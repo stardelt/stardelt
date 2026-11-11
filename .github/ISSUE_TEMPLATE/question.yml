@@ -1,0 +1,16 @@
+name: A question
+description: Ask us something; a maintainer moves it to the right repository.
+labels: [question, community]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you. A maintainer moves this to the right repository if it belongs somewhere else.
+  - type: markdown
+    attributes:
+      value: Check the [documentation](https://stardelt.io/docs/intro/overview) first; we answer here when it does not help.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
