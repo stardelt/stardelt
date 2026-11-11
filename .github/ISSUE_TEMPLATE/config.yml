@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/stardelt/.github/blob/main/SECURITY.md
+    about: Please do not open a public issue for a security problem.
+  - name: Read the documentation
+    url: https://stardelt.io/docs/intro/overview
+    about: Guides, the quickstart and the reference.
