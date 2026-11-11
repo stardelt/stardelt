@@ -1,0 +1,48 @@
+name: Something does not work
+description: Tell us what went wrong; a maintainer moves it to the right repository.
+labels: [bug, community]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you. A maintainer moves this to the right repository if it belongs somewhere else.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      placeholder: I clicked … and saw …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where?
+      options:
+        - Nova (the interface)
+        - Install or upgrade
+        - Notebooks
+        - Pipelines
+        - Dashboards
+        - SQL / query engine
+        - Python package or CLI
+        - Documentation
+        - The demo at stardelt.io/demo
+        - I don't know
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: the commit you installed, or 'demo'
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Remove passwords and tokens before you paste.
+      render: shell

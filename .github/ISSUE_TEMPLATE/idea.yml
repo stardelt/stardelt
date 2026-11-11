@@ -1,0 +1,23 @@
+name: An idea or a missing feature
+description: Describe the problem you want solved; a maintainer moves it to the right repository.
+labels: [enhancement, community]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you. A maintainer moves this to the right repository if it belongs somewhere else.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: obstacle
+    attributes:
+      label: What gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How would you like it to work?
