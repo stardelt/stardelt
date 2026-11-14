@@ -74,6 +74,13 @@ rules:
   - apiGroups: ["stardelt.io"]
     resources: ["sqlwarehouses"]
     verbs: ["get", "list"]
+  # Model endpoints (operator#609 slice b): Nova reads them and writes its probe into status.
+  - apiGroups: ["stardelt.io"]
+    resources: ["modelendpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["stardelt.io"]
+    resources: ["modelendpoints/status"]
+    verbs: ["patch"]
   # Connections (nova#203): the list route reads the `Connection` resources to show each
   # connection's sync state and, for an administrator, every group's connections; a group
   # connection writes and deletes its resource. Without this rule the store half works and the

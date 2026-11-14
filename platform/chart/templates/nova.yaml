@@ -107,6 +107,13 @@ rules:
   - apiGroups: ["stardelt.io"]
     resources: ["sqlwarehouses"]
     verbs: ["get", "list"]
+  # Model endpoints (operator#609 slice b): Nova reads them and writes its probe into status.
+  - apiGroups: ["stardelt.io"]
+    resources: ["modelendpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["stardelt.io"]
+    resources: ["modelendpoints/status"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
