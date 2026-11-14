@@ -466,6 +466,20 @@ export type AdminCatalogCondition = {
   message: string | null
 }
 
+/** One recorded `/mcp` tool call (`GET /api/admin/mcp-audit`, stardelt-nova#970): never an argument, never a result. */
+export type McpCall = {
+  atMs: number
+  sub: string
+  client?: string | null
+  tool: string
+  status: string
+  durationMs: number
+  argumentsSha256: string
+}
+
+/** The answer of `GET /api/admin/mcp-audit`: the calls, newest first. */
+export type McpCalls = { calls: McpCall[] }
+
 /**
  * The body of `PUT /api/admin/catalogs/{name}/access` (stardelt-nova#253): the whole
  * `spec.owner`, `spec.managedAccess` and `spec.grants` of one `Catalog`, plus the
@@ -1611,6 +1625,14 @@ export const api = {
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
   /** Every catalog of the platform namespace with its grants (administrators only, #251). */
   adminCatalogs: ()                           => jget<AdminCatalog[]>('/api/admin/catalogs'),
+  /** The last `/mcp` tool calls, newest first (administrators only, #970). */
+  mcpAudit: (p: { limit?: number; sub?: string; tool?: string } = {}) => {
+    const qs = new URLSearchParams()
+    if (p.limit != null) qs.set('limit', String(p.limit))
+    if (p.sub) qs.set('sub', p.sub)
+    if (p.tool) qs.set('tool', p.tool)
+    return jget<McpCalls>(`/api/admin/mcp-audit${qs.size ? `?${qs}` : ''}`)
+  },
   /** Change one catalog's owner, managed access and grants (#253); the resource stays the source. */
   putCatalogAccess: (name: string, body: CatalogAccessUpdate) =>
     jput<AdminCatalog>(`/api/admin/catalogs/${seg(name)}/access`, body),

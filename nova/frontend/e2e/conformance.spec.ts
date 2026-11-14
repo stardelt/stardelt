@@ -6,7 +6,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/pipelines', '/runs', '/deployments', '/queries',
-  '/platform', '/admin/catalogs', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
+  '/platform', '/admin/catalogs', '/admin/agent-calls', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },

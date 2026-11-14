@@ -43,6 +43,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Admin',
     admin: true,
     items: [
+      { to: '/admin/agent-calls', label: 'Agent calls', icon: 'pulse' },
       { to: '/admin/catalogs', label: 'Catalogs', icon: 'database' },
       { to: '/platform', label: 'Platform', icon: 'grid' },
       { to: '/settings', label: 'Platform settings', icon: 'sliders' },
