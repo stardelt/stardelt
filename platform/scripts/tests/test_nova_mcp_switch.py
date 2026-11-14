@@ -11,7 +11,12 @@ import unittest
 import yaml
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-SWITCH = {"NOVA_MCP_ENABLED": "mcpEnabled", "NOVA_MCP_AUDIENCE": "mcpAudience"}
+SWITCH = {
+    "NOVA_MCP_ENABLED": "mcpEnabled",
+    "NOVA_MCP_AUDIENCE": "mcpAudience",
+    "NOVA_MCP_ALLOWED_CLIENTS": "mcpAllowedClients",
+    "NOVA_MCP_ALLOWED_GROUPS": "mcpAllowedGroups",
+}
 
 
 def nova_container():
@@ -37,3 +42,10 @@ class Switch(unittest.TestCase):
         script = (REPO / "scripts" / "identity-bootstrap.sh").read_text()
         self.assertIn("--from-literal=mcpEnabled=", script)
         self.assertIn("--from-literal=mcpAudience=", script)
+
+    def test_install_identity_writes_the_two_allowlists(self):
+        script = (REPO / "scripts" / "identity-bootstrap.sh").read_text()
+        self.assertIn("--from-literal=mcpAllowedClients=", script)
+        self.assertIn("--from-literal=mcpAllowedGroups=", script)
+        self.assertIn("MCP_ALLOWED_CLIENTS", script)
+        self.assertIn("MCP_ALLOWED_GROUPS", script)

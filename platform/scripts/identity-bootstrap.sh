@@ -170,7 +170,8 @@ echo "› ConfigMap keycloak-env (KC_HOSTNAME=https://id.${BASE_DOMAIN})"
 # the key lives in the contract so consumers (#611) never build it.
 # The hosted MCP endpoint's switch (stardelt-nova#112). Off on a fresh install; a re-run keeps
 # whatever the live ConfigMap already says unless MCP_ENABLED/MCP_AUDIENCE are given, so
-# `make install-identity` cannot turn a running endpoint off by accident.
+# `make install-identity` cannot turn a running endpoint off by accident. The two allowlists
+# (`mcpAllowedClients`/`mcpAllowedGroups`) follow the same rule.
 mcp_enabled="${MCP_ENABLED:-}"
 if [ -z "$mcp_enabled" ]; then
   mcp_enabled="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.mcpEnabled}' 2>/dev/null || true)"
@@ -181,6 +182,17 @@ if [ -z "$mcp_audience" ]; then
   mcp_audience="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.mcpAudience}' 2>/dev/null || true)"
 fi
 mcp_audience="${mcp_audience:-https://${BASE_DOMAIN}/mcp}"
+# The allowlists (`NOVA_MCP_ALLOWED_CLIENTS`, `NOVA_MCP_ALLOWED_GROUPS`): empty on a fresh install
+# (accept every client / group the audience accepts). A re-run keeps whatever the live ConfigMap
+# says unless MCP_ALLOWED_CLIENTS/MCP_ALLOWED_GROUPS are given, like the switch above.
+mcp_allowed_clients="${MCP_ALLOWED_CLIENTS:-}"
+if [ -z "$mcp_allowed_clients" ]; then
+  mcp_allowed_clients="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.mcpAllowedClients}' 2>/dev/null || true)"
+fi
+mcp_allowed_groups="${MCP_ALLOWED_GROUPS:-}"
+if [ -z "$mcp_allowed_groups" ]; then
+  mcp_allowed_groups="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.mcpAllowedGroups}' 2>/dev/null || true)"
+fi
 apply_configmap stardelt-identity \
   --from-literal=issuerUrl="https://id.${BASE_DOMAIN}/realms/stardelt" \
   --from-literal=tokenEndpoint="https://id.${BASE_DOMAIN}/realms/stardelt/protocol/openid-connect/token" \
@@ -190,5 +202,7 @@ apply_configmap stardelt-identity \
   --from-literal=publicUrl="https://${BASE_DOMAIN}" \
   --from-literal=mcpEnabled="${mcp_enabled}" \
   --from-literal=mcpAudience="${mcp_audience}" \
+  --from-literal=mcpAllowedClients="${mcp_allowed_clients}" \
+  --from-literal=mcpAllowedGroups="${mcp_allowed_groups}" \
   --from-literal=trinoUrl="https://trino.${NAMESPACE}.svc.cluster.local:8443"
 echo "› ConfigMap stardelt-identity (issuer https://id.${BASE_DOMAIN}/realms/stardelt)"

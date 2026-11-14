@@ -516,6 +516,19 @@ The endpoint's switch is the `stardelt-identity` ConfigMap's `mcpEnabled` (defau
 followed by `kubectl -n stardelt rollout restart deploy/nova`, or install with
 `MCP_ENABLED=1 make install-identity`; `MCP_ENABLED=0` turns it off again.
 
+The same ConfigMap carries the two allowlists the endpoint reads: `mcpAllowedClients` (client ids,
+comma separated) and `mcpAllowedGroups` (group names, comma separated). Both default to empty, which
+accepts every client or group the audience accepts; set one to restrict who may call `/mcp`:
+
+```console
+$ kubectl -n stardelt patch configmap stardelt-identity --type merge \
+    -p '{"data":{"mcpAllowedClients":"stardelt-mcp","mcpAllowedGroups":"agents"}}'
+$ kubectl -n stardelt rollout restart deploy/nova
+```
+
+`MCP_ALLOWED_CLIENTS=… MCP_ALLOWED_GROUPS=… make install-identity` sets them on a fresh install, and
+a re-run keeps the live values unless the variables are given.
+
 ### TLS on the coordinator (why the in-cluster path is safe)
 
 Two listeners, one behavior:

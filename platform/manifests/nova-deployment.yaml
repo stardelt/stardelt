@@ -178,6 +178,15 @@ spec:
             - name: NOVA_MCP_AUDIENCE
               valueFrom:
                 configMapKeyRef: { name: stardelt-identity, key: mcpAudience, optional: true }
+            # The two allowlists (stardelt-nova#980). Same reason as the switch: the values live
+            # in the ConfigMap, so a re-apply cannot prune an administrator's restriction.
+            # Empty = every client / every group the audience accepts.
+            - name: NOVA_MCP_ALLOWED_CLIENTS
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpAllowedClients, optional: true }
+            - name: NOVA_MCP_ALLOWED_GROUPS
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpAllowedGroups, optional: true }
             # ---- Sign-in (contract: docs/architecture/identity) --------------
             # `dev` keeps the no-login behaviour (CI, `make demo`, the kind gate).
             # To turn on SSO on a manifest install: run scripts/identity-bootstrap.sh
