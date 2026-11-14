@@ -495,7 +495,10 @@ client flows") and the same audiences.
 *MCP agents (stardelt-nova#112).* `stardelt-mcp` is the public client an MCP-capable agent signs in
 with: PKCE to a loopback address and the device grant, no secret, no service account. Its tokens
 carry the `groups` claim and the audience `https://<nova host>/mcp` — the resource of Nova's `/mcp`
-endpoint — and no engine audience. Every token also carries the realm scope `stardelt:read`. The
+endpoint — and no engine audience. Every token also carries the realm scope `stardelt:read`.
+`stardelt:write` is an **optional** client scope: it is not in the default token. A client that
+starts a pipeline asks for it in the authorization request, and `/mcp` answers
+`403 insufficient_scope` with `scope="stardelt:write"` when a write tool is called without it. The
 token an agent runs SQL with is **not** exchanged today: Nova forwards the caller's MCP token to the
 engine (`NOVA_FORWARD_IDENTITY=1`), and the engine accepts it because this deployment sets no
 `http-server.authentication.oauth2.audience`; the exchange that mints an engine-audience token is

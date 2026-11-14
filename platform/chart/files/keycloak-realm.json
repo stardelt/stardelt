@@ -615,6 +615,9 @@
         "email",
         "stardelt:read"
       ],
+      "optionalClientScopes": [
+        "stardelt:write"
+      ],
       "redirectUris": [
         "http://127.0.0.1/*",
         "http://localhost/*"
@@ -662,6 +665,15 @@
       "attributes": {
         "include.in.token.scope": "true",
         "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "stardelt:write",
+      "description": "Write access through Nova's /mcp endpoint: starting a pipeline run, with a stated reason (design agent-access section 4).",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
       }
     }
   ],

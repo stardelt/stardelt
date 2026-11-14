@@ -17,7 +17,9 @@
 # the result against the realm's own endpoints: the device endpoint answers, a loopback redirect
 # with any port is accepted and a redirect to a foreign host is refused. Idempotent. Reaches
 # Keycloak through svc/keycloak (port-forward) because the public `/admin` API is closed; secrets
-# travel only through files under a mode-0700 temp dir and `--data @file` bodies.
+# travel only through files under a mode-0700 temp dir and `--data @file` bodies. The write scope
+# `stardelt:write` is optional: a client asks for it in the authorization request, so a default
+# sign-in cannot start a pipeline run.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -26,6 +28,7 @@ NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
 MCP_CLIENT="${MCP_CLIENT:-stardelt-mcp}"
 READ_SCOPE="${READ_SCOPE:-stardelt:read}"
+WRITE_SCOPE="${WRITE_SCOPE:-stardelt:write}"
 MCP_AUDIENCE="${MCP_AUDIENCE:-}"
 MASTER_SECRET="${MASTER_SECRET:-keycloak-admin}"
 
@@ -252,6 +255,37 @@ else
   echo "› client $MCP_CLIENT: scope $READ_SCOPE assigned"
 fi
 
+# 5e. The write scope. `/mcp`'s first write tool (starting a pipeline run) requires
+#     `stardelt:write`. It is an **optional** client scope: a client asks for it in the
+#     authorization request, so a default sign-in never carries it and cannot start a run.
+write_scope_id="$("${CURL_SOFT[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/client-scopes" \
+  | python3 -c "import sys,json; print(next((s['id'] for s in json.load(sys.stdin) if s['name'] == '$WRITE_SCOPE'), ''))")"
+if [ -z "$write_scope_id" ]; then
+  python3 - > "$tmp/write-scope.json" <<'PY'
+import json, sys
+json.dump({"name": "stardelt:write",
+           "description": "Write access through Nova's /mcp endpoint: starting a pipeline run, with a stated reason (design agent-access section 4).",
+           "protocol": "openid-connect",
+           "attributes": {"include.in.token.scope": "true",
+                          "display.on.consent.screen": "true"}}, sys.stdout)
+PY
+  "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" -H 'Content-Type: application/json' \
+    -X POST --data @"$tmp/write-scope.json" "$API/client-scopes" >/dev/null \
+    || fail "Keycloak refused to create the client scope $WRITE_SCOPE"
+  write_scope_id="$("${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/client-scopes" \
+    | python3 -c "import sys,json; print(next(s['id'] for s in json.load(sys.stdin) if s['name'] == '$WRITE_SCOPE'))")"
+  echo "› client $MCP_CLIENT: scope $WRITE_SCOPE created (optional)"
+fi
+if "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/clients/$client_uuid/optional-client-scopes" \
+  | python3 -c "import sys,json; sys.exit(0 if any(s['name'] == '$WRITE_SCOPE' for s in json.load(sys.stdin)) else 1)"; then
+  echo "› client $MCP_CLIENT: scope $WRITE_SCOPE assigned (optional)"
+else
+  "${CURL[@]}" -o /dev/null "${HEAD[@]}" "${AUTH[@]}" -X PUT \
+    "$API/clients/$client_uuid/optional-client-scopes/$write_scope_id" \
+    || fail "Keycloak refused to assign scope $WRITE_SCOPE to $MCP_CLIENT"
+  echo "› client $MCP_CLIENT: scope $WRITE_SCOPE assigned (optional)"
+fi
+
 # 6. Prove it against the realm's own endpoints. Nothing here completes a sign-in (that needs a person).
 OIDC="$KC/realms/$REALM/protocol/openid-connect"
 # PKCE is required on this client, for the device grant as well: every request carries a challenge.
@@ -295,5 +329,25 @@ if sys.argv[2] not in scope.split():
     sys.exit("scope is %r" % scope)
 print("› client %s: example access token carries scope %s" % (sys.argv[3], sys.argv[2]))
 PY
+  python3 - "$tmp/example-scope.json" "$READ_SCOPE" "$WRITE_SCOPE" "$MCP_CLIENT" <<'PY' || fail "the example access token of $MCP_CLIENT carries the optional write scope $WRITE_SCOPE"
+import json, sys
+scope = json.load(open(sys.argv[1])).get("scope") or ""
+if sys.argv[3] in scope.split():
+    sys.exit("scope is %r — the write scope must be optional, not default" % scope)
+if sys.argv[2] not in scope.split():
+    sys.exit("scope is %r — the read scope is missing" % scope)
+print("› client %s: example access token does not carry scope %s" % (sys.argv[4], sys.argv[3]))
+PY
 fi
-echo "keycloak-sync-mcp-client: OK — client $MCP_CLIENT is enabled"
+
+# The write scope must be stored as an optional scope, never as a default one.
+"${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/clients/$client_uuid/optional-client-scopes" > "$tmp/optional-scopes.json" \
+  || fail "Keycloak could not list the optional client scopes of $MCP_CLIENT"
+python3 - "$tmp/optional-scopes.json" "$WRITE_SCOPE" "$MCP_CLIENT" <<'PY' || fail "the optional client scopes of $MCP_CLIENT do not list $WRITE_SCOPE"
+import json, sys
+names = [s["name"] for s in json.load(open(sys.argv[1]))]
+if sys.argv[2] not in names:
+    sys.exit("optional client scopes are %r" % names)
+print("› client %s: optional client scopes list %s" % (sys.argv[3], sys.argv[2]))
+PY
+echo "keycloak-sync-mcp-client: OK — client $MCP_CLIENT is enabled: $READ_SCOPE default, $WRITE_SCOPE optional"
