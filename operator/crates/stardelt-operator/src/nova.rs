@@ -216,6 +216,14 @@ pub fn roles(namespace: &str) -> Vec<Role> {
                     "stardelt.io",
                 ),
                 rule(&["sqlwarehouses"], &["get", "list"], "stardelt.io"),
+                // Model endpoints (operator#609 slice b): Nova reads them and writes its probe into
+                // `status`. It never creates or deletes one; that is the administrator's.
+                rule(
+                    &["modelendpoints"],
+                    &["get", "list", "watch"],
+                    "stardelt.io",
+                ),
+                rule(&["modelendpoints/status"], &["patch"], "stardelt.io"),
             ],
         ),
     ]
@@ -523,10 +531,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    /// Every (apiGroup, resource, verb) that Nova may use. 34 entries: the list that
+    /// Every (apiGroup, resource, verb) that Nova may use. 38 entries: the list that
     /// `scripts/check-nova-rbac-parity.sh` in stardelt-platform compares between the manifest
     /// and the chart.
-    const GRANTED: [(&str, &str, &str); 34] = [
+    const GRANTED: [(&str, &str, &str); 38] = [
         ("apps", "deployments", "get"),
         ("apps", "deployments", "list"),
         ("apps", "statefulsets", "get"),
@@ -561,6 +569,10 @@ mod tests {
         ("stardelt.io", "catalogs", "create"),
         ("stardelt.io", "sqlwarehouses", "get"),
         ("stardelt.io", "sqlwarehouses", "list"),
+        ("stardelt.io", "modelendpoints", "get"),
+        ("stardelt.io", "modelendpoints", "list"),
+        ("stardelt.io", "modelendpoints", "watch"),
+        ("stardelt.io", "modelendpoints/status", "patch"),
     ];
 
     fn granted() -> BTreeSet<(String, String, String)> {
