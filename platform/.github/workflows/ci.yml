@@ -330,6 +330,14 @@ jobs:
                     | grep -c 'name: NOVA_MCP_ALLOWED_CLIENTS' || true)" = 0
           test "$(helm template stardelt chart -n stardelt --set nova.auth.mode=oidc \
                     --set identity.mode=platform --set platform.baseDomain=example.com \
+                    --set nova.mcp.enabled=true --set 'nova.mcp.allowedGroups={agents,data-eng}' \
+                    | grep -c 'name: NOVA_MCP_ALLOWED_GROUPS' || true)" = 1
+          test "$(helm template stardelt chart -n stardelt --set nova.auth.mode=oidc \
+                    --set identity.mode=platform --set platform.baseDomain=example.com \
+                    --set nova.mcp.enabled=true \
+                    | grep -c 'name: NOVA_MCP_ALLOWED_GROUPS' || true)" = 0
+          test "$(helm template stardelt chart -n stardelt --set nova.auth.mode=oidc \
+                    --set identity.mode=platform --set platform.baseDomain=example.com \
                     --set nova.mcp.enabled=true --set nova.mcp.callsPerMinute=120 \
                     | grep -c 'name: NOVA_MCP_CALLS_PER_MINUTE' || true)" = 1
           test "$(helm template stardelt chart -n stardelt --set nova.auth.mode=oidc \

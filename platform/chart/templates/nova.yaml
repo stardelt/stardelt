@@ -239,6 +239,10 @@ spec:
             - name: NOVA_MCP_ALLOWED_CLIENTS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- with .Values.nova.mcp.allowedGroups }}
+            - name: NOVA_MCP_ALLOWED_GROUPS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.nova.mcp.callsPerMinute }}
             - name: NOVA_MCP_CALLS_PER_MINUTE
               value: {{ . | quote }}

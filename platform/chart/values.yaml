@@ -601,6 +601,10 @@ nova:
     # Nova refuses a token without an `azp` once the list is set. The operator's CRD carries
     # the same list as `spec.mcp.allowedClients`.
     allowedClients: []
+    # The groups (`groups` claim) whose members may call /mcp; empty = every group the audience
+    # accepts. Nova refuses a caller whose token names none of them once the list is set. The
+    # operator's CRD carries the same list as `spec.mcp.allowedGroups` (stardelt-operator#742).
+    allowedGroups: []
     # `tools/call`s one person may make per minute on /mcp; 1-600. Empty = Nova's own default (60).
     # The operator's CRD carries the same knob as `spec.mcp.callsPerMinute` (stardelt-operator#738).
     callsPerMinute: ""
