@@ -77,6 +77,10 @@ const RUN_STATES: Record<string, { word: string; cls: string }> = {
   upstream_failed: { word: 'Upstream failed', cls: BAD },
   skipped: { word: 'Skipped', cls: WAIT },
   up_for_retry: { word: 'Up for retry', cls: WAIT },
+  QUEUED: { word: 'Queued', cls: BUSY },
+  RUNNING: { word: 'Running', cls: BUSY },
+  FINISHED: { word: 'Succeeded', cls: GOOD },
+  FAILED: { word: 'Failed', cls: BAD },
 }
 
 /** `not-loaded` also tells a person what to do about it. */
@@ -95,6 +99,17 @@ export function PipelineStateBadge({ state }: { state: string }) {
 
 export function runStateWord(state: string): string {
   return RUN_STATES[state]?.word ?? (state || 'Unknown')
+}
+
+/** Who started a run, in Nova's words; an unknown value (a person's name) is shown as it is. */
+const TRIGGERS: Record<string, string> = {
+  rest_api: 'Nova', cli: 'Command line', timetable: 'Schedule', asset: 'Table update',
+  backfill: 'Backfill', operator: 'Another pipeline', ui: 'Scheduler UI', test: 'Test',
+}
+
+export function triggerWord(value: string | null | undefined): string {
+  if (!value) return '—'
+  return TRIGGERS[value] ?? value
 }
 
 export function RunStateBadge({ state }: { state: string }) {

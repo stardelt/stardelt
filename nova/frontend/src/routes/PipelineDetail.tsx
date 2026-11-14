@@ -17,6 +17,7 @@ import {
   RunStateBadge,
   formatWhen,
   runDuration,
+  triggerWord,
   usePipelineActions,
 } from './Pipelines'
 
@@ -489,7 +490,7 @@ function RunRow({
           <span title={started.title}>{started.text}</span>
         </td>
         <td className="td px-3 text-text-dim text-xs whitespace-nowrap">{runDuration(run.durationSeconds)}</td>
-        <td className="td px-3 text-text-dim">{run.triggeredBy || '—'}</td>
+        <td className="td px-3 text-text-dim">{triggerWord(run.triggeredBy)}</td>
         <td className="td px-3">
           {run.note ? <span className="break-words">{run.note}</span> : <span className="text-text-mute">—</span>}
         </td>
@@ -527,6 +528,7 @@ function RunRow({
                 name={pipeline.name}
                 runId={run.runId}
                 notebookTasks={pipeline.tasks.filter((task) => task.kind === 'notebook').map((task) => task.name)}
+                taskKinds={Object.fromEntries(pipeline.tasks.map((task) => [task.name, task.kind]))}
               />
             </div>
           </td>
@@ -541,11 +543,13 @@ function RunTasks({
   name,
   runId,
   notebookTasks,
+  taskKinds,
 }: {
   namespace: string
   name: string
   runId: string
   notebookTasks: string[]
+  taskKinds: Record<string, string>
 }) {
   const [log, setLog] = useState<{ taskId: string; tryNumber: number } | null>(null)
   const tasks = useQuery({
@@ -585,7 +589,7 @@ function RunTasks({
                 <th scope="col" className="th px-3 py-2">Try</th>
                 <th scope="col" className="th px-3 py-2">Started</th>
                 <th scope="col" className="th px-3 py-2">Duration</th>
-                <th scope="col" className="th px-3 py-2">Operator</th>
+                <th scope="col" className="th px-3 py-2">Kind</th>
                 <th scope="col" className="th px-3 py-2">
                   <span className="sr-only">Log</span>
                 </th>
@@ -605,7 +609,7 @@ function RunTasks({
                     <td className="td px-3 text-text-dim text-xs whitespace-nowrap">
                       {runDuration(task.durationSeconds)}
                     </td>
-                    <td className="td px-3 text-text-dim">{task.operator ?? '—'}</td>
+                    <td className="td px-3 text-text-dim">{taskKinds[task.taskId] ?? '—'}</td>
                     <td className="td px-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <button

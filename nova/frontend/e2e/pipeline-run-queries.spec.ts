@@ -76,6 +76,11 @@ test.describe('the statements of a run', () => {
     const walls = page.locator('td').filter({ hasText: /^(\d+\.\d s|\d+ ms)$/ })
     await expect(walls).toHaveText(['6.2 s', '400 ms'])
     await expect(page.getByText('insert into gold select 1')).toBeVisible()
+    // The engine's upper-case state reads like the task above it (stardelt-nova#959).
+    const statements = page.getByRole('table', { name: "The run's queries, slowest first." })
+    const finished = statements.locator('tbody tr', { hasText: 'insert into gold select 1' })
+    await expect(finished.getByText('Succeeded')).toBeVisible()
+    await expect(page.getByText('FINISHED')).toHaveCount(0)
   })
 
   test('an empty run shows no statements section', async ({ page }) => {
