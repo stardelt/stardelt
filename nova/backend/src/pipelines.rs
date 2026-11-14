@@ -3811,7 +3811,7 @@ fn concurrency_of(spec: &Value) -> &str {
 /// `POST …/runs`: start a run now. Refusals happen before Airflow is asked to trigger:
 /// not loaded (409), paused (409), rate limit (429), an active run under `Forbid`/`Replace`
 /// (409). `Allow` skips the activity check.
-async fn run_now(
+pub(crate) async fn run_now(
     resources: Option<&PipelineResources>,
     airflow: Option<&AirflowClient>,
     limiter: &RunStartsLimiter,
@@ -5246,7 +5246,7 @@ pub(crate) async fn deployed_rows(
 }
 
 /// The resource client for this request; `None` without a cluster connection.
-fn resources(state: &AppState) -> Option<PipelineResources> {
+pub(crate) fn resources(state: &AppState) -> Option<PipelineResources> {
     state.kube.clone().map(PipelineResources::cluster)
 }
 
