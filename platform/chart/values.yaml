@@ -601,6 +601,9 @@ nova:
     # Nova refuses a token without an `azp` once the list is set. The operator's CRD carries
     # the same list as `spec.mcp.allowedClients`.
     allowedClients: []
+    # `tools/call`s one person may make per minute on /mcp; 1-600. Empty = Nova's own default (60).
+    # The operator's CRD carries the same knob as `spec.mcp.callsPerMinute` (stardelt-operator#738).
+    callsPerMinute: ""
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.
   #   oidc — Nova is a client of the IdP configured under `identity:` above.

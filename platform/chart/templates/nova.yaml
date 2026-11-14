@@ -239,6 +239,10 @@ spec:
             - name: NOVA_MCP_ALLOWED_CLIENTS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- with .Values.nova.mcp.callsPerMinute }}
+            - name: NOVA_MCP_CALLS_PER_MINUTE
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- /* The public client `stardelt login` signs in with (device flow): Nova tells it to
                    the command line at GET /api/auth/config (stardelt-nova#312). The platform's own
