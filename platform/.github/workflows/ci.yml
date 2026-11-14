@@ -319,6 +319,14 @@ jobs:
                     --set identity.mode=platform --set platform.baseDomain=example.com \
                     --set nova.mcp.enabled=true \
                     | grep -c -e 'name: NOVA_MCP_MAX_ROWS' -e 'name: NOVA_MCP_QUERY_TIMEOUT_SECS' || true)" = 0
+          test "$(helm template stardelt chart -n stardelt --set nova.auth.mode=oidc \
+                    --set identity.mode=platform --set platform.baseDomain=example.com \
+                    --set nova.mcp.enabled=true --set 'nova.mcp.allowedClients={stardelt-mcp,stardelt-cli}' \
+                    | grep -c 'name: NOVA_MCP_ALLOWED_CLIENTS' || true)" = 1
+          test "$(helm template stardelt chart -n stardelt --set nova.auth.mode=oidc \
+                    --set identity.mode=platform --set platform.baseDomain=example.com \
+                    --set nova.mcp.enabled=true \
+                    | grep -c 'name: NOVA_MCP_ALLOWED_CLIENTS' || true)" = 0
           # chart-path catalog backups (#51): the Cluster declares the
           # barmanObjectStore config, exactly one ScheduledBackup renders, and
           # both follow the configured bucket and the enabled switch.

@@ -597,6 +597,10 @@ nova:
     # `spec.mcp.queryTimeoutSeconds` (stardelt-operator#732).
     maxRows: ""
     queryTimeoutSeconds: ""
+    # The client ids (`azp`) allowed to call /mcp; empty = every client the audience accepts.
+    # Nova refuses a token without an `azp` once the list is set. The operator's CRD carries
+    # the same list as `spec.mcp.allowedClients`.
+    allowedClients: []
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.
   #   oidc — Nova is a client of the IdP configured under `identity:` above.

@@ -235,6 +235,10 @@ spec:
             - name: NOVA_MCP_QUERY_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.nova.mcp.allowedClients }}
+            - name: NOVA_MCP_ALLOWED_CLIENTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- /* The public client `stardelt login` signs in with (device flow): Nova tells it to
                    the command line at GET /api/auth/config (stardelt-nova#312). The platform's own
