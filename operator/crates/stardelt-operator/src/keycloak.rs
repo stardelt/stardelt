@@ -618,8 +618,33 @@ mod tests {
             mapper("aud-mcp")["config"]["included.custom.audience"],
             "https://data.example.com/mcp"
         );
-        mapper("aud-trino");
+        assert!(
+            mappers.iter().all(|m| m["name"] != "aud-trino"),
+            "the MCP token must not carry the engine audience"
+        );
         mapper("groups");
+        // Nova's /mcp requires `stardelt:read` on every call and `stardelt:write` on a run.
+        let default_scopes = client["defaultClientScopes"]
+            .as_array()
+            .expect("defaultClientScopes");
+        assert!(
+            default_scopes.iter().any(|s| s == "stardelt:read"),
+            "stardelt:read is not a default scope"
+        );
+        assert_eq!(
+            client["optionalClientScopes"],
+            serde_json::json!(["stardelt:write"])
+        );
+        let realm_scopes: std::collections::BTreeSet<&str> = parsed["clientScopes"]
+            .as_array()
+            .expect("clientScopes")
+            .iter()
+            .map(|s| s["name"].as_str().expect("a scope name"))
+            .collect();
+        assert_eq!(
+            realm_scopes,
+            ["stardelt:read", "stardelt:write"].into_iter().collect()
+        );
     }
 
     #[test]
