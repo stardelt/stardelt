@@ -112,6 +112,16 @@ export function triggerWord(value: string | null | undefined): string {
   return TRIGGERS[value] ?? value
 }
 
+/** A run's type in Nova's words; an unknown type is shown as it is. */
+const RUN_TYPES: Record<string, string> = {
+  manual: 'Manual', scheduled: 'Scheduled', backfill: 'Backfill', asset_triggered: 'Table update',
+}
+
+export function runTypeWord(value: string | null | undefined): string {
+  if (!value) return '—'
+  return RUN_TYPES[value] ?? value
+}
+
 export function RunStateBadge({ state }: { state: string }) {
   return <span className={`badge ${RUN_STATES[state]?.cls ?? NEUTRAL}`}>{runStateWord(state)}</span>
 }

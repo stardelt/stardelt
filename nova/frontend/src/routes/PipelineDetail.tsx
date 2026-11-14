@@ -17,6 +17,7 @@ import {
   RunStateBadge,
   formatWhen,
   runDuration,
+  runTypeWord,
   triggerWord,
   usePipelineActions,
 } from './Pipelines'
@@ -481,11 +482,11 @@ function RunRow({
             className="flex items-start gap-1.5 text-left"
           >
             <span aria-hidden className={`inline-block ${open ? 'rotate-90' : ''}`}>›</span>
-            <span className="font-mono text-xs break-all">{run.runId}</span>
+            <span className="text-sm" title={run.runId}>{started.title ?? run.runId}</span>
           </button>
         </td>
         <td className="td px-3"><RunStateBadge state={run.state} /></td>
-        <td className="td px-3 text-text-dim">{run.type || '—'}</td>
+        <td className="td px-3 text-text-dim">{runTypeWord(run.type)}</td>
         <td className="td px-3 text-text-dim text-xs whitespace-nowrap">
           <span title={started.title}>{started.text}</span>
         </td>
@@ -527,6 +528,7 @@ function RunRow({
                 namespace={pipeline.namespace}
                 name={pipeline.name}
                 runId={run.runId}
+                label={started.title ?? run.runId}
                 notebookTasks={pipeline.tasks.filter((task) => task.kind === 'notebook').map((task) => task.name)}
                 taskKinds={Object.fromEntries(pipeline.tasks.map((task) => [task.name, task.kind]))}
               />
@@ -542,12 +544,14 @@ function RunTasks({
   namespace,
   name,
   runId,
+  label,
   notebookTasks,
   taskKinds,
 }: {
   namespace: string
   name: string
   runId: string
+  label: string
   notebookTasks: string[]
   taskKinds: Record<string, string>
 }) {
@@ -574,7 +578,7 @@ function RunTasks({
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-semibold break-all">
-        Tasks of run <span className="font-mono text-xs">{runId}</span>
+        Tasks of run <span title={runId}>{label}</span>
       </h3>
       {tasks.data.tasks.length === 0 ? (
         <p className="text-sm text-text-mute">This run has no tasks yet.</p>
