@@ -14,5 +14,5 @@
 # the one in the `Pin it:` line (and no other way to tell them apart from the log).
 image:
   repository: ghcr.io/stardelt/stardelt-operator
-  tag: dev@sha256:9c733b6d91fb22cb6a737b1f2784d3c57a960ab546a7bcd9bfb896bde3eb9a02
+  tag: dev@sha256:eaebab265065f357b4ac75f7f87da3eb06ffdb08420c0028212f75f1d18c77b5
   pullPolicy: IfNotPresent
