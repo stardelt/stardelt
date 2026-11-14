@@ -802,6 +802,21 @@ async fn call_tool(
         arguments_sha256 = %arguments_sha256,
         "mcp tool call"
     );
+    // The queryable copy for the administrator's view; a failure here never fails the call.
+    if let Some(pool) = state.db.as_ref()
+        && let Err(e) = crate::mcp_audit::record(
+            pool,
+            &principal.identity.sub,
+            facts.client_id.as_deref(),
+            name,
+            outcome,
+            started.elapsed().as_millis() as u64,
+            &arguments_sha256,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "could not store the mcp call");
+    }
 
     tool_result(id, status, body)
 }

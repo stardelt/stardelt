@@ -120,6 +120,7 @@ mod lineage_api;
 mod lineage_event;
 mod lineage_store;
 mod mcp;
+mod mcp_audit;
 mod metrics;
 mod migrations;
 mod notebooks;
@@ -844,6 +845,9 @@ fn admin_router() -> Router<Arc<AppState>> {
         // A new team space in one call: `<team>`, `<team>lab`, `<team>ref` and the
         // group's pipeline principal (#596). Same administrator gate.
         .route("/admin/teams", post(admin_catalogs::create_team))
+        // The administrator's read of the MCP calls (stardelt-nova#970, T7): the queryable
+        // copy of the one audit line per tool call. Same administrator gate.
+        .route("/admin/mcp-audit", get(mcp_audit::list))
         // The administrator's cluster form (internal#161 slice 5c): create-or-replace and
         // delete. Start/Stop stay on the public `/compute` routes.
         .route(
@@ -1202,6 +1206,7 @@ async fn main() -> anyhow::Result<()> {
     pipeline_notice::spawn(state.clone());
     if let Some(pool) = state.db.clone() {
         query_log_store::spawn_retention(pool.clone());
+        mcp_audit::spawn_retention(pool.clone());
         shared_accounts::spawn_nightly(pool, state.shared_accounts.clone());
     }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
