@@ -605,8 +605,9 @@ nova:
     # The operator's CRD carries the same knob as `spec.mcp.callsPerMinute` (stardelt-operator#738).
     callsPerMinute: ""
     # Days the stored audit rows of /mcp tool calls are kept; 0-3650. Empty = Nova's own default (30);
-    # 0 keeps them and switches the hourly purge off. The operator's CRD carries the same knob as
-    # `spec.mcp.auditRetentionDays` (stardelt-operator#740).
+    # 0 keeps them and switches the hourly purge off — `0` is a value, not "unset": the template
+    # compares the rendered string against the empty string. The operator's CRD carries the same
+    # knob as `spec.mcp.auditRetentionDays` (stardelt-operator#740).
     auditRetentionDays: ""
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.

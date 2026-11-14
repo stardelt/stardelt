@@ -243,9 +243,9 @@ spec:
             - name: NOVA_MCP_CALLS_PER_MINUTE
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.nova.mcp.auditRetentionDays }}
+            {{- if ne (.Values.nova.mcp.auditRetentionDays | toString) "" }}
             - name: NOVA_MCP_AUDIT_RETENTION_DAYS
-              value: {{ . | quote }}
+              value: {{ .Values.nova.mcp.auditRetentionDays | quote }}
             {{- end }}
             {{- end }}
             {{- /* The public client `stardelt login` signs in with (device flow): Nova tells it to
