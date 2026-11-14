@@ -11,6 +11,9 @@
 //! - **Its own audience.** `NOVA_MCP_AUDIENCE` names the resource identifier the IdP mints
 //!   tokens for (`https://<nova host>/mcp`), so a token minted for the browser is refused
 //!   (`auth::AuthState::authenticate_bearer_for`). The session cookie is never accepted.
+//! - **One scope.** Every call needs `stardelt:read`, which the realm client `stardelt-mcp`
+//!   grants by default (stardelt-platform#1369). A token without it gets 403
+//!   `insufficient_scope` with the scope named, so a client can step up.
 //! - **Discovery.** `/.well-known/oauth-protected-resource` (RFC 9728) and its `/mcp` twin
 //!   tell a client where to sign in, and the 401 challenge points at them.
 //! - **Read tools only.** Each tool calls the catalog handler the `/api/catalog/*` route
@@ -41,6 +44,10 @@ use crate::{catalog, catalog_search};
 
 /// The protocol revision this endpoint speaks.
 const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The scope every tool call needs; the realm client `stardelt-mcp` grants it by default
+/// (stardelt-platform#1369).
+pub const READ_SCOPE: &str = "stardelt:read";
 
 /// Longest tool text before it is cut short; past this the answer carries no
 /// `structuredContent` and says so (a whole catalog does not fit in a model's context).
@@ -137,6 +144,24 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
 }
 
+/// RFC 6750 §3.1: a valid token that lacks the scope this resource needs.
+fn insufficient_scope() -> Response {
+    let mut response = (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "insufficient_scope", "required_scope": READ_SCOPE })),
+    )
+        .into_response();
+    let challenge = format!(
+        "Bearer error=\"insufficient_scope\", error_description=\"the token has no {READ_SCOPE} scope\", scope=\"{READ_SCOPE}\""
+    );
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_str(&challenge)
+            .unwrap_or_else(|_| HeaderValue::from_static("Bearer error=\"insufficient_scope\"")),
+    );
+    response
+}
+
 /// `GET /.well-known/oauth-protected-resource`.
 async fn metadata(State(state): State<Arc<AppState>>) -> Response {
     protected_resource(&state)
@@ -159,6 +184,7 @@ fn protected_resource(state: &AppState) -> Response {
         "resource": format!("{}/mcp", auth.config.public_url),
         "authorization_servers": [auth.config.issuer],
         "bearer_methods_supported": ["header"],
+        "scopes_supported": [READ_SCOPE],
     }))
     .into_response()
 }
@@ -199,15 +225,18 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
     }
 
     let audiences = [cfg.audience.clone()];
-    let principal = match auth.authenticate_bearer_for(&headers, &audiences).await {
-        Ok(principal) => principal,
+    let (principal, scopes) = match auth
+        .authenticate_bearer_for_scopes(&headers, &audiences)
+        .await
+    {
+        Ok(ok) => ok,
         Err(err) => {
             // The MCP challenge names the metadata document, so a client that never heard
             // of this resource can find out where to sign in (RFC 9728 §5.1).
             let invalid = !matches!(err, AuthError::Unauthenticated);
             let mut response = err.into_response();
             let mut challenge = format!(
-                "Bearer resource_metadata=\"{public_url}/.well-known/oauth-protected-resource/mcp\""
+                "Bearer resource_metadata=\"{public_url}/.well-known/oauth-protected-resource/mcp\", scope=\"{READ_SCOPE}\""
             );
             if invalid {
                 challenge.push_str(", error=\"invalid_token\"");
@@ -220,6 +249,10 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
             return response;
         }
     };
+
+    if !scopes.iter().any(|s| s == READ_SCOPE) {
+        return insufficient_scope();
+    }
 
     let request: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
@@ -741,10 +774,29 @@ mod tests {
                 }
             })
         }
+
+        fn validate_for_scopes<'a>(
+            &'a self,
+            token: &'a str,
+            audiences: &'a [String],
+        ) -> BoxFuture<'a, Result<(Identity, Vec<String>), AuthError>> {
+            Box::pin(async move {
+                if !(audiences.len() == 1 && audiences[0] == "stardelt-mcp") {
+                    return Err(AuthError::InvalidToken("wrong audience"));
+                }
+                let identity = validate(token)?;
+                let scopes = if token == "good" {
+                    vec![READ_SCOPE.to_string()]
+                } else {
+                    vec!["openid".to_string()]
+                };
+                Ok((identity, scopes))
+            })
+        }
     }
 
     fn validate(token: &str) -> Result<Identity, AuthError> {
-        if token != "good" {
+        if token != "good" && token != "plain" {
             return Err(AuthError::InvalidToken("bad signature"));
         }
         Ok(Identity {
@@ -819,6 +871,14 @@ mod tests {
         request
             .headers_mut()
             .insert(header::AUTHORIZATION, "Bearer good".parse().unwrap());
+        request
+    }
+
+    fn authorized_with(token: &str, mut request: Request<Body>) -> Request<Body> {
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
         request
     }
 
@@ -1206,5 +1266,63 @@ mod tests {
         .expect("enabled");
         assert_eq!(cfg.max_rows, 1);
         assert_eq!(cfg.query_timeout, std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn a_token_without_the_read_scope_is_403() {
+        let (app, _dir) = test_app("mcp-scope-403", true);
+        let response = send(
+            app,
+            authorized_with(
+                "plain",
+                post(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            challenge.contains("error=\"insufficient_scope\""),
+            "{challenge}"
+        );
+        assert!(challenge.contains("scope=\"stardelt:read\""), "{challenge}");
+        assert_eq!(
+            json_body(response).await,
+            json!({ "error": "insufficient_scope", "required_scope": "stardelt:read" })
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_names_the_read_scope() {
+        let (app, _dir) = test_app("mcp-scope-challenge", true);
+        let response = send(
+            app,
+            post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(challenge.contains("scope=\"stardelt:read\""), "{challenge}");
+    }
+
+    #[tokio::test]
+    async fn metadata_names_the_read_scope() {
+        let (app, _dir) = test_app("mcp-scope-metadata", true);
+        let response = send(app, get("/.well-known/oauth-protected-resource/mcp")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await["scopes_supported"],
+            json!([READ_SCOPE])
+        );
     }
 }

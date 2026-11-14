@@ -425,6 +425,21 @@ fn claim_list(claims: &Value, key: &str) -> Vec<String> {
     }
 }
 
+/// The token's granted scopes. Keycloak (RFC 6749) sends `scope` as one space-separated
+/// string; Entra sends `scp` the same way, and an IdP may send an array. Unknown = none.
+pub fn claim_scopes(claims: &Value) -> Vec<String> {
+    for key in ["scope", "scp"] {
+        match claims.get(key) {
+            Some(Value::String(s)) => {
+                return s.split_whitespace().map(str::to_string).collect();
+            }
+            Some(Value::Array(_)) => return claim_list(claims, key),
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
 /// Entra ID "group overage": when a user is in more groups than fit the token, Entra
 /// omits the group claim and sets `_claim_names.groups` (or `hasgroups: true`).
 /// Nova does not call Graph to resolve it; it treats the user as having no groups.
@@ -826,6 +841,16 @@ pub trait BearerValidator: Send + Sync {
     ) -> BoxFuture<'a, Result<Identity, AuthError>> {
         self.validate(token)
     }
+
+    /// Like `validate_for`, also returning the token's granted scopes (`scope`/`scp`).
+    /// The default carries none, which is what a validator that does not read claims gets.
+    fn validate_for_scopes<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, Vec<String>), AuthError>> {
+        Box::pin(async move { Ok((self.validate_for(token, audiences).await?, Vec::new())) })
+    }
 }
 
 struct OidcBearer {
@@ -857,6 +882,21 @@ impl BearerValidator for OidcBearer {
                 .verify(token, audiences, &self.client_id)
                 .await?;
             identity_from_claims(&claims, &self.claims)
+        })
+    }
+
+    fn validate_for_scopes<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, Vec<String>), AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, audiences, &self.client_id)
+                .await?;
+            let identity = identity_from_claims(&claims, &self.claims)?;
+            Ok((identity, claim_scopes(&claims)))
         })
     }
 }
@@ -1346,6 +1386,18 @@ impl AuthState {
         headers: &HeaderMap,
         audiences: &[String],
     ) -> Result<Principal, AuthError> {
+        Ok(self
+            .authenticate_bearer_for_scopes(headers, audiences)
+            .await?
+            .0)
+    }
+
+    /// The same check, also returning the token's granted scopes. `/mcp` requires one.
+    pub async fn authenticate_bearer_for_scopes(
+        &self,
+        headers: &HeaderMap,
+        audiences: &[String],
+    ) -> Result<(Principal, Vec<String>), AuthError> {
         let value = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -1357,12 +1409,15 @@ impl AuthState {
             return Err(AuthError::Unauthenticated);
         }
         let token = token.trim();
-        let identity = self.bearer.validate_for(token, audiences).await?;
-        Ok(Principal {
-            identity,
-            via: "bearer",
-            access_token: Some(Secret(token.to_string())),
-        })
+        let (identity, scopes) = self.bearer.validate_for_scopes(token, audiences).await?;
+        Ok((
+            Principal {
+                identity,
+                via: "bearer",
+                access_token: Some(Secret(token.to_string())),
+            },
+            scopes,
+        ))
     }
 
     /// What `/api/me` reports beyond the identity: the administrator decision and, for a
