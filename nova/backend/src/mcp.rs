@@ -36,10 +36,11 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::AppState;
-use crate::auth::{AuthError, Principal};
+use crate::auth::{AuthError, BearerFacts, Principal};
 use crate::{catalog, catalog_search};
 
 /// The protocol revision this endpoint speaks.
@@ -54,7 +55,7 @@ pub const READ_SCOPE: &str = "stardelt:read";
 const MAX_TOOL_TEXT_CHARS: usize = 20_000;
 
 /// The MCP resource's configuration (`NOVA_MCP_ENABLED`, `NOVA_MCP_AUDIENCE`,
-/// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`).
+/// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`, `NOVA_MCP_ALLOWED_CLIENTS`).
 #[derive(Clone, Debug)]
 pub struct McpConfig {
     /// The resource identifier the IdP mints access tokens for: `https://<nova host>/mcp`.
@@ -63,6 +64,10 @@ pub struct McpConfig {
     pub max_rows: usize,
     /// Cut-off for one `sql_read`/`sql_explain` call (`NOVA_MCP_QUERY_TIMEOUT_SECS`, default 60, clamped 1..=300).
     pub query_timeout: std::time::Duration,
+    /// Client ids (`azp`) allowed to call the endpoint (`NOVA_MCP_ALLOWED_CLIENTS`,
+    /// comma separated). Empty = every client the audience accepts. A token without an
+    /// `azp` is refused while the list is non-empty.
+    pub allowed_clients: Vec<String>,
 }
 
 impl McpConfig {
@@ -107,10 +112,20 @@ impl McpConfig {
             .filter(|n| *n > 0)
             .map(|n| n.min(300))
             .unwrap_or(60);
+        let allowed_clients = get("NOVA_MCP_ALLOWED_CLIENTS")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Some(Self {
             audience,
             max_rows,
             query_timeout: std::time::Duration::from_secs(query_timeout_secs),
+            allowed_clients,
         }))
     }
 }
@@ -225,8 +240,8 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
     }
 
     let audiences = [cfg.audience.clone()];
-    let (principal, scopes) = match auth
-        .authenticate_bearer_for_scopes(&headers, &audiences)
+    let (principal, facts) = match auth
+        .authenticate_bearer_for_facts(&headers, &audiences)
         .await
     {
         Ok(ok) => ok,
@@ -250,8 +265,22 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
         }
     };
 
-    if !scopes.iter().any(|s| s == READ_SCOPE) {
+    if !facts.scopes.iter().any(|s| s == READ_SCOPE) {
         return insufficient_scope();
+    }
+
+    if !cfg.allowed_clients.is_empty() {
+        let allowed = facts
+            .client_id
+            .as_deref()
+            .is_some_and(|client| cfg.allowed_clients.iter().any(|c| c == client));
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "client not allowed", "client": facts.client_id })),
+            )
+                .into_response();
+        }
     }
 
     let request: Value = match serde_json::from_slice(&body) {
@@ -276,7 +305,7 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
         // A notification: nothing to answer, and no id to answer it with.
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         "tools/list" => rpc_result(id, json!({ "tools": tools() })),
-        "tools/call" => call_tool(&state, &cfg, &principal, id, &request).await,
+        "tools/call" => call_tool(&state, &cfg, &principal, &facts, id, &request).await,
         _ => rpc_error(id, -32601, "method not found"),
     }
 }
@@ -399,6 +428,7 @@ async fn call_tool(
     state: &Arc<AppState>,
     cfg: &McpConfig,
     principal: &Principal,
+    facts: &BearerFacts,
     id: Option<Value>,
     request: &Value,
 ) -> Response {
@@ -524,13 +554,17 @@ async fn call_tool(
 
     let is_error = !status.is_success();
     let outcome = if is_error { "error" } else { "ok" };
-    // One line per tool call, before the answer: who ran what, how it ended, how long.
+    // One line per tool call, before the answer: who ran what, with which client, how it
+    // ended, how long, and a fingerprint of the arguments (never the arguments themselves).
+    let arguments_sha256 = arguments_hash(&arguments);
     tracing::info!(
         target: "audit",
         sub = %principal.identity.sub,
+        client = facts.client_id.as_deref().unwrap_or(""),
         tool = %name,
         status = %outcome,
         duration_ms = started.elapsed().as_millis() as u64,
+        arguments_sha256 = %arguments_sha256,
         "mcp tool call"
     );
 
@@ -686,6 +720,16 @@ async fn body_of(response: Response) -> (StatusCode, Value) {
     )
 }
 
+/// SHA-256 of a tool call's `arguments` JSON, lowercase hex. Stable for identical JSON so
+/// two calls can be compared, and one-way so the log never holds a statement or a value.
+fn arguments_hash(arguments: &Value) -> String {
+    let text = serde_json::to_vec(arguments).unwrap_or_default();
+    Sha256::digest(&text)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// MCP's tool answer: the JSON as text in `content`, the JSON itself in
 /// `structuredContent`. A refusal is `isError` with the handler's own sentence; a body
 /// past the context budget loses `structuredContent` and says where it was cut.
@@ -750,7 +794,8 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::auth::{
-        self, BearerValidator, BoxFuture, ClaimConfig, Identity, OidcConfig, Provider, Secret,
+        self, BearerFacts, BearerValidator, BoxFuture, ClaimConfig, Identity, OidcConfig, Provider,
+        Secret,
     };
 
     /// A validator that accepts `"good"` for the MCP audience only, like the IdP.
@@ -793,10 +838,32 @@ mod tests {
                 Ok((identity, scopes))
             })
         }
+
+        fn validate_for_facts<'a>(
+            &'a self,
+            token: &'a str,
+            audiences: &'a [String],
+        ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+            Box::pin(async move {
+                if !(audiences.len() == 1 && audiences[0] == "stardelt-mcp") {
+                    return Err(AuthError::InvalidToken("wrong audience"));
+                }
+                let identity = validate(token)?;
+                let (scopes, client_id) = match token {
+                    "good" => (
+                        vec![READ_SCOPE.to_string()],
+                        Some("stardelt-mcp".to_string()),
+                    ),
+                    "other" => (vec![READ_SCOPE.to_string()], Some("rogue".to_string())),
+                    _ => (vec!["openid".to_string()], None),
+                };
+                Ok((identity, BearerFacts { scopes, client_id }))
+            })
+        }
     }
 
     fn validate(token: &str) -> Result<Identity, AuthError> {
-        if token != "good" && token != "plain" {
+        if !matches!(token, "good" | "plain" | "other") {
             return Err(AuthError::InvalidToken("bad signature"));
         }
         Ok(Identity {
@@ -838,7 +905,11 @@ mod tests {
     }
 
     /// The app the image serves: the MCP routes, `/api`, and the SPA fallback.
-    fn test_app(tag: &str, enabled: bool) -> (Router, crate::router_tests::StaticDir) {
+    fn test_app_with(
+        tag: &str,
+        enabled: bool,
+        allowed_clients: Vec<String>,
+    ) -> (Router, crate::router_tests::StaticDir) {
         let mut state = crate::router_tests::test_state();
         if enabled {
             let s = Arc::get_mut(&mut state).expect("a fresh state");
@@ -847,11 +918,16 @@ mod tests {
                 audience: "stardelt-mcp".into(),
                 max_rows: 200,
                 query_timeout: std::time::Duration::from_secs(60),
+                allowed_clients,
             });
         }
         let dir = crate::router_tests::StaticDir::new(tag);
         let app = crate::app(state, crate::api_router(), dir.path());
         (app, dir)
+    }
+
+    fn test_app(tag: &str, enabled: bool) -> (Router, crate::router_tests::StaticDir) {
+        test_app_with(tag, enabled, Vec::new())
     }
 
     async fn send(app: Router, request: Request<Body>) -> Response {
@@ -1266,6 +1342,50 @@ mod tests {
         .expect("enabled");
         assert_eq!(cfg.max_rows, 1);
         assert_eq!(cfg.query_timeout, std::time::Duration::from_secs(60));
+
+        // No allowlist by default; a configured one is trimmed and split on commas.
+        assert!(cfg.allowed_clients.is_empty());
+        let cfg = McpConfig::from_lookup(
+            |k| match k {
+                "NOVA_MCP_ENABLED" => Some("true".to_string()),
+                "NOVA_MCP_AUDIENCE" => Some("https://nova.example.com/mcp".to_string()),
+                "NOVA_MCP_ALLOWED_CLIENTS" => Some(" stardelt-mcp, stardelt-cli ".to_string()),
+                _ => None,
+            },
+            true,
+        )
+        .expect("a configuration")
+        .expect("enabled");
+        assert_eq!(cfg.allowed_clients, vec!["stardelt-mcp", "stardelt-cli"]);
+    }
+
+    #[test]
+    fn arguments_hash_is_stable_and_hex() {
+        let a = json!({ "sql": "select 1", "maxRows": 5 });
+        assert_eq!(arguments_hash(&a).len(), 64);
+        assert!(arguments_hash(&a).chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            arguments_hash(&a),
+            arguments_hash(&json!({ "sql": "select 1", "maxRows": 5 }))
+        );
+        assert_ne!(
+            arguments_hash(&a),
+            arguments_hash(&json!({ "sql": "select 2", "maxRows": 5 }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_outside_the_allowlist_is_403() {
+        let (app, _dir) = test_app_with("mcp-client-403", true, vec!["stardelt-mcp".into()]);
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let denied = send(app.clone(), authorized_with("other", post(list))).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(denied).await,
+            json!({ "error": "client not allowed", "client": "rogue" })
+        );
+        let allowed = send(app, authorized_with("good", post(list))).await;
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]

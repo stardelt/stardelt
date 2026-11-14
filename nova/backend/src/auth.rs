@@ -403,6 +403,14 @@ pub struct Identity {
     pub is_admin: bool,
 }
 
+/// What a resource server needs beyond the identity: the token's granted scopes and the
+/// client it was issued to (`azp`, OIDC Core 2 §2). `None` when the IdP sets no `azp`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BearerFacts {
+    pub scopes: Vec<String>,
+    pub client_id: Option<String>,
+}
+
 fn claim_str(claims: &Value, key: &str) -> Option<String> {
     claims
         .get(key)
@@ -851,6 +859,25 @@ pub trait BearerValidator: Send + Sync {
     ) -> BoxFuture<'a, Result<(Identity, Vec<String>), AuthError>> {
         Box::pin(async move { Ok((self.validate_for(token, audiences).await?, Vec::new())) })
     }
+
+    /// Like `validate_for_scopes`, also naming the client the token was issued to.
+    /// The default carries no client id; a validator that reads claims overrides it.
+    fn validate_for_facts<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+        Box::pin(async move {
+            let (identity, scopes) = self.validate_for_scopes(token, audiences).await?;
+            Ok((
+                identity,
+                BearerFacts {
+                    scopes,
+                    client_id: None,
+                },
+            ))
+        })
+    }
 }
 
 struct OidcBearer {
@@ -897,6 +924,27 @@ impl BearerValidator for OidcBearer {
                 .await?;
             let identity = identity_from_claims(&claims, &self.claims)?;
             Ok((identity, claim_scopes(&claims)))
+        })
+    }
+
+    fn validate_for_facts<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, audiences, &self.client_id)
+                .await?;
+            let identity = identity_from_claims(&claims, &self.claims)?;
+            Ok((
+                identity,
+                BearerFacts {
+                    scopes: claim_scopes(&claims),
+                    client_id: claim_str(&claims, "azp"),
+                },
+            ))
         })
     }
 }
@@ -1398,6 +1446,18 @@ impl AuthState {
         headers: &HeaderMap,
         audiences: &[String],
     ) -> Result<(Principal, Vec<String>), AuthError> {
+        let (principal, facts) = self
+            .authenticate_bearer_for_facts(headers, audiences)
+            .await?;
+        Ok((principal, facts.scopes))
+    }
+
+    /// The MCP endpoint's bearer check with the token's scopes and client (`azp`).
+    pub async fn authenticate_bearer_for_facts(
+        &self,
+        headers: &HeaderMap,
+        audiences: &[String],
+    ) -> Result<(Principal, BearerFacts), AuthError> {
         let value = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -1409,14 +1469,14 @@ impl AuthState {
             return Err(AuthError::Unauthenticated);
         }
         let token = token.trim();
-        let (identity, scopes) = self.bearer.validate_for_scopes(token, audiences).await?;
+        let (identity, facts) = self.bearer.validate_for_facts(token, audiences).await?;
         Ok((
             Principal {
                 identity,
                 via: "bearer",
                 access_token: Some(Secret(token.to_string())),
             },
-            scopes,
+            facts,
         ))
     }
 
