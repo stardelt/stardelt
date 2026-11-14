@@ -25,7 +25,10 @@
 //! - **No new dependency.** Three JSON-RPC methods and `serde_json` are enough; a JSON-RPC
 //!   or MCP crate would need a licence check first.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use axum::{
     Extension, Json, Router,
@@ -54,8 +57,17 @@ pub const READ_SCOPE: &str = "stardelt:read";
 /// `structuredContent` and says so (a whole catalog does not fit in a model's context).
 const MAX_TOOL_TEXT_CHARS: usize = 20_000;
 
+/// Calls one person may make per minute on `/mcp` (`NOVA_MCP_CALLS_PER_MINUTE`, default 60).
+/// `initialize` and `tools/list` never consume a slot: a session makes one of each.
+const CALLS_PER_MINUTE: usize = 60;
+
+/// The per-person call limit (`AppState`-lifetime, shared by every cloned `McpConfig`): per
+/// signed-in `sub`, the `tools/call` instants inside the last minute. Only a restart forgets it.
+pub type CallsLimiter = Arc<Mutex<HashMap<String, VecDeque<Instant>>>>;
+
 /// The MCP resource's configuration (`NOVA_MCP_ENABLED`, `NOVA_MCP_AUDIENCE`,
-/// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`, `NOVA_MCP_ALLOWED_CLIENTS`).
+/// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`, `NOVA_MCP_ALLOWED_CLIENTS`,
+/// `NOVA_MCP_CALLS_PER_MINUTE`).
 #[derive(Clone, Debug)]
 pub struct McpConfig {
     /// The resource identifier the IdP mints access tokens for: `https://<nova host>/mcp`.
@@ -68,6 +80,10 @@ pub struct McpConfig {
     /// comma separated). Empty = every client the audience accepts. A token without an
     /// `azp` is refused while the list is non-empty.
     pub allowed_clients: Vec<String>,
+    /// `tools/call`s one person may make per minute (`NOVA_MCP_CALLS_PER_MINUTE`, default 60, 1..=600).
+    pub calls_per_minute: usize,
+    /// The call instants already taken, per `sub`; cloned configs share it.
+    pub calls: CallsLimiter,
 }
 
 impl McpConfig {
@@ -121,11 +137,17 @@ impl McpConfig {
                     .collect()
             })
             .unwrap_or_default();
+        let calls_per_minute = get("NOVA_MCP_CALLS_PER_MINUTE")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.clamp(1, 600))
+            .unwrap_or(CALLS_PER_MINUTE);
         Ok(Some(Self {
             audience,
             max_rows,
             query_timeout: std::time::Duration::from_secs(query_timeout_secs),
             allowed_clients,
+            calls_per_minute,
+            calls: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
 }
@@ -305,7 +327,29 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
         // A notification: nothing to answer, and no id to answer it with.
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         "tools/list" => rpc_result(id, json!({ "tools": tools() })),
-        "tools/call" => call_tool(&state, &cfg, &principal, &facts, id, &request).await,
+        "tools/call" => {
+            if !take_call_slot(&cfg.calls, &principal.identity.sub, cfg.calls_per_minute) {
+                tracing::info!(
+                    target: "audit",
+                    sub = %principal.identity.sub,
+                    client = facts.client_id.as_deref().unwrap_or(""),
+                    tool = "tools/call",
+                    status = "rate_limited",
+                    "mcp tool call"
+                );
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, HeaderValue::from_static("60"))],
+                    Json(json!({
+                        "error": "too_many_requests",
+                        "limit": cfg.calls_per_minute,
+                        "window_seconds": 60,
+                    })),
+                )
+                    .into_response();
+            }
+            call_tool(&state, &cfg, &principal, &facts, id, &request).await
+        }
         _ => rpc_error(id, -32601, "method not found"),
     }
 }
@@ -794,6 +838,25 @@ async fn body_of(response: Response) -> (StatusCode, Value) {
     )
 }
 
+/// Take one `tools/call` slot for `sub`, or report that the last minute is full.
+fn take_call_slot(limiter: &CallsLimiter, sub: &str, limit: usize) -> bool {
+    let mut map = limiter.lock().expect("mcp call limiter poisoned");
+    let now = Instant::now();
+    let slots = map.entry(sub.to_string()).or_default();
+    while slots
+        .front()
+        .is_some_and(|then| now.duration_since(*then) >= std::time::Duration::from_secs(60))
+    {
+        slots.pop_front();
+    }
+    if slots.len() >= limit {
+        false
+    } else {
+        slots.push_back(now);
+        true
+    }
+}
+
 /// SHA-256 of a tool call's `arguments` JSON, lowercase hex. Stable for identical JSON so
 /// two calls can be compared, and one-way so the log never holds a statement or a value.
 fn arguments_hash(arguments: &Value) -> String {
@@ -993,8 +1056,30 @@ mod tests {
                 max_rows: 200,
                 query_timeout: std::time::Duration::from_secs(60),
                 allowed_clients,
+                calls_per_minute: CALLS_PER_MINUTE,
+                calls: Arc::new(Mutex::new(HashMap::new())),
             });
         }
+        let dir = crate::router_tests::StaticDir::new(tag);
+        let app = crate::app(state, crate::api_router(), dir.path());
+        (app, dir)
+    }
+
+    fn test_app_with_limit(
+        tag: &str,
+        calls_per_minute: usize,
+    ) -> (Router, crate::router_tests::StaticDir) {
+        let mut state = crate::router_tests::test_state();
+        let s = Arc::get_mut(&mut state).expect("a fresh state");
+        s.auth = Some(stub_auth());
+        s.mcp = Some(McpConfig {
+            audience: "stardelt-mcp".into(),
+            max_rows: 200,
+            query_timeout: std::time::Duration::from_secs(60),
+            allowed_clients: vec![],
+            calls_per_minute,
+            calls: Arc::new(Mutex::new(HashMap::new())),
+        });
         let dir = crate::router_tests::StaticDir::new(tag);
         let app = crate::app(state, crate::api_router(), dir.path());
         (app, dir)
@@ -1111,6 +1196,37 @@ mod tests {
             ),
             "{challenge}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_call_limit_refuses_the_third_call_and_lists_do_not_count() {
+        let (app, _dir) = test_app_with_limit("mcp-limit", 2);
+        let call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"platform_status","arguments":{}}}"#;
+        // 1st and 2nd: 200. `tools/list` in between: 200 and no slot.
+        for _ in 0..2 {
+            let response = send(app.clone(), authorized(post(call))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let listed = send(
+                app.clone(),
+                authorized(post(r#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#)),
+            )
+            .await;
+            assert_eq!(listed.status(), StatusCode::OK);
+        }
+        // 3rd: 429 with the header and the body the client can act on.
+        let refused = send(app, authorized(post(call))).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("60")
+        );
+        let body = json_body(refused).await;
+        assert_eq!(body["error"], "too_many_requests");
+        assert_eq!(body["limit"], 2);
+        assert_eq!(body["window_seconds"], 60);
     }
 
     #[tokio::test]
