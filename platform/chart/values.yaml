@@ -604,6 +604,10 @@ nova:
     # `tools/call`s one person may make per minute on /mcp; 1-600. Empty = Nova's own default (60).
     # The operator's CRD carries the same knob as `spec.mcp.callsPerMinute` (stardelt-operator#738).
     callsPerMinute: ""
+    # Days the stored audit rows of /mcp tool calls are kept; 0-3650. Empty = Nova's own default (30);
+    # 0 keeps them and switches the hourly purge off. The operator's CRD carries the same knob as
+    # `spec.mcp.auditRetentionDays` (stardelt-operator#740).
+    auditRetentionDays: ""
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.
   #   oidc — Nova is a client of the IdP configured under `identity:` above.
