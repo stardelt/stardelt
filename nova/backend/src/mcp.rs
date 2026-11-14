@@ -14,6 +14,10 @@
 //! - **One scope.** Every call needs `stardelt:read`, which the realm client `stardelt-mcp`
 //!   grants by default (stardelt-platform#1369). A token without it gets 403
 //!   `insufficient_scope` with the scope named, so a client can step up.
+//! - **Only the groups an administrator names.** `NOVA_MCP_ALLOWED_GROUPS` (comma separated) refuses
+//!   a caller whose `groups` claim names none of them with 403 `{"error":"group not allowed"}`;
+//!   empty = every group the audience accepts. A token without a group is refused while the list is
+//!   set — the same rule as `NOVA_MCP_ALLOWED_CLIENTS`.
 //! - **Discovery.** `/.well-known/oauth-protected-resource` (RFC 9728) and its `/mcp` twin
 //!   tell a client where to sign in, and the 401 challenge points at them.
 //! - **Read tools only.** Each tool calls the catalog handler the `/api/catalog/*` route
@@ -75,7 +79,7 @@ pub type CallsLimiter = Arc<Mutex<HashMap<String, VecDeque<Instant>>>>;
 
 /// The MCP resource's configuration (`NOVA_MCP_ENABLED`, `NOVA_MCP_AUDIENCE`,
 /// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`, `NOVA_MCP_ALLOWED_CLIENTS`,
-/// `NOVA_MCP_CALLS_PER_MINUTE`).
+/// `NOVA_MCP_ALLOWED_GROUPS`, `NOVA_MCP_CALLS_PER_MINUTE`).
 #[derive(Clone, Debug)]
 pub struct McpConfig {
     /// The resource identifier the IdP mints access tokens for: `https://<nova host>/mcp`.
@@ -88,6 +92,10 @@ pub struct McpConfig {
     /// comma separated). Empty = every client the audience accepts. A token without an
     /// `azp` is refused while the list is non-empty.
     pub allowed_clients: Vec<String>,
+    /// Groups (`groups` claim) allowed to call the endpoint (`NOVA_MCP_ALLOWED_GROUPS`,
+    /// comma separated). Empty = every group the audience accepts. A token without a group
+    /// is refused while the list is set.
+    pub allowed_groups: Vec<String>,
     /// `tools/call`s one person may make per minute (`NOVA_MCP_CALLS_PER_MINUTE`, default 60, 1..=600).
     pub calls_per_minute: usize,
     /// The call instants already taken, per `sub`; cloned configs share it.
@@ -145,6 +153,15 @@ impl McpConfig {
                     .collect()
             })
             .unwrap_or_default();
+        let allowed_groups = get("NOVA_MCP_ALLOWED_GROUPS")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         let calls_per_minute = get("NOVA_MCP_CALLS_PER_MINUTE")
             .and_then(|v| v.trim().parse::<usize>().ok())
             .map(|n| n.clamp(1, 600))
@@ -154,6 +171,7 @@ impl McpConfig {
             max_rows,
             query_timeout: std::time::Duration::from_secs(query_timeout_secs),
             allowed_clients,
+            allowed_groups,
             calls_per_minute,
             calls: Arc::new(Mutex::new(HashMap::new())),
         }))
@@ -308,6 +326,21 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({ "error": "client not allowed", "client": facts.client_id })),
+            )
+                .into_response();
+        }
+    }
+
+    if !cfg.allowed_groups.is_empty() {
+        let allowed = principal
+            .identity
+            .groups
+            .iter()
+            .any(|group| cfg.allowed_groups.iter().any(|a| a == group));
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "group not allowed" })),
             )
                 .into_response();
         }
@@ -1200,6 +1233,10 @@ mod tests {
                         Some("stardelt-mcp".to_string()),
                     ),
                     "other" => (vec![READ_SCOPE.to_string()], Some("rogue".to_string())),
+                    "member" => (
+                        vec![READ_SCOPE.to_string()],
+                        Some("stardelt-mcp".to_string()),
+                    ),
                     _ => (vec!["openid".to_string()], None),
                 };
                 Ok((identity, BearerFacts { scopes, client_id }))
@@ -1208,7 +1245,7 @@ mod tests {
     }
 
     fn validate(token: &str) -> Result<Identity, AuthError> {
-        if !matches!(token, "good" | "plain" | "other") {
+        if !matches!(token, "good" | "plain" | "other" | "member") {
             return Err(AuthError::InvalidToken("bad signature"));
         }
         Ok(Identity {
@@ -1216,7 +1253,11 @@ mod tests {
             display_name: "alice".into(),
             email: None,
             name: None,
-            groups: vec![],
+            groups: if token == "member" {
+                vec!["analysts".into()]
+            } else {
+                vec![]
+            },
             roles: vec![],
             groups_overage: false,
             is_admin: false,
@@ -1264,6 +1305,7 @@ mod tests {
                 max_rows: 200,
                 query_timeout: std::time::Duration::from_secs(60),
                 allowed_clients,
+                allowed_groups: vec![],
                 calls_per_minute: CALLS_PER_MINUTE,
                 calls: Arc::new(Mutex::new(HashMap::new())),
             });
@@ -1285,7 +1327,29 @@ mod tests {
             max_rows: 200,
             query_timeout: std::time::Duration::from_secs(60),
             allowed_clients: vec![],
+            allowed_groups: vec![],
             calls_per_minute,
+            calls: Arc::new(Mutex::new(HashMap::new())),
+        });
+        let dir = crate::router_tests::StaticDir::new(tag);
+        let app = crate::app(state, crate::api_router(), dir.path());
+        (app, dir)
+    }
+
+    fn test_app_with_groups(
+        tag: &str,
+        allowed_groups: Vec<String>,
+    ) -> (Router, crate::router_tests::StaticDir) {
+        let mut state = crate::router_tests::test_state();
+        let s = Arc::get_mut(&mut state).expect("a fresh state");
+        s.auth = Some(stub_auth());
+        s.mcp = Some(McpConfig {
+            audience: "stardelt-mcp".into(),
+            max_rows: 200,
+            query_timeout: std::time::Duration::from_secs(60),
+            allowed_clients: vec![],
+            allowed_groups,
+            calls_per_minute: CALLS_PER_MINUTE,
             calls: Arc::new(Mutex::new(HashMap::new())),
         });
         let dir = crate::router_tests::StaticDir::new(tag);
@@ -1909,6 +1973,21 @@ mod tests {
         .expect("a configuration")
         .expect("enabled");
         assert_eq!(cfg.allowed_clients, vec!["stardelt-mcp", "stardelt-cli"]);
+
+        // No group switch by default; a configured one is trimmed and split on commas.
+        assert!(cfg.allowed_groups.is_empty());
+        let cfg = McpConfig::from_lookup(
+            |k| match k {
+                "NOVA_MCP_ENABLED" => Some("true".to_string()),
+                "NOVA_MCP_AUDIENCE" => Some("https://nova.example.com/mcp".to_string()),
+                "NOVA_MCP_ALLOWED_GROUPS" => Some(" agents, data-eng ".to_string()),
+                _ => None,
+            },
+            true,
+        )
+        .expect("a configuration")
+        .expect("enabled");
+        assert_eq!(cfg.allowed_groups, vec!["agents", "data-eng"]);
     }
 
     #[test]
@@ -1937,6 +2016,20 @@ mod tests {
             json!({ "error": "client not allowed", "client": "rogue" })
         );
         let allowed = send(app, authorized_with("good", post(list))).await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_group_outside_the_allowlist_is_403() {
+        let (app, _dir) = test_app_with_groups("mcp-group-403", vec!["analysts".into()]);
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let denied = send(app.clone(), authorized_with("good", post(list))).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(denied).await,
+            json!({ "error": "group not allowed" })
+        );
+        let allowed = send(app, authorized_with("member", post(list))).await;
         assert_eq!(allowed.status(), StatusCode::OK);
     }
 
