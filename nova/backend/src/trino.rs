@@ -221,12 +221,12 @@ fn cancel_request(
 /// log shows it so a person can tell where a statement came from.
 const SOURCE_NOVA: &str = "nova";
 
-/// The statement POST: the caller's identity plus where the statement comes from. The engine records
-/// `source` and the client tag in its query events, and the query log keeps them.
-pub(crate) fn statement_post(
+/// [`statement_post`] with explicit client tags (the MCP tools name their tool and client).
+pub(crate) fn statement_post_tagged(
     state: &AppState,
     caller: Option<&crate::auth::Principal>,
     source: &str,
+    client_tags: &str,
 ) -> reqwest::RequestBuilder {
     trino_request(
         state,
@@ -236,8 +236,18 @@ pub(crate) fn statement_post(
             .post(format!("{}/v1/statement", state.trino_url))
             .header("Content-Type", "text/plain")
             .header("X-Trino-Source", source)
-            .header("X-Trino-Client-Tags", "nova"),
+            .header("X-Trino-Client-Tags", client_tags),
     )
+}
+
+/// The statement POST: the caller's identity plus where the statement comes from. The engine records
+/// `source` and the client tag in its query events, and the query log keeps them.
+pub(crate) fn statement_post(
+    state: &AppState,
+    caller: Option<&crate::auth::Principal>,
+    source: &str,
+) -> reqwest::RequestBuilder {
+    statement_post_tagged(state, caller, source, "nova")
 }
 
 /// The text of the error when the engine did not answer at all (not a failed statement).
@@ -269,6 +279,17 @@ pub async fn execute_from(
     caller: Option<&crate::auth::Principal>,
     source: &str,
 ) -> Result<QueryResult, String> {
+    execute_from_tagged(state, sql, caller, source, "nova").await
+}
+
+/// [`execute_from`] with explicit client tags, so the query log says which tool and client asked.
+pub async fn execute_from_tagged(
+    state: &AppState,
+    sql: String,
+    caller: Option<&crate::auth::Principal>,
+    source: &str,
+    client_tags: &str,
+) -> Result<QueryResult, String> {
     let guard_user = caller
         .map(|c| c.identity.display_name.as_str())
         .unwrap_or(&state.dev_user)
@@ -281,7 +302,7 @@ pub async fn execute_from(
         auth: guard_auth,
     };
 
-    let request = statement_post(state, caller, source);
+    let request = statement_post_tagged(state, caller, source, client_tags);
     let initial = request.body(sql).send().await.map_err(|e| {
         tracing::warn!(error = %e, "trino request failed");
         ENGINE_UNREACHABLE.to_string()
@@ -772,6 +793,27 @@ mod tests {
         // Everything Nova runs for itself reports the generic source.
         let own = statement_post(&state, None, SOURCE_NOVA).build().unwrap();
         assert_eq!(own.headers().get("x-trino-source").unwrap(), "nova");
+    }
+
+    #[test]
+    fn a_tagged_statement_carries_its_tool_and_client() {
+        let state = test_state(true, "dev");
+        let req = statement_post_tagged(
+            &state,
+            None,
+            "stardelt-mcp",
+            "nova,tool=sql_read,client=stardelt-mcp",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(req.headers().get("x-trino-source").unwrap(), "stardelt-mcp");
+        assert_eq!(
+            req.headers().get("x-trino-client-tags").unwrap(),
+            "nova,tool=sql_read,client=stardelt-mcp"
+        );
+        // The untagged twin is unchanged.
+        let plain = statement_post(&state, None, SOURCE_NOVA).build().unwrap();
+        assert_eq!(plain.headers().get("x-trino-client-tags").unwrap(), "nova");
     }
 
     #[test]

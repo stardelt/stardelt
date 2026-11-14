@@ -630,7 +630,17 @@ async fn call_tool(
                 .and_then(Value::as_u64)
                 .map(|n| n as usize);
             let limit = asked.unwrap_or(cfg.max_rows).clamp(1, cfg.max_rows);
-            match run_statement(state, cfg, principal, &statement, limit).await {
+            match run_statement(
+                state,
+                cfg,
+                principal,
+                &statement,
+                limit,
+                name,
+                facts.client_id.as_deref(),
+            )
+            .await
+            {
                 Ok(result) => (
                     StatusCode::OK,
                     serde_json::to_value(result).unwrap_or(Value::Null),
@@ -821,6 +831,15 @@ async fn call_tool(
     tool_result(id, status, body)
 }
 
+/// The engine's client tags for an MCP statement: the tool and the client that asked. Trino's
+/// `client_tags` are the query log's filter, so these are what say where an agent's SQL came from.
+fn client_tags(tool: &str, client: Option<&str>) -> String {
+    match client {
+        Some(client) if !client.is_empty() => format!("nova,tool={tool},client={client}"),
+        _ => format!("nova,tool={tool}"),
+    }
+}
+
 /// `sql_read`/`sql_explain`: one statement, as the caller, with the row cap and the timeout.
 async fn run_statement(
     state: &Arc<AppState>,
@@ -828,12 +847,18 @@ async fn run_statement(
     principal: &Principal,
     statement: &str,
     max_rows: usize,
+    tool: &str,
+    client: Option<&str>,
 ) -> Result<crate::trino::QueryResult, String> {
-    let run = crate::trino::execute_from(
+    // The ticket's inline `&client_tags(tool, client)` is a temporary borrowed across the await;
+    // hoisted to a `let` (same value, compiles).
+    let tags = client_tags(tool, client);
+    let run = crate::trino::execute_from_tagged(
         state,
         statement.to_string(),
         Some(principal),
         "stardelt-mcp",
+        &tags,
     );
     match tokio::time::timeout(cfg.query_timeout, run).await {
         Err(_) => Err(format!(
@@ -1056,6 +1081,16 @@ fn rpc_error(id: Option<Value>, code: i64, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_tags_name_the_tool_and_the_client() {
+        assert_eq!(
+            client_tags("sql_read", Some("stardelt-mcp")),
+            "nova,tool=sql_read,client=stardelt-mcp"
+        );
+        assert_eq!(client_tags("sql_explain", None), "nova,tool=sql_explain");
+        assert_eq!(client_tags("sql_read", Some("")), "nova,tool=sql_read");
+    }
 
     use axum::body::Body;
     use axum::http::Request;
