@@ -29,8 +29,9 @@ the transitional dev install until the operator path is proven on a fresh node
 | `SparkCluster` | namespaced | Spark compute for a team or one person: size, runtime, image, env and Spark settings, with an idle stop; the resource exists, nothing reconciles it yet |
 | `ServicePrincipal` | namespaced | a non-human identity (client credentials) for pipelines, maintenance and collectors |
 | `StreamApp` | namespaced | a streaming app: a Kafka topic in, an Iceberg table out (D42) |
+| `ModelEndpoint` | namespaced | the customer's own OpenAI-compatible model endpoint: URL, model, key reference, where it runs, purposes and token quota; the resource is validated, nothing reconciles it yet |
 
-The ML plugs (`ModelRegistry`, `ModelService`, `ModelEndpoint`) are planned (see the master spec §5).
+The ML plugs (`ModelRegistry`, `ModelService`) are planned (see the master spec §5).
 
 ### Pillars
 

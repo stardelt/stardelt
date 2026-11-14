@@ -3291,6 +3291,118 @@ pub struct SparkClusterStatus {
     pub observed_generation: Option<i64>,
 }
 
+/// Where a model endpoint runs: in the customer's network, or at a cloud provider (prompts leave the cluster).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelLocation {
+    #[default]
+    OnPremise,
+    Cloud,
+}
+
+/// What a model endpoint is used for.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelPurpose {
+    Ask,
+    Agents,
+}
+
+/// Token limits; absent means no limit.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct ModelQuota {
+    #[serde(
+        default,
+        rename = "perGroupMonthlyTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(min = 1, max = 10_000_000_000i64))]
+    pub per_group_monthly_tokens: Option<i64>,
+    #[serde(
+        default,
+        rename = "perPersonDailyTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(min = 1, max = 1_000_000_000i64))]
+    pub per_person_daily_tokens: Option<i64>,
+}
+
+/// The plug to the customer's own OpenAI-compatible model endpoint (D46). stardelt ships no model.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "ModelEndpoint",
+    namespaced,
+    status = "ModelEndpointStatus",
+    shortname = "me",
+    doc = "The customer's own OpenAI-compatible model endpoint: URL, model, key, where it runs, what it is for and how much each group may use."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.location != 'cloud' || self.url.startsWith('https://')",
+        "message": "a cloud endpoint must use https"
+    },
+    {
+        "rule": "self.purposes.all(p, self.purposes.exists_one(q, q == p))",
+        "message": "each purpose may appear once"
+    }
+]))]
+pub struct ModelEndpointSpec {
+    /// The OpenAI-compatible base URL, for example `https://llm.internal.example/v1`.
+    #[schemars(length(min = 8, max = 512), regex(pattern = r"^https?://"))]
+    pub url: String,
+    /// The model id the endpoint serves.
+    #[schemars(length(min = 1, max = 200))]
+    pub model: String,
+    /// The API key: a key of a `Connection` in the same namespace. Absent for a keyless in-cluster endpoint.
+    #[serde(default, rename = "keyRef", skip_serializing_if = "Option::is_none")]
+    pub key_ref: Option<ConnectionKeyRef>,
+    #[serde(default)]
+    pub location: ModelLocation,
+    #[serde(default = "default_model_purposes")]
+    #[schemars(length(min = 1, max = 2))]
+    pub purposes: Vec<ModelPurpose>,
+    /// May query results (rows) be sent to this model? Off by default.
+    #[serde(default, rename = "sendRows")]
+    pub send_rows: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<ModelQuota>,
+}
+
+fn default_model_purposes() -> Vec<ModelPurpose> {
+    vec![ModelPurpose::Ask, ModelPurpose::Agents]
+}
+
+/// What Nova's probe found (slice c writes it).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct ModelEndpointStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+    #[serde(
+        default,
+        rename = "toolCalling",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_calling: Option<bool>,
+    #[serde(
+        default,
+        rename = "jsonOutput",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub json_output: Option<bool>,
+    #[serde(
+        default,
+        rename = "contextTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_tokens: Option<i64>,
+    #[serde(default, rename = "checkedAt", skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct ComponentStatus {
     pub name: String,
@@ -3346,6 +3458,7 @@ pub fn crd_documents() -> Vec<CustomResourceDefinition> {
         Catalog::crd(),
         SqlWarehouse::crd(),
         SparkCluster::crd(),
+        ModelEndpoint::crd(),
     ]
 }
 
@@ -3395,6 +3508,53 @@ mod tests {
     }
 
     #[test]
+    fn model_endpoint_defaults() {
+        let spec: ModelEndpointSpec =
+            serde_json::from_value(serde_json::json!({"url":"https://x.example/v1","model":"m"}))
+                .expect("deserialize ModelEndpointSpec");
+        assert_eq!(spec.location, ModelLocation::OnPremise);
+        assert_eq!(
+            spec.purposes,
+            vec![ModelPurpose::Ask, ModelPurpose::Agents],
+            "a new endpoint serves both Ask and the agent harness"
+        );
+        assert!(!spec.send_rows, "rows never leave the cluster by default");
+        assert!(spec.key_ref.is_none());
+    }
+
+    #[test]
+    fn model_endpoint_schema_has_the_rules() {
+        let crd = ModelEndpoint::crd();
+        let schema = serde_json::to_value(
+            crd.spec.versions[0]
+                .schema
+                .as_ref()
+                .and_then(|s| s.open_api_v3_schema.clone())
+                .expect("ModelEndpoint CRD carries an openAPIV3Schema"),
+        )
+        .expect("serialize the ModelEndpoint schema");
+        assert_structural("#", &schema);
+        let text = schema.to_string();
+        assert!(
+            text.contains("a cloud endpoint must use https"),
+            "the cloud-https CEL rule is in the schema"
+        );
+        assert!(
+            text.contains("each purpose may appear once"),
+            "the duplicate-purpose CEL rule is in the schema"
+        );
+        let spec = &schema["properties"]["spec"]["properties"];
+        let mut locations: Vec<&str> = spec["location"]["enum"]
+            .as_array()
+            .expect("location is an enum in the schema")
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings"))
+            .collect();
+        locations.sort_unstable();
+        assert_eq!(locations, ["cloud", "on-premise"]);
+    }
+
+    #[test]
     fn crd_documents_lists_every_served_kind() {
         let docs = crd_documents();
         let mut names: Vec<String> = docs
@@ -3409,6 +3569,7 @@ mod tests {
                 "connections.stardelt.io",
                 "ingestionsources.stardelt.io",
                 "lakehouses.stardelt.io",
+                "modelendpoints.stardelt.io",
                 "pipelines.stardelt.io",
                 "platforminstances.stardelt.io",
                 "serviceprincipals.stardelt.io",
