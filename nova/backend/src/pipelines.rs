@@ -5408,6 +5408,29 @@ pub(crate) async fn list_runs(
     )
 }
 
+/// The hosted MCP tool `pipeline_list` (#114 read slice): `GET /api/pipelines` for a caller
+/// the MCP endpoint has already authenticated. Same visibility rule, same answer.
+pub(crate) async fn list_for(state: &AppState, who: &Identity) -> Response {
+    answer(list_pipelines(resources(state).as_ref(), state.airflow.as_ref(), who).await)
+}
+
+/// The hosted MCP tool `pipeline_runs`: `GET /api/runs` with the same filters, as the caller.
+pub(crate) async fn runs_for(
+    state: &AppState,
+    who: &Identity,
+    query: &BTreeMap<String, String>,
+) -> Response {
+    answer(
+        runs_across_pipelines(
+            resources(state).as_ref(),
+            state.airflow.as_ref(),
+            who,
+            query,
+        )
+        .await,
+    )
+}
+
 /// Demo mode's `GET /api/runs`: the sample is filtered and capped like a real answer, so the
 /// page's filters and its 400s behave the same way. There is no notebook schedule in demo mode,
 /// so a `notebook` filter answers no rows — the same empty list the notebook page's usage route

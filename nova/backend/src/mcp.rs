@@ -1,6 +1,6 @@
 //! The hosted MCP endpoint (stardelt-nova#112, design `design/agent-access.md` §4).
 //!
-//! One endpoint, one bearer token, four read-only tools: an MCP-capable agent reaches the
+//! One endpoint, one bearer token, nine read-only tools: an MCP-capable agent reaches the
 //! platform's catalog as the signed-in person with no client install. The local
 //! `stardelt mcp serve` stays the stdio server; this is the hosted one at `/mcp`, outside
 //! `/api` so it never appears in the SPA fallback or the OpenAPI document.
@@ -248,7 +248,7 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
     }
 }
 
-/// The seven read-only tools, in a fixed order so a client's menu does not move.
+/// The nine read-only tools, in a fixed order so a client's menu does not move.
 fn tools() -> Value {
     json!([
         {
@@ -332,6 +332,26 @@ fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                },
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "pipeline_list",
+            "description": "The pipelines the signed-in person may see: owner group, schedule, state and last run.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "pipeline_runs",
+            "description": "Recent runs of the pipelines the signed-in person may see, newest first. Narrow with pipeline (<namespace>/<name>) and state (for example failed).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pipeline": { "type": "string", "description": "<namespace>/<name>" },
+                    "state": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 },
                 "additionalProperties": false,
@@ -443,6 +463,27 @@ async fn call_tool(
                 axum::extract::Query(query),
             )
             .await;
+            body_of(response).await
+        }
+        "pipeline_list" => {
+            let response = crate::pipelines::list_for(state, &principal.identity).await;
+            body_of(response).await
+        }
+        "pipeline_runs" => {
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 100);
+            let mut query = std::collections::BTreeMap::new();
+            query.insert("limit".to_string(), limit.to_string());
+            if let Some(pipeline) = argument("pipeline") {
+                query.insert("pipeline".to_string(), pipeline);
+            }
+            if let Some(run_state) = argument("state") {
+                query.insert("state".to_string(), run_state);
+            }
+            let response = crate::pipelines::runs_for(state, &principal.identity, &query).await;
             body_of(response).await
         }
         other => return rpc_error(id, -32602, &format!("unknown tool: {other}")),
@@ -927,7 +968,9 @@ mod tests {
                 "catalog_search",
                 "sql_read",
                 "sql_explain",
-                "query_log_list"
+                "query_log_list",
+                "pipeline_list",
+                "pipeline_runs"
             ]
         );
 
@@ -1046,6 +1089,35 @@ mod tests {
             text_of(&result).contains("this needs Nova's database"),
             "{result}"
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_list_without_a_cluster() {
+        let (app, _dir) = test_app("mcp-pipeline-list", true);
+        let result = call(app, "pipeline_list", json!({})).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("no cluster connection"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_runs_without_a_cluster() {
+        let (app, _dir) = test_app("mcp-pipeline-runs", true);
+        let result = call(app, "pipeline_runs", json!({})).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("no cluster connection"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_runs_rejects_a_bad_pipeline_argument() {
+        let (app, _dir) = test_app("mcp-pipeline-bad", true);
+        let result = call(app, "pipeline_runs", json!({ "pipeline": "no-slash" })).await;
+        assert_eq!(result["isError"], true, "{result}");
     }
 
     #[tokio::test]
