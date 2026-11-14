@@ -1,6 +1,6 @@
 //! The hosted MCP endpoint (stardelt-nova#112, design `design/agent-access.md` §4).
 //!
-//! One endpoint, one bearer token, nine read-only tools: an MCP-capable agent reaches the
+//! One endpoint, one bearer token, eleven read-only tools: an MCP-capable agent reaches the
 //! platform's catalog as the signed-in person with no client install. The local
 //! `stardelt mcp serve` stays the stdio server; this is the hosted one at `/mcp`, outside
 //! `/api` so it never appears in the SPA fallback or the OpenAPI document.
@@ -310,7 +310,7 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
     }
 }
 
-/// The nine read-only tools, in a fixed order so a client's menu does not move.
+/// The eleven read-only tools, in a fixed order so a client's menu does not move.
 fn tools() -> Value {
     json!([
         {
@@ -416,6 +416,37 @@ fn tools() -> Value {
                     "state": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 },
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "pipeline_run",
+            "description": "One run of a pipeline with its tasks and their states: find the task that failed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pipeline": { "type": "string", "description": "<namespace>/<name>" },
+                    "run_id": { "type": "string" },
+                },
+                "required": ["pipeline", "run_id"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "pipeline_task_log",
+            "description": "One page of a task's log, with the error and stack frames of a failed task. Pass next_token from the previous answer to read on.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pipeline": { "type": "string", "description": "<namespace>/<name>" },
+                    "run_id": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "try": { "type": "integer", "minimum": 1 },
+                    "next_token": { "type": "string" },
+                },
+                "required": ["pipeline", "run_id", "task_id"],
                 "additionalProperties": false,
             },
             "annotations": { "readOnlyHint": true },
@@ -548,6 +579,49 @@ async fn call_tool(
             }
             let response = crate::pipelines::runs_for(state, &principal.identity, &query).await;
             body_of(response).await
+        }
+        "pipeline_run" | "pipeline_task_log" => {
+            let pipeline = argument("pipeline").unwrap_or_default();
+            let run_id = argument("run_id").unwrap_or_default();
+            match pipeline.split_once('/') {
+                Some((namespace, pipeline_name))
+                    if !namespace.is_empty() && !pipeline_name.is_empty() && !run_id.is_empty() =>
+                {
+                    let response = if name == "pipeline_run" {
+                        crate::pipelines::run_for(
+                            state,
+                            &principal.identity,
+                            namespace,
+                            pipeline_name,
+                            &run_id,
+                        )
+                        .await
+                    } else {
+                        let task_id = argument("task_id").unwrap_or_default();
+                        let try_number = arguments
+                            .get("try")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| u32::try_from(n).ok());
+                        let token = argument("next_token");
+                        crate::pipelines::task_log_for(
+                            state,
+                            &principal.identity,
+                            namespace,
+                            pipeline_name,
+                            &run_id,
+                            &task_id,
+                            try_number,
+                            token.as_deref(),
+                        )
+                        .await
+                    };
+                    body_of(response).await
+                }
+                _ => (
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": "pipeline must be <namespace>/<name>, and run_id must be given" }),
+                ),
+            }
         }
         other => return rpc_error(id, -32602, &format!("unknown tool: {other}")),
     };
@@ -1106,7 +1180,9 @@ mod tests {
                 "sql_explain",
                 "query_log_list",
                 "pipeline_list",
-                "pipeline_runs"
+                "pipeline_runs",
+                "pipeline_run",
+                "pipeline_task_log"
             ]
         );
 
@@ -1254,6 +1330,61 @@ mod tests {
         let (app, _dir) = test_app("mcp-pipeline-bad", true);
         let result = call(app, "pipeline_runs", json!({ "pipeline": "no-slash" })).await;
         assert_eq!(result["isError"], true, "{result}");
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_without_a_cluster() {
+        let (app, _dir) = test_app("mcp-pipeline-run", true);
+        let result = call(
+            app,
+            "pipeline_run",
+            json!({ "pipeline": "stardelt/shop", "run_id": "r1" }),
+        )
+        .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("no cluster connection"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_task_log_without_a_cluster() {
+        let (app, _dir) = test_app("mcp-pipeline-task-log", true);
+        let result = call(
+            app,
+            "pipeline_task_log",
+            json!({ "pipeline": "stardelt/shop", "run_id": "r1", "task_id": "t1" }),
+        )
+        .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("no cluster connection"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_run_needs_namespace_and_run() {
+        let (app, _dir) = test_app("mcp-pipeline-run-args", true);
+        let result = call(
+            app.clone(),
+            "pipeline_run",
+            json!({ "pipeline": "no-slash", "run_id": "r1" }),
+        )
+        .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("pipeline must be <namespace>/<name>"),
+            "{result}"
+        );
+
+        let result = call(app, "pipeline_run", json!({ "pipeline": "stardelt/shop" })).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("pipeline must be <namespace>/<name>"),
+            "{result}"
+        );
     }
 
     #[tokio::test]

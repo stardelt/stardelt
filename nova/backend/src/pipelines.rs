@@ -5431,6 +5431,55 @@ pub(crate) async fn runs_for(
     )
 }
 
+/// The hosted MCP tool `pipeline_run`: `GET /api/pipelines/{ns}/{name}/runs/{run_id}`, as the caller.
+pub(crate) async fn run_for(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Response {
+    answer(
+        run_detail(
+            resources(state).as_ref(),
+            state.airflow.as_ref(),
+            who,
+            namespace,
+            name,
+            run_id,
+        )
+        .await,
+    )
+}
+
+/// The hosted MCP tool `pipeline_task_log`: one page of a task's log, as the caller. Audited by `task_logs`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn task_log_for(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    task_id: &str,
+    try_number: Option<u32>,
+    token: Option<&str>,
+) -> Response {
+    answer(
+        task_logs(
+            resources(state).as_ref(),
+            state.airflow.as_ref(),
+            who,
+            namespace,
+            name,
+            run_id,
+            task_id,
+            try_number,
+            token,
+        )
+        .await,
+    )
+}
+
 /// Demo mode's `GET /api/runs`: the sample is filtered and capped like a real answer, so the
 /// page's filters and its 400s behave the same way. There is no notebook schedule in demo mode,
 /// so a `notebook` filter answers no rows — the same empty list the notebook page's usage route
