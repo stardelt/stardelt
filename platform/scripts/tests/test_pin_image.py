@@ -55,7 +55,19 @@ if "get" in args and "deploy" in args:
     if any("].image}" in a for a in args):
         print(os.environ.get("FAKE_CURRENT_IMAGE", ""))
         sys.exit(0)
-    print(os.environ.get("FAKE_CONTAINER", "app"))
+    print(os.environ.get("FAKE_CONTAINER") or "app")
+    sys.exit(0)
+
+if "get" in args and "cronjob" in args:
+    name = args[args.index("cronjob") + 1]
+    missing = [m for m in os.environ.get("FAKE_MISSING", "").split(",") if m]
+    if name in missing:
+        print(
+            'Error from server (NotFound): cronjobs.batch "%s" not found' % name,
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print("sync")
     sys.exit(0)
 
 if "get" in args and "configmap" in args:
@@ -106,13 +118,16 @@ class PinImageTest(unittest.TestCase):
             "        image: ghcr.io/stardelt/nova:dev@sha256:" + "00" * 32 + "\n"
         )
 
-    def run_pin(self, app="nova", current="", digest=DIGEST, missing="", env=None):
+    def run_pin(
+        self, app="nova", current="", digest=DIGEST, missing="", env=None, container=""
+    ):
         env = dict(os.environ, **(env or {}))
         env["PATH"] = str(self.bin) + os.pathsep + env["PATH"]
         env["FAKE_LOG"] = str(self.log)
         env["FAKE_DIGEST"] = digest
         env["FAKE_CURRENT_IMAGE"] = current
         env["FAKE_MISSING"] = missing
+        env["FAKE_CONTAINER"] = container
         return subprocess.run(
             ["bash", str(SCRIPT), app],
             cwd=self.work,
@@ -120,6 +135,13 @@ class PinImageTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def fixture(self, relative, text):
+        """Write a fixture file under the work tree, creating its directory."""
+        path = self.work / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
 
     def calls(self):
         return self.log.read_text() if self.log.exists() else ""
@@ -214,6 +236,113 @@ class PinImageTest(unittest.TestCase):
         self.assertEqual(self.apply_payloads(), [], self.calls())
         self.assertEqual(self.calls().count("get configmap"), 0, self.calls())
         self.assertIn(DIGEST, catalogue.read_text())
+
+    def airflow_fixtures(self):
+        """The two files an airflow pin writes: helm-values/airflow.yaml and the group-roles CronJob."""
+        zero = "00" * 32
+        values = self.fixture(
+            "helm-values/airflow.yaml",
+            "# stardelt-owned image with DAGs baked in\n"
+            "images:\n"
+            "  airflow:\n"
+            "    repository: ghcr.io/stardelt/airflow\n"
+            "    tag: demo\n"
+            "    digest: sha256:" + zero + "\n"
+            "    pullPolicy: IfNotPresent\n"
+            "\n"
+            "  # KubernetesExecutor task pods: the executor builds their image as\n"
+            "  # `<repository>:<tag>` from these two settings, which override the pod template.\n"
+            "  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_REPOSITORY\n"
+            "    value: ghcr.io/stardelt/airflow\n"
+            "  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG\n"
+            '    value: "demo@sha256:' + zero + '"\n',
+        )
+        roles = self.fixture(
+            "manifests/airflow-group-roles.yaml",
+            "apiVersion: batch/v1\n"
+            "kind: CronJob\n"
+            "metadata:\n"
+            "  name: airflow-group-roles\n"
+            "spec:\n"
+            "  jobTemplate:\n"
+            "    spec:\n"
+            "      template:\n"
+            "        spec:\n"
+            "          containers:\n"
+            "            - name: sync\n"
+            "              image: ghcr.io/stardelt/airflow:demo@sha256:" + zero + "\n",
+        )
+        return values, roles
+
+    def test_airflow_moves_all_four_deployments(self):
+        values, roles = self.airflow_fixtures()
+        self.run_pin(
+            "airflow",
+            current="ghcr.io/stardelt/airflow:demo@sha256:" + "00" * 32,
+            container="airflow",
+        )
+        calls = self.calls()
+        # The API server runs DAGs for a request; the scheduler imports them and builds every
+        # task pod. Moving the first alone leaves schedules on the old code (platform#1460).
+        for expected in (
+            "set image deploy/airflow-api-server airflow=ghcr.io/stardelt/airflow:demo@",
+            "set image deploy/airflow-scheduler scheduler=ghcr.io/stardelt/airflow:demo@",
+            "set image deploy/airflow-dag-processor dag-processor=ghcr.io/stardelt/airflow:demo@",
+            "set image deploy/airflow-triggerer triggerer=ghcr.io/stardelt/airflow:demo@",
+        ):
+            self.assertIn(expected + DIGEST, calls)
+        # the loop's order is an implementation detail; only "after the api-server" is not
+        api_server = calls.index("set image deploy/airflow-api-server")
+        for name in ("airflow-scheduler", "airflow-dag-processor", "airflow-triggerer"):
+            self.assertGreater(calls.index("set image deploy/" + name), api_server)
+        self.assertIn(DIGEST, values.read_text())
+        self.assertIn(DIGEST, roles.read_text())
+
+    def test_superset_moves_the_worker_and_the_group_roles_job(self):
+        zero = "00" * 32
+        values = self.fixture(
+            "helm-values/superset.yaml",
+            "image:\n"
+            "  repository: ghcr.io/stardelt/superset\n"
+            '  tag: "dev@sha256:' + zero + '"\n'
+            "  pullPolicy: IfNotPresent\n",
+        )
+        roles = self.fixture(
+            "manifests/superset-group-roles.yaml",
+            "apiVersion: batch/v1\n"
+            "kind: CronJob\n"
+            "metadata:\n"
+            "  name: superset-group-roles\n"
+            "spec:\n"
+            "  jobTemplate:\n"
+            "    spec:\n"
+            "      template:\n"
+            "        spec:\n"
+            "          containers:\n"
+            "            - name: sync\n"
+            "              image: ghcr.io/stardelt/superset:dev@sha256:" + zero + "\n",
+        )
+        self.run_pin(
+            "superset",
+            current="ghcr.io/stardelt/superset:dev@sha256:" + "00" * 32,
+            container="superset",
+        )
+        calls = self.calls()
+        # One image serves three objects: the web Deployment, the Celery worker and the
+        # group-roles CronJob. A pin that moves the web pod alone leaves the rest behind
+        # (platform#902).
+        self.assertIn(
+            "set image deploy/superset-worker superset=ghcr.io/stardelt/superset:dev@"
+            + DIGEST,
+            calls,
+        )
+        self.assertIn(
+            "set image cronjob/superset-group-roles sync=ghcr.io/stardelt/superset:dev@"
+            + DIGEST,
+            calls,
+        )
+        self.assertIn(DIGEST, values.read_text())
+        self.assertIn(DIGEST, roles.read_text())
 
 
 if __name__ == "__main__":
