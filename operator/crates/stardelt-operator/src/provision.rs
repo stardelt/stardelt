@@ -17,7 +17,7 @@ use k8s_openapi::{
 };
 use kube::{
     Api, ResourceExt,
-    api::{Patch, PatchParams},
+    api::{ListParams, Patch, PatchParams},
     core::{ApiResource, DynamicObject, ObjectMeta, TypeMeta},
 };
 use serde_json::json;
@@ -26,7 +26,7 @@ use crate::{
     access_sync, airflow,
     controller::Context,
     crd::{
-        CatalogImpl, ComponentStatus, IdentityMode, Lakehouse, PlatformInstanceSpec,
+        CatalogImpl, ComponentStatus, IdentityMode, Lakehouse, ModelEndpoint, PlatformInstanceSpec,
         PrincipalAudience, PrincipalPurpose, SecretsMode, ServicePrincipal, StorageImpl,
     },
     identity, ingress, kafka, keycloak, network_policy, nova,
@@ -2426,12 +2426,14 @@ pub async fn ensure_nova(
     {
         return Some(status(NAME, false, e.to_string()));
     }
+    let models = model_keys(client, namespace).await;
     let deployment = nova::deployment(
         namespace,
         NOVA_IMAGE,
         spec.base_domain.as_deref(),
         spec.pillars.pipelines,
         &spec.mcp,
+        &models,
     );
     let applied =
         match apply_owned::<Deployment>(client, namespace, owner, &deployment, dry_run).await {
@@ -2460,6 +2462,35 @@ pub async fn ensure_nova(
             "waiting for the Deployment to become ready",
         ))
     }
+}
+
+/// The model endpoints of the namespace that carry a key, as projected key files. Best
+/// effort: a list that fails (the CRD absent, no RBAC) leaves Nova without keys instead of
+/// keeping it from starting; the probe then reports the endpoint unreachable.
+async fn model_keys(client: &kube::Client, namespace: &str) -> Vec<nova::ModelKey> {
+    let api: Api<ModelEndpoint> = Api::namespaced(client.clone(), namespace);
+    match api.list(&ListParams::default()).await {
+        Ok(list) => model_keys_from(&list.items),
+        Err(e) => {
+            tracing::warn!(error = %e, "model endpoint list failed; Nova starts without model keys");
+            Vec::new()
+        }
+    }
+}
+
+/// The endpoints that name a `keyRef`; a keyless endpoint has no key file.
+fn model_keys_from(endpoints: &[ModelEndpoint]) -> Vec<nova::ModelKey> {
+    endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let key = endpoint.spec.key_ref.as_ref()?;
+            Some(nova::ModelKey {
+                endpoint: endpoint.metadata.name.clone()?,
+                connection: key.name.clone(),
+                key: key.key.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The Ingress objects of the applications (`spec.ingress`): Nova on the base domain, and with
@@ -2955,6 +2986,37 @@ mod tests {
         assert_eq!(
             crate::crd::principal_client_id("catalog-operator"),
             "sp-catalog-operator"
+        );
+    }
+
+    #[test]
+    fn only_endpoints_with_a_key_ref_are_projected() {
+        let keyed: ModelEndpoint = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1",
+            "kind": "ModelEndpoint",
+            "metadata": { "name": "default", "namespace": "data" },
+            "spec": {
+                "url": "https://llm.example/v1",
+                "model": "gpt-x",
+                "keyRef": { "name": "llm-key", "key": "api-key" }
+            }
+        }))
+        .expect("keyed endpoint");
+        let keyless: ModelEndpoint = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1",
+            "kind": "ModelEndpoint",
+            "metadata": { "name": "local", "namespace": "data" },
+            "spec": { "url": "http://llm.data.svc:8000/v1", "model": "local-model" }
+        }))
+        .expect("keyless endpoint");
+        let keys = model_keys_from(&[keyed, keyless]);
+        assert_eq!(
+            keys,
+            vec![nova::ModelKey {
+                endpoint: "default".into(),
+                connection: "llm-key".into(),
+                key: "api-key".into(),
+            }]
         );
     }
 

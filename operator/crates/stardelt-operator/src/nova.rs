@@ -14,9 +14,10 @@ use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec},
     core::v1::{
         Capabilities, ConfigMapKeySelector, Container, ContainerPort, EnvVar, EnvVarSource,
-        HTTPGetAction, LocalObjectReference, ObjectFieldSelector, PodSecurityContext, PodSpec,
-        PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile, SecretKeySelector,
-        SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec,
+        HTTPGetAction, KeyToPath, LocalObjectReference, ObjectFieldSelector, PodSecurityContext,
+        PodSpec, PodTemplateSpec, Probe, ProjectedVolumeSource, ResourceRequirements,
+        SeccompProfile, SecretKeySelector, SecretProjection, SecurityContext, Service,
+        ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount, VolumeProjection,
     },
     rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject},
 };
@@ -426,6 +427,7 @@ fn container(
     base_domain: Option<&str>,
     airflow: bool,
     mcp: &McpSpec,
+    models: &[ModelKey],
 ) -> Container {
     let port = |name: &str, container_port: i32| ContainerPort {
         name: Some(name.into()),
@@ -440,6 +442,16 @@ fn container(
         image_pull_policy: Some("IfNotPresent".into()),
         ports: Some(vec![port("http", 8080), port("internal", 8081)]),
         env: Some(env(namespace, base_domain, airflow, mcp)),
+        volume_mounts: if models.is_empty() {
+            None
+        } else {
+            Some(vec![VolumeMount {
+                name: MODEL_KEYS_VOLUME.into(),
+                mount_path: MODEL_KEYS_PATH.into(),
+                read_only: Some(true),
+                ..VolumeMount::default()
+            }])
+        },
         readiness_probe: Some(Probe {
             http_get: Some(HTTPGetAction {
                 path: Some("/api/health".into()),
@@ -468,18 +480,34 @@ fn container(
     }
 }
 
+/// One model endpoint's key as the kubelet projects it (operator#609 slice c1): the key of
+/// the `Connection`'s synced Secret `conn-<connection>` lands at `<mount>/<endpoint>/key`.
+/// Nova never reads a Secret through the API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelKey {
+    pub endpoint: String,
+    pub connection: String,
+    pub key: String,
+}
+
+/// Where the projected keys are mounted in Nova's container.
+pub const MODEL_KEYS_PATH: &str = "/var/run/stardelt/models";
+/// Name of the one projected volume.
+const MODEL_KEYS_VOLUME: &str = "model-keys";
+
 /// The Nova Deployment: one replica, running as ServiceAccount `nova` without root and with a
 /// read-only filesystem. `image` is the reference to run (pinned by digest in a real install);
 /// `base_domain` is the domain the applications are served under, used for the links Nova shows
 /// to the other applications (none when it is `None`). `airflow` adds the three variables that
 /// point Nova at the Airflow of the `pipelines` pillar; `mcp` adds the two of the hosted MCP
-/// endpoint when it is enabled.
+/// endpoint when it is enabled; `models` are the model endpoint keys projected into the pod.
 pub fn deployment(
     namespace: &str,
     image: &str,
     base_domain: Option<&str>,
     airflow: bool,
     mcp: &McpSpec,
+    models: &[ModelKey],
 ) -> Deployment {
     let mut labels = name_selector();
     labels.extend(part_of());
@@ -505,6 +533,8 @@ pub fn deployment(
                         run_as_non_root: Some(true),
                         run_as_user: Some(65532),
                         run_as_group: Some(65532),
+                        // The projected key files are mode 0440; the kubelet gives them this group.
+                        fs_group: Some(65532),
                         seccomp_profile: Some(SeccompProfile {
                             type_: "RuntimeDefault".into(),
                             ..SeccompProfile::default()
@@ -516,13 +546,56 @@ pub fn deployment(
                     image_pull_secrets: Some(vec![LocalObjectReference {
                         name: "ghcr-creds".into(),
                     }]),
-                    containers: vec![container(image, namespace, base_domain, airflow, mcp)],
+                    volumes: if models.is_empty() {
+                        None
+                    } else {
+                        Some(vec![model_keys_volume(models)])
+                    },
+                    containers: vec![container(
+                        image,
+                        namespace,
+                        base_domain,
+                        airflow,
+                        mcp,
+                        models,
+                    )],
                     ..PodSpec::default()
                 }),
             },
             ..DeploymentSpec::default()
         },
         ..Deployment::default()
+    }
+}
+
+fn model_keys_volume(models: &[ModelKey]) -> Volume {
+    Volume {
+        name: MODEL_KEYS_VOLUME.into(),
+        projected: Some(ProjectedVolumeSource {
+            default_mode: Some(0o440),
+            sources: Some(
+                models
+                    .iter()
+                    .map(|model| VolumeProjection {
+                        secret: Some(SecretProjection {
+                            name: format!("conn-{}", model.connection),
+                            // An administrator may name a connection before its Secret is
+                            // synced; the file is then absent and the probe says so, instead
+                            // of the pod never starting.
+                            optional: Some(true),
+                            items: Some(vec![KeyToPath {
+                                key: model.key.clone(),
+                                path: format!("{}/key", model.endpoint),
+                                ..KeyToPath::default()
+                            }]),
+                        }),
+                        ..VolumeProjection::default()
+                    })
+                    .collect(),
+            ),
+            ..ProjectedVolumeSource::default()
+        }),
+        ..Volume::default()
     }
 }
 
@@ -714,7 +787,7 @@ mod tests {
 
     #[test]
     fn the_deployment_runs_the_given_image_as_the_nova_service_account() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default());
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[]);
         assert_eq!(deployment.metadata.name.as_deref(), Some("nova"));
         assert_eq!(deployment.metadata.namespace.as_deref(), Some("stardelt"));
         let spec = deployment.spec.clone();
@@ -741,7 +814,7 @@ mod tests {
 
     #[test]
     fn the_pod_is_locked_down() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default());
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[]);
         let pod = deployment.spec.clone().template.spec.expect("pod");
         let pod_security = pod.security_context.expect("pod security");
         assert_eq!(pod_security.run_as_non_root, Some(true));
@@ -763,6 +836,41 @@ mod tests {
     }
 
     #[test]
+    fn no_model_endpoint_means_no_volume() {
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[]);
+        let pod = deployment.spec.clone().template.spec.expect("pod");
+        assert!(pod.volumes.is_none());
+        assert!(pod.containers[0].volume_mounts.is_none());
+    }
+
+    #[test]
+    fn a_model_key_is_projected_under_its_endpoint() {
+        let models = [ModelKey {
+            endpoint: "default".into(),
+            connection: "llm-key".into(),
+            key: "api-key".into(),
+        }];
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &models);
+        let pod = deployment.spec.clone().template.spec.expect("pod");
+        let volumes = pod.volumes.expect("volumes");
+        assert_eq!(volumes[0].name, "model-keys");
+        let projected = volumes[0].projected.clone().expect("projected");
+        assert_eq!(projected.default_mode, Some(0o440));
+        let sources = projected.sources.expect("sources");
+        let secret = sources[0].secret.clone().expect("secret");
+        assert_eq!(secret.name, "conn-llm-key");
+        assert_eq!(secret.optional, Some(true));
+        let items = secret.items.expect("items");
+        assert_eq!(items[0].key, "api-key");
+        assert_eq!(items[0].path, "default/key");
+        let mounts = pod.containers[0].volume_mounts.clone().expect("mounts");
+        assert_eq!(mounts[0].mount_path, MODEL_KEYS_PATH);
+        assert_eq!(mounts[0].read_only, Some(true));
+        let pod_security = pod.security_context.expect("pod security");
+        assert_eq!(pod_security.fs_group, Some(65532));
+    }
+
+    #[test]
     fn the_container_ports_are_the_ones_the_service_targets() {
         let container = container_of(&deployment(
             "stardelt",
@@ -770,6 +878,7 @@ mod tests {
             None,
             false,
             &McpSpec::default(),
+            &[],
         ));
         let ports: Vec<_> = container
             .ports
@@ -798,6 +907,7 @@ mod tests {
             None,
             false,
             &McpSpec::default(),
+            &[],
         ));
         let names: Vec<&str> = env.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
@@ -840,6 +950,7 @@ mod tests {
             None,
             false,
             &McpSpec::default(),
+            &[],
         ));
         let mut required = Vec::new();
         for var in &env {
@@ -873,6 +984,7 @@ mod tests {
             None,
             false,
             &McpSpec::default(),
+            &[],
         ));
         let secret = |name: &str| {
             let selector = named(&env, name)
@@ -924,7 +1036,14 @@ mod tests {
 
     #[test]
     fn the_addresses_follow_the_namespace() {
-        let env = env_of(&deployment("lab", IMAGE, None, false, &McpSpec::default()));
+        let env = env_of(&deployment(
+            "lab",
+            IMAGE,
+            None,
+            false,
+            &McpSpec::default(),
+            &[],
+        ));
         let value = |name: &str| named(&env, name).value.expect(name);
         assert_eq!(
             value("NOVA_LAKEKEEPER_URL"),
@@ -948,6 +1067,7 @@ mod tests {
             None,
             false,
             &McpSpec::default(),
+            &[],
         ));
         assert!(without.iter().all(|e| e.name != "NOVA_BASE_DOMAIN"));
         let with = env_of(&deployment(
@@ -956,6 +1076,7 @@ mod tests {
             Some("data.example.com"),
             false,
             &McpSpec::default(),
+            &[],
         ));
         assert_eq!(
             named(&with, "NOVA_BASE_DOMAIN").value.as_deref(),
@@ -972,6 +1093,7 @@ mod tests {
             Some("data.example.com"),
             false,
             &McpSpec::default(),
+            &[],
         ));
         assert!(!off.iter().any(|e| e.name.starts_with("NOVA_MCP_")));
 
@@ -985,6 +1107,7 @@ mod tests {
                 audience: None,
                 ..McpSpec::default()
             },
+            &[],
         ));
         assert_eq!(named(&on, "NOVA_MCP_ENABLED").value.as_deref(), Some("1"));
         assert_eq!(
@@ -1002,6 +1125,7 @@ mod tests {
                 audience: Some("https://agents.example.com".into()),
                 ..McpSpec::default()
             },
+            &[],
         ));
         assert_eq!(
             named(&custom, "NOVA_MCP_AUDIENCE").value.as_deref(),
@@ -1021,6 +1145,7 @@ mod tests {
                 audit_retention_days: Some(90),
                 ..McpSpec::default()
             },
+            &[],
         ));
         assert_eq!(
             named(&tuned, "NOVA_MCP_MAX_ROWS").value.as_deref(),
@@ -1060,6 +1185,7 @@ mod tests {
                 allowed_clients: Some(vec!["stardelt-mcp".into(), "stardelt-cli".into()]),
                 ..McpSpec::default()
             },
+            &[],
         ));
         assert_eq!(
             named(&limited, "NOVA_MCP_ALLOWED_CLIENTS").value.as_deref(),
@@ -1076,6 +1202,7 @@ mod tests {
                 allowed_groups: Some(vec!["agents".into(), "data-eng".into()]),
                 ..McpSpec::default()
             },
+            &[],
         ));
         assert_eq!(
             named(&grouped, "NOVA_MCP_ALLOWED_GROUPS").value.as_deref(),
@@ -1086,9 +1213,23 @@ mod tests {
 
     #[test]
     fn with_the_pipelines_pillar_nova_gets_the_airflow_address_user_and_password() {
-        let without = env_of(&deployment("lab", IMAGE, None, false, &McpSpec::default()));
+        let without = env_of(&deployment(
+            "lab",
+            IMAGE,
+            None,
+            false,
+            &McpSpec::default(),
+            &[],
+        ));
         assert!(without.iter().all(|e| !e.name.starts_with("NOVA_AIRFLOW")));
-        let env = env_of(&deployment("lab", IMAGE, None, true, &McpSpec::default()));
+        let env = env_of(&deployment(
+            "lab",
+            IMAGE,
+            None,
+            true,
+            &McpSpec::default(),
+            &[],
+        ));
         let added: Vec<&str> = env
             .iter()
             .map(|e| e.name.as_str())
