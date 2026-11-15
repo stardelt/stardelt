@@ -1,13 +1,23 @@
 import { useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { api } from '../api'
-import { formatTime } from '../format'
+import { formatTime, relativeTime } from '../format'
 import ErrorBox from './ErrorBox'
 
 /** Most characters a question may carry; the API's own limit (#1018). */
 const MAX_QUESTION = 500
 /** Most characters the SQL may carry; the API's own limit (#1018). */
 const MAX_SQL = 20000
+/** Most characters of a failed check's message shown inline; the rest sits in `title`. */
+const MAX_CHECK_MESSAGE = 160
+
+/** The instant a check ran as milliseconds, or `null` when it never ran. */
+function checkedAt(item: { lastCheckAt?: string | null }): number | null {
+  if (!item.lastCheckAt) return null
+  const ms = Date.parse(item.lastCheckAt)
+  return Number.isNaN(ms) ? null : ms
+}
 
 /**
  * "Verified queries": the questions a table's owners answered with SQL, read by anyone who
@@ -16,6 +26,10 @@ const MAX_SQL = 20000
  * The list is a query of its own, so a failed load leaves the rest of the About card
  * working: while it is loading or failed the section renders nothing at all. Nothing here
  * runs the SQL or renders Markdown — a verified query is text plus the statement.
+ *
+ * Each query shows the outcome of its last check, and anyone who may see the list may run it
+ * again: the check reads only and runs as the caller (#912). The statement opens in the SQL
+ * editor, which is what a reader wants next.
  */
 export default function VerifiedQueries({
   ns,
@@ -40,10 +54,13 @@ export default function VerifiedQueries({
 
   const [question, setQuestion] = useState('')
   const [sql, setSql] = useState('')
+  const [formOpen, setFormOpen] = useState(false)
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<unknown>(null)
   const [deleting, setDeleting] = useState<number | null>(null)
   const [deleteError, setDeleteError] = useState<unknown>(null)
+  const [checking, setChecking] = useState<number | null>(null)
+  const [checkError, setCheckError] = useState<unknown>(null)
 
   const items = list.data?.items ?? []
 
@@ -51,6 +68,13 @@ export default function VerifiedQueries({
   // error, so a backend that does not answer this path leaves every screen as it was.
   if (list.isLoading || list.isError) return null
   if (items.length === 0 && !canEdit) return null
+
+  function closeForm() {
+    setQuestion('')
+    setSql('')
+    setAddError(null)
+    setFormOpen(false)
+  }
 
   async function add(event: FormEvent) {
     event.preventDefault()
@@ -63,6 +87,7 @@ export default function VerifiedQueries({
       await api.createVerifiedQuery(ns, tbl, { question: nextQuestion, sql: nextSql }, catalog)
       setQuestion('')
       setSql('')
+      setFormOpen(false)
       await qc.invalidateQueries({ queryKey })
     } catch (error) {
       setAddError(error)
@@ -85,41 +110,87 @@ export default function VerifiedQueries({
     }
   }
 
+  async function check(id: number) {
+    if (checking !== null) return
+    setChecking(id)
+    setCheckError(null)
+    try {
+      await api.checkVerifiedQuery(id)
+      await qc.invalidateQueries({ queryKey })
+    } catch (error) {
+      setCheckError(error)
+    } finally {
+      setChecking(null)
+    }
+  }
+
   return (
     <section className="mt-4" aria-label="Verified queries">
       <div className="label mb-1">Verified queries</div>
 
       {items.length > 0 ? (
         <ul className="space-y-3">
-          {items.map((item) => (
-            <li key={item.id} className="min-w-0">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <p className="min-w-0 text-sm text-text whitespace-normal break-words">{item.question}</p>
-                {canEdit && (
+          {items.map((item) => {
+            const at = checkedAt(item)
+            const message = item.lastCheckMessage ?? ''
+            return (
+              <li key={item.id} className="min-w-0">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <p className="min-w-0 text-sm text-text whitespace-normal break-words">{item.question}</p>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      className="btn-ghost py-1 px-2.5 text-xs"
+                      aria-label={`Delete the verified query: ${item.question}`}
+                      disabled={deleting !== null}
+                      onClick={() => void remove(item.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+                <pre className="mt-1.5 max-h-40 overflow-auto rounded-[8px] bg-bg-soft px-2.5 py-2 font-mono text-xs text-text-dim">
+                  {item.sql}
+                </pre>
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-mute">
+                  <span>
+                    Verified by {item.verifiedBy} · {formatTime(item.verifiedAt)}
+                  </span>
+                  {item.lastCheckPassed === true && at !== null && (
+                    <span className="text-ok">✓ Checked {relativeTime(at)}</span>
+                  )}
+                  {item.lastCheckPassed === false && (
+                    <span className="text-bad" title={message}>
+                      ✕ {message.slice(0, MAX_CHECK_MESSAGE)}
+                    </span>
+                  )}
+                  {at === null && <span>Not checked yet</span>}
                   <button
                     type="button"
-                    className="btn-ghost py-1 px-2.5 text-xs"
-                    aria-label={`Delete the verified query: ${item.question}`}
-                    disabled={deleting !== null}
-                    onClick={() => void remove(item.id)}
+                    className="btn-ghost py-0.5 px-2 text-xs"
+                    disabled={checking !== null}
+                    onClick={() => void check(item.id)}
                   >
-                    Delete
+                    {checking === item.id ? 'Checking…' : 'Check now'}
                   </button>
-                )}
-              </div>
-              <pre className="mt-1.5 overflow-x-auto rounded-[8px] bg-bg-soft px-2.5 py-2 font-mono text-xs text-text-dim">
-                {item.sql}
-              </pre>
-              <div className="mt-1 text-xs text-text-mute">
-                Verified by {item.verifiedBy} · {formatTime(item.verifiedAt)}
-              </div>
-            </li>
-          ))}
+                  <Link className="btn-ghost py-0.5 px-2 text-xs" to={`/query?sql=${encodeURIComponent(item.sql)}`}>
+                    Open in SQL editor
+                  </Link>
+                </div>
+              </li>
+            )
+          })}
         </ul>
       ) : (
         <p className="text-sm text-text-mute">
           No verified queries yet. Add the question the table answers, and the SQL that answers it.
         </p>
+      )}
+
+      {checkError !== null && (
+        <div className="mt-2">
+          <ErrorBox error={checkError} />
+        </div>
       )}
 
       {deleteError !== null && (
@@ -128,7 +199,13 @@ export default function VerifiedQueries({
         </div>
       )}
 
-      {canEdit && (
+      {canEdit && !formOpen && (
+        <button type="button" className="btn-ghost mt-3 py-1 px-2.5 text-xs" onClick={() => setFormOpen(true)}>
+          + Add a verified query
+        </button>
+      )}
+
+      {canEdit && formOpen && (
         <form className="mt-3 space-y-2" onSubmit={add}>
           <input
             className="input"
@@ -147,8 +224,15 @@ export default function VerifiedQueries({
             aria-label="SQL"
           />
           <div className="flex flex-wrap items-center gap-2">
-            <button type="submit" className="btn" disabled={adding || question.trim() === '' || sql.trim() === ''}>
-              {adding ? 'Adding…' : 'Add'}
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={adding || question.trim() === '' || sql.trim() === ''}
+            >
+              {adding ? 'Adding…' : 'Add verified query'}
+            </button>
+            <button type="button" className="btn-ghost" onClick={closeForm}>
+              Cancel
             </button>
           </div>
           {addError !== null && <ErrorBox error={addError} />}

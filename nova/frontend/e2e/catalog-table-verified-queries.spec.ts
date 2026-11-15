@@ -11,7 +11,16 @@ const FIELDS = [
   { id: 2, name: 'note', required: false, type: 'string' },
 ]
 
-type Row = { id: number; question: string; sql: string; verifiedBy: string; verifiedAt: string }
+type Row = {
+  id: number
+  question: string
+  sql: string
+  verifiedBy: string
+  verifiedAt: string
+  lastCheckAt?: string | null
+  lastCheckPassed?: boolean | null
+  lastCheckMessage?: string | null
+}
 
 const REVENUE: Row = {
   id: 7,
@@ -26,6 +35,28 @@ const REFUNDS: Row = {
   sql: 'SELECT count(*) FROM sales.orders WHERE refunded',
   verifiedBy: 'bob',
   verifiedAt: '2026-11-11T10:30:00Z',
+}
+
+/** The rows the check test starts from: one failing, one passing (#1036). */
+const FAILING: Row = {
+  id: 11,
+  question: 'How many rows does last month have?',
+  sql: 'SELECT count(*) FROM sales.orders WHERE month = 11',
+  verifiedBy: 'alice',
+  verifiedAt: '2026-11-12T08:00:00Z',
+  lastCheckAt: '2026-11-14T09:00:00Z',
+  lastCheckPassed: false,
+  lastCheckMessage: 'expected 3 rows, got 4',
+}
+const PASSING: Row = {
+  id: 12,
+  question: 'Which currency do we sell in?',
+  sql: 'SELECT DISTINCT currency FROM sales.orders',
+  verifiedBy: 'bob',
+  verifiedAt: '2026-11-12T08:30:00Z',
+  lastCheckAt: '2026-11-14T09:05:00Z',
+  lastCheckPassed: true,
+  lastCheckMessage: 'the result matches the expected result',
 }
 
 /**
@@ -73,6 +104,19 @@ async function stub(
         return json(r, row, 201)
       }
       return json(r, { items: rows })
+    }
+    if (path.startsWith('/api/verified-queries/') && path.endsWith('/check') && method === 'POST') {
+      const id = Number(path.split('/')[3])
+      const row = rows.find((candidate) => candidate.id === id)
+      const answered: Row = {
+        ...(row ?? FAILING),
+        lastCheckAt: '2026-11-15T12:00:00Z',
+        lastCheckPassed: true,
+        lastCheckMessage: 'the result matches the expected result',
+      }
+      const at = rows.findIndex((candidate) => candidate.id === id)
+      if (at >= 0) rows[at] = answered
+      return json(r, answered)
     }
     if (path.startsWith('/api/verified-queries/') && method === 'DELETE') {
       const id = Number(path.split('/').pop())
@@ -148,8 +192,9 @@ test('an owner adds a verified query and sees it once the list is refetched', as
   await expect(section).toBeVisible()
   await expect(section.getByRole('button', { name: `Delete the verified query: ${REVENUE.question}` })).toBeVisible()
 
-  // The owner's view, for the design record: one query and the form that adds the next.
-  await page.screenshot({ path: '../docs/screenshots/1021/table-verified-queries-1440-dark.png' })
+  // The form is closed until the owner asks for it: no empty inputs under the list.
+  await expect(section.getByRole('textbox', { name: 'Question' })).toHaveCount(0)
+  await expect(section.getByRole('textbox', { name: 'SQL' })).toHaveCount(0)
 
   const question = 'Which customers spent the most?'
   const sql = 'SELECT customer_id, sum(total) FROM sales.orders GROUP BY 1 ORDER BY 2 DESC LIMIT 10'
@@ -158,17 +203,23 @@ test('an owner adds a verified query and sees it once the list is refetched', as
     (r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/catalog/tables/sales/orders/verified-queries',
   )
 
+  await section.getByRole('button', { name: '+ Add a verified query' }).click()
+  await expect(section.getByRole('textbox', { name: 'Question' })).toBeVisible()
+
+  // The owner's view, for the design record: one query and the form that adds the next.
+  await page.screenshot({ path: '../docs/screenshots/1036/verified-queries-1440-dark.png' })
+
   await section.getByRole('textbox', { name: 'Question' }).fill(question)
   await section.getByRole('textbox', { name: 'SQL' }).fill(sql)
-  await section.getByRole('button', { name: 'Add' }).click()
+  await section.getByRole('button', { name: 'Add verified query' }).click()
 
   const request = await posted
   expect(request.postDataJSON()).toEqual({ question, sql })
 
-  // The form is cleared and the list shows the new question.
+  // The form closes with the add and the list shows the new question.
   await expect(section.getByText(question)).toBeVisible()
-  await expect(section.getByRole('textbox', { name: 'Question' })).toHaveValue('')
-  await expect(section.getByRole('textbox', { name: 'SQL' })).toHaveValue('')
+  await expect(section.getByRole('textbox', { name: 'Question' })).toHaveCount(0)
+  await expect(section.getByRole('button', { name: '+ Add a verified query' })).toBeVisible()
 })
 
 test('an owner deletes a verified query and it leaves the list', async ({ page }) => {
@@ -188,4 +239,33 @@ test('an owner deletes a verified query and it leaves the list', async ({ page }
   expect(deleted).toEqual([7])
   await expect(section.getByText(REVENUE.question)).toHaveCount(0)
   await expect(section.getByText(REFUNDS.question)).toBeVisible()
+})
+
+test('each verified query shows its last check, can be checked now and opens in the editor', async ({ page }) => {
+  await stub(page, { canEdit: false, rows: [FAILING, PASSING] })
+  await page.goto('/catalog?catalog=warehouse&ns=sales&tbl=orders')
+
+  const section = page.getByRole('region', { name: 'Verified queries' })
+  await expect(section).toBeVisible()
+
+  // The failed check says what it found; the passed one says it passed.
+  await expect(section.getByText('✕ expected 3 rows, got 4')).toBeVisible()
+  await expect(section.getByText('✓ Checked')).toBeVisible()
+
+  // A reader may open the statement in the SQL editor.
+  const editor = section.getByRole('link', { name: 'Open in SQL editor' })
+  await expect(editor).toHaveCount(2)
+  await expect(editor.first()).toHaveAttribute('href', `/query?sql=${encodeURIComponent(FAILING.sql)}`)
+
+  // A reader may run the check again: it only reads, and it runs as the caller.
+  const checked = page.waitForRequest(
+    (r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/verified-queries/11/check',
+  )
+  const failing = section.locator('li', { hasText: FAILING.question })
+  await failing.getByRole('button', { name: 'Check now' }).click()
+  await checked
+
+  // The list is refetched with the outcome the check answered.
+  await expect(section.getByText('✕ expected 3 rows, got 4')).toHaveCount(0)
+  await expect(section.getByText('✓ Checked')).toHaveCount(2)
 })

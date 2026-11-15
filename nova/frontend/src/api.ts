@@ -267,6 +267,14 @@ export type VerifiedQuery = {
   sql: string
   verifiedBy: string
   verifiedAt: string
+  /** The known answer: one array of values per row, or `null` (nova#912). */
+  expected?: unknown[] | null
+  /** When the query was last checked, RFC 3339, or `null` when it never was (#912). */
+  lastCheckAt?: string | null
+  /** Whether the last check passed, or `null` when it never ran (#912). */
+  lastCheckPassed?: boolean | null
+  /** What the last check found, in one sentence, or `null` when it never ran (#912). */
+  lastCheckMessage?: string | null
 }
 export type VerifiedQueryList = { items: VerifiedQuery[] }
 
@@ -1629,6 +1637,8 @@ export const api = {
   createVerifiedQuery: (ns: string, tbl: string, body: { question: string; sql: string }, catalog?: string) =>
     jpost<VerifiedQuery>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog), body),
   deleteVerifiedQuery: (id: number) => jdel(`/api/verified-queries/${id}`),
+  /** Run one verified query as the caller and compare it with its expected result (#912). */
+  checkVerifiedQuery: (id: number) => jpost<VerifiedQuery>(`/api/verified-queries/${id}/check`, {}),
   tableHistory: (ns: string, tbl: string, catalog?: string) =>
     jget<QueryResult>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/history`, catalog)),
   rollback:     (ns: string, tbl: string, snapshotId: string, catalog?: string) =>
