@@ -218,6 +218,31 @@ if [ "$APP" = "superset" ]; then
     fi
   fi
 fi
+
+# Airflow serves one image from four Deployments and only the API server runs DAGs for a request:
+# the scheduler imports them and builds every task pod, so a loader pin that moves the API server
+# alone leaves scheduled pipelines on the old code (platform#1460's label never reached a pod).
+# Container names are the chart's: scheduler, dag-processor, triggerer.
+if [ "$APP" = "airflow" ]; then
+  moved=""
+  for d in scheduler:airflow-scheduler dag-processor:airflow-dag-processor triggerer:airflow-triggerer; do
+    container="${d%%:*}"; deploy="${d##*:}"
+    if kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1; then
+      kubectl -n "$NS" set image "deploy/$deploy" "$container=$pinned" >/dev/null
+      moved="$moved $NS/$deploy"
+    fi
+  done
+  if [ -n "$moved" ]; then
+    echo "›$moved: image set to …@${digest:0:19}…"
+    if [ "${NOWAIT:-0}" != "1" ]; then
+      for deploy in airflow-scheduler airflow-dag-processor airflow-triggerer; do
+        kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1 && \
+          kubectl -n "$NS" rollout status "deploy/$deploy" --timeout="${TIMEOUT:-300s}"
+      done
+    fi
+  fi
+fi
+
 fi # WRITE_MANIFEST_ONLY
 
 # Keep the manifest in step, or the next `kubectl apply` puts the mutable tag back and a
