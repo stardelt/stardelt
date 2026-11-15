@@ -80,6 +80,7 @@ pub struct ErrorResponse {
         crate::verified_queries::list,
         crate::verified_queries::create,
         crate::verified_queries::delete,
+        crate::verified_queries::check,
         crate::connection_routes::list,
         crate::connection_routes::create,
         crate::connection_routes::rotate_personal,

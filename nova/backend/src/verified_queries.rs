@@ -6,9 +6,14 @@
 //! table reads them. For a person a verified query is the trusted way to compute a number;
 //! for an agent it is an example to copy instead of guessing SQL.
 //!
+//! A query may carry an **expected result** and be **checked** (design nova#912 slice 1): a
+//! question with a known answer is a test of the data and of its definitions. `POST
+//! /api/verified-queries/{id}/check` runs the statement as the caller and compares the rows
+//! with the expected ones; the last check is stored on the row. Whoever may see the table may
+//! check it.
+//!
 //! Only one read-only statement is accepted, checked with `mcp::classify` — the same
-//! classifier that guards `sql_read` and Ask. The stored SQL is never run from here: this
-//! module reads and lists, nothing else.
+//! classifier that guards `sql_read` and Ask. The statement runs only from the check.
 //!
 //! Without a state store (`NOVA_DATABASE_URL` unset) the routes answer
 //! `503 {"error":"this needs Nova's database, …"}`. The list asks the table's
@@ -36,15 +41,28 @@ use crate::api_json::ApiJson;
 use crate::auth::Principal;
 use crate::catalog::CatalogParam;
 use crate::saved_queries::{error, not_found, store_failed, unavailable};
+use crate::trino::QueryResult;
 
 /// Most characters a question may carry (the table's CHECK allows the same).
 pub const MAX_QUESTION_CHARS: usize = 500;
 /// Most characters the SQL may carry.
 pub const MAX_SQL_CHARS: usize = 20_000;
+/// Most rows an expected result may carry.
+pub const MAX_EXPECTED_ROWS: usize = 100;
+/// Most characters a difference message may carry.
+const DIFF_CHARS: usize = 300;
 /// Rows one list answers, newest first.
 const LIST_LIMIT: usize = 50;
+/// The answer when a statement runs and no expected result is stored.
+pub const RAN_WITHOUT_EXPECTED: &str = "ran, no expected result to compare";
+/// The answer when the rows equal the expected result.
+pub const RESULT_MATCHES: &str = "the result matches the expected result";
+/// The answer when the engine cut the result before the end.
+const TOO_LARGE: &str = "the result is larger than 100 rows";
+/// The answer when a create body carries something that is not a list of rows.
+const BAD_EXPECTED: &str = "expected must be a list of at most 100 rows";
 
-/// A row as the API returns it. `verified_at` is RFC 3339 in UTC.
+/// A row as the API returns it. `verified_at` and `last_check_at` are RFC 3339 in UTC.
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct VerifiedQuery {
     pub id: i64,
@@ -60,6 +78,21 @@ pub struct VerifiedQuery {
     #[serde(rename = "verifiedAt")]
     #[schema(rename = "verifiedAt")]
     pub verified_at: String,
+    /// The expected result: one array per row, each holding the row's values, or `null`.
+    #[schema(value_type = Option<Vec<Vec<Object>>>)]
+    pub expected: Option<serde_json::Value>,
+    /// When the query was last checked, RFC 3339, or `null` when it never was.
+    #[serde(rename = "lastCheckAt")]
+    #[schema(rename = "lastCheckAt")]
+    pub last_check_at: Option<String>,
+    /// Whether the last check passed, or `null` when it never ran.
+    #[serde(rename = "lastCheckPassed")]
+    #[schema(rename = "lastCheckPassed")]
+    pub last_check_passed: Option<bool>,
+    /// What the last check found, in one sentence, or `null` when it never ran.
+    #[serde(rename = "lastCheckMessage")]
+    #[schema(rename = "lastCheckMessage")]
+    pub last_check_message: Option<String>,
 }
 
 /// `POST /api/catalog/tables/{ns}/{tbl}/verified-queries` body.
@@ -69,9 +102,14 @@ pub struct NewVerifiedQuery {
     pub question: String,
     /// One read-only statement, at most 20 000 characters.
     pub sql: String,
+    /// The known answer: up to 100 rows, each an array of values, or absent.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<Vec<Object>>>)]
+    pub expected: Option<serde_json::Value>,
 }
 
-/// The row a delete needs before it can ask the table's rule: the table it belongs to.
+/// The row a delete or a check needs before it can ask the table's rule: where it lives and
+/// what it runs.
 #[derive(sqlx::FromRow)]
 struct TableRef {
     catalog: String,
@@ -79,9 +117,33 @@ struct TableRef {
     table_name: String,
 }
 
-/// The columns [`VerifiedQuery`] reads; the timestamp as RFC 3339 in UTC.
-const ROW_COLUMNS: &str = "id, question, sql, verified_by, \
-    to_char(verified_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS verified_at";
+/// What a check runs and compares against.
+#[derive(sqlx::FromRow)]
+struct CheckTarget {
+    catalog: String,
+    namespace: String,
+    table_name: String,
+    sql: String,
+    expected: Option<serde_json::Value>,
+}
+
+/// The columns [`VerifiedQuery`] reads; the timestamps as RFC 3339 in UTC.
+const ROW_COLUMNS: &str = "id, question, sql, verified_by, expected, \
+    to_char(verified_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS verified_at, \
+    CASE WHEN last_check_at IS NULL THEN NULL ELSE \
+        to_char(last_check_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') END \
+        AS last_check_at, \
+    last_check_passed, last_check_message";
+
+/// An expected result is a JSON array of rows, each an array of values, at most 100.
+fn valid_expected(value: &serde_json::Value) -> bool {
+    match value.as_array() {
+        Some(rows) => {
+            rows.len() <= MAX_EXPECTED_ROWS && rows.iter().all(|row| row.as_array().is_some())
+        }
+        None => false,
+    }
+}
 
 /// Trim the text fields and enforce the same limits the table's CHECK constraints do, so
 /// a caller gets a sentence instead of a database error.
@@ -102,7 +164,16 @@ fn validate(req: NewVerifiedQuery) -> Result<NewVerifiedQuery, String> {
     if sql.chars().count() > MAX_SQL_CHARS {
         return Err(format!("sql must be at most {MAX_SQL_CHARS} characters"));
     }
-    Ok(NewVerifiedQuery { question, sql })
+    let expected = match req.expected {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) if valid_expected(&value) => Some(value),
+        Some(_) => return Err(BAD_EXPECTED.into()),
+    };
+    Ok(NewVerifiedQuery {
+        question,
+        sql,
+        expected,
+    })
 }
 
 /// `GET /api/catalog/tables/{ns}/{tbl}/verified-queries` — the table's, newest first.
@@ -111,7 +182,7 @@ fn validate(req: NewVerifiedQuery) -> Result<NewVerifiedQuery, String> {
     operation_id = "verified_queries_list",
     path = "/api/catalog/tables/{ns}/{tbl}/verified-queries",
     tag = "public",
-    description = "The verified queries of one table: questions its owners answered with one read-only statement, who verified each and when. Newest first, at most 50. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
+    description = "The verified queries of one table: questions its owners answered with one read-only statement, who verified each and when, its expected result and the last check's outcome. Newest first, at most 50. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -169,7 +240,7 @@ pub async fn list(
     operation_id = "verified_queries_create",
     path = "/api/catalog/tables/{ns}/{tbl}/verified-queries",
     tag = "public",
-    description = "Verify one answer to a question about this table: the question (at most 500 characters) and one read-only statement (at most 20 000). Only the owner group of the table and administrators may add one; the caller is recorded as `verifiedBy`. The statement is checked, never run. `?catalog=` picks the catalog.",
+    description = "Verify one answer to a question about this table: the question (at most 500 characters), one read-only statement (at most 20 000) and, optionally, the known answer as up to 100 rows of values. Only the owner group of the table and administrators may add one; the caller is recorded as `verifiedBy`. The statement is checked on create and run only by `POST /api/verified-queries/{id}/check`. `?catalog=` picks the catalog.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -178,7 +249,7 @@ pub async fn list(
     request_body = NewVerifiedQuery,
     responses(
         (status = 201, description = "The stored row", body = VerifiedQuery),
-        (status = 400, description = "The question or the SQL is empty or too long, the catalog name is invalid, or the statement is not one read-only statement", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The question or the SQL is empty or too long, `expected` is not a list of at most 100 rows, the catalog name is invalid, or the statement is not one read-only statement", body = crate::openapi::ErrorResponse),
         (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may verify a query", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
@@ -216,8 +287,9 @@ pub async fn create(
     }
     let who = crate::catalog_docs::caller_identity(&s, caller);
     let sql = format!(
-        "INSERT INTO verified_query (catalog, namespace, table_name, question, sql, verified_by) \
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {ROW_COLUMNS}"
+        "INSERT INTO verified_query \
+         (catalog, namespace, table_name, question, sql, verified_by, expected) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {ROW_COLUMNS}"
     );
     match sqlx::query_as::<_, VerifiedQuery>(sqlx::AssertSqlSafe(sql))
         .bind(&name)
@@ -226,6 +298,7 @@ pub async fn create(
         .bind(&new.question)
         .bind(&statement)
         .bind(&who.sub)
+        .bind(&new.expected)
         .fetch_one(pool)
         .await
     {
@@ -242,6 +315,200 @@ pub async fn create(
         }
         Err(e) => store_failed(e),
     }
+}
+
+/// `POST /api/verified-queries/{id}/check` — run the statement as the caller and compare it
+/// with the expected result; `200` with the updated row either way.
+///
+/// Whoever may see the table may check it: the check is the owner's assertion re-run, not an
+/// edit. An engine error is a failed check with the engine's message — the check itself worked.
+#[utoipa::path(
+    post,
+    operation_id = "verified_queries_check",
+    path = "/api/verified-queries/{id}/check",
+    tag = "public",
+    description = "Run one verified query as the caller and compare its rows with the expected result, store the outcome on the row and answer the row. Without an expected result it passes when the statement runs; with one it passes when the rows are equal as a multiset, numbers compared after rounding to six decimals. A readable difference says what was expected and what came back. Whoever may see the table may check it.",
+    params(("id" = i64, Path, description = "The verified query's id")),
+    responses(
+        (status = 200, description = "The updated row: `lastCheckPassed` and `lastCheckMessage` say what the check found", body = VerifiedQuery),
+        (status = 400, description = "The stored SQL is no longer one read-only statement", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such verified query, catalog or table", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn check(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return not_found();
+    };
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let row = match sqlx::query_as::<_, CheckTarget>(
+        "SELECT catalog, namespace, table_name, sql, expected FROM verified_query WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(e) => return store_failed(e),
+    };
+    let caller = caller.as_ref().map(|c| &c.0);
+    if let Err(response) = crate::catalog_docs::documentation_for(
+        &s,
+        caller,
+        Some(&row.catalog),
+        &row.namespace,
+        &row.table_name,
+    )
+    .await
+    {
+        return response;
+    }
+    let statement = match crate::mcp::classify(&row.sql, false) {
+        Ok(statement) => statement,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    let sub = crate::catalog_docs::caller_identity(&s, caller).sub;
+    let (passed, message) =
+        match crate::trino::execute_from_tagged(&s, statement, caller, "nova-eval", "eval").await {
+            Err(message) => (false, message),
+            Ok(result) => match row.expected.as_ref() {
+                None => (true, RAN_WITHOUT_EXPECTED.to_string()),
+                Some(expected) => match compare(expected, &result) {
+                    Ok(()) => (true, RESULT_MATCHES.to_string()),
+                    Err(message) => (false, message),
+                },
+            },
+        };
+    let sql = format!(
+        "UPDATE verified_query \
+         SET last_check_at = now(), last_check_passed = $2, last_check_message = $3 \
+         WHERE id = $1 RETURNING {ROW_COLUMNS}"
+    );
+    match sqlx::query_as::<_, VerifiedQuery>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(passed)
+        .bind(&message)
+        .fetch_one(pool)
+        .await
+    {
+        Ok(updated) => {
+            tracing::info!(
+                target: "audit",
+                sub = %sub,
+                catalog = %row.catalog,
+                table = %format!("{}.{}", row.namespace, row.table_name),
+                id,
+                passed,
+                "verified query checked",
+            );
+            Json(updated).into_response()
+        }
+        Err(e) => store_failed(e),
+    }
+}
+
+/// Compare a statement's result with an expected one.
+///
+/// Equal as a multiset: the rows are sorted by their JSON text, so another order passes. A
+/// number counts as its value rounded to six decimals. A result the engine cut before the end
+/// never passes — it is a prefix, not the answer.
+pub(crate) fn compare(expected: &serde_json::Value, result: &QueryResult) -> Result<(), String> {
+    if expected.is_null() {
+        return Ok(());
+    }
+    if result.truncated {
+        return Err(TOO_LARGE.into());
+    }
+    let Some(rows) = expected.as_array() else {
+        return Err(BAD_EXPECTED.into());
+    };
+    if rows.iter().any(|row| row.as_array().is_none()) {
+        return Err(BAD_EXPECTED.into());
+    }
+    let want: Vec<String> = rows.iter().map(row_text).collect();
+    let got: Vec<String> = result
+        .rows
+        .iter()
+        .map(|row| row_text(&serde_json::Value::Array(row.clone())))
+        .collect();
+    if want.len() != got.len() {
+        return Err(short(&format!(
+            "expected {} rows, got {}",
+            want.len(),
+            got.len()
+        )));
+    }
+    let mut sorted_want = want.clone();
+    sorted_want.sort();
+    let mut sorted_got = got.clone();
+    sorted_got.sort();
+    if sorted_want == sorted_got {
+        return Ok(());
+    }
+    for (i, (w, g)) in want.iter().zip(got.iter()).enumerate() {
+        if w != g {
+            return Err(short(&format!(
+                "row {} differs: expected {w}, got {g}",
+                i + 1
+            )));
+        }
+    }
+    Err(short("the rows differ"))
+}
+
+/// One row as comparable text: numbers rounded to six decimals, keys in their JSON order.
+fn row_text(row: &serde_json::Value) -> String {
+    serde_json::to_string(&rounded(row)).unwrap_or_default()
+}
+
+/// Every number in `value`, rounded to six decimals; everything else unchanged. A whole
+/// number is an integer in the text, so `1` and `1.0` compare equal and say `1`.
+fn rounded(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                return Value::Number(i.into());
+            }
+            if let Some(u) = n.as_u64() {
+                return Value::Number(u.into());
+            }
+            let Some(f) = n.as_f64() else {
+                return value.clone();
+            };
+            let scaled = (f * 1_000_000.0).round() / 1_000_000.0;
+            let number = if scaled.fract() == 0.0 && scaled.abs() < 9e15 {
+                serde_json::Number::from(scaled as i64)
+            } else {
+                match serde_json::Number::from_f64(scaled) {
+                    Some(number) => number,
+                    None => return value.clone(),
+                }
+            };
+            Value::Number(number)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(rounded).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| (key.clone(), rounded(item)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// A difference message, cut at [`DIFF_CHARS`] characters.
+fn short(message: &str) -> String {
+    message.chars().take(DIFF_CHARS).collect()
 }
 
 /// `DELETE /api/verified-queries/{id}` — `204`; `404` when the id is not a row.
@@ -328,7 +595,24 @@ mod tests {
         NewVerifiedQuery {
             question: question.into(),
             sql: sql.into(),
+            expected: None,
         }
+    }
+
+    /// A result as the engine returns it: one array per row.
+    fn result(rows: &[&[serde_json::Value]], truncated: bool) -> QueryResult {
+        QueryResult {
+            columns: Vec::new(),
+            rows: rows.iter().map(|row| row.to_vec()).collect(),
+            row_count: rows.len(),
+            query_id: None,
+            stats: None,
+            truncated,
+        }
+    }
+
+    fn rows(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).expect("valid JSON")
     }
 
     #[test]
@@ -394,6 +678,10 @@ mod tests {
             sql: "SELECT 1".into(),
             verified_by: "ada".into(),
             verified_at: "2026-11-15T11:03:46.000Z".into(),
+            expected: Some(rows(r#"[[1]]"#)),
+            last_check_at: Some("2026-11-15T12:00:00.000Z".into()),
+            last_check_passed: Some(true),
+            last_check_message: Some(RESULT_MATCHES.into()),
         })
         .expect("serializes");
         assert_eq!(value["verifiedBy"], serde_json::json!("ada"));
@@ -401,5 +689,98 @@ mod tests {
             value["verifiedAt"],
             serde_json::json!("2026-11-15T11:03:46.000Z")
         );
+        assert_eq!(value["expected"], rows(r#"[[1]]"#));
+        assert_eq!(
+            value["lastCheckAt"],
+            serde_json::json!("2026-11-15T12:00:00.000Z")
+        );
+        assert_eq!(value["lastCheckPassed"], serde_json::json!(true));
+        assert_eq!(value["lastCheckMessage"], serde_json::json!(RESULT_MATCHES));
+    }
+
+    #[test]
+    fn compare_passes_when_the_rows_are_equal_in_another_order() {
+        let expected = rows(r#"[[2, "b"], [1, "a"]]"#);
+        let got = result(
+            &[
+                &[serde_json::json!(1), serde_json::json!("a")],
+                &[serde_json::json!(2), serde_json::json!("b")],
+            ],
+            false,
+        );
+        assert_eq!(compare(&expected, &got), Ok(()));
+    }
+
+    #[test]
+    fn compare_fails_with_the_count_when_one_row_is_extra() {
+        let expected = rows(r#"[[1], [2], [3]]"#);
+        let got = result(
+            &[
+                &[serde_json::json!(1)],
+                &[serde_json::json!(2)],
+                &[serde_json::json!(3)],
+                &[serde_json::json!(4)],
+            ],
+            false,
+        );
+        assert_eq!(
+            compare(&expected, &got),
+            Err("expected 3 rows, got 4".into())
+        );
+    }
+
+    #[test]
+    fn compare_fails_with_the_row_when_one_value_changes() {
+        let expected = rows(r#"[[1, "a"], [2, "b"]]"#);
+        let got = result(
+            &[
+                &[serde_json::json!(1), serde_json::json!("a")],
+                &[serde_json::json!(2), serde_json::json!("c")],
+            ],
+            false,
+        );
+        let message = compare(&expected, &got).expect_err("differs");
+        assert_eq!(message, r#"row 2 differs: expected [2,"b"], got [2,"c"]"#);
+        assert!(message.chars().count() <= 300, "{message}");
+    }
+
+    #[test]
+    fn compare_treats_1_0000001_as_1() {
+        let expected = rows("[[1.0000001]]");
+        let got = result(&[&[serde_json::json!(1.0)]], false);
+        assert_eq!(compare(&expected, &got), Ok(()));
+    }
+
+    #[test]
+    fn compare_passes_with_no_expected_result() {
+        let got = result(&[&[serde_json::json!(1)]], false);
+        assert_eq!(compare(&serde_json::Value::Null, &got), Ok(()));
+    }
+
+    #[test]
+    fn compare_fails_a_truncated_result() {
+        let expected = rows("[[1]]");
+        let got = result(&[&[serde_json::json!(1)]], true);
+        assert_eq!(compare(&expected, &got), Err(TOO_LARGE.into()));
+    }
+
+    #[test]
+    fn validate_refuses_101_expected_rows() {
+        let hundred: Vec<serde_json::Value> = (0..MAX_EXPECTED_ROWS)
+            .map(|i| serde_json::json!([i]))
+            .collect();
+        let mut at_limit = new("q", "SELECT 1");
+        at_limit.expected = Some(serde_json::Value::Array(hundred.clone()));
+        assert!(validate(at_limit).is_ok(), "exactly at the limit");
+
+        let mut over = new("q", "SELECT 1");
+        over.expected = Some(serde_json::json!(
+            hundred
+                .into_iter()
+                .chain(std::iter::once(serde_json::json!([0])))
+                .collect::<Vec<_>>()
+        ));
+        let err = validate(over).expect_err("101 rows");
+        assert_eq!(err, BAD_EXPECTED);
     }
 }

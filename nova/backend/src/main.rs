@@ -720,6 +720,12 @@ fn api_router() -> Router<Arc<AppState>> {
             get(verified_queries::list).post(verified_queries::create),
         )
         .route("/verified-queries/{id}", delete(verified_queries::delete))
+        // A known answer is a test of the data: run the query as the caller and compare
+        // (nova#912 slice 1).
+        .route(
+            "/verified-queries/{id}/check",
+            post(verified_queries::check),
+        )
         .route(
             "/catalog/tables/{ns}/{tbl}/columns/{column}/description",
             put(catalog_docs::update_column),
