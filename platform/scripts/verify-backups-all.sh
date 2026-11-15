@@ -130,6 +130,8 @@ RULES=(
   'data-filer-seaweedfs-filer-*|accepted|platform#3|filer metadata (the S3 namespace index); the object bytes are what lakehouse-backup copies'
   'data-stardelt-seaweedfs-master-*|accepted|platform#3|volume-assignment metadata, not object data'
   'hub-db-dir|accepted|platform#3|JupyterHub session store (users, tokens); losing it means signing in again, notebooks are bucket objects'
+  'claim-*|accepted|platform#1241|per-user notebook home: scratch by design; the durable copy is Git and the published notebooks bucket'
+  'data-kafka-kafka-*|accepted|platform#1241|event log of the Kafka broker: transport for StreamApps; the durable copy is the Iceberg table the sink writes'
   'keycloak-pg-*|cnpg|keycloak-pg|-'
   'lakekeeper-pg-*|cnpg|lakekeeper-pg|-'
   'nova-pg-*|cnpg|nova-pg|-'
