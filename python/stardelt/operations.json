@@ -8,6 +8,13 @@
       "query_params": [],
       "body": true
     },
+    "ask_feedback": {
+      "method": "POST",
+      "path": "/api/ask/feedback",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
     "auth_config": {
       "method": "GET",
       "path": "/api/auth/config",
@@ -818,6 +825,39 @@
       "path": "/api/catalog/namespaces/{ns}/tables",
       "path_params": [
         "ns"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "verified_queries_create": {
+      "method": "POST",
+      "path": "/api/catalog/tables/{ns}/{tbl}/verified-queries",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "verified_queries_delete": {
+      "method": "DELETE",
+      "path": "/api/verified-queries/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "verified_queries_list": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}/verified-queries",
+      "path_params": [
+        "ns",
+        "tbl"
       ],
       "query_params": [
         "catalog"

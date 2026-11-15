@@ -301,3 +301,36 @@ def test_every_operation_is_reachable_through_ops():
         resource, _, verb = operation_id.partition("_")
         target = getattr(nova.ops, resource)
         assert verb == "" or callable(getattr(target, verb)), operation_id
+
+
+def test_the_verified_queries_operations_are_in_the_contract():
+    ops = api.operations()
+    assert ops["verified_queries_list"] == {
+        "method": "GET",
+        "path": "/api/catalog/tables/{ns}/{tbl}/verified-queries",
+        "path_params": ["ns", "tbl"],
+        "query_params": ["catalog"],
+        "body": False,
+    }
+    assert ops["verified_queries_create"] == {
+        **ops["verified_queries_list"],
+        "method": "POST",
+        "body": True,
+    }
+    assert ops["verified_queries_delete"] == {
+        "method": "DELETE",
+        "path": "/api/verified-queries/{id}",
+        "path_params": ["id"],
+        "query_params": [],
+        "body": False,
+    }
+
+
+def test_the_ask_feedback_operation_is_in_the_contract():
+    assert api.operations()["ask_feedback"] == {
+        "method": "POST",
+        "path": "/api/ask/feedback",
+        "path_params": [],
+        "query_params": [],
+        "body": True,
+    }
