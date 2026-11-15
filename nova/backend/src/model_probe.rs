@@ -44,6 +44,8 @@ const ROUND_EVERY: Duration = Duration::from_secs(60);
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// How much of an error body a message may carry.
 const BODY_CHARS: usize = 200;
+/// The plain chat check's prompt — also the text whose bytes and hash the call record keeps.
+const CHAT_PROMPT: &str = "Reply with one short sentence about lakes.";
 
 /// What one probe found. The field names are the CRD's (`ModelEndpointStatus`), so the
 /// merge patch needs no translation: `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`.
@@ -111,7 +113,7 @@ fn chat_body(model: &str, extra: Value) -> Value {
     let mut body = json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
-        "messages": [{"role": "user", "content": "Reply with one short sentence about lakes."}],
+        "messages": [{"role": "user", "content": CHAT_PROMPT}],
     });
     if let (Some(object), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
         for (key, value) in extra {
@@ -157,9 +159,49 @@ fn refusal(status: reqwest::StatusCode, body: &str) -> String {
     format!("{}: {}", status.as_u16(), short(body))
 }
 
+/// Record the plain chat check as one `model_call` row (design nova#890, slice 1). Best
+/// effort: an endpoint that answered, refused or failed still gets its row, and a failed
+/// insert is a log line, never a probe failure. `usage` is the answer body's `usage` object
+/// when the endpoint sent one; `answer` is its content.
+async fn note(
+    db: Option<&sqlx::PgPool>,
+    name: &str,
+    model: &str,
+    latency_ms: u64,
+    outcome: &str,
+    usage: Option<&Value>,
+    answer: Option<&str>,
+) {
+    let Some(pool) = db else {
+        return;
+    };
+    let call = crate::model_calls::Call {
+        sub: "nova",
+        group: None,
+        feature: "probe",
+        endpoint: name,
+        model,
+        tokens: crate::model_calls::tokens(usage, CHAT_PROMPT, answer),
+        latency_ms,
+        outcome,
+        prompt: CHAT_PROMPT,
+        answer,
+    };
+    if let Err(e) = crate::model_calls::record(pool, &call).await {
+        warn!(endpoint = %name, error = %e, "model probe: the call record failed");
+    }
+}
+
 /// Probe one endpoint: the three measured calls, in order, each one's failure not stopping
 /// the next. Never panics; never carries the key or the URL anywhere.
-async fn probe(client: &reqwest::Client, url: &str, model: &str, key: Option<&str>) -> Outcome {
+async fn probe(
+    client: &reqwest::Client,
+    name: &str,
+    url: &str,
+    model: &str,
+    key: Option<&str>,
+    db: Option<&sqlx::PgPool>,
+) -> Outcome {
     let base = base_url(url);
     let checked_at = now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let mut outcome = Outcome {
@@ -185,18 +227,55 @@ async fn probe(client: &reqwest::Client, url: &str, model: &str, key: Option<&st
     }
 
     // (b) Does it answer at all? Everything after this is pointless when it does not.
+    let started = std::time::Instant::now();
     match send(client, &base, key, &chat_body(model, json!({}))).await {
-        Ok(response) if response.status().is_success() => outcome.reachable = Some(true),
+        Ok(response) if response.status().is_success() => {
+            outcome.reachable = Some(true);
+            let body: Value = response.json().await.unwrap_or(Value::Null);
+            let answer = body
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str);
+            note(
+                db,
+                name,
+                model,
+                started.elapsed().as_millis() as u64,
+                "ok",
+                body.get("usage"),
+                answer,
+            )
+            .await;
+        }
         Ok(response) => {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             outcome.reachable = Some(false);
             outcome.message = Some(refusal(status, &body));
+            note(
+                db,
+                name,
+                model,
+                started.elapsed().as_millis() as u64,
+                "refused",
+                None,
+                None,
+            )
+            .await;
             return outcome;
         }
         Err(e) => {
             outcome.reachable = Some(false);
             outcome.message = Some(e);
+            note(
+                db,
+                name,
+                model,
+                started.elapsed().as_millis() as u64,
+                "error",
+                None,
+                None,
+            )
+            .await;
             return outcome;
         }
     }
@@ -361,7 +440,15 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
             continue;
         }
         let key = key_at(&dir, &name);
-        let outcome = probe(&client, url, model, key.as_deref()).await;
+        let outcome = probe(
+            &client,
+            &name,
+            url,
+            model,
+            key.as_deref(),
+            state.db.as_ref(),
+        )
+        .await;
         info!(
             endpoint = %name,
             reachable = ?outcome.reachable,
@@ -462,7 +549,15 @@ mod tests {
             .timeout(CALL_TIMEOUT)
             .build()
             .unwrap();
-        let outcome = probe(&client, &format!("{base}/v1/"), "m", None).await;
+        let outcome = probe(
+            &client,
+            "probe-check",
+            &format!("{base}/v1/"),
+            "m",
+            None,
+            None,
+        )
+        .await;
         assert_eq!(outcome.reachable, Some(true));
         assert_eq!(outcome.tool_calling, Some(true));
         assert_eq!(outcome.json_output, Some(true));
@@ -480,7 +575,15 @@ mod tests {
             .timeout(CALL_TIMEOUT)
             .build()
             .unwrap();
-        let outcome = probe(&client, &format!("http://127.0.0.1:{port}/v1"), "m", None).await;
+        let outcome = probe(
+            &client,
+            "probe-check",
+            &format!("http://127.0.0.1:{port}/v1"),
+            "m",
+            None,
+            None,
+        )
+        .await;
         assert_eq!(outcome.reachable, Some(false));
         assert!(outcome.message.is_some());
         assert_eq!(outcome.tool_calling, None);
@@ -495,7 +598,15 @@ mod tests {
             .timeout(CALL_TIMEOUT)
             .build()
             .unwrap();
-        let outcome = probe(&client, &format!("{base}/v1"), "m", None).await;
+        let outcome = probe(
+            &client,
+            "probe-check",
+            &format!("{base}/v1"),
+            "m",
+            None,
+            None,
+        )
+        .await;
         assert_eq!(outcome.reachable, Some(true));
         assert_eq!(outcome.tool_calling, Some(false));
         assert_eq!(outcome.json_output, Some(true));

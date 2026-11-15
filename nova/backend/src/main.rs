@@ -123,6 +123,7 @@ mod mcp;
 mod mcp_audit;
 mod metrics;
 mod migrations;
+mod model_calls;
 mod model_endpoints;
 mod model_probe;
 mod notebooks;
@@ -1215,6 +1216,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(pool) = state.db.clone() {
         query_log_store::spawn_retention(pool.clone());
         mcp_audit::spawn_retention(pool.clone());
+        model_calls::spawn_retention(pool.clone());
         shared_accounts::spawn_nightly(pool, state.shared_accounts.clone());
     }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
