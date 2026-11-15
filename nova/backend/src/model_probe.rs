@@ -13,9 +13,10 @@
 //! never reads a Secret and never logs the key, the URL or the `keyRef`. A keyless endpoint
 //! is probed without the header, never skipped.
 //!
-//! The loop is the shape of [`crate::catalog_metrics::spawn_refresher`]: one round a minute
-//! after start, then one round per [`DEFAULT_INTERVAL`] (a day). A new endpoint — one with no
-//! `status.checkedAt` — is probed at the next round, so it needs no scheduler of its own.
+//! The loop is the shape of [`crate::catalog_metrics::spawn_refresher`]: one round a minute, and
+//! each round probes only the endpoints with no `status.checkedAt` or one older than
+//! [`DEFAULT_INTERVAL`] (a day). A new endpoint is therefore probed within a minute, and needs no
+//! scheduler of its own.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +38,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(86_400);
 const MIN_INTERVAL: u64 = 300;
 const MAX_INTERVAL: u64 = 604_800;
-const FIRST_DELAY: Duration = Duration::from_secs(60);
+/// How often the probe looks for endpoints that are due (a new one, or one a day old).
+const ROUND_EVERY: Duration = Duration::from_secs(60);
 /// The `/models` call is a convenience: it never holds the round up.
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// How much of an error body a message may carry.
@@ -275,9 +277,9 @@ fn interval_from_env(raw: Option<&str>) -> Duration {
     )
 }
 
-/// Start the probe: after [`FIRST_DELAY`], one round per interval, for as long as the
-/// process runs. Answers whether a task was started: demo mode and a Nova without a cluster
-/// client have none.
+/// Start the probe: one round per [`ROUND_EVERY`] for as long as the process runs, each round
+/// probing only the endpoints that are new or older than the interval. Answers whether a task
+/// was started: demo mode and a Nova without a cluster client have none.
 pub(crate) fn spawn_loop(state: Arc<AppState>) -> bool {
     if state.demo || state.kube.is_none() {
         info!(
@@ -289,14 +291,13 @@ pub(crate) fn spawn_loop(state: Arc<AppState>) -> bool {
     let interval = interval_from_env(std::env::var("NOVA_MODEL_PROBE_SECONDS").ok().as_deref());
     info!(
         interval_secs = interval.as_secs(),
-        first_delay_secs = FIRST_DELAY.as_secs(),
+        round_every_secs = ROUND_EVERY.as_secs(),
         "model probe started"
     );
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(FIRST_DELAY).await;
+            tokio::time::sleep(ROUND_EVERY).await;
             round(&state, interval).await;
-            tokio::time::sleep(interval).await;
         }
     });
     true
