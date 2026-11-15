@@ -629,6 +629,10 @@ nova:
   # How often the model-endpoint probe re-checks every endpoint, in seconds; 300-604800.
   # A new endpoint is probed by the next one-minute round regardless. Nova's default is 86400.
   modelProbeSeconds: 86400
+  # Days the stored model-call rows of Ask, the agent proxy and the probe are kept; 0-3650.
+  # Empty = Nova's own default (30); `0` keeps them and switches the hourly purge off — `0` is a
+  # value, not "unset": the template compares the rendered string against the empty string.
+  modelCallRetentionDays: ""
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.
   #   oidc — Nova is a client of the IdP configured under `identity:` above.

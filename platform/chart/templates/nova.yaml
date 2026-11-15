@@ -386,6 +386,10 @@ spec:
             {{- end }}
             - name: NOVA_MODEL_PROBE_SECONDS
               value: {{ .Values.nova.modelProbeSeconds | default 86400 | quote }}
+            {{- if ne (.Values.nova.modelCallRetentionDays | toString) "" }}
+            - name: NOVA_MODEL_CALL_RETENTION_DAYS
+              value: {{ .Values.nova.modelCallRetentionDays | quote }}
+            {{- end }}
             # Query-log collector (stardelt-nova#116): a second listener that no Ingress
             # routes, reachable inside the cluster only (Service port `internal`). The bearer
             # token is Secret `nova-events` (scripts/nova-events-token.sh), shared with Trino's

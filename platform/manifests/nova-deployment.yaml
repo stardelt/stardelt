@@ -374,6 +374,11 @@ spec:
             # the next one-minute round regardless. Nova's own default is 86400.
             - name: NOVA_MODEL_PROBE_SECONDS
               value: "86400"
+            # Days the stored model-call rows are kept (nova#890 slice 1): 0 keeps them and
+            # switches the hourly purge off; Nova's own default is 30. The chart's twin is
+            # `nova.modelCallRetentionDays`.
+            - name: NOVA_MODEL_CALL_RETENTION_DAYS
+              value: "30"
             - name: RUST_LOG
               value: info,tower_http=info
           readinessProbe:
