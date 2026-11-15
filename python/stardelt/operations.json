@@ -1,6 +1,13 @@
 {
   "contract_version": "0.1.0",
   "operations": {
+    "ask_answer": {
+      "method": "POST",
+      "path": "/api/ask",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
     "auth_config": {
       "method": "GET",
       "path": "/api/auth/config",
