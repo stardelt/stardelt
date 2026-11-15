@@ -148,6 +148,22 @@ mod tests {
         );
     }
 
+    /// Two files with the same numeric prefix (0022, 2026-11-15) make every database fail
+    /// on `_sqlx_migrations_pkey`; the `migrate!` macro embeds both without a word.
+    #[test]
+    fn migration_versions_are_unique() {
+        let mut seen: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
+        for migration in MIGRATOR.iter() {
+            if let Some(first) = seen.insert(migration.version, migration.description.to_string()) {
+                panic!(
+                    "two migrations share version {}: {first} and {}",
+                    migration.version, migration.description
+                );
+            }
+        }
+        assert!(!seen.is_empty(), "the migrations are embedded");
+    }
+
     #[tokio::test]
     async fn status_is_disabled_without_a_pool() {
         assert_eq!(status(None).await, DbStatus::Disabled);
