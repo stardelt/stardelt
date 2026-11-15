@@ -151,7 +151,10 @@ async fn send(
     if let Some(key) = key {
         request = request.bearer_auth(key);
     }
-    request.send().await.map_err(|e| e.to_string())
+    request
+        .send()
+        .await
+        .map_err(|e| e.without_url().to_string())
 }
 
 /// A non-2xx answer as the message it belongs in: `503: <first 200 characters>`.
@@ -497,6 +500,29 @@ mod tests {
         assert_eq!(key_at(&dir, "endpoint"), Some("sk-1".to_string()));
         assert_eq!(key_at(&dir, "nothing-projected"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A transport error must not carry the endpoint's URL into `status.message`, which
+    /// `GET /api/model-endpoints` serves (nova#990).
+    #[tokio::test]
+    async fn a_transport_error_carries_no_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .timeout(CALL_TIMEOUT)
+            .build()
+            .unwrap();
+        let error = send(
+            &client,
+            &format!("http://127.0.0.1:{port}/v1"),
+            None,
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.contains("http://"), "{error}");
+        assert!(!error.contains(&port.to_string()), "{error}");
     }
 
     /// A mock endpoint: `/models` names a context window, `/chat/completions` answers the
