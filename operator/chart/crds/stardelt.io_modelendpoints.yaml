@@ -108,6 +108,36 @@ spec:
               checkedAt:
                 nullable: true
                 type: string
+              conditions:
+                description: |-
+                  The conditions Nova reports for this endpoint. `Ready` is `True` when the last probe
+                  found an endpoint that answers and returns a tool call; `False` with a `reason` and a
+                  `message` names what is missing. The `Condition` shape every other status in this file
+                  uses — no new type.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
               contextTokens:
                 format: int64
                 nullable: true

@@ -3413,6 +3413,12 @@ pub struct ModelEndpointStatus {
     pub checked_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The conditions Nova reports for this endpoint. `Ready` is `True` when the last probe
+    /// found an endpoint that answers and returns a tool call; `False` with a `reason` and a
+    /// `message` names what is missing. The `Condition` shape every other status in this file
+    /// uses — no new type.
+    #[serde(default, rename = "conditions", skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -3605,6 +3611,38 @@ mod tests {
                 "crdgen derives the schema filename from spec.names.singular"
             );
         }
+    }
+
+    #[test]
+    fn model_endpoint_status_carries_conditions() {
+        let docs = crd_documents();
+        let crd = docs
+            .iter()
+            .find(|crd| crd.metadata.name.as_deref() == Some("modelendpoints.stardelt.io"))
+            .expect("the ModelEndpoint CRD is served");
+        let version = crd
+            .spec
+            .versions
+            .iter()
+            .find(|version| version.name == "v1alpha1")
+            .expect("ModelEndpoint serves v1alpha1");
+        let schema = serde_json::to_value(
+            version
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.open_api_v3_schema.clone())
+                .expect("ModelEndpoint CRD carries an openAPIV3Schema"),
+        )
+        .expect("serialize the ModelEndpoint schema");
+        let conditions = &schema["properties"]["status"]["properties"]["conditions"];
+        assert_eq!(
+            conditions["type"], "array",
+            "status.conditions is an array in the generated document"
+        );
+        assert_eq!(conditions["items"]["type"], "object");
+        let items = &conditions["items"]["properties"];
+        assert_eq!(items["type"]["type"], "string");
+        assert_eq!(items["status"]["type"], "string");
     }
 
     #[test]
