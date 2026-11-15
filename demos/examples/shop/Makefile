@@ -18,7 +18,7 @@ check:
 	$(DBT) parse $(ARGS)
 
 demo:
-	$(DBT) snapshot $(ARGS) && $(DBT) build $(ARGS) --vars '{scale: $(SCALE)}' $(if $(FULL),--full-refresh,)
+	$(DBT) build $(ARGS) --vars '{scale: $(SCALE)}' $(if $(FULL),--full-refresh,)
 
 inventory:
 	$(DBT) ls $(ARGS) --output name --resource-type model snapshot test unit_test exposure
