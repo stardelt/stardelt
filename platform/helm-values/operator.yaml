@@ -16,3 +16,8 @@ image:
   repository: ghcr.io/stardelt/stardelt-operator
   tag: dev@sha256:2ab972892c582645259901392ffd3da8707b0e3df20fffdb3def3dfe03d18960
   pullPolicy: IfNotPresent
+
+# One replica reconciles at a time (it holds the Lease stardelt-operator-leader); the second
+# is a standby that takes over about 15 s after the leader is gone. With one replica every
+# lease miss was a kubelet CrashLoopBackOff and 0/1 for minutes (platform#1458).
+replicaCount: 2
