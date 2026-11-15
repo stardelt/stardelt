@@ -108,24 +108,34 @@ RUN chmod 0644 /opt/spark/jars/iceberg-spark-runtime.jar /opt/spark/jars/iceberg
 #
 # pandas, pyarrow and numpy are the notebook image's exact versions
 # (images/jupyter/Dockerfile): a pandas UDF pickles pandas objects on the client
-# and rebuilds them in the worker, so the two sides must agree. Nothing else is
-# installed — a library a user imports inside a UDF is not on the executor, and
-# that is stated in the quickstart.
+# and rebuilds them in the worker, so the two sides must agree. Apart from the
+# CLI's five dependencies below, nothing else is installed — a library a user
+# imports inside a UDF is not on the executor, and that is stated in the
+# quickstart.
 ADD --checksum=sha256:dd5bcc096cfb1b2d63805576b4799126350170ba29476baa28256c317ea08e32 \
     https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.11.17%2B20261020-x86_64-unknown-linux-gnu-install_only.tar.gz \
     /tmp/python-3.11.tar.gz
 # One RUN: extract, install, and chmod in the same layer, so the `chmod -R` only
 # touches metadata of files this layer creates (a later chmod would copy the
 # whole tree up into a second layer). `a+rX` because uid 185 runs the image.
+# The five after pyarrow are `spark-pipelines`' Python dependencies: the CLI is a
+# Spark Connect client and refuses to start without them (platform#1386 S0a,
+# `pyspark/sql/connect/utils.py:check_dependencies`). They are the versions the
+# S0a spike ran with. Do not bump numpy/pandas/pyarrow here: their minor versions
+# must equal the notebook image's (`scripts/check-python-parity.sh`).
 RUN mkdir -p /opt/python311 \
     && tar -xzf /tmp/python-3.11.tar.gz --strip-components=1 -C /opt/python311 \
     && rm /tmp/python-3.11.tar.gz \
     && /opt/python311/bin/python3 -m pip install --no-cache-dir \
         numpy==2.0.2 pandas==2.2.3 pyarrow==18.1.0 \
+        pyyaml==6.0.3 grpcio==1.85.1 grpcio-status==1.85.1 \
+        googleapis-common-protos==1.76.0 zstandard==0.25.0 \
     && chmod -R a+rX /opt/python311 \
-    && /opt/python311/bin/python3 -c "import sys, numpy, pandas, pyarrow; \
+    && /opt/python311/bin/python3 -c "import sys, numpy, pandas, pyarrow, yaml, grpc, grpc_status, google.protobuf, zstandard; \
         print('worker python', sys.version.split()[0], '| numpy', numpy.__version__, \
-              '| pandas', pandas.__version__, '| pyarrow', pyarrow.__version__)"
+              '| pandas', pandas.__version__, '| pyarrow', pyarrow.__version__, \
+              '| pyyaml', yaml.__version__, '| grpcio', grpc.__version__, \
+              '| zstandard', zstandard.__version__)"
 
 # Both the driver and the executors (same image) start their Python workers
 # through these. Set here, once, rather than in the ConfigMap: a pod that runs
