@@ -480,6 +480,51 @@ export type McpCall = {
 /** The answer of `GET /api/admin/mcp-audit`: the calls, newest first. */
 export type McpCalls = { calls: McpCall[] }
 
+/** A model endpoint an administrator connected (operator#609). No URL, no keyRef — by design. */
+export type ModelEndpoint = {
+  name: string
+  model: string
+  /** `on-premise` | `cloud`. */
+  location: string
+  purposes: string[]
+  sendRows: boolean
+  reachable?: boolean | null
+  toolCalling?: boolean | null
+  jsonOutput?: boolean | null
+  contextTokens?: number | null
+  checkedAt?: string | null
+  message?: string | null
+}
+
+/** The month's tokens for one group and endpoint (`GET /api/admin/model-usage`). */
+export type ModelUsageRow = {
+  group: string
+  endpoint: string
+  tokensIn: number
+  tokensOut: number
+  calls: number
+  /** Calls whose tokens were estimated from bytes (`ceil(bytes / 4)`). */
+  estimatedCalls: number
+}
+
+/** One recorded model call: sizes, durations and hashes, never the conversation. */
+export type ModelUsageCall = {
+  atMs: number
+  sub: string
+  group?: string
+  feature: string
+  endpoint: string
+  model: string
+  tokensIn: number
+  tokensOut: number
+  tokensEstimated: boolean
+  latencyMs: number
+  outcome: string
+}
+
+/** The answer of `GET /api/admin/model-usage`: the month's totals and the last calls. */
+export type ModelUsage = { month: string; groups: ModelUsageRow[]; calls: ModelUsageCall[] }
+
 /**
  * The body of `PUT /api/admin/catalogs/{name}/access` (stardelt-nova#253): the whole
  * `spec.owner`, `spec.managedAccess` and `spec.grants` of one `Catalog`, plus the
@@ -1633,6 +1678,17 @@ export const api = {
     if (p.tool) qs.set('tool', p.tool)
     return jget<McpCalls>(`/api/admin/mcp-audit${qs.size ? `?${qs}` : ''}`)
   },
+  /** The model endpoints an administrator connected, without their URL or key. */
+  modelEndpoints: () => jget<ModelEndpoint[]>('/api/model-endpoints'),
+  /** The month's tokens per group and endpoint, and the last calls (admins only). */
+  modelUsage: (p: { limit?: number; group?: string } = {}) => {
+    const qs = new URLSearchParams()
+    if (p.limit != null) qs.set('limit', String(p.limit))
+    if (p.group) qs.set('group', p.group)
+    return jget<ModelUsage>(`/api/admin/model-usage${qs.size ? `?${qs}` : ''}`)
+  },
+  /** Probe one endpoint now; 503 carries `Nova has no cluster connection`. */
+  probeModelEndpoint: (name: string) => jpost<ModelEndpoint>(`/api/model-endpoints/${seg(name)}/probe`, {}),
   /** Change one catalog's owner, managed access and grants (#253); the resource stays the source. */
   putCatalogAccess: (name: string, body: CatalogAccessUpdate) =>
     jput<AdminCatalog>(`/api/admin/catalogs/${seg(name)}/access`, body),

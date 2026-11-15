@@ -18,6 +18,7 @@ import QueryLog from './routes/QueryLog'
 import AppDetail from './routes/AppDetail'
 import AdminCatalogs from './routes/AdminCatalogs'
 import AgentCalls from './routes/AgentCalls'
+import Models from './routes/Models'
 import Lineage from './routes/Lineage'
 import Platform from './routes/Platform'
 import Dashboards from './routes/Dashboards'
@@ -52,6 +53,7 @@ export default function App() {
         <Route path="/platform"   element={<RequireAdmin><Platform  /></RequireAdmin>} />
         <Route path="/admin/catalogs" element={<RequireAdmin><AdminCatalogs /></RequireAdmin>} />
         <Route path="/admin/agent-calls" element={<RequireAdmin><AgentCalls /></RequireAdmin>} />
+        <Route path="/admin/models" element={<RequireAdmin><Models /></RequireAdmin>} />
         <Route path="/lineage"    element={<Lineage    />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/notebooks"  element={<Notebooks  />} />
