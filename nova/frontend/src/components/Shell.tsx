@@ -7,6 +7,7 @@ import { Icon } from './Icon'
 import { applyTheme, counterpart, themeLabel, useTheme } from '../theme'
 import { isAdmin } from '../roles'
 import { NAV_GROUPS } from '../nav'
+import AskPanel from './AskPanel'
 import CommandPalette from './CommandPalette'
 import ErrorBoundary from './ErrorBoundary'
 import StageBadge from './StageBadge'
@@ -155,6 +156,34 @@ export default function Shell() {
   const [navOpen, setNavOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   useEffect(() => { setNavOpen(false) }, [location.pathname])
+
+  // Ask is on when an endpoint may answer it: purpose `ask`, the probe found it
+  // reachable, and it answers in a JSON shape — the rule the backend applies to itself
+  // (`backend/src/ask.rs`, `ready_ask_endpoint`). Without one the button never shows.
+  const endpoints = useQuery({ queryKey: ['model-endpoints'], queryFn: api.modelEndpoints, staleTime: 60_000 })
+  // The endpoint list is an array or nothing; an answer that is neither leaves Ask off
+  // rather than taking the shell down with it.
+  const endpointRows = Array.isArray(endpoints.data) ? endpoints.data : []
+  const askEndpoint = endpointRows
+    .filter(e => e.purposes.includes('ask') && e.reachable === true && e.jsonOutput === true)
+    .sort((a, b) => a.name.localeCompare(b.name))[0]
+  const [askOpen, setAskOpen] = useState(false)
+  useEffect(() => { if (!askEndpoint) setAskOpen(false) }, [askEndpoint])
+
+  // ⌘J / Ctrl+J opens Ask — when an endpoint can answer it, and never from a field where
+  // the person is typing a question.
+  useEffect(() => {
+    if (!askEndpoint) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'j') return
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+      e.preventDefault()
+      setAskOpen(v => !v)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [askEndpoint])
 
   // ⌘K / Ctrl+K opens the page palette. The SQL editor owns Ctrl/⌘+Enter, so nothing
   // else is bound here.
@@ -364,6 +393,19 @@ export default function Shell() {
             />
           </form>
           <span className="md:hidden"><StageBadge me={me.data} /></span>
+          {askEndpoint && (
+            <button
+              type="button"
+              className="btn-ghost py-1.5 text-sm"
+              aria-label="Ask about your data"
+              aria-expanded={askOpen}
+              aria-controls="ask-panel"
+              onClick={() => setAskOpen(v => !v)}
+            >
+              <Icon name="spark" className="w-4 h-4" />
+              <span className="hidden sm:inline">Ask</span>
+            </button>
+          )}
           <AppSwitcher />
           <UserMenu me={me.data} />
           <button
@@ -376,32 +418,35 @@ export default function Shell() {
           </button>
         </header>
 
-        <main id="main" tabIndex={-1} className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 outline-none">
-          {me.data?.shared_account && (
-            <>
-              <div role="note" className="mb-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
-                Public demo: everyone signs in as this account and can see what you type and save. Everything is deleted every night at 03:00 UTC. Please do not enter personal data.
-              </div>
-              <p className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-dim">
-                <span>Like what you see? stardelt is free and open source.</span>
-                <a
-                  href="https://github.com/stardelt/stardelt"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-text hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                >
-                  <span aria-hidden="true">★</span> Star it on GitHub
-                </a>
-                <a href="https://stardelt.io/docs/getting-started/quickstart" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
-                  Install it yourself →
-                </a>
-              </p>
-            </>
-          )}
-          <ErrorBoundary key={location.pathname}>
-            <Outlet />
-          </ErrorBoundary>
-        </main>
+        <div className="flex flex-1 min-h-0">
+          <main id="main" tabIndex={-1} className="flex-1 min-h-0 min-w-0 overflow-auto p-3 sm:p-6 outline-none">
+            {me.data?.shared_account && (
+              <>
+                <div role="note" className="mb-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
+                  Public demo: everyone signs in as this account and can see what you type and save. Everything is deleted every night at 03:00 UTC. Please do not enter personal data.
+                </div>
+                <p className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-dim">
+                  <span>Like what you see? stardelt is free and open source.</span>
+                  <a
+                    href="https://github.com/stardelt/stardelt"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-text hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                  >
+                    <span aria-hidden="true">★</span> Star it on GitHub
+                  </a>
+                  <a href="https://stardelt.io/docs/getting-started/quickstart" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                    Install it yourself →
+                  </a>
+                </p>
+              </>
+            )}
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
+          </main>
+          {askOpen && askEndpoint && <AskPanel endpoint={askEndpoint} onClose={() => setAskOpen(false)} />}
+        </div>
       </div>
     </div>
   )

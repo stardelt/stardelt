@@ -503,6 +503,24 @@ export type ModelEndpoint = {
   perPersonDailyTokens?: number | null
 }
 
+/** One table an Ask answer was written for. */
+export type AskTable = { catalog: string; namespace: string; table: string }
+
+/** The answer of `POST /api/ask` (design #891 slice a). No rows ever, and the SQL is not run. */
+export type AskAnswer = {
+  endpoint: string
+  model: string
+  /** `null` when no table matched. */
+  sql: string | null
+  sentence: string
+  tables: AskTable[]
+  /** `passed`, `failed` or `not_run`. */
+  explain: string
+  error?: string | null
+  /** The `model_call` row the answer's last call wrote; the vote's target. */
+  callId?: number | null
+}
+
 /** The month's tokens for one group and endpoint (`GET /api/admin/model-usage`). */
 export type ModelUsageRow = {
   group: string
@@ -1240,6 +1258,20 @@ async function jdel(path: string): Promise<void> {
   }
 }
 
+/** A POST whose success is a `204` with no body (`jpost` reads JSON and would throw). */
+async function jpostNoContent(path: string, body: unknown): Promise<void> {
+  const r = await send(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  checkAuth(path, r)
+  if (!r.ok) {
+    console.debug('api', path, r.status)
+    throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
+  }
+}
+
 /** A POST whose success is `204` and carries no body (the share routes). */
 async function jsendNoContent(path: string, body: unknown): Promise<void> {
   const r = await send(path, {
@@ -1687,6 +1719,11 @@ export const api = {
   },
   /** The model endpoints an administrator connected, without their URL or key. */
   modelEndpoints: () => jget<ModelEndpoint[]>('/api/model-endpoints'),
+  /** A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform. */
+  ask:          (question: string)                => jpost<AskAnswer>('/api/ask', { question }),
+  /** 👍 or 👎 on one recorded call; the caller's own row only. */
+  askFeedback:  (callId: number, vote: 'up' | 'down') =>
+    jpostNoContent('/api/ask/feedback', { callId, vote }),
   /** The month's tokens per group and endpoint, and the last calls (admins only). */
   modelUsage: (p: { limit?: number; group?: string } = {}) => {
     const qs = new URLSearchParams()

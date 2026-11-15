@@ -13,17 +13,9 @@ import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
 import WarehouseNote from '../components/WarehouseNote'
 import { formatCount, sqlTableRef } from '../format'
-import { tokenizeSql, type SqlTokenKind } from '../sqlHighlight'
+import { tokenizeSql } from '../sqlHighlight'
 import { splitStatements, statementToRun } from '../sqlStatements'
-
-/** The colour each token kind carries in the editor overlay (#501 slice 2). */
-const TOKEN_CLASS: Record<SqlTokenKind, string> = {
-  keyword: 'text-accent',
-  string: 'text-ok',
-  comment: 'text-text-mute italic',
-  number: 'text-warn',
-  plain: 'text-text',
-}
+import { TOKEN_CLASS } from '../sqlTokens'
 
 const HISTORY_KEY = 'stardelt-nova:history'
 const HISTORY_LIMIT = 50
