@@ -120,6 +120,18 @@ class SyncOperatorChartTest(unittest.TestCase):
         self.assertIn("1 commit(s) behind origin/main", result.stderr)
         self.assertIn(first[:7], result.stderr)
 
+    def test_a_checkout_ahead_of_origin_main_is_named_truthfully(self):
+        first = self.make_git_chart()
+        self.git("update-ref", "refs/remotes/origin/main", first)
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com",
+                 "commit", "-q", "--allow-empty", "-m", "local work")
+        ahead = self.git("rev-parse", "HEAD")
+        result = self.run_script(DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("differs from origin/main", result.stderr)
+        self.assertIn(ahead[:7], result.stderr)
+        self.assertNotIn("0 commit(s) behind", result.stderr)
+
     def test_renders_the_chart_at_the_digest(self):
         result = self.run_script(DIGEST, "stardelt")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -39,7 +39,11 @@ if [ -n "$chart_rev" ]; then
   chart_main="$(git -C "$op_dir" rev-parse --short=7 origin/main 2>/dev/null || true)"
   if [ -n "$chart_main" ] && [ "$chart_rev" != "$chart_main" ]; then
     behind="$(git -C "$op_dir" rev-list --count "HEAD..origin/main" 2>/dev/null || true)"
-    echo "! $op_dir is ${behind:-?} commit(s) behind origin/main ($chart_rev vs $chart_main) — this is not the pinned build's chart (set OPERATOR_DIR, or: git -C $op_dir pull --ff-only)" >&2
+    if [ -n "$behind" ] && [ "$behind" -gt 0 ]; then
+      echo "! $op_dir is $behind commit(s) behind origin/main ($chart_rev vs $chart_main) — this is not the pinned build's chart (set OPERATOR_DIR, or: git -C $op_dir pull --ff-only)" >&2
+    else
+      echo "! $op_dir differs from origin/main ($chart_rev vs $chart_main) — this is not the pinned build's chart (set OPERATOR_DIR, or: check out the chart's origin/main)" >&2
+    fi
   fi
 fi
 if ! command -v helm >/dev/null 2>&1; then
