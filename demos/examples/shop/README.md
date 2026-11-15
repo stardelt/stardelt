@@ -6,19 +6,34 @@ and stores nothing large. Then it is an ordinary dbt data model, one layer per c
 
 | Layer | Catalog | What | Materialization |
 |---|---|---|---|
-| bronze | `bronze.shop` | the seeds `customers`, `products` and the generated `order_lines` | table |
-| silver | `silver.shop` | `stg_customers`, `stg_products`, `stg_order_lines` (clean names, types) | view |
-| gold | `gold.shop` | `daily_revenue` (incremental merge), `customer_ltv` (window functions: rank, cumulative share), `product_mix` (share of revenue, rank in category) | table / incremental |
+| bronze | `bronze.shop_dbt` | the seeds `customers`, `products` and the generated `order_lines` | table |
+| silver | `silver.shop_dbt` | `stg_customers`, `stg_products`, `stg_order_lines` (clean names, types) and `customers_snapshot` (history of segment and country) | view / snapshot |
+| gold | `gold.shop_dbt` | `daily_revenue` (incremental merge), `order_lines_enriched` (incremental append by day), `customer_ltv` (window functions: rank, cumulative share, enforced contract), `product_mix` (share of revenue, rank in category) | table / incremental |
 
-20 tests: unique, not null, relationships, accepted values, and two singular tests (revenue is never negative; the units of
-the marts equal the units of the lines).
+24 data tests: unique, not null, relationships, accepted values, the custom `is_positive` and two singular tests (revenue is
+never negative; the units of the marts equal the units of the lines), plus one unit test.
 
 ## Check it without a cluster
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install dbt-core dbt-trino
-make check DBT=.venv/bin/dbt      # dbt parse: 7 models, 2 seeds, 20 tests
+make check DBT=.venv/bin/dbt      # dbt parse: 8 models, 1 snapshot, 2 seeds, 24 tests, 1 unit test
+make inventory DBT=.venv/bin/dbt  # every resource by name: 35 in all
 ```
+
+## What the project shows
+
+- **Snapshot** `customers_snapshot` — `check` strategy on `segment` and `country`: a changed customer gets a second version.
+- **Incremental append** `order_lines_enriched` — each run adds only the days after the newest one already loaded.
+- **Incremental merge** `daily_revenue` — each run recomputes the last three days and merges them on the day.
+- **Contract** `customer_ltv` — `contract.enforced`, every column with its `data_type`, checked at build time.
+- **Generic test** `is_positive` in `tests/generic/` — used on the revenue and line-revenue columns.
+- **Singular tests** `revenue_is_not_negative` and `units_reconcile` — the marts agree with their inputs.
+- **Unit test** `customer_ltv_ranks_by_value` — fixed input rows, the expected rank per customer, no cluster table needed.
+- **Macro** `money` — one place that rounds money to cents and gives it the contract's `decimal(18, 2)`.
+- **Persisted docs** — descriptions of the marts and their columns are written into the Trino catalog (the platform's catalog shows them).
+- **Exposure** `shop_dashboard` — names the dashboard that reads the three marts.
+- **Tags** `load` (bronze and staging) and `marts` (gold and the snapshot) — `dbt build --select tag:marts` runs one layer.
 
 ## Run it on the platform
 
@@ -35,13 +50,13 @@ see below). `make demo SCALE=1000000 FULL=1` builds a million lines (`FULL=1` re
 recomputes only the last three days, so change the scale only together with `FULL=1`). Then look at the results:
 
 ```sql
-select * from gold.shop.daily_revenue order by order_date desc limit 7;
-select * from gold.shop.customer_ltv order by value_rank limit 10;
-select * from gold.shop.product_mix order by revenue desc limit 10;
+select * from gold.shop_dbt.daily_revenue order by order_date desc limit 7;
+select * from gold.shop_dbt.customer_ltv order by value_rank limit 10;
+select * from gold.shop_dbt.product_mix order by revenue desc limit 10;
 ```
 
 Run `make demo` a second time: `daily_revenue` is merged, not rebuilt. `make teardown` drops everything the example created
-(`bronze.shop`, `silver.shop`, `gold.shop`).
+(`bronze.shop_dbt`, `silver.shop_dbt`, `gold.shop_dbt`).
 
 ## Notes
 
