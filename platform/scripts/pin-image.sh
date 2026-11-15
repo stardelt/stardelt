@@ -312,6 +312,26 @@ if replaced:
 PYEOF
 fi
 
+# The catalogue is a live ConfigMap, not only a file: a SparkCluster reads
+# `configmap/stardelt-spark-runtimes` to choose its image, so a pin that writes the file
+# alone leaves every cluster on the image the ConfigMap was last applied with. Measured
+# 2026-11-15: the file said 759b73cb…, the lab's ConfigMap said 1acae614… six days later.
+# Render it exactly as `make install-spark` does (Makefile:619-621).
+if [ "$APP" = "spark" ] && [ "${WRITE_MANIFEST_ONLY:-0}" != "1" ] \
+   && kubectl -n "$NS" get configmap stardelt-spark-runtimes >/dev/null 2>&1; then
+  python3 - chart/files/spark-runtimes.json <<'PYEOF' | kubectl -n "$NS" apply -f - >/dev/null
+import json, sys
+data = json.load(open(sys.argv[1]))
+print(json.dumps({
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {"name": "stardelt-spark-runtimes"},
+    "data": {key: json.dumps(value) for key, value in data.items()},
+}))
+PYEOF
+  echo "› $NS/configmap stardelt-spark-runtimes: image set to …@${digest:0:19}…"
+fi
+
 if [ "${WRITE_MANIFEST:-1}" = "1" ] && [ "$APP" = "stardelt-operator" ] && [ -f "$manifest" ]; then
   python3 - "$manifest" "$digest" <<'PYEOF'
 import re, sys

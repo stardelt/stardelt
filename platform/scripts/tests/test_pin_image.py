@@ -12,6 +12,7 @@ other script tests use.
 """
 
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -57,6 +58,18 @@ if "get" in args and "deploy" in args:
     print(os.environ.get("FAKE_CONTAINER", "app"))
     sys.exit(0)
 
+if "get" in args and "configmap" in args:
+    print("configmap/stardelt-spark-runtimes")
+    sys.exit(0)
+
+if "apply" in args:
+    payload = sys.stdin.read()
+    if log:
+        with open(log, "a") as handle:
+            handle.write("apply " + payload.replace("\\n", " ") + "\\n")
+    print("configmap/stardelt-spark-runtimes created")
+    sys.exit(0)
+
 print("fake kubectl: unsupported: " + " ".join(args), file=sys.stderr)
 sys.exit(96)
 '''
@@ -93,8 +106,8 @@ class PinImageTest(unittest.TestCase):
             "        image: ghcr.io/stardelt/nova:dev@sha256:" + "00" * 32 + "\n"
         )
 
-    def run_pin(self, app="nova", current="", digest=DIGEST, missing=""):
-        env = dict(os.environ)
+    def run_pin(self, app="nova", current="", digest=DIGEST, missing="", env=None):
+        env = dict(os.environ, **(env or {}))
         env["PATH"] = str(self.bin) + os.pathsep + env["PATH"]
         env["FAKE_LOG"] = str(self.log)
         env["FAKE_DIGEST"] = digest
@@ -143,6 +156,64 @@ class PinImageTest(unittest.TestCase):
         proc = self.run_pin("nova", missing="nova")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("NotFound", proc.stderr)
+
+    def spark_fixtures(self):
+        """The two files a spark pin writes: the manifest and the runtime catalogue."""
+        zero = "00" * 32
+        manifest = self.work / "manifests" / "spark.yaml"
+        manifest.write_text(
+            "    containers:\n"
+            "      - name: app\n"
+            "        image: ghcr.io/stardelt/spark:dev@sha256:" + zero + "\n"
+            "        args:\n"
+            "          - spark.kubernetes.container.image "
+            "ghcr.io/stardelt/spark:dev@sha256:" + zero + "\n"
+        )
+        catalogue = self.work / "chart" / "files" / "spark-runtimes.json"
+        catalogue.parent.mkdir(parents=True, exist_ok=True)
+        catalogue.write_text(
+            '{"spark-4.1-py3.11": {"image": "ghcr.io/stardelt/spark:dev@sha256:'
+            + zero
+            + '"}}\n'
+        )
+        return manifest, catalogue
+
+    def apply_payloads(self):
+        return [
+            line[len("apply ") :]
+            for line in self.calls().splitlines()
+            if line.startswith("apply ")
+        ]
+
+    def test_a_spark_pin_applies_the_runtime_catalogue_configmap(self):
+        _, catalogue = self.spark_fixtures()
+        self.run_pin("spark", current="ghcr.io/stardelt/spark:dev@sha256:" + "00" * 32)
+        calls = self.calls()
+        self.assertIn("get configmap stardelt-spark-runtimes", calls)
+        payloads = self.apply_payloads()
+        self.assertEqual(len(payloads), 1, calls)
+        document = json.loads(payloads[0])
+        self.assertEqual(document["kind"], "ConfigMap")
+        self.assertEqual(document["metadata"]["name"], "stardelt-spark-runtimes")
+        self.assertTrue(
+            json.loads(document["data"]["spark-4.1-py3.11"])["image"].endswith(
+                "@" + DIGEST
+            )
+        )
+        # the cluster half comes after the file was written, not instead of it
+        self.assertIn(DIGEST, catalogue.read_text())
+        self.assertGreater(calls.index("apply "), calls.rindex("set image"))
+
+    def test_a_spark_pin_without_a_cluster_writes_no_configmap(self):
+        _, catalogue = self.spark_fixtures()
+        self.run_pin(
+            "spark",
+            current="ghcr.io/stardelt/spark:dev@sha256:" + "00" * 32,
+            env={"WRITE_MANIFEST_ONLY": "1"},
+        )
+        self.assertEqual(self.apply_payloads(), [], self.calls())
+        self.assertEqual(self.calls().count("get configmap"), 0, self.calls())
+        self.assertIn(DIGEST, catalogue.read_text())
 
 
 if __name__ == "__main__":
