@@ -9,9 +9,9 @@ use k8s_openapi::{
     api::{
         batch::v1::{CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec},
         core::v1::{
-            Capabilities, ConfigMap, Container, EnvVar, EnvVarSource, PodSecurityContext, PodSpec,
-            PodTemplateSpec, SeccompProfile, Secret, SecretKeySelector, SecretVolumeSource,
-            SecurityContext, Volume, VolumeMount,
+            Capabilities, ConfigMap, Container, EnvVar, EnvVarSource, Namespace,
+            PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, Secret,
+            SecretKeySelector, SecretVolumeSource, SecurityContext, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::apis::meta::v1::OwnerReference,
@@ -65,6 +65,50 @@ impl S3Keys {
             access_key: random_hex(10)?,
             secret_key: random_hex(20)?,
         })
+    }
+}
+
+/// The namespace the platform is installed into. Same floor as the platform repo's
+/// `manifests/namespace.yaml` (platform#1096 question 5): `baseline` is enforced, so no
+/// privileged, hostNetwork or hostPath pod; `restricted` is only warned and audited while
+/// the SeaweedFS pods and Lakekeeper's `opa` sidecar do not pass it (#1095).
+pub fn platform_namespace(name: &str) -> Namespace {
+    Namespace {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    "app.kubernetes.io/part-of".to_string(),
+                    "stardelt".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/enforce".to_string(),
+                    "baseline".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/enforce-version".to_string(),
+                    "latest".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/audit".to_string(),
+                    "restricted".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/audit-version".to_string(),
+                    "latest".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/warn".to_string(),
+                    "restricted".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/warn-version".to_string(),
+                    "latest".to_string(),
+                ),
+            ])),
+            ..Default::default()
+        },
+        ..Default::default()
     }
 }
 
@@ -844,6 +888,29 @@ mod tests {
             access_key: "AK".into(),
             secret_key: "SK".into(),
         }
+    }
+
+    #[test]
+    fn the_platform_namespace_carries_the_pod_security_floor() {
+        let ns = platform_namespace("lab");
+        assert_eq!(ns.metadata.name.as_deref(), Some("lab"));
+        let labels = ns.metadata.labels.expect("labels");
+        assert_eq!(
+            labels.get("app.kubernetes.io/part-of").map(String::as_str),
+            Some("stardelt")
+        );
+        for key in [
+            "pod-security.kubernetes.io/enforce",
+            "pod-security.kubernetes.io/enforce-version",
+            "pod-security.kubernetes.io/audit",
+            "pod-security.kubernetes.io/audit-version",
+            "pod-security.kubernetes.io/warn",
+            "pod-security.kubernetes.io/warn-version",
+        ] {
+            assert!(labels.contains_key(key), "missing {key}");
+        }
+        assert_eq!(labels["pod-security.kubernetes.io/enforce"], "baseline");
+        assert_eq!(labels["pod-security.kubernetes.io/warn"], "restricted");
     }
 
     #[test]

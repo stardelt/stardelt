@@ -50,13 +50,13 @@ use crate::provision::{
     ensure_archive, ensure_barman_cloud, ensure_bootstrap, ensure_catalog_database,
     ensure_catalog_principals, ensure_discovery, ensure_external_store, ensure_group_stores,
     ensure_identity, ensure_identity_secrets, ensure_ingress, ensure_kafka_broker, ensure_keycloak,
-    ensure_keycloak_pg, ensure_lakekeeper_network_policy, ensure_notebook_public_egress,
-    ensure_notebooks_bucket, ensure_nova, ensure_nova_events, ensure_nova_pg, ensure_nova_session,
-    ensure_openbao_init, ensure_openbao_seal_key, ensure_openfga_database,
-    ensure_openfga_network_policy, ensure_pg_dumps, ensure_pipeline_notebook_egress,
-    ensure_s3_secrets, ensure_seaweedfs_network_policy, ensure_secrets_mode, ensure_spark,
-    ensure_superset_group_roles, ensure_superset_rbac, ensure_superset_secrets,
-    ensure_trino_auth_secrets, ensure_trino_config_maps, ensure_trino_tls,
+    ensure_keycloak_pg, ensure_lakekeeper_network_policy, ensure_namespace,
+    ensure_notebook_public_egress, ensure_notebooks_bucket, ensure_nova, ensure_nova_events,
+    ensure_nova_pg, ensure_nova_session, ensure_openbao_init, ensure_openbao_seal_key,
+    ensure_openfga_database, ensure_openfga_network_policy, ensure_pg_dumps,
+    ensure_pipeline_notebook_egress, ensure_s3_secrets, ensure_seaweedfs_network_policy,
+    ensure_secrets_mode, ensure_spark, ensure_superset_group_roles, ensure_superset_rbac,
+    ensure_superset_secrets, ensure_trino_auth_secrets, ensure_trino_config_maps, ensure_trino_tls,
 };
 use crate::stop;
 use crate::values::{deep_merge, effective_values, identity_values, parse_values_document};
@@ -1568,6 +1568,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     // Prerequisites first (decision D17): the S3 Secrets and the catalog database.
     // Lakekeeper is installed only once its database is Ready, so `helm --wait`
     // never blocks on a database that does not exist yet.
+    let namespace_status = ensure_namespace(&ctx, &namespace, lh.spec.dry_run).await;
     let s3 = ensure_s3_secrets(&ctx, &lh, &namespace).await;
     let database = ensure_catalog_database(&ctx, &lh, &namespace).await;
     let database_ready = database.ready;
@@ -1590,6 +1591,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
         previous,
     )
     .await;
+    outcome.components.push(namespace_status);
     if !lh.spec.dry_run && !database_ready {
         outcome.components.push(ComponentStatus {
             name: "lakekeeper".into(),
@@ -1932,6 +1934,7 @@ async fn reconcile_platform(
         .map(|s| s.components.as_slice())
         .unwrap_or(&[]);
     // Airflow's Secrets come before its release: its pods read them when they start.
+    let namespace_status = ensure_namespace(&ctx, &namespace, instance.spec.dry_run).await;
     let airflow_secrets = ensure_airflow_secrets(&ctx, &instance.spec).await;
     // Superset's Secrets come before its release.
     let superset_secrets = ensure_superset_secrets(&ctx, &instance.spec).await;
@@ -1952,6 +1955,7 @@ async fn reconcile_platform(
         previous,
     )
     .await;
+    outcome.components.push(namespace_status);
     if let Some(contract) = secrets_mode {
         outcome.components.push(contract);
     }

@@ -9,7 +9,7 @@ use k8s_openapi::{
     api::{
         apps::v1::Deployment,
         batch::v1::Job,
-        core::v1::{ConfigMap, Secret, Service, ServiceAccount},
+        core::v1::{ConfigMap, Namespace, Secret, Service, ServiceAccount},
         networking::v1::{Ingress, NetworkPolicy},
         rbac::v1::{Role, RoleBinding},
     },
@@ -43,8 +43,8 @@ use crate::{
         barman_cloud_object_stores, bootstrap_job, bootstrap_job_name, catalog_cluster,
         catalog_pg_backup, discovery_config_map, discovery_config_map_name, keycloak_pg_backup,
         keycloak_pg_cluster, notebooks_bucket_job, notebooks_bucket_job_name, nova_pg_backup,
-        nova_pg_cluster, openfga_pg_backup, openfga_pg_cluster, s3_creds_secret, s3_endpoint,
-        seaweedfs_config_secret,
+        nova_pg_cluster, openfga_pg_backup, openfga_pg_cluster, platform_namespace,
+        s3_creds_secret, s3_endpoint, seaweedfs_config_secret,
     },
     secrets, spark, superset,
 };
@@ -217,6 +217,27 @@ fn bucket(lh: &Lakehouse) -> String {
         .bucket
         .clone()
         .unwrap_or_else(|| DEFAULT_BUCKET.to_string())
+}
+
+/// Creates the namespace the platform is installed into, with the Pod Security floor of
+/// the platform repo's `manifests/namespace.yaml` (platform#1096 question 5). An existing
+/// namespace is left alone: an administrator may have set a stricter level there.
+pub async fn ensure_namespace(ctx: &Context, namespace: &str, dry_run: bool) -> ComponentStatus {
+    const NAME: &str = "namespace";
+    let api: Api<Namespace> = Api::all(ctx.client.clone());
+    match api.get_opt(namespace).await {
+        Ok(Some(_)) => status(NAME, true, "present (labels left as they are)"),
+        Ok(None) if dry_run => status(
+            NAME,
+            false,
+            "planned (dry-run): would create the namespace with the Pod Security floor",
+        ),
+        Ok(None) => match apply_cluster(&ctx.client, &platform_namespace(namespace), false).await {
+            Ok(_) => status(NAME, true, "created with the Pod Security floor"),
+            Err(e) => status(NAME, false, e.to_string()),
+        },
+        Err(e) => status(NAME, false, e.to_string()),
+    }
 }
 
 /// `stardelt-s3-creds` and `seaweedfs-s3-config`: created only when absent, never
