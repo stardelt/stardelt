@@ -260,7 +260,7 @@ export type TableDocsUpdate = {
   guide?: string | null
 }
 
-/** One verified query: a question about a table that its owners answered (#1018). */
+/** One verified query: a question about a table that its owners answered (#1018, #912). */
 export type VerifiedQuery = {
   id: number
   question: string
@@ -1634,7 +1634,12 @@ export const api = {
     ),
   verifiedQueries: (ns: string, tbl: string, catalog?: string) =>
     jget<VerifiedQueryList>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog)),
-  createVerifiedQuery: (ns: string, tbl: string, body: { question: string; sql: string }, catalog?: string) =>
+  createVerifiedQuery: (
+    ns: string,
+    tbl: string,
+    body: { question: string; sql: string; expected?: unknown[][] },
+    catalog?: string,
+  ) =>
     jpost<VerifiedQuery>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog), body),
   deleteVerifiedQuery: (id: number) => jdel(`/api/verified-queries/${id}`),
   /** Run one verified query as the caller and compare it with its expected result (#912). */

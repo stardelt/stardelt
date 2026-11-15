@@ -148,6 +148,231 @@ function SaveQueryDialog({
   )
 }
 
+/** Most characters a question may carry; the API's own limit (#1018). */
+const MAX_QUESTION = 500
+/** Most characters the SQL may carry; the API's own limit (#1018). */
+const MAX_SQL = 20000
+/** Most rows the API keeps of an expected result (#912). */
+const MAX_EXPECTED_ROWS = 100
+
+/**
+ * Verify the statement at the cursor against the table it answers (design #911 slice 2c).
+ *
+ * The table is picked here instead of parsed out of the statement: a statement can join
+ * three tables, and a verified query belongs to the one whose owners keep it. The question
+ * is what a person asks; the statement is prefilled with the editor's selection. The rows
+ * the last run produced are offered as the expected answer when the API could keep them —
+ * a check (`#1019`) compares against exactly those.
+ */
+function VerifiedQueryDialog({
+  catalog,
+  sql,
+  result,
+  onClose,
+  onSaved,
+}: {
+  catalog?: string
+  /** The statement at the cursor, prefilled into the textarea. */
+  sql: string
+  /** The last run's result, offered as the expected answer. */
+  result: QueryResult | null
+  onClose: () => void
+  onSaved: (table: string) => void
+}) {
+  const ref = useRef<HTMLDialogElement>(null)
+  const opener = useRef<HTMLElement | null>(null)
+  const questionInput = useRef<HTMLInputElement>(null)
+  const id = useId()
+  const titleId = `${id}-title`
+  const qc = useQueryClient()
+  const catalogs = useCatalogs()
+  const catalogList = catalogs.data?.catalogs ?? []
+  // One catalog is no choice: the page's own `?catalog=` is the one the write lands in.
+  const manyCatalogs = catalogList.length > 1
+  const [pickedCatalog, setPickedCatalog] = useState('')
+  const effectiveCatalog = manyCatalogs
+    ? (pickedCatalog || catalog || catalogs.data?.default || catalogList[0]?.name || '')
+    : (catalog ?? '')
+  const tables = useQuery({
+    queryKey: ['catalog', 'all', effectiveCatalog || undefined],
+    queryFn: () => allTables(effectiveCatalog || undefined),
+  })
+  const tableList = tables.data ?? []
+  /** `${ns}.${name}` of the picked table; the list is the only source of the pair. */
+  const [table, setTable] = useState('')
+  const [question, setQuestion] = useState('')
+  const [statement, setStatement] = useState(sql)
+  const [useResult, setUseResult] = useState(false)
+  const rows = result?.rows ?? []
+  const resultUsable = rows.length > 0 && rows.length <= MAX_EXPECTED_ROWS
+  const target = tableList.find((t) => `${t.ns}.${t.name}` === table)
+  const blocked = target === undefined || question.trim() === '' || statement.trim() === ''
+
+  const create = useMutation({
+    mutationFn: (req: { target: TableRef; body: { question: string; sql: string; expected?: unknown[][] } }) =>
+      api.createVerifiedQuery(req.target.ns, req.target.name, req.body, effectiveCatalog || undefined),
+    onSuccess: (_, req) => {
+      void qc.invalidateQueries({ queryKey: ['verified-queries'] })
+      onSaved(effectiveCatalog ? `${effectiveCatalog}.${req.target.ns}.${req.target.name}` : `${req.target.ns}.${req.target.name}`)
+    },
+  })
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!dialog) return
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!dialog.open) dialog.showModal()
+    questionInput.current?.focus()
+    return () => {
+      if (dialog.open) dialog.close()
+      opener.current?.focus()
+    }
+  }, [])
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="m-auto w-[min(38rem,calc(100vw_-_2rem))] max-w-none rounded-[14px] border border-border bg-bg-elev p-0 text-text shadow-2xl backdrop:bg-black/60"
+    >
+      <div className="flex max-h-[85vh] flex-col">
+        <div className="px-5 pt-5">
+          <h2 id={titleId} className="text-lg font-semibold">Save as verified query</h2>
+          <p className="mt-1 text-xs text-text-mute">
+            The question this table answers, with the statement that answered it. The table's owners keep it.
+          </p>
+        </div>
+        <form
+          className="min-h-0 space-y-3 overflow-y-auto px-5 py-4 text-sm"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (blocked || create.isPending || !target) return
+            create.mutate({
+              target,
+              body: {
+                question: question.trim(),
+                sql: statement.trim(),
+                ...(useResult && resultUsable ? { expected: rows } : {}),
+              },
+            })
+          }}
+        >
+          {manyCatalogs && (
+            <label className="grid gap-1.5">
+              <span className="label">Catalog</span>
+              <select
+                value={effectiveCatalog}
+                onChange={(e) => {
+                  setPickedCatalog(e.target.value)
+                  setTable('')
+                }}
+                aria-label="Catalog"
+                className="w-full rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 text-sm text-text outline-hidden focus:border-accent/60"
+              >
+                {catalogList.map((c) => (
+                  <option key={c.name} value={c.name}>{c.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <label className="grid gap-1.5">
+            <span className="label">Table</span>
+            <select
+              value={table}
+              onChange={(e) => setTable(e.target.value)}
+              required
+              disabled={tables.isPending}
+              aria-label="Table"
+              className="w-full rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 text-sm text-text outline-hidden focus:border-accent/60 disabled:opacity-60"
+            >
+              <option value="">{tables.isPending ? 'Tables…' : 'Pick a table'}</option>
+              {tableList.map((t) => (
+                <option key={`${t.ns}.${t.name}`} value={`${t.ns}.${t.name}`}>{`${t.ns}.${t.name}`}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="grid gap-1.5">
+            <span className="label">Question</span>
+            <input
+              ref={questionInput}
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              maxLength={MAX_QUESTION}
+              required
+              aria-label="Question"
+              placeholder="What did revenue last month come to?"
+              className="w-full rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 text-sm text-text outline-hidden focus:border-accent/60"
+            />
+          </label>
+
+          <label className="grid gap-1.5">
+            <span className="label">Statement</span>
+            <textarea
+              value={statement}
+              onChange={(e) => setStatement(e.target.value)}
+              rows={8}
+              maxLength={MAX_SQL}
+              required
+              aria-label="Statement"
+              spellCheck={false}
+              className="w-full resize-y rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 font-mono text-xs text-text outline-hidden focus:border-accent/60"
+            />
+          </label>
+
+          <fieldset className="grid gap-1.5">
+            <legend className="label">Expected answer</legend>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name={`${id}-expected`}
+                checked={!useResult || !resultUsable}
+                onChange={() => setUseResult(false)}
+              />
+              <span>No expected answer</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name={`${id}-expected`}
+                checked={useResult && resultUsable}
+                disabled={!resultUsable}
+                onChange={() => setUseResult(true)}
+              />
+              <span>{`Use this run's result (${rows.length} ${rows.length === 1 ? 'row' : 'rows'})`}</span>
+            </label>
+            {!resultUsable && (
+              <p className="text-xs text-text-mute">
+                The API keeps at most 100 rows; run a statement that returns fewer.
+              </p>
+            )}
+          </fieldset>
+
+          {create.error != null && (
+            <div role="alert" className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
+              {errorMessage(create.error)}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-3">
+            <button type="submit" className="btn-primary py-1.5" disabled={blocked || create.isPending}>
+              {create.isPending ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" className="btn-ghost" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+  )
+}
+
 /**
  * Delete one saved query (`DELETE /api/saved-queries/{id}`). The confirmation names the
  * title, so a person can see which one goes; Cancel is focused first and Escape closes.
@@ -356,6 +581,8 @@ export default function Query() {
   const [scheduling, setScheduling] = useState(false)
   const [scheduled, setScheduled] = useState<{ name: string; namespace: string } | null>(null)
   const [scheduleSql, setScheduleSql] = useState('')
+  const [verifying, setVerifying] = useState(false)
+  const [verifySql, setVerifySql] = useState('')
   const saved = useQuery({ queryKey: ['saved-queries'], queryFn: () => api.savedQueries() })
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const [saving, setSaving] = useState(false)
@@ -586,6 +813,27 @@ export default function Query() {
               <Icon name="clock" className="w-4 h-4" />
               Schedule
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                const area = taRef.current
+                const t = statementToRun(sql, area ? area.selectionStart : sql.length, area ? area.selectionEnd : sql.length)
+                if ('error' in t) {
+                  setResult(null); setElapsed(null); setError(null); setHint(t.error)
+                  area?.focus() // the same refusal as Run, and the person's selection stays visible
+                  return
+                }
+                setVerifySql(t.statement.text)
+                setVerifying(true)
+              }}
+              disabled={empty}
+              title={empty ? 'Write a statement first' : undefined}
+              aria-label="Save as verified query"
+              className="btn-ghost py-1.5"
+            >
+              <Icon name="spark" className="w-4 h-4" />
+              Verify
+            </button>
             <div className="text-xs text-text-mute ml-auto">⌘/Ctrl+Enter runs the statement at the cursor</div>
             {/* The class the engine will schedule this statement into (#236): the same
                 line the Profile page shows. Nothing while the answer is on its way or the
@@ -815,6 +1063,19 @@ export default function Query() {
           onScheduled={(view) => {
             setScheduling(false)
             setScheduled({ name: view.name, namespace: view.namespace })
+          }}
+        />
+      )}
+
+      {verifying && (
+        <VerifiedQueryDialog
+          catalog={catalog}
+          sql={verifySql}
+          result={result}
+          onClose={() => setVerifying(false)}
+          onSaved={(table) => {
+            setVerifying(false)
+            setNotice({ text: `Saved — ${table} lists it under Verified queries.` })
           }}
         />
       )}
