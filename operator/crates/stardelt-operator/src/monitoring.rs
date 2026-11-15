@@ -125,7 +125,9 @@ pub fn podmonitors(namespace: &str, labels: &BTreeMap<String, String>) -> Vec<Dy
 }
 
 /// The starter alerts (#607 item 5). Every expression uses a series measured on the lab on
-/// 2026-11-12; an alert whose series does not exist stays inactive instead of failing.
+/// 2026-11-12; the four alerts that depend on an exporter an install may not run stay
+/// inactive when their series does not exist instead of failing, while the two about the
+/// operator itself also fire when their series is absent (`or absent(...)`).
 /// `runbook_url` points at the operations page that documents the endpoints.
 pub fn prometheus_rule(namespace: &str, labels: &BTreeMap<String, String>) -> DynamicObject {
     let labels = object_labels(labels);
@@ -153,7 +155,7 @@ pub fn prometheus_rule(namespace: &str, labels: &BTreeMap<String, String>) -> Dy
                 {
                     "alert": "StardeltMetricsTargetDown",
                     "expr": format!(
-                        "up{{namespace=\"{namespace}\"}} == 0"
+                        "up{{namespace=\"{namespace}\"}} == 0 or absent(up{{namespace=\"{namespace}\"}})"
                     ),
                     "for": "10m",
                     "labels": {"severity": "warning"},
@@ -165,7 +167,8 @@ pub fn prometheus_rule(namespace: &str, labels: &BTreeMap<String, String>) -> Dy
                 {
                     "alert": "StardeltOperatorNoLeader",
                     "expr": format!(
-                        "max by (namespace) (stardelt_operator_leader{{namespace=\"{namespace}\"}}) == 0"
+                        "max by (namespace) (stardelt_operator_leader{{namespace=\"{namespace}\"}}) == 0 \
+                         or absent(stardelt_operator_leader{{namespace=\"{namespace}\"}})"
                     ),
                     "for": "10m",
                     "labels": {"severity": "critical"},
@@ -462,6 +465,26 @@ mod tests {
                 "https://stardelt.io/docs/operations/monitoring/"
             );
         }
+        let no_leader = rules
+            .iter()
+            .find(|rule| rule["alert"] == "StardeltOperatorNoLeader")
+            .expect("rule");
+        assert!(
+            no_leader["expr"]
+                .as_str()
+                .unwrap()
+                .contains("or absent(stardelt_operator_leader{")
+        );
+        let target_down = rules
+            .iter()
+            .find(|rule| rule["alert"] == "StardeltMetricsTargetDown")
+            .expect("rule");
+        assert!(
+            target_down["expr"]
+                .as_str()
+                .unwrap()
+                .contains("or absent(up{")
+        );
     }
 
     #[test]
