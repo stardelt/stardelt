@@ -7,6 +7,7 @@
 #   ./scripts/pin-image.sh airflow           # the loader (`:demo`, airflow-api-server, three files)
 #   WRITE_MANIFEST_ONLY=1 ./scripts/pin-image.sh jupyter   # the notebook image, three files, no cluster
 #   ./scripts/pin-image.sh superset          # the BI image: two files, three live objects (web, worker, group-roles CronJob)
+#   SYNC_CHART=0 ./scripts/pin-image.sh stardelt-operator   # image + CRDs only, no helm render
 #
 # Why this exists: a moving tag is not an upgrade path. CI publishes `dev` on
 # every merge to main, but a node that already has layers for that tag can keep
@@ -451,4 +452,13 @@ if [ -n "$CRDS_DIR" ]; then
   else
     echo "  › no operator CRDs at $CRDS_DIR — the CRD schema was not updated (set OPERATOR_DIR)" >&2
   fi
+fi
+
+# The image and the CRDs are two of the operator's three halves; the third is the chart, and
+# only `helm upgrade` applies it (`make install-operator`). A chart-only fix was pinned, rolled
+# out and dark until a manual `helm upgrade` (operator#781's deletecollection rule, platform#1491).
+# The helper names the digest explicitly, so a `WRITE_MANIFEST=0` run cannot render the old tag.
+# `SYNC_CHART=0` keeps the old image+CRD path for a fast dev loop.
+if [ "$APP" = "stardelt-operator" ] && [ "${SYNC_CHART:-1}" = "1" ] && [ "${WRITE_MANIFEST_ONLY:-0}" != "1" ]; then
+  bash scripts/sync-operator-chart.sh "$digest" "$NS"
 fi
