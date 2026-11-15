@@ -43,7 +43,9 @@
 //!
 //! ## Limits and answers
 //!
-//! A description is trimmed and capped at 4,000 characters and must not contain a NUL; at
+//! A description is trimmed and capped at 4,000 characters and must not contain a NUL; a
+//! guide (the `stardelt.guide` property) is trimmed at its ends, capped at 16,000
+//! characters, keeps its line breaks and must not contain a NUL; at
 //! most 20 tags are allowed, each `^[a-z0-9][a-z0-9_-]{0,31}$` and unique; an owner is a
 //! group name ([`crate::connections::group_ok`]); a domain is
 //! `^[a-z0-9][a-z0-9_-]{0,39}$`. Validation happens before any request is sent. A key that
@@ -74,6 +76,8 @@ use crate::{AppState, audit, catalog};
 
 /// Most characters a description may hold, after trimming.
 pub const MAX_DESCRIPTION_CHARS: usize = 4000;
+/// Most characters a guide may hold, after trimming.
+pub const MAX_GUIDE_CHARS: usize = 16000;
 /// Most tags one table may carry.
 pub const MAX_TAGS: usize = 20;
 
@@ -99,6 +103,8 @@ pub struct TableDocumentation {
     pub owner: Option<String>,
     /// The `stardelt.domain` property, or `null`.
     pub domain: Option<String>,
+    /// The `stardelt.guide` property: how to use this table (joins, filters, definitions), or `null`.
+    pub guide: Option<String>,
     /// The fields of the **current** schema, in schema order.
     pub columns: Vec<ColumnDocumentation>,
     /// Whether the interim rule lets this caller edit (see the module docs).
@@ -142,6 +148,10 @@ pub struct DocumentationUpdate {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<String>)]
     pub domain: Option<Option<String>>,
+    /// New guide (`null` or blank removes it).
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub guide: Option<Option<String>>,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description` body.
@@ -480,6 +490,7 @@ fn documentation(
             .unwrap_or_default(),
         owner: owner.clone(),
         domain: property(&loaded.properties, "stardelt.domain"),
+        guide: property(&loaded.properties, "stardelt.guide"),
         columns: loaded
             .columns
             .iter()
@@ -581,6 +592,28 @@ fn checked_description(raw: Option<String>) -> Result<Option<String>, String> {
     Ok(Some(text.to_string()))
 }
 
+/// A guide as it is stored, or `None` when it should be removed. Trims only the ends — the
+/// line breaks of a plain-text or Markdown guide stay as written — caps the length and
+/// refuses a NUL.
+fn checked_guide(raw: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let text = raw.trim();
+    if text.chars().count() > MAX_GUIDE_CHARS {
+        return Err(format!(
+            "guide must be at most {MAX_GUIDE_CHARS} characters"
+        ));
+    }
+    if text.contains('\0') {
+        return Err("guide must not contain a NUL character".into());
+    }
+    if text.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(text.to_string()))
+}
+
 /// A tag: 1 to 32 lower-case ASCII letters, digits, `-` or `_`, starting with a letter or
 /// digit — `^[a-z0-9][a-z0-9_-]{0,31}$`.
 fn tag_ok(tag: &str) -> bool {
@@ -610,6 +643,7 @@ struct Requested {
     tags: Option<Option<Vec<String>>>,
     owner: Option<Option<String>>,
     domain: Option<Option<String>>,
+    guide: Option<Option<String>>,
 }
 
 fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
@@ -674,11 +708,16 @@ fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
             Some(Some(domain))
         }
     };
+    let guide = match req.guide {
+        None => None,
+        Some(raw) => Some(checked_guide(raw)?),
+    };
     Ok(Requested {
         description,
         tags,
         owner,
         domain,
+        guide,
     })
 }
 
@@ -824,6 +863,17 @@ async fn write_documentation(
                 set.insert("stardelt.domain".into(), domain.clone());
             }
             None => remove.push("stardelt.domain".into()),
+        }
+    }
+    if let Some(next) = &requested.guide
+        && next.as_deref() != current.guide.as_deref()
+    {
+        changed.push("guide");
+        match next {
+            Some(guide) => {
+                set.insert("stardelt.guide".into(), guide.clone());
+            }
+            None => remove.push("stardelt.guide".into()),
         }
     }
 
@@ -1017,7 +1067,7 @@ async fn catalog_or_error(
     operation_id = "table_documentation_get",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers the seeded table's documentation read-only (`canEdit` and `canRollback` are false).",
+    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain`/`stardelt.guide` custom properties, and the description and type of every column of the **current** schema. `stardelt.guide` is a guide in plain text or Markdown, at most 16000 characters: how to use the table. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers the seeded table's documentation read-only (`canEdit` and `canRollback` are false).",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1075,7 +1125,7 @@ pub async fn read(
     operation_id = "table_documentation_update",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
+    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1476,7 +1526,29 @@ mod tests {
             tags: tags.map(|t| t.map(|list| list.iter().map(|s| s.to_string()).collect())),
             owner: owner.map(|o| o.map(str::to_string)),
             domain: domain.map(|d| d.map(str::to_string)),
+            guide: None,
         }
+    }
+
+    /// A body whose only key is `guide`.
+    fn guide_body(guide: Option<Option<&str>>) -> DocumentationUpdate {
+        DocumentationUpdate {
+            description: None,
+            tags: None,
+            owner: None,
+            domain: None,
+            guide: guide.map(|g| g.map(str::to_string)),
+        }
+    }
+
+    /// The load fixture with a guide stored in `stardelt.guide`.
+    fn load_fixture_with_guide(guide: &str) -> Value {
+        let mut load = load_fixture();
+        load["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert("stardelt.guide".into(), json!(guide));
+        load
     }
 
     fn status_of(e: DocError) -> (StatusCode, String) {
@@ -2145,5 +2217,130 @@ mod tests {
         assert_eq!(doc.columns.len(), 10);
         assert!(doc.columns.iter().all(|c| c.description.is_none()));
         assert!(demo.documentation("nyc_taxi", "nope").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. The guide: the `stardelt.guide` property
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_guide_longer_than_the_cap_is_refused_before_any_request() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+        let long = "x".repeat(MAX_GUIDE_CHARS + 1);
+
+        let error = write_documentation(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            guide_body(Some(Some(long.as_str()))),
+        )
+        .await
+        .expect_err("16001 characters are too many");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), "guide must be at most 16000 characters");
+        assert_eq!(
+            fake.snapshot().1,
+            0,
+            "the refusal happened before the catalog saw a request"
+        );
+
+        // Exactly the cap is accepted.
+        let at_cap = "y".repeat(MAX_GUIDE_CHARS);
+        assert!(checked_guide(Some(at_cap)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_guide_keeps_its_line_breaks() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        write_documentation(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            guide_body(Some(Some(
+                "\nJoin on customer_id.\nDrop status = 'test'.\n",
+            ))),
+        )
+        .await
+        .expect("the guide is stored");
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(
+            commits[0]["updates"][0]["updates"]["stardelt.guide"],
+            json!("Join on customer_id.\nDrop status = 'test'."),
+            "only the ends are trimmed; the line breaks stay"
+        );
+        assert_eq!(
+            checked_guide(Some("a\nb\r\nc".into())),
+            Ok(Some("a\nb\r\nc".into())),
+            "a Markdown guide keeps every line break as written"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_removes_the_guide() {
+        let (fake, addr) = fake_catalog().await;
+        fake.set_load(load_fixture_with_guide("Read with the customer join."));
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        write_documentation(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            guide_body(Some(None)),
+        )
+        .await
+        .expect("the guide is removed");
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(
+            commits[0]["updates"],
+            json!([{ "action": "remove-properties", "removals": ["stardelt.guide"] }]),
+            "a null guide is a remove-properties of stardelt.guide"
+        );
+    }
+
+    #[tokio::test]
+    async fn documentation_reads_the_guide_from_the_properties() {
+        let (fake, addr) = fake_catalog().await;
+        fake.set_load(load_fixture_with_guide(
+            "Join `customer_id` to analytics.customers.",
+        ));
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
+            .await
+            .expect("the table loads");
+        assert_eq!(
+            doc.guide.as_deref(),
+            Some("Join `customer_id` to analytics.customers.")
+        );
+        let serialized = serde_json::to_value(&doc).expect("the answer serializes");
+        assert_eq!(
+            serialized["guide"],
+            json!("Join `customer_id` to analytics.customers."),
+            "the read answer carries the guide"
+        );
+
+        // A table without the property answers `null`.
+        fake.set_load(load_fixture());
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
+            .await
+            .expect("the table loads");
+        assert!(doc.guide.is_none());
     }
 }

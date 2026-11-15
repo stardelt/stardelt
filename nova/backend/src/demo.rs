@@ -342,6 +342,7 @@ impl DemoState {
             tags: tags.into_iter().map(str::to_string).collect(),
             owner: (!owner.is_empty()).then(|| owner.to_string()),
             domain: domain.map(str::to_string),
+            guide: None,
             columns: t
                 .columns
                 .iter()

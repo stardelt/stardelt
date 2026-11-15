@@ -1893,6 +1893,7 @@ mod tests {
             "tags": ["bronze", "taxi"],
             "owner": "mobility-analytics",
             "domain": "mobility",
+            "guide": "Join on trip_id; drop the cancelled rides.",
             "columns": [{ "name": "trip_id", "type": "bigint", "description": "The ride." }],
             "canEdit": false,
             "editRule": "Demo mode answers read-only.",
@@ -1909,10 +1910,15 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["columns", "description", "domain", "owner", "tags"]
+            vec!["columns", "description", "domain", "guide", "owner", "tags"]
         );
         assert_eq!(view["owner"], "mobility-analytics");
         assert_eq!(view["tags"], json!(["bronze", "taxi"]));
+        assert_eq!(
+            view["guide"],
+            json!("Join on trip_id; drop the cancelled rides."),
+            "the guide reaches the agent; only the page hints are dropped"
+        );
     }
 
     #[test]

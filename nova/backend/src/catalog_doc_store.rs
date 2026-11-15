@@ -242,6 +242,7 @@ mod tests {
             tags: vec!["finance".into(), "daily".into()],
             owner: Some("analytics".into()),
             domain: Some("Sales".into()),
+            guide: None,
             columns: Vec::new(),
             can_edit: false,
             edit_rule: String::new(),

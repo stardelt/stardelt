@@ -591,6 +591,7 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             owner: Some(owner.into()),
             domain: Some(domain.into()),
+            guide: None,
             columns: Vec::new(),
             can_edit: false,
             edit_rule: String::new(),
