@@ -81,13 +81,17 @@ const MAX_TOOL_TEXT_CHARS: usize = 20_000;
 /// `initialize` and `tools/list` never consume a slot: a session makes one of each.
 const CALLS_PER_MINUTE: usize = 60;
 
+/// Write calls one person may make per hour (`NOVA_MCP_WRITES_PER_HOUR`, default 20). The
+/// read tools keep the minute limit; a write costs compute and changes data.
+const WRITES_PER_HOUR: usize = 20;
+
 /// The per-person call limit (`AppState`-lifetime, shared by every cloned `McpConfig`): per
 /// signed-in `sub`, the `tools/call` instants inside the last minute. Only a restart forgets it.
 pub type CallsLimiter = Arc<Mutex<HashMap<String, VecDeque<Instant>>>>;
 
 /// The MCP resource's configuration (`NOVA_MCP_ENABLED`, `NOVA_MCP_AUDIENCE`,
 /// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`, `NOVA_MCP_ALLOWED_CLIENTS`,
-/// `NOVA_MCP_ALLOWED_GROUPS`, `NOVA_MCP_CALLS_PER_MINUTE`).
+/// `NOVA_MCP_ALLOWED_GROUPS`, `NOVA_MCP_CALLS_PER_MINUTE`, `NOVA_MCP_WRITES_PER_HOUR`).
 #[derive(Clone, Debug)]
 pub struct McpConfig {
     /// The resource identifier the IdP mints access tokens for: `https://<nova host>/mcp`.
@@ -108,6 +112,11 @@ pub struct McpConfig {
     pub calls_per_minute: usize,
     /// The call instants already taken, per `sub`; cloned configs share it.
     pub calls: CallsLimiter,
+    /// `tools/call`s of a write tool one person may make per hour
+    /// (`NOVA_MCP_WRITES_PER_HOUR`, default 20, 1..=600).
+    pub writes_per_hour: usize,
+    /// The write-call instants already taken, per `sub`; cloned configs share it.
+    pub writes: CallsLimiter,
 }
 
 impl McpConfig {
@@ -174,6 +183,10 @@ impl McpConfig {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .map(|n| n.clamp(1, 600))
             .unwrap_or(CALLS_PER_MINUTE);
+        let writes_per_hour = get("NOVA_MCP_WRITES_PER_HOUR")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.clamp(1, 600))
+            .unwrap_or(WRITES_PER_HOUR);
         Ok(Some(Self {
             audience,
             max_rows,
@@ -182,6 +195,8 @@ impl McpConfig {
             allowed_groups,
             calls_per_minute,
             calls: Arc::new(Mutex::new(HashMap::new())),
+            writes_per_hour,
+            writes: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
 }
@@ -386,7 +401,12 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         "tools/list" => rpc_result(id, json!({ "tools": tools() })),
         "tools/call" => {
-            if !take_call_slot(&cfg.calls, &principal.identity.sub, cfg.calls_per_minute) {
+            if !take_call_slot(
+                &cfg.calls,
+                &principal.identity.sub,
+                cfg.calls_per_minute,
+                std::time::Duration::from_secs(60),
+            ) {
                 tracing::info!(
                     target: "audit",
                     sub = %principal.identity.sub,
@@ -642,6 +662,35 @@ async fn call_tool(
     let required = required_scope(name);
     if !facts.scopes.iter().any(|s| s == required) {
         return insufficient_scope(required);
+    }
+    if required == WRITE_SCOPE
+        && !take_call_slot(
+            &cfg.writes,
+            &principal.identity.sub,
+            cfg.writes_per_hour,
+            std::time::Duration::from_secs(3600),
+        )
+    {
+        tracing::info!(
+            target: "audit",
+            sub = %principal.identity.sub,
+            client = facts.client_id.as_deref().unwrap_or(""),
+            tool = %name,
+            status = "rate_limited",
+            window_seconds = 3600i64,
+            "mcp write call"
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, HeaderValue::from_static("3600"))],
+            Json(json!({
+                "error": "too_many_requests",
+                "limit": cfg.writes_per_hour,
+                "window_seconds": 3600,
+                "scope": WRITE_SCOPE,
+            })),
+        )
+            .into_response();
     }
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let argument = |key: &str| {
@@ -1149,14 +1198,19 @@ fn agent_view(mut body: Value) -> Value {
     body
 }
 
-/// Take one `tools/call` slot for `sub`, or report that the last minute is full.
-fn take_call_slot(limiter: &CallsLimiter, sub: &str, limit: usize) -> bool {
+/// Take one `tools/call` slot for `sub` inside `window`, or report that the window is full.
+fn take_call_slot(
+    limiter: &CallsLimiter,
+    sub: &str,
+    limit: usize,
+    window: std::time::Duration,
+) -> bool {
     let mut map = limiter.lock().expect("mcp call limiter poisoned");
     let now = Instant::now();
     let slots = map.entry(sub.to_string()).or_default();
     while slots
         .front()
-        .is_some_and(|then| now.duration_since(*then) >= std::time::Duration::from_secs(60))
+        .is_some_and(|then| now.duration_since(*then) >= window)
     {
         slots.pop_front();
     }
@@ -1392,6 +1446,8 @@ mod tests {
                 allowed_groups: vec![],
                 calls_per_minute: CALLS_PER_MINUTE,
                 calls: Arc::new(Mutex::new(HashMap::new())),
+                writes_per_hour: WRITES_PER_HOUR,
+                writes: Arc::new(Mutex::new(HashMap::new())),
             });
         }
         let dir = crate::router_tests::StaticDir::new(tag);
@@ -1414,6 +1470,32 @@ mod tests {
             allowed_groups: vec![],
             calls_per_minute,
             calls: Arc::new(Mutex::new(HashMap::new())),
+            writes_per_hour: WRITES_PER_HOUR,
+            writes: Arc::new(Mutex::new(HashMap::new())),
+        });
+        let dir = crate::router_tests::StaticDir::new(tag);
+        let app = crate::app(state, crate::api_router(), dir.path());
+        (app, dir)
+    }
+
+    fn test_app_with_limits(
+        tag: &str,
+        calls_per_minute: usize,
+        writes_per_hour: usize,
+    ) -> (Router, crate::router_tests::StaticDir) {
+        let mut state = crate::router_tests::test_state();
+        let s = Arc::get_mut(&mut state).expect("a fresh state");
+        s.auth = Some(stub_auth());
+        s.mcp = Some(McpConfig {
+            audience: "stardelt-mcp".into(),
+            max_rows: 200,
+            query_timeout: std::time::Duration::from_secs(60),
+            allowed_clients: vec![],
+            allowed_groups: vec![],
+            calls_per_minute,
+            calls: Arc::new(Mutex::new(HashMap::new())),
+            writes_per_hour,
+            writes: Arc::new(Mutex::new(HashMap::new())),
         });
         let dir = crate::router_tests::StaticDir::new(tag);
         let app = crate::app(state, crate::api_router(), dir.path());
@@ -1435,6 +1517,8 @@ mod tests {
             allowed_groups,
             calls_per_minute: CALLS_PER_MINUTE,
             calls: Arc::new(Mutex::new(HashMap::new())),
+            writes_per_hour: WRITES_PER_HOUR,
+            writes: Arc::new(Mutex::new(HashMap::new())),
         });
         let dir = crate::router_tests::StaticDir::new(tag);
         let app = crate::app(state, crate::api_router(), dir.path());
@@ -1583,6 +1667,50 @@ mod tests {
         assert_eq!(body["error"], "too_many_requests");
         assert_eq!(body["limit"], 2);
         assert_eq!(body["window_seconds"], 60);
+    }
+
+    #[tokio::test]
+    async fn a_second_write_call_in_the_hour_is_429_but_reads_still_pass() {
+        let (app, _dir) = test_app_with_limits("mcp-write-limit", 60, 1);
+        let write = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"pipeline_start","arguments":{"pipeline":"stardelt/x","reason":"refresh gold"}}}"#;
+        // The first write takes the hour's only slot; it then fails for the absent cluster,
+        // which is fine: the slot was taken.
+        let first = send(app.clone(), authorized_with("writer", post(write))).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let body = json_body(first).await;
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        assert!(
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("no cluster connection")),
+            "{body}"
+        );
+
+        // A read in between still passes: the read tools keep the minute limit.
+        let read = send(
+            app.clone(),
+            authorized(post(
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"platform_status","arguments":{}}}"#,
+            )),
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::OK);
+
+        // The second write in the hour is refused before the tool runs.
+        let refused = send(app, authorized_with("writer", post(write))).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("3600")
+        );
+        let body = json_body(refused).await;
+        assert_eq!(body["error"], "too_many_requests");
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["window_seconds"], 3600);
+        assert_eq!(body["scope"], "stardelt:write");
     }
 
     #[tokio::test]
@@ -2088,6 +2216,7 @@ mod tests {
         // The defaults, when neither limit variable is set.
         assert_eq!(cfg.max_rows, 200);
         assert_eq!(cfg.query_timeout, std::time::Duration::from_secs(60));
+        assert_eq!(cfg.writes_per_hour, 20);
 
         // Explicit values are read, and clamped to 1..=1000 rows and 1..=300 seconds.
         let cfg = McpConfig::from_lookup(
@@ -2149,6 +2278,26 @@ mod tests {
         .expect("a configuration")
         .expect("enabled");
         assert_eq!(cfg.allowed_groups, vec!["agents", "data-eng"]);
+
+        // The write budget: 20 an hour by default, 0 becomes 1, 9999 becomes 600.
+        let write_budget = |value: Option<&str>| {
+            McpConfig::from_lookup(
+                |k| match k {
+                    "NOVA_MCP_ENABLED" => Some("true".to_string()),
+                    "NOVA_MCP_AUDIENCE" => Some("https://nova.example.com/mcp".to_string()),
+                    "NOVA_MCP_WRITES_PER_HOUR" => value.map(str::to_string),
+                    _ => None,
+                },
+                true,
+            )
+            .expect("a configuration")
+            .expect("enabled")
+            .writes_per_hour
+        };
+        assert_eq!(write_budget(None), 20);
+        assert_eq!(write_budget(Some("0")), 1);
+        assert_eq!(write_budget(Some("9999")), 600);
+        assert_eq!(write_budget(Some("5")), 5);
     }
 
     #[test]
