@@ -6,7 +6,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/pipelines', '/runs', '/deployments', '/queries',
-  '/platform', '/admin/catalogs', '/admin/agent-calls', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
+  '/platform', '/admin/catalogs', '/admin/agent-calls', '/admin/models', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -54,6 +54,40 @@ test.describe('every page, every variant', () => {
           if (r.status() === 500 && r.url().includes('/api/'))
             found.push({ rule: 'U12', detail: `500 from ${new URL(r.url()).pathname}` })
         })
+        // The Models page is the one route whose content the no-cluster backend cannot answer:
+        // its two lists are a 503 there, and the warning and quota colours U7 checks need rows.
+        if (route === '/admin/models') {
+          await page.route('**/api/model-endpoints', (r) =>
+            json(r, [
+              {
+                name: 'frontier', model: 'frontier-1', location: 'cloud', purposes: ['ask'],
+                sendRows: false, reachable: true, toolCalling: true, jsonOutput: true,
+                contextTokens: 32768, checkedAt: '2026-11-15T08:00:00Z', message: 'ok',
+                perGroupMonthlyTokens: 2_000_000, perPersonDailyTokens: null,
+              },
+              {
+                name: 'local', model: 'qwen3-4b', location: 'on-premise', purposes: ['ask'],
+                sendRows: false, reachable: null, toolCalling: null, jsonOutput: null,
+                contextTokens: null, checkedAt: null, message: null,
+                perGroupMonthlyTokens: null, perPersonDailyTokens: null,
+              },
+            ]))
+          await page.route('**/api/admin/model-usage**', (r) =>
+            json(r, {
+              month: '2026-11',
+              groups: [
+                { group: 'shop', endpoint: 'frontier', tokensIn: 1_200_000, tokensOut: 844_775, calls: 41, estimatedCalls: 0 },
+                { group: 'shop', endpoint: 'local', tokensIn: 900, tokensOut: 120, calls: 2, estimatedCalls: 0 },
+              ],
+              calls: [
+                {
+                  atMs: 1_700_000_000_000, sub: 'alice', group: 'shop', feature: 'ask',
+                  endpoint: 'frontier', model: 'frontier-1', tokensIn: 1200, tokensOut: 180,
+                  tokensEstimated: false, latencyMs: 900, outcome: 'ok',
+                },
+              ],
+            }))
+        }
         await page.goto(route)
         // U11: the answer (data or an error) is on screen within 6 s; "loading" never stays.
         await page.waitForFunction(() => !/loading/i.test(document.body.innerText), null, { timeout: 6000 })
