@@ -224,6 +224,8 @@ class NotebookPodOperator(KubernetesPodOperator):
             labels={
                 "app.kubernetes.io/name": "pipeline-notebook",
                 "stardelt.io/pipeline": pipeline,
+                # The owner group's label: its SparkCluster admits it (stardelt-platform#1425).
+                f"stardelt.io/group.{_segment(owner_group, 'owner group')}": "true",
             },
             security_context=k8s.V1PodSecurityContext(
                 run_as_non_root=True,

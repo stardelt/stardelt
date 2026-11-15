@@ -242,3 +242,20 @@ def test_the_pod_carries_the_connections_values(monkeypatch):
         assert by_name[name].value_from.secret_key_ref.key == key
     # A connection adds to the environment the pod already had; it replaces nothing.
     assert by_name["PIPELINE_CLIENT_ID"].value_from.secret_key_ref.name == "sp-p"
+
+
+def test_the_pod_carries_the_owner_groups_label():
+    """A group's `SparkCluster` admits pods labelled for that group (stardelt-platform#1425)."""
+    pytest.importorskip(PROVIDER)
+    labels = operator(owner_group="shop").labels
+    assert labels["stardelt.io/group.shop"] == "true"
+    # The labels the pod already carried are still there, unchanged.
+    assert labels["app.kubernetes.io/name"] == "pipeline-notebook"
+    assert labels["stardelt.io/pipeline"] == "nbtest"
+    assert len(labels) == 3
+
+
+def test_an_invalid_owner_group_never_becomes_a_label():
+    pytest.importorskip(PROVIDER)
+    with pytest.raises(ValueError, match="owner group"):
+        operator(owner_group="shop/other")
