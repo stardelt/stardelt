@@ -106,7 +106,7 @@ async function stub(
         rows.unshift(row)
         return json(r, row, 201)
       }
-      return json(r, { items: rows })
+      return json(r, rows)
     }
     if (path.startsWith('/api/verified-queries/') && path.endsWith('/check') && method === 'POST') {
       const id = Number(path.split('/')[3])

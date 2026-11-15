@@ -276,7 +276,6 @@ export type VerifiedQuery = {
   /** What the last check found, in one sentence, or `null` when it never ran (#912). */
   lastCheckMessage?: string | null
 }
-export type VerifiedQueryList = { items: VerifiedQuery[] }
 
 export type QueryColumn = { name: string; type: string }
 export type QueryResult = {
@@ -1650,7 +1649,7 @@ export const api = {
       { description },
     ),
   verifiedQueries: (ns: string, tbl: string, catalog?: string) =>
-    jget<VerifiedQueryList>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog)),
+    jget<VerifiedQuery[]>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog)),
   createVerifiedQuery: (
     ns: string,
     tbl: string,

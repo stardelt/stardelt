@@ -66,7 +66,7 @@ export default function VerifiedQueries({
   /** The totals of the last "Check all", or `null` before there was one. */
   const [bulk, setBulk] = useState<{ checked: number; passed: number; failed: number } | null>(null)
 
-  const items = list.data?.items ?? []
+  const items = list.data ?? []
 
   // A failed or unfinished list is not the card's business: render nothing rather than an
   // error, so a backend that does not answer this path leaves every screen as it was.
