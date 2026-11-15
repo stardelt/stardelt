@@ -157,13 +157,12 @@ another cluster rename it and set `serverName` to the folder in the bucket (whic
 does not follow the restored Cluster's name):
 
 ```sh
-kubectl create namespace stardelt-restore
-kubectl -n stardelt get secret stardelt-s3-creds -o json \
-  | jq 'del(.metadata.namespace,.metadata.uid,.metadata.resourceVersion,
-            .metadata.creationTimestamp,.metadata.managedFields)' \
-  | kubectl -n stardelt-restore apply -f -
-kubectl -n stardelt-restore apply -f manifests/cnpg-restore-proof.yaml
+make verify-restore
 ```
+
+It restores from the plugin's object store (`lakekeeper-pg-backups`), checks that
+the `lakekeeper` database has tables, and deletes the namespace again (`KEEP=1`
+keeps it).
 
 **Superset and Airflow** (logical dumps): run the CronJob once, read the key it
 printed, and restore that object. The job prints `name`, `size` and `key` — never
