@@ -154,6 +154,7 @@ mod statements;
 mod streams;
 mod trino;
 mod user_settings;
+mod verified_queries;
 mod warehouses;
 mod workspace;
 
@@ -713,6 +714,12 @@ fn api_router() -> Router<Arc<AppState>> {
             "/catalog/tables/{ns}/{tbl}/documentation",
             get(catalog_docs::read).put(catalog_docs::update),
         )
+        // A question and its trusted SQL, kept per table by its owners (#911 slice 2a).
+        .route(
+            "/catalog/tables/{ns}/{tbl}/verified-queries",
+            get(verified_queries::list).post(verified_queries::create),
+        )
+        .route("/verified-queries/{id}", delete(verified_queries::delete))
         .route(
             "/catalog/tables/{ns}/{tbl}/columns/{column}/description",
             put(catalog_docs::update_column),
@@ -1694,6 +1701,52 @@ mod router_tests {
             .unwrap();
         let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, value)
+    }
+
+    /// A verified query is checked before the state store is consulted, so an installation
+    /// without a database still refuses a write: a good body says the store is missing, and
+    /// a statement that is not a read says why, in the classifier's own sentence.
+    #[tokio::test]
+    async fn verified_queries_validate_before_the_state_store() {
+        let (app, _dir) = test_app("verified-503");
+        let uri = "/api/catalog/tables/sales/orders/verified-queries";
+        let (status, body) = call(
+            &app,
+            "POST",
+            uri,
+            Some(r#"{"question":"Revenue last month, net of returns?","sql":"select 1"}"#),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({"error": "this needs Nova's database, and this installation has none; ask your administrator"})
+            )
+        );
+        let (status, body) = call(
+            &app,
+            "POST",
+            uri,
+            Some(r#"{"question":"q","sql":"DELETE FROM x"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            serde_json::json!(
+                crate::mcp::classify("DELETE FROM x", false).expect_err("a write is refused")
+            )
+        );
+        // The delete route is wired, and a path that cannot be an id is the plain 404.
+        let (status, body) = call(&app, "DELETE", "/api/verified-queries/abc", None).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "not found"})
+            )
+        );
     }
 
     /// Without `NOVA_DATABASE_URL` the saved-query routes say so, in JSON; a path that

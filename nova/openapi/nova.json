@@ -1988,6 +1988,219 @@
         }
       }
     },
+    "/api/catalog/tables/{ns}/{tbl}/verified-queries": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/catalog/tables/{ns}/{tbl}/verified-queries` — the table's, newest first.",
+        "description": "The verified queries of one table: questions its owners answered with one read-only statement, who verified each and when. Newest first, at most 50. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
+        "operationId": "verified_queries_list",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table's verified queries, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VerifiedQuery"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is not a single path segment, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/catalog/tables/{ns}/{tbl}/verified-queries` — `201` with the stored row.",
+        "description": "Verify one answer to a question about this table: the question (at most 500 characters) and one read-only statement (at most 20 000). Only the owner group of the table and administrators may add one; the caller is recorded as `verifiedBy`. The statement is checked, never run. `?catalog=` picks the catalog.",
+        "operationId": "verified_queries_create",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewVerifiedQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifiedQuery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The question or the SQL is empty or too long, the catalog name is invalid, or the statement is not one read-only statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog, or only the owner group and administrators may verify a query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/warehouse": {
       "get": {
         "tags": [
@@ -8270,6 +8483,73 @@
         }
       }
     },
+    "/api/verified-queries/{id}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/verified-queries/{id}` — `204`; `404` when the id is not a row.",
+        "description": "Remove one verified query. Only the owner group of its table and administrators may delete it.",
+        "operationId": "verified_queries_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The verified query's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "403": {
+            "description": "Only the owner group and administrators may delete a verified query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such verified query, or the id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -11279,6 +11559,24 @@
           "principalCreated": {
             "type": "boolean",
             "description": "False when the principal already existed for another team of the same group."
+          }
+        }
+      },
+      "NewVerifiedQuery": {
+        "type": "object",
+        "description": "`POST /api/catalog/tables/{ns}/{tbl}/verified-queries` body.",
+        "required": [
+          "question",
+          "sql"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The question, at most 500 characters."
+          },
+          "sql": {
+            "type": "string",
+            "description": "One read-only statement, at most 20 000 characters."
           }
         }
       },
@@ -14477,6 +14775,39 @@
         "properties": {
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "VerifiedQuery": {
+        "type": "object",
+        "description": "A row as the API returns it. `verified_at` is RFC 3339 in UTC.",
+        "required": [
+          "id",
+          "question",
+          "sql",
+          "verifiedBy",
+          "verifiedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "question": {
+            "type": "string",
+            "description": "The question a person asks, in words."
+          },
+          "sql": {
+            "type": "string",
+            "description": "The one read-only statement that answers it."
+          },
+          "verifiedAt": {
+            "type": "string",
+            "description": "When it was verified, RFC 3339."
+          },
+          "verifiedBy": {
+            "type": "string",
+            "description": "The `sub` of the person who verified it."
           }
         }
       },

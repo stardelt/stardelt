@@ -1026,7 +1026,7 @@ pub fn caller_identity(state: &AppState, caller: Option<&Principal>) -> Identity
     }
 }
 
-fn demo_unavailable() -> Response {
+pub(crate) fn demo_unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({ "error": "not available in demo mode" })),
@@ -1099,24 +1099,39 @@ pub async fn read(
         };
     }
     let caller = caller.as_ref().map(|c| &c.0);
-    let who = caller_identity(&s, caller);
-    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
-        Ok(scope) => scope,
-        Err(response) => return response,
-    };
-    let (base, authorization) = match catalog_or_error(&s, &id).await {
-        Ok(v) => v,
-        Err(response) => return *response,
-    };
-    let catalog = Catalog {
+    match documentation_for(&s, caller, q.catalog.as_deref(), &ns, &tbl).await {
+        Ok((_catalog, doc)) => Json(doc).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// The documentation of one table, resolved for `caller`: the catalog **name** it was read
+/// from and the documentation itself.
+///
+/// Shared with the routes that need the same visibility and the same owner rule without
+/// repeating them (`verified_queries.rs`): a table the caller cannot see answers exactly
+/// what `read` answers. Demo mode is not handled here; a caller that serves demo data
+/// answers it before calling this.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn documentation_for(
+    s: &Arc<AppState>,
+    caller: Option<&Principal>,
+    catalog: Option<&str>,
+    ns: &str,
+    tbl: &str,
+) -> Result<(String, TableDocumentation), Response> {
+    let who = caller_identity(s, caller);
+    let (name, id) = crate::catalog::catalog_scope(s, caller, catalog).await?;
+    let (base, authorization) = catalog_or_error(s, &id).await.map_err(|e| *e)?;
+    let client = Catalog {
         http: &s.http,
         base,
         authorization: authorization.as_deref(),
         name: &name,
     };
-    match read_documentation(&s, &catalog, &who, &ns, &tbl).await {
-        Ok(doc) => Json(doc).into_response(),
-        Err(e) => e.into_response(),
+    match read_documentation(s, &client, &who, ns, tbl).await {
+        Ok(doc) => Ok((name, doc)),
+        Err(e) => Err(e.into_response()),
     }
 }
 
