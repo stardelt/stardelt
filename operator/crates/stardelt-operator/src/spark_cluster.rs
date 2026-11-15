@@ -137,13 +137,6 @@ pub fn spark_connect(
         "spark.kubernetes.namespace".to_string(),
         namespace.to_string(),
     );
-    // The executors run user code and keep the runtime's token-less ServiceAccount
-    // (platform#1096); the driver creates the executor pods (operator#773).
-    spark_conf.insert(
-        "spark.kubernetes.authenticate.executor.serviceAccountName".to_string(),
-        runtime.service_account.clone(),
-    );
-
     let image = spec.image.clone().unwrap_or_else(|| runtime.image.clone());
 
     Ok(DynamicObject {
@@ -187,6 +180,11 @@ pub fn spark_connect(
                     "instances": 0,
                     "template": {
                         "spec": {
+                            // The executors run user code and keep the runtime's token-less
+                            // ServiceAccount (platform#1096); the driver creates the executor
+                            // pods (operator#773). The Spark operator's webhook refuses this
+                            // identity inside sparkConf, so it belongs in this template.
+                            "serviceAccountName": runtime.service_account.clone(),
                             "containers": [{
                                 "name": "spark-kubernetes-executor",
                                 "env": env,
@@ -1154,10 +1152,16 @@ mod tests {
             Some(&json!("spark-cluster-driver"))
         );
         assert_eq!(
+            object
+                .data
+                .pointer("/spec/executor/template/spec/serviceAccountName"),
+            Some(&json!("spark-runtime"))
+        );
+        assert_eq!(
             object.data.pointer(
                 "/spec/sparkConf/spark.kubernetes.authenticate.executor.serviceAccountName"
             ),
-            Some(&json!("spark-runtime"))
+            None
         );
     }
 
