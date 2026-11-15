@@ -98,6 +98,7 @@ mod admin_catalogs;
 mod airflow;
 mod api_json;
 mod apps;
+mod ask;
 mod audit;
 mod auth;
 mod catalog;
@@ -687,6 +688,9 @@ fn api_router() -> Router<Arc<AppState>> {
         // The model endpoints an administrator connected (operator#609 slice c): Ask reads
         // whether one exists, where prompts go and what the probe last found.
         .route("/model-endpoints", get(model_endpoints::list))
+        // A question in words, one checked SQL statement out (nova#891, Ask slice a): the
+        // model receives the question and table documentation, never rows.
+        .route("/ask", post(ask::ask))
         // The Spark clusters a person may use (internal#161 slice 5a): the operator translates
         // a SparkCluster into the Spark server, Nova only lists it and sets `spec.state`.
         .route("/compute", get(compute::list))

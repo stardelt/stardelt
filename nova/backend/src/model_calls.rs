@@ -160,8 +160,6 @@ pub(crate) struct Quota {
 }
 
 /// Read `spec.quota` from a `ModelEndpoint` object as the API server returns it.
-// called by the Ask endpoint (nova#891) and the agent proxy (slice 3); remove the allow there
-#[allow(dead_code)]
 pub(crate) fn quota_of(object: &Value) -> Quota {
     let quota = object.pointer("/spec/quota").unwrap_or(&Value::Null);
     Quota {
@@ -222,8 +220,6 @@ async fn person_tokens(pool: &PgPool, sub: &str) -> sqlx::Result<i64> {
 ///
 /// A database error is **not** a refusal: it is logged and the call goes through, the same
 /// rule [`record`] follows — a broken audit table must not stop the product.
-// called by the Ask endpoint (nova#891) and the agent proxy (slice 3); remove the allow there
-#[allow(dead_code)]
 pub(crate) async fn check(
     pool: &PgPool,
     quota: &Quota,
@@ -266,8 +262,6 @@ pub(crate) async fn check(
 }
 
 /// The 429 answer: the sentence in `message`, plus the numbers, so the UI needs no second call.
-// called by the Ask endpoint (nova#891) and the agent proxy (slice 3); remove the allow there
-#[allow(dead_code)]
 pub(crate) fn refuse(refusal: &Refusal) -> Response {
     let body = json!({
         "error": "model_budget_exceeded",

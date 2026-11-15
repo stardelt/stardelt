@@ -718,6 +718,88 @@
         }
       }
     },
+    "/api/ask": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/ask` — a question in, checked SQL out.",
+        "description": "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables, sends the question and **the documentation of those tables only** — description, tags, owner, domain, column names and their descriptions — to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+        "operationId": "ask_answer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The statement, its sentence, the tables it was written for and the `EXPLAIN` result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskAnswer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The question is empty or longer than 2000 characters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The person's or their group's model budget is spent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog, the cluster or the model endpoint did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No state store, no cluster connection, no HTTP client, or no ready `ask` endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/config": {
       "get": {
         "tags": [
@@ -8678,6 +8760,87 @@
           "planId": {
             "type": "string",
             "description": "The `planId` a plan answered with."
+          }
+        }
+      },
+      "AskAnswer": {
+        "type": "object",
+        "description": "What Ask answers: the statement, the sentence, the tables it chose from and the check.",
+        "required": [
+          "endpoint",
+          "model",
+          "sentence",
+          "tables",
+          "explain"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "The `ModelEndpoint` that answered — never its URL."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the `EXPLAIN` check failed, when it did."
+          },
+          "explain": {
+            "type": "string",
+            "description": "`passed`, `failed` or `not_run`"
+          },
+          "model": {
+            "type": "string"
+          },
+          "sentence": {
+            "type": "string",
+            "description": "One sentence saying what the statement answers, or why there is none."
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The statement; `null` when no table matched, kept when the check failed."
+          },
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AskTable"
+            }
+          }
+        }
+      },
+      "AskRequest": {
+        "type": "object",
+        "description": "`POST /api/ask` body.",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The question, in words, 1 to 2000 characters."
+          }
+        }
+      },
+      "AskTable": {
+        "type": "object",
+        "description": "One table the model was given.",
+        "required": [
+          "catalog",
+          "namespace",
+          "table"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
           }
         }
       },

@@ -770,10 +770,10 @@ async fn call_tool(
             let limit = asked.unwrap_or(cfg.max_rows).clamp(1, cfg.max_rows);
             match run_statement(
                 state,
-                cfg,
-                principal,
+                Some(principal),
                 &statement,
                 limit,
+                cfg.query_timeout,
                 name,
                 facts.client_id.as_deref(),
             )
@@ -1032,13 +1032,16 @@ fn client_tags(tool: &str, client: Option<&str>) -> String {
     }
 }
 
-/// `sql_read`/`sql_explain`: one statement, as the caller, with the row cap and the timeout.
-async fn run_statement(
+/// `sql_read`/`sql_explain`, and Ask's `EXPLAIN`: one statement, as the caller, with the row
+/// cap and the timeout. `principal` is `None` in dev mode, where there is nobody to run as.
+///
+/// Called by Ask (nova#891) too, so it is `pub(crate)`: the shared slice of the MCP tools.
+pub(crate) async fn run_statement(
     state: &Arc<AppState>,
-    cfg: &McpConfig,
-    principal: &Principal,
+    principal: Option<&Principal>,
     statement: &str,
     max_rows: usize,
+    timeout: std::time::Duration,
     tool: &str,
     client: Option<&str>,
 ) -> Result<crate::trino::QueryResult, String> {
@@ -1048,14 +1051,14 @@ async fn run_statement(
     let run = crate::trino::execute_from_tagged(
         state,
         statement.to_string(),
-        Some(principal),
+        principal,
         "stardelt-mcp",
         &tags,
     );
-    match tokio::time::timeout(cfg.query_timeout, run).await {
+    match tokio::time::timeout(timeout, run).await {
         Err(_) => Err(format!(
             "the statement did not finish in {} seconds and was cancelled; aggregate or add a LIMIT",
-            cfg.query_timeout.as_secs()
+            timeout.as_secs()
         )),
         Ok(Err(e)) => Err(e),
         Ok(Ok(mut result)) => {
@@ -1128,7 +1131,9 @@ fn strip_comments(sql: &str) -> (String, bool) {
 
 /// The statement to send, or the sentence that says why it is refused. Ported from the local
 /// server's `guarded_sql.classify`, so both see the same statements and the same sentences.
-fn classify(sql: &str, explain: bool) -> Result<String, String> {
+///
+/// Shared with Ask (nova#891), which checks a model's statement with `EXPLAIN` before showing it.
+pub(crate) fn classify(sql: &str, explain: bool) -> Result<String, String> {
     if sql.trim().is_empty() {
         return Err("the statement is empty".into());
     }
