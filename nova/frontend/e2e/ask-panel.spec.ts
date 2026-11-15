@@ -49,23 +49,21 @@ const FAILED = {
 const HISTORY_SQL = "SELECT count(*) AS orders\nFROM lakehouse.staging.orders\nWHERE ordered_at >= current_date - INTERVAL '7' DAY"
 
 /** Two stored conversations, as `GET /api/ask/history` answers them: newest first. */
-const HISTORY = {
-  items: [
-    {
-      id: 2, question: 'How many orders came in this week?', endpoint: 'lab', model: 'llama-3.3-70b',
-      callId: 43, sql: HISTORY_SQL, sentence: 'Orders placed in the last seven days.',
-      tables: [{ catalog: 'lakehouse', namespace: 'staging', table: 'orders' }],
-      explain: 'passed', error: null, createdAt: '2026-11-15T10:00:00Z',
-    },
-    {
-      id: 1, question: 'What did the shop read yesterday?', endpoint: 'lab', model: 'llama-3.3-70b',
-      callId: 41, sql: SQL, sentence: 'Customer rows the shop read yesterday.',
-      tables: [{ catalog: 'gold', namespace: 'shop', table: 'customer_ltv' }],
-      explain: 'failed', error: 'Table gold.shop.customer_ltv does not exist',
-      createdAt: '2026-11-14T10:00:00Z',
-    },
-  ],
-}
+const HISTORY = [
+  {
+    id: 2, question: 'How many orders came in this week?', endpoint: 'lab', model: 'llama-3.3-70b',
+    callId: 43, sql: HISTORY_SQL, sentence: 'Orders placed in the last seven days.',
+    tables: [{ catalog: 'lakehouse', namespace: 'staging', table: 'orders' }],
+    explain: 'passed', error: null, createdAt: '2026-11-15T10:00:00Z',
+  },
+  {
+    id: 1, question: 'What did the shop read yesterday?', endpoint: 'lab', model: 'llama-3.3-70b',
+    callId: 41, sql: SQL, sentence: 'Customer rows the shop read yesterday.',
+    tables: [{ catalog: 'gold', namespace: 'shop', table: 'customer_ltv' }],
+    explain: 'failed', error: 'Table gold.shop.customer_ltv does not exist',
+    createdAt: '2026-11-14T10:00:00Z',
+  },
+]
 
 type Options = {
   /** What `/api/model-endpoints` answers; one ready row by default. */
@@ -252,7 +250,7 @@ test('opening a stored conversation shows it, and the model is not asked again',
 })
 
 test('a person with no history is told so', async ({ page }) => {
-  await stub(page, { history: (route) => json(route, { items: [] }) })
+  await stub(page, { history: (route) => json(route, []) })
   await page.keyboard.press('Control+J')
   const panel = page.locator('#ask-panel')
   await panel.getByRole('button', { name: 'History' }).click()

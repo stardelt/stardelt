@@ -714,7 +714,7 @@ pub(crate) async fn history(
                     created_at: row.get("created_at"),
                 })
                 .collect();
-            no_store((StatusCode::OK, Json(json!({ "items": items }))).into_response())
+            no_store((StatusCode::OK, Json(items)).into_response())
         }
         Err(e) => {
             tracing::warn!(error = %e, "ask: the history could not be read");
@@ -1171,7 +1171,7 @@ mod tests {
         let (status, body, cache) = history_call(&as_person("alice")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(cache.as_deref(), Some("no-store"));
-        let items = body["items"].as_array().expect("a list of conversations");
+        let items = body.as_array().expect("a list of conversations");
         assert_eq!(items.len(), 20);
         assert_eq!(items[0]["question"], json!("alice question 20"));
         assert!(
@@ -1182,7 +1182,7 @@ mod tests {
         // Bob sees his one, and none of alice's.
         let (status, body, _) = history_call(&as_person("bob")).await;
         assert_eq!(status, StatusCode::OK);
-        let items = body["items"].as_array().expect("a list of conversations");
+        let items = body.as_array().expect("a list of conversations");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["question"], json!(bobs));
     }

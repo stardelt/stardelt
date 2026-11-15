@@ -68,7 +68,7 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
     enabled: showHistory,
     retry: false,
   })
-  const conversations = history.data?.items ?? []
+  const conversations = history.data ?? []
 
   const sqlOfLastTurn = turns.length > 0 ? turns[turns.length - 1].answer?.sql ?? null : null
 

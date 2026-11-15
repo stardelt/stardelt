@@ -1773,8 +1773,8 @@ export const api = {
   modelEndpoints: () => jget<ModelEndpoint[]>('/api/model-endpoints'),
   /** A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform. */
   ask:          (question: string)                => jpost<AskAnswer>('/api/ask', { question }),
-  /** The caller's own last 20 Ask conversations, newest first. The body is `{ items: … }`. */
-  askHistory:   ()                                => jget<{ items: AskConversation[] }>('/api/ask/history'),
+  /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */
+  askHistory:   ()                                => jget<AskConversation[]>('/api/ask/history'),
   /** 👍 or 👎 on one recorded call; the caller's own row only. */
   askFeedback:  (callId: number, vote: 'up' | 'down') =>
     jpostNoContent('/api/ask/feedback', { callId, vote }),

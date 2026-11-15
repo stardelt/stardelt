@@ -47,7 +47,7 @@ async function stubApi(page: import('@playwright/test').Page) {
     if (path === '/api/saved-queries') return json(route, [])
     if (path === '/api/model-endpoints') return json(route, [ENDPOINT])
     if (path === '/api/ask') return json(route, ANSWER)
-    if (path === '/api/ask/history') return json(route, { items: [] })
+    if (path === '/api/ask/history') return json(route, [])
     return json(route, {})
   })
 }
