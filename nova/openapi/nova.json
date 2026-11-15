@@ -3910,6 +3910,99 @@
         }
       }
     },
+    "/api/model-endpoints/{name}/probe": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`POST /api/model-endpoints/{name}/probe` — an administrator asks Nova to check one\nendpoint now, instead of waiting for the minute round.",
+        "description": "Start the same probe the minute round runs, for one endpoint only, and answer at once. Administrator-only (the administrator gate is `main`'s). The answer is **not** the probe's result: a probe makes up to three calls of up to 120 seconds each, so this answers `202` with the endpoint as it is now — `GET /api/model-endpoints` shows the new `checkedAt`, `reachable` and `message` when the probe has written its `status`. A second call while a probe of the same endpoint runs is also `202` and starts nothing: two clicks make one probe. Answers `Cache-Control: no-store`.",
+        "operationId": "model_endpoint_probe",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The endpoint's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The probe is running (or was already running); the endpoint as it is now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelEndpointRow"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such model endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Nova could not build its HTTP client (the platform CA did not load)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notebooks": {
       "get": {
         "tags": [

@@ -53,6 +53,7 @@ pub struct ErrorResponse {
         crate::catalog::warehouse_info,
         crate::warehouses::list,
         crate::model_endpoints::list,
+        crate::model_endpoints::probe,
         crate::compute::list,
         crate::compute::start,
         crate::compute::stop,

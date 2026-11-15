@@ -74,7 +74,7 @@ fn now() -> DateTime<Utc> {
 }
 
 /// Where the projected keys live; `NOVA_MODEL_KEYS_DIR` is the test seam.
-fn keys_dir() -> PathBuf {
+pub(crate) fn keys_dir() -> PathBuf {
     match std::env::var("NOVA_MODEL_KEYS_DIR") {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(MODEL_KEYS_PATH),
@@ -197,7 +197,7 @@ async fn note(
 
 /// Probe one endpoint: the three measured calls, in order, each one's failure not stopping
 /// the next. Never panics; never carries the key or the URL anywhere.
-async fn probe(
+pub(crate) async fn probe(
     client: &reqwest::Client,
     name: &str,
     url: &str,
@@ -346,6 +346,20 @@ async fn probe(
     outcome
 }
 
+/// The HTTP client a probe uses: the platform CA, one call's timeout. `None` would mean
+/// the CA could not be loaded — the caller answers 500, never a silent skip.
+pub(crate) fn http_client() -> Option<reqwest::Client> {
+    match crate::add_platform_ca(reqwest::Client::builder())
+        .and_then(|builder| Ok(builder.timeout(CALL_TIMEOUT).build()?))
+    {
+        Ok(client) => Some(client),
+        Err(e) => {
+            warn!(error = %e, "model probe: no HTTP client");
+            None
+        }
+    }
+}
+
 /// `NOVA_MODEL_PROBE_SECONDS`, clamped to [`MIN_INTERVAL`]..=[`MAX_INTERVAL`]; a value that
 /// is not a number is the default, so a typo cannot stop the probe.
 fn interval_from_env(raw: Option<&str>) -> Duration {
@@ -400,12 +414,10 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
             return;
         }
     };
-    let client = match crate::add_platform_ca(reqwest::Client::builder())
-        .and_then(|builder| Ok(builder.timeout(CALL_TIMEOUT).build()?))
-    {
-        Ok(client) => client,
-        Err(e) => {
-            warn!(error = %e, "model probe: no HTTP client — trying again next round");
+    let client = match http_client() {
+        Some(client) => client,
+        None => {
+            warn!("model probe: trying again next round");
             return;
         }
     };
@@ -466,6 +478,98 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
         {
             warn!(endpoint = %name, error = %e, "model probe: the status patch failed");
         }
+    }
+}
+
+/// One endpoint by name, probed now and its status patched — the body of the
+/// administrator's "Probe now". Best effort: a failed patch is a log line (the next round
+/// corrects it), and the slot is always released.
+pub(crate) async fn probe_named(
+    state: &AppState,
+    object: &kube::api::DynamicObject,
+    api: &kube::api::Api<kube::api::DynamicObject>,
+) {
+    let name = object
+        .metadata
+        .name
+        .as_deref()
+        .unwrap_or_default()
+        .to_string();
+    if name.is_empty() {
+        return;
+    }
+    // Releases the slot however this task ends, including an early return.
+    let _slot = Slot(name.clone());
+    let Some(client) = http_client() else {
+        return;
+    };
+    let url = object
+        .data
+        .pointer("/spec/url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let model = object
+        .data
+        .pointer("/spec/model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if url.is_empty() || model.is_empty() {
+        warn!(endpoint = %name, "model probe: no url or model — skipped");
+        return;
+    }
+    let dir = keys_dir();
+    let key = key_at(&dir, &name);
+    let outcome = probe(
+        &client,
+        &name,
+        url,
+        model,
+        key.as_deref(),
+        state.db.as_ref(),
+    )
+    .await;
+    info!(
+        endpoint = %name,
+        reachable = ?outcome.reachable,
+        tool_calling = ?outcome.tool_calling,
+        json_output = ?outcome.json_output,
+        "model probe: one endpoint checked"
+    );
+    let patch = kube::api::Patch::Merge(outcome.patch());
+    if let Err(e) = api
+        .patch_status(&name, &kube::api::PatchParams::default(), &patch)
+        .await
+    {
+        warn!(endpoint = %name, error = %e, "model probe: the status patch failed");
+    }
+}
+
+/// The endpoints a probe is running for right now. One process, so a static: two clicks on
+/// "Probe now" start one probe, and the second answer is still `202`.
+static PROBING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether this call took the endpoint's slot; `finish` releases it.
+pub(crate) fn try_start(name: &str) -> bool {
+    let mut names = PROBING.lock().unwrap_or_else(|e| e.into_inner());
+    if names.iter().any(|n| n == name) {
+        return false;
+    }
+    names.push(name.to_string());
+    true
+}
+
+/// Release the endpoint's slot. Idempotent.
+pub(crate) fn finish(name: &str) {
+    let mut names = PROBING.lock().unwrap_or_else(|e| e.into_inner());
+    names.retain(|n| n != name);
+}
+
+/// Releases one endpoint's slot when the task that took it ends, however it ends.
+struct Slot(String);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        finish(&self.0);
     }
 }
 
@@ -640,5 +744,29 @@ mod tests {
             outcome.message.as_deref(),
             Some("the endpoint answers but returned no tool call")
         );
+    }
+
+    /// Two clicks on "Probe now" start one probe, and the slot is released when it ends.
+    /// Distinct names, so a parallel test run cannot collide with another test's slot.
+    #[test]
+    fn one_probe_per_endpoint_at_a_time() {
+        let a = "probe-now-test-a";
+        let b = "probe-now-test-b";
+        assert!(try_start(a), "the first call takes the slot");
+        assert!(
+            !try_start(a),
+            "the second call does not start a second probe"
+        );
+        assert!(try_start(b), "another endpoint has its own slot");
+        finish(a);
+        assert!(try_start(a), "the slot is free again");
+        finish(a);
+        finish(b);
+        // Releasing a slot nobody holds is a no-op, and leaves the list usable.
+        finish("probe-now-test-never-started");
+        assert!(try_start(a));
+        assert!(try_start(b));
+        finish(a);
+        finish(b);
     }
 }

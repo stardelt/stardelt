@@ -854,6 +854,12 @@ fn admin_router() -> Router<Arc<AppState>> {
         // The administrator's read of the MCP calls (stardelt-nova#970, T7): the queryable
         // copy of the one audit line per tool call. Same administrator gate.
         .route("/admin/mcp-audit", get(mcp_audit::list))
+        // The administrator's "Probe now" on one model endpoint (operator#609): the same
+        // minute-round probe, started on request. Same administrator gate.
+        .route(
+            "/model-endpoints/{name}/probe",
+            post(model_endpoints::probe),
+        )
         // The administrator's cluster form (internal#161 slice 5c): create-or-replace and
         // delete. Start/Stop stay on the public `/compute` routes.
         .route(

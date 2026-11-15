@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -58,7 +58,7 @@ pub(crate) fn endpoints_api(client: kube::Client) -> Api<DynamicObject> {
 }
 
 /// One object as a row; absent fields take the CRD's defaults.
-fn row(object: &Value) -> ModelEndpointRow {
+pub(crate) fn row(object: &Value) -> ModelEndpointRow {
     let spec = object.get("spec").unwrap_or(&Value::Null);
     let status = object.get("status").unwrap_or(&Value::Null);
     ModelEndpointRow {
@@ -163,6 +163,76 @@ pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
         Json(rows(&objects)),
     )
         .into_response()
+}
+
+/// `POST /api/model-endpoints/{name}/probe` — an administrator asks Nova to check one
+/// endpoint now, instead of waiting for the minute round.
+#[utoipa::path(
+    post,
+    operation_id = "model_endpoint_probe",
+    path = "/api/model-endpoints/{name}/probe",
+    tag = "internal",
+    description = "Start the same probe the minute round runs, for one endpoint only, and answer at once. Administrator-only (the administrator gate is `main`'s). The answer is **not** the probe's result: a probe makes up to three calls of up to 120 seconds each, so this answers `202` with the endpoint as it is now — `GET /api/model-endpoints` shows the new `checkedAt`, `reachable` and `message` when the probe has written its `status`. A second call while a probe of the same endpoint runs is also `202` and starts nothing: two clicks make one probe. Answers `Cache-Control: no-store`.",
+    params(
+        ("name" = String, Path, description = "The endpoint's name"),
+    ),
+    responses(
+        (status = 202, description = "The probe is running (or was already running); the endpoint as it is now", body = ModelEndpointRow),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such model endpoint", body = crate::openapi::ErrorResponse),
+        (status = 500, description = "Nova could not build its HTTP client (the platform CA did not load)", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn probe(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(client) = state.kube.clone() else {
+        return Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Nova has no cluster connection",
+        )
+        .into_response();
+    };
+    let api = endpoints_api(client);
+    let object = match api.get(&name).await {
+        Ok(object) => object,
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            return Fail::new(StatusCode::NOT_FOUND, format!("no model endpoint {name}"))
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "model endpoint get failed");
+            return Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer")
+                .into_response();
+        }
+    };
+    // The probe would be a silent skip without a client; the caller has to hear it.
+    if crate::model_probe::http_client().is_none() {
+        return Fail::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Nova could not reach its own HTTP client",
+        )
+        .into_response();
+    }
+    // Already running: the answer is still 202, and no second probe starts.
+    if crate::model_probe::try_start(&name) {
+        let state = Arc::clone(&state);
+        let object = object.clone();
+        let api = api.clone();
+        tokio::spawn(async move {
+            crate::model_probe::probe_named(&state, &object, &api).await;
+        });
+    }
+    let view = row(&serde_json::to_value(&object).unwrap_or_default());
+    let mut answer = (StatusCode::ACCEPTED, Json(view)).into_response();
+    answer
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    answer
 }
 
 #[cfg(test)]
@@ -282,5 +352,37 @@ mod tests {
             .expect("body");
         let body: Value = serde_json::from_slice(&bytes).expect("JSON");
         assert_eq!(body, json!([]));
+    }
+
+    /// `POST /api/model-endpoints/{name}/probe` without a cluster client is a 503 with the
+    /// sentence that says why — never a 202 for a probe that cannot run.
+    #[tokio::test]
+    async fn a_missing_cluster_is_503() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::post;
+        use tower::ServiceExt;
+
+        let state = crate::router_tests::test_state();
+        let app = Router::new()
+            .route("/model-endpoints/{name}/probe", post(probe))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/model-endpoints/default/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(text.contains("Nova has no cluster connection"), "{text}");
     }
 }
