@@ -84,7 +84,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-images verify-streaming verify-compute verify-maintenance verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-images verify-streaming verify-compute verify-maintenance verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -159,6 +159,9 @@ verify-pod-security: _context ## Every running pod is admitted by a `restricted`
 	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh \
 	  --allow '^seaweedfs-' \
 	  --allow '^lakekeeper-'
+
+verify-pod-security-baseline: _context ## Every running pod is admitted by a `baseline` Pod Security namespace (#1096)
+	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh --level baseline
 
 verify-backups: _context ## Verify WAL archiving for real: config + the bucket covers every queued WAL segment + agreement with pg_stat_archiver. SKIP_OBJECTS=1 drops the S3 half
 	@NAMESPACE=$(NAMESPACE) CLUSTER=$(PG_CLUSTER) SKIP_OBJECTS="$(SKIP_OBJECTS)" \
@@ -317,6 +320,7 @@ platform-config: _context ## Converge ConfigMap stardelt-platform-config (Nova's
 # Install
 # ---------------------------------------------------------------------------
 install: step-preflight ## Install all stardelt components (idempotent)
+	@$(MAKE) --no-print-directory step-namespace
 	@$(MAKE) --no-print-directory step-reloader
 	@$(MAKE) --no-print-directory step-cnpg
 	@$(MAKE) --no-print-directory step-barman-cloud-plugin
@@ -346,12 +350,16 @@ install: step-preflight ## Install all stardelt components (idempotent)
 # The steps are idempotent: each converges the live state to what this
 # repository declares and leaves it alone when it is already there.
 # ---------------------------------------------------------------------------
-.PHONY: step-preflight step-reloader step-cnpg step-barman-cloud-plugin step-cnpg-cluster step-s3-secrets
+.PHONY: step-preflight step-namespace step-reloader step-cnpg step-barman-cloud-plugin step-cnpg-cluster step-s3-secrets
 .PHONY: step-storage step-openfga step-catalog-clients step-lakekeeper step-access-sync
 .PHONY: step-trino step-app-secrets step-airflow step-superset step-pgdump step-nova
 .PHONY: step-apps step-pins step-verify
 
 step-preflight: deps _context _helm-repos ## Tools, the kube-context and the Helm repos
+
+step-namespace: ## The namespace's Pod Security labels: baseline enforced, restricted warned (#1096)
+	@echo "› Namespace: Pod Security baseline enforced, restricted warned and audited"
+	@kubectl apply -f manifests/namespace.yaml
 
 step-reloader: ## Reloader: restarts a workload when a credential it reads changes
 	@echo "› Reloader (restarts workloads when a credential they read changes)"

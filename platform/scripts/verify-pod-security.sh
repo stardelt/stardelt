@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Every running pod is admitted by a `restricted` Pod Security namespace (#1096 question 5).
+# Every running pod is admitted by a Pod Security namespace at the level given (`--level`, default
+# `restricted`; #1096 question 5).
 #
 #   NS=stardelt bash scripts/verify-pod-security.sh --allow '^seaweedfs-' --allow '^lakekeeper-'
+#   NS=stardelt bash scripts/verify-pod-security.sh --level baseline
 #
 # Read-only for the platform: each live pod's spec is re-admitted with a server-side dry run into a
-# scratch namespace labelled `pod-security.kubernetes.io/enforce=restricted`, which is deleted
+# scratch namespace labelled `pod-security.kubernetes.io/enforce=$level`, which is deleted
 # again. `--allow <regex>` names a pod that is a known exception; the reason belongs in the comment
 # beside the flag in the Makefile. A pattern that matches no refusal is reported (drop it), and a
 # refusal outside the list fails the run.
@@ -12,10 +14,18 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
 PROBE="${POD_SECURITY_PROBE_NS:-stardelt-pss-probe}"
+level=restricted
 allow=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow) allow+=("${2:?--allow needs a regular expression}"); shift 2 ;;
+    --level)
+      level="${2:?--level needs baseline or restricted}"
+      case "$level" in
+        baseline|restricted) ;;
+        *) echo "unknown --level: $level (baseline or restricted)" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -44,9 +54,9 @@ if ! kubectl create namespace "$PROBE" >/dev/null; then
   exit 1
 fi
 if ! kubectl label namespace "$PROBE" \
-    pod-security.kubernetes.io/enforce=restricted \
+    pod-security.kubernetes.io/enforce="$level" \
     pod-security.kubernetes.io/enforce-version=latest >/dev/null; then
-  echo "cannot label the probe namespace $PROBE restricted (the API server's message is above)" >&2
+  echo "cannot label the probe namespace $PROBE $level (the API server's message is above)" >&2
   exit 1
 fi
 
@@ -69,7 +79,7 @@ for pod in $(kubectl -n "$NS" get pods -o json \
     passed=$((passed + 1))
     continue
   fi
-  reason="$(grep -o 'violates PodSecurity "restricted:latest": .*' "$tmp/err" | head -1 | cut -c1-200 || true)"
+  reason="$(grep -o "violates PodSecurity \"$level:latest\": .*" "$tmp/err" | head -1 | cut -c1-200 || true)"
   [ -n "$reason" ] || reason="$(head -1 "$tmp/err")"
   matched=""
   for pattern in ${allow[@]+"${allow[@]}"}; do
@@ -100,4 +110,4 @@ if [ "$passed" -lt 5 ]; then
   echo "UNVERIFIED ($passed of $total pods admitted; install the platform first)"
   exit 3
 fi
-echo "PASS ($passed of $total pods admitted by restricted, $allowed known exceptions)"
+echo "PASS ($passed of $total pods admitted by $level, $allowed known exceptions)"

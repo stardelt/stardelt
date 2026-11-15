@@ -94,6 +94,11 @@ add_step preflight step-preflight \
   "nothing to undo — this step only reads" \
   "kubectl config current-context"
 
+add_step namespace step-namespace \
+  "labels the platform namespace: Pod Security baseline enforced, restricted warned and audited" \
+  "kubectl label namespace $NAMESPACE pod-security.kubernetes.io/enforce- pod-security.kubernetes.io/audit- pod-security.kubernetes.io/warn-" \
+  "kubectl get namespace $NAMESPACE -o jsonpath='{.metadata.labels}'"
+
 add_step storage step-storage \
   "installs the object store (SeaweedFS, the S3 API) and the S3 key pair that reaches it" \
   "helm uninstall seaweedfs -n $NAMESPACE (the PVC and the objects stay)" \
@@ -158,8 +163,8 @@ add_step verify step-verify \
 # the verify targets at the end. Both end with the wait and the report, which
 # the runner does itself (they are not Makefile targets: they read the cluster
 # and print).
-PLAN_INSTALL="preflight storage databases openfga identity catalog access-sync query apps notebooks spark pins"
-PLAN_UPGRADE="preflight storage databases openfga identity catalog query apps notebooks spark pins access-sync"
+PLAN_INSTALL="preflight namespace storage databases openfga identity catalog access-sync query apps notebooks spark pins"
+PLAN_UPGRADE="preflight namespace storage databases openfga identity catalog query apps notebooks spark pins access-sync"
 
 plan_for() {
   case "$1" in

@@ -9,6 +9,10 @@ master:
   data:
     type: persistentVolumeClaim
     size: 1Gi
+  # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+  # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+  logs:
+    type: emptyDir
   defaultReplication: "000"
   resources:
     requests: { cpu: "50m", memory: "128Mi" }
@@ -38,6 +42,10 @@ filer:
   data:
     type: persistentVolumeClaim
     size: 1Gi
+  # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+  # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+  logs:
+    type: emptyDir
   # The filer keeps the metadata of every S3 key in memory-mapped stores; at 256Mi it was OOM-killed in a
   # loop on the dev cluster (platform#230). 512Mi is the value that held with S3 traffic and the admin UI.
   resources:
@@ -50,6 +58,10 @@ s3:
   # Reloader restarts the S3 gateway when its identities change (helm-values/reloader.yaml).
   podAnnotations:
     secret.reloader.stakater.com/reload: "seaweedfs-s3-config"
+  # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+  # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+  logs:
+    type: emptyDir
   port: 8333
   enableAuth: true
   # The S3 identities come from Secret `seaweedfs-s3-config`, written by

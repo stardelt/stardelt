@@ -1,0 +1,18 @@
+# The platform namespace's Pod Security floor (platform#1096 question 5).
+#
+# `baseline` is enforced: no privileged container, no host network/PID/IPC, no hostPath.
+# Every running pod is admitted (measured 2026-11-15, 47 of 47 after the SeaweedFS log
+# volumes became emptyDir). `restricted` is only warned and audited: three SeaweedFS pods
+# and Lakekeeper's `opa` sidecar do not pass it yet (#1095, chart 0.14.0).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stardelt
+  labels:
+    app.kubernetes.io/part-of: stardelt
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
