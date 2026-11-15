@@ -2146,6 +2146,47 @@ mod tests {
         );
     }
 
+    /// Every Rule the operator creates must be grantable from its own ClusterRole: RBAC
+    /// escalation control refuses a Role that grants a verb the creator does not hold, with a
+    /// 403 on the Role (operator#773, measured on the lab 2026-11-15: every `SparkCluster`
+    /// failed because `spark-cluster-driver` carries `deletecollection` on pods).
+    #[test]
+    fn the_chart_grants_every_verb_the_driver_roles_need() {
+        let chart = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../chart/templates/operator.yaml"
+        ));
+        let doc = chart
+            .split("\n---")
+            .find(|doc| doc.contains("kind: ClusterRole"))
+            .expect("the chart carries the operator's ClusterRole");
+        let role: k8s_openapi::api::rbac::v1::ClusterRole =
+            serde_yaml::from_str(doc).expect("the ClusterRole parses");
+        let known = role.rules.unwrap_or_default();
+
+        let covers = |resource: &str, verb: &str| {
+            known.iter().any(|rule| {
+                let groups = rule.api_groups.clone().unwrap_or_default();
+                let resources = rule.resources.clone().unwrap_or_default();
+                groups.iter().any(|g| g == "*" || g.is_empty())
+                    && resources.iter().any(|r| r == "*" || r == resource)
+                    && rule.verbs.iter().any(|v| v == verb)
+            })
+        };
+
+        for rule in pod_and_config_map_rules() {
+            for resource in rule.resources.unwrap_or_default() {
+                for verb in &rule.verbs {
+                    assert!(
+                        covers(&resource, verb),
+                        "the operator does not grant itself {verb} on {resource}, so it cannot \
+                         create a Role that does (spark.rs `pod_and_config_map_rules`)"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_confmap_janitor_may_only_delete_configmaps_by_name() {
         let janitor = confmap_janitor_role("stardelt");
