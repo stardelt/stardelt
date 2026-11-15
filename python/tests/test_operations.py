@@ -99,6 +99,17 @@ def test_the_pipeline_run_queries_operation_is_in_the_contract():
     }
 
 
+def test_the_model_endpoints_operation_is_in_the_contract():
+    op = api.operations()["model_endpoints_list"]
+    assert op == {
+        "method": "GET",
+        "path": "/api/model-endpoints",
+        "path_params": [],
+        "query_params": [],
+        "body": False,
+    }
+
+
 def test_stardelt_compute_start_is_a_shortcut_for_the_start_operation():
     code, out, err, session = run(
         ["compute", "start", "trial"],

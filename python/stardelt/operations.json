@@ -265,6 +265,13 @@
       "query_params": [],
       "body": true
     },
+    "model_endpoints_list": {
+      "method": "GET",
+      "path": "/api/model-endpoints",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
     "namespaces_list": {
       "method": "GET",
       "path": "/api/catalog/namespaces",
