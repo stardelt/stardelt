@@ -695,6 +695,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // One 👍 or 👎 on the row an answer wrote (stardelt-nova#1011, Ask slice b): the model
         // check's input; somebody else's call id is a 404.
         .route("/ask/feedback", post(ask::feedback))
+        // The caller's last 20 Ask conversations (nova#891 slice c); the History view reads it.
+        .route("/ask/history", get(ask::history))
         // The Spark clusters a person may use (internal#161 slice 5a): the operator translates
         // a SparkCluster into the Spark server, Nova only lists it and sets `spec.state`.
         .route("/compute", get(compute::list))

@@ -24,6 +24,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::Row;
 
 use crate::AppState;
 
@@ -75,6 +76,23 @@ pub(crate) struct AskAnswer {
     pub explain: String,
     /// Why the `EXPLAIN` check failed, when it did.
     pub error: Option<String>,
+}
+
+/// One conversation from a person's History.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AskConversation {
+    pub id: i64,
+    pub question: String,
+    pub endpoint: String,
+    pub model: Option<String>,
+    pub call_id: Option<i64>,
+    pub sql: Option<String>,
+    pub sentence: String,
+    pub tables: Value,
+    pub explain: String,
+    pub error: Option<String>,
+    pub created_at: String,
 }
 
 /// The first endpoint (name order) that may answer Ask: purpose `ask`, the probe found it
@@ -132,6 +150,46 @@ fn fail(status: StatusCode, message: impl Into<String>) -> Response {
 /// The `200` answer.
 fn answer(body: AskAnswer) -> Response {
     no_store((StatusCode::OK, Json(body)).into_response())
+}
+
+/// Keep one conversation for the person's History, and keep at most 20 of them.
+///
+/// A failed write is a warning, never a failed answer: the person asked a question and the
+/// answer is what matters. `tables` is stored as the answer's own JSON.
+async fn record_conversation(pool: &sqlx::PgPool, sub: &str, question: &str, body: &AskAnswer) {
+    let tables = serde_json::to_value(&body.tables).unwrap_or_else(|_| json!([]));
+    let inserted = sqlx::query(
+        "INSERT INTO ask_conversation \
+         (sub, question, endpoint, model, call_id, sql, sentence, tables, explain, error) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(sub)
+    .bind(question)
+    .bind(&body.endpoint)
+    .bind(&body.model)
+    .bind(body.call_id)
+    .bind(&body.sql)
+    .bind(&body.sentence)
+    .bind(tables)
+    .bind(&body.explain)
+    .bind(&body.error)
+    .execute(pool)
+    .await;
+    if let Err(e) = inserted {
+        tracing::warn!(error = %e, "ask: the conversation was not stored");
+        return;
+    }
+    let pruned = sqlx::query(
+        "DELETE FROM ask_conversation WHERE sub = $1 AND id NOT IN ( \
+           SELECT id FROM ask_conversation WHERE sub = $1 \
+           ORDER BY created_at DESC, id DESC LIMIT 20)",
+    )
+    .bind(sub)
+    .execute(pool)
+    .await;
+    if let Err(e) = pruned {
+        tracing::warn!(error = %e, "ask: old conversations were not pruned");
+    }
 }
 
 /// A handler's `Response` as its status and JSON body (an unreadable body is `null`).
@@ -425,7 +483,7 @@ pub(crate) async fn ask(
         .map(|matches| matches.iter().filter_map(ask_table).collect())
         .unwrap_or_default();
     if candidates.is_empty() {
-        return answer(AskAnswer {
+        let body = AskAnswer {
             endpoint: name,
             model,
             call_id: None,
@@ -434,7 +492,9 @@ pub(crate) async fn ask(
             tables: Vec::new(),
             explain: "not_run".to_string(),
             error: None,
-        });
+        };
+        record_conversation(pool, &sub, &question, &body).await;
+        return answer(body);
     }
 
     let mut docs = Vec::with_capacity(candidates.len());
@@ -486,7 +546,7 @@ pub(crate) async fn ask(
         Err(response) => return response,
     };
     let Some(error) = check_statement(&state, principal, &first.sql).await.err() else {
-        return answer(AskAnswer {
+        let body = AskAnswer {
             endpoint: name,
             model,
             call_id: first.call_id,
@@ -495,7 +555,9 @@ pub(crate) async fn ask(
             tables: candidates,
             explain: "passed".to_string(),
             error: None,
-        });
+        };
+        record_conversation(pool, &sub, &question, &body).await;
+        return answer(body);
     };
 
     // One correction: the model sees its own statement and why it does not run.
@@ -512,8 +574,8 @@ pub(crate) async fn ask(
         Ok(second) => second,
         Err(response) => return response,
     };
-    match check_statement(&state, principal, &second.sql).await {
-        Ok(()) => answer(AskAnswer {
+    let body = match check_statement(&state, principal, &second.sql).await {
+        Ok(()) => AskAnswer {
             endpoint: name,
             model,
             call_id: second.call_id,
@@ -522,8 +584,8 @@ pub(crate) async fn ask(
             tables: candidates,
             explain: "passed".to_string(),
             error: None,
-        }),
-        Err(second_error) => answer(AskAnswer {
+        },
+        Err(second_error) => AskAnswer {
             endpoint: name,
             model,
             call_id: second.call_id,
@@ -532,8 +594,10 @@ pub(crate) async fn ask(
             tables: candidates,
             explain: "failed".to_string(),
             error: Some(second_error),
-        }),
-    }
+        },
+    };
+    record_conversation(pool, &sub, &question, &body).await;
+    answer(body)
 }
 
 /// `POST /api/ask/feedback` body.
@@ -593,6 +657,71 @@ pub(crate) async fn feedback(
         Err(e) => {
             tracing::warn!(error = %e, "could not store the ask vote");
             fail(StatusCode::INTERNAL_SERVER_ERROR, "the vote was not stored")
+        }
+    }
+}
+
+/// `GET /api/ask/history` — the caller's last 20 conversations (nova#891 slice c).
+#[utoipa::path(
+    get,
+    operation_id = "ask_history",
+    path = "/api/ask/history",
+    tag = "public",
+    description = "The caller's own last 20 Ask questions and answers, newest first. Nobody else's conversations are readable, and there is no way to ask for another person's. Every answer carries `Cache-Control: no-store`.",
+    responses(
+        (status = 200, description = "The conversations, newest first", body = Vec<AskConversation>),
+        (status = 503, description = "No state store", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn history(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+) -> Response {
+    let Some(pool) = state.db.as_ref() else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Ask needs Nova's database, and this installation has none",
+        );
+    };
+    let sub = match caller.as_ref() {
+        Some(caller) => caller.0.identity.sub.clone(),
+        None => state.dev_user.clone(),
+    };
+    let rows: Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> = sqlx::query(
+        "SELECT id, question, endpoint, model, call_id, sql, sentence, tables, explain, error, \
+                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at \
+         FROM ask_conversation WHERE sub = $1 \
+         ORDER BY ask_conversation.created_at DESC, id DESC LIMIT 20",
+    )
+    .bind(&sub)
+    .fetch_all(pool)
+    .await;
+    match rows {
+        Ok(rows) => {
+            let items: Vec<AskConversation> = rows
+                .into_iter()
+                .map(|row| AskConversation {
+                    id: row.get("id"),
+                    question: row.get("question"),
+                    endpoint: row.get("endpoint"),
+                    model: row.get("model"),
+                    call_id: row.get("call_id"),
+                    sql: row.get("sql"),
+                    sentence: row.get("sentence"),
+                    tables: row.get("tables"),
+                    explain: row.get("explain"),
+                    error: row.get("error"),
+                    created_at: row.get("created_at"),
+                })
+                .collect();
+            no_store((StatusCode::OK, Json(json!({ "items": items }))).into_response())
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "ask: the history could not be read");
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the history was not read",
+            )
         }
     }
 }
@@ -942,5 +1071,119 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(feedback_of(id).await.unwrap().as_deref(), Some("down"));
+    }
+
+    // --- the history route (slice c) --------------------------------------------------
+
+    fn history_app(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/ask/history", axum::routing::get(history))
+            .with_state(state)
+    }
+
+    /// One `GET /api/ask/history`, its status, its body and its cache control.
+    async fn history_call(app: &Router) -> (StatusCode, Value, Option<String>) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/ask/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let cache = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            cache,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_history_without_a_state_store_is_a_503() {
+        let (status, body, cache) =
+            history_call(&history_app(crate::router_tests::test_state())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["error"],
+            json!("Ask needs Nova's database, and this installation has none")
+        );
+        assert_eq!(cache.as_deref(), Some("no-store"));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_history_keeps_the_last_20_of_ones_own_conversations() {
+        use crate::db::test_support::migrated_pool;
+
+        let pool = migrated_pool().await;
+        sqlx::query("DELETE FROM ask_conversation")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let answer_of = |question: &str| AskAnswer {
+            endpoint: "default".into(),
+            model: "qwen3-4b".into(),
+            call_id: None,
+            sql: Some("SELECT 1".into()),
+            sentence: format!("the answer to {question}"),
+            tables: Vec::new(),
+            explain: "passed".into(),
+            error: None,
+        };
+        // Twenty-one of alice's, then one of bob's.
+        for number in 0..21 {
+            let question = format!("alice question {number}");
+            record_conversation(&pool, "alice", &question, &answer_of(&question)).await;
+        }
+        let bobs = "bob question 0";
+        record_conversation(&pool, "bob", bobs, &answer_of(bobs)).await;
+
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let as_person = |sub: &str| -> Router {
+            Router::new()
+                .route("/api/ask/history", axum::routing::get(history))
+                .with_state(Arc::clone(&state))
+                .layer(axum::Extension(principal(sub)))
+        };
+
+        // The retention is the table's, not the read's: alice keeps 20 rows.
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM ask_conversation WHERE sub = 'alice'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, 20);
+
+        // Alice keeps exactly 20, newest first, and none of bob's.
+        let (status, body, cache) = history_call(&as_person("alice")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cache.as_deref(), Some("no-store"));
+        let items = body["items"].as_array().expect("a list of conversations");
+        assert_eq!(items.len(), 20);
+        assert_eq!(items[0]["question"], json!("alice question 20"));
+        assert!(
+            !body.to_string().contains(bobs),
+            "bob's question is in alice's history: {body}"
+        );
+
+        // Bob sees his one, and none of alice's.
+        let (status, body, _) = history_call(&as_person("bob")).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().expect("a list of conversations");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["question"], json!(bobs));
     }
 }

@@ -875,6 +875,41 @@
         }
       }
     },
+    "/api/ask/history": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/ask/history` — the caller's last 20 conversations (nova#891 slice c).",
+        "description": "The caller's own last 20 Ask questions and answers, newest first. Nobody else's conversations are readable, and there is no way to ask for another person's. Every answer carries `Cache-Control: no-store`.",
+        "operationId": "ask_history",
+        "responses": {
+          "200": {
+            "description": "The conversations, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AskConversation"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No state store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/config": {
       "get": {
         "tags": [
@@ -9256,6 +9291,66 @@
               "$ref": "#/components/schemas/AskTable"
             }
           }
+        }
+      },
+      "AskConversation": {
+        "type": "object",
+        "description": "One conversation from a person's History.",
+        "required": [
+          "id",
+          "question",
+          "endpoint",
+          "sentence",
+          "tables",
+          "explain",
+          "createdAt"
+        ],
+        "properties": {
+          "callId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "explain": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "question": {
+            "type": "string"
+          },
+          "sentence": {
+            "type": "string"
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tables": {}
         }
       },
       "AskFeedback": {
