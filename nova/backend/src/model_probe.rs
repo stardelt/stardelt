@@ -53,11 +53,120 @@ pub(crate) struct Outcome {
     pub message: Option<String>,
 }
 
+/// The CRD's default `spec.purposes` when the field is absent or empty.
+const DEFAULT_PURPOSES: [&str; 2] = ["ask", "agents"];
+
 impl Outcome {
-    /// `{"status": {…}}` for `Api::patch_status` — only the fields a probe can know.
-    pub(crate) fn patch(&self) -> Value {
-        json!({ "status": self })
+    /// `{"status": {…}}` for `Api::patch_status`, with the `Ready` condition. Reads
+    /// `spec.purposes` and `metadata.generation`, and keeps the previous condition's
+    /// `lastTransitionTime` while the status does not change. A JSON merge patch: the
+    /// other status fields keep their keys.
+    pub(crate) fn patch_for(&self, object: &kube::api::DynamicObject, now: DateTime<Utc>) -> Value {
+        let purposes: Vec<String> = object
+            .data
+            .pointer("/spec/purposes")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_else(|| DEFAULT_PURPOSES.map(str::to_string).to_vec());
+        let previous = object
+            .data
+            .pointer("/status/conditions")
+            .and_then(Value::as_array)
+            .and_then(|list| {
+                list.iter().find(|condition| {
+                    condition.pointer("/type").and_then(Value::as_str) == Some("Ready")
+                })
+            });
+        let generation = object
+            .data
+            .pointer("/metadata/generation")
+            .and_then(Value::as_i64);
+        let condition = ready_condition(&purposes, self, previous, generation, now);
+        let mut status = serde_json::to_value(self).expect("an Outcome serialises");
+        status["conditions"] = json!([condition]);
+        json!({ "status": status })
     }
+}
+
+/// `status.conditions[0]` for one probe outcome: `Ready` for the purposes the endpoint
+/// declares (operator#609; operator#754 rendered the field). Data-only: the caller passes the
+/// object's spec and the previous condition.
+pub(crate) fn ready_condition(
+    purposes: &[String],
+    outcome: &Outcome,
+    previous: Option<&Value>,
+    generation: Option<i64>,
+    now: DateTime<Utc>,
+) -> Value {
+    let declared: Vec<&str> = if purposes.is_empty() {
+        DEFAULT_PURPOSES.to_vec()
+    } else {
+        purposes.iter().map(String::as_str).collect()
+    };
+    // An unknown purpose is ignored: the CRD's enum makes it impossible, and panicking over
+    // one would take the probe down for a typo somebody fixed.
+    let supports = |purpose: &str| match purpose {
+        "ask" => outcome.json_output == Some(true),
+        "agents" => outcome.tool_calling == Some(true),
+        _ => true,
+    };
+    let ready = outcome.reachable == Some(true) && declared.iter().all(|p| supports(p));
+    let (reason, message) = if outcome.reachable != Some(true) {
+        (
+            Some("EndpointUnreachable"),
+            Some(
+                outcome
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "the endpoint did not answer".to_string()),
+            ),
+        )
+    } else if declared.contains(&"agents") && !supports("agents") {
+        (
+            Some("ToolCallingMissing"),
+            Some(
+                "the endpoint does not support tool calls, which the agents purpose needs"
+                    .to_string(),
+            ),
+        )
+    } else if declared.contains(&"ask") && !supports("ask") {
+        (
+            Some("JsonOutputMissing"),
+            Some(
+                "the endpoint does not answer in a JSON shape, which the ask purpose needs"
+                    .to_string(),
+            ),
+        )
+    } else {
+        (None, None)
+    };
+    let status = if ready { "True" } else { "False" };
+    // The transition time only moves when the status does: a probe a minute later is not a
+    // transition.
+    let last_transition_time = previous
+        .filter(|previous| previous.pointer("/status").and_then(Value::as_str) == Some(status))
+        .and_then(|previous| previous.pointer("/lastTransitionTime"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| now.to_rfc3339_opts(SecondsFormat::Secs, true));
+    let mut condition = json!({
+        "type": "Ready",
+        "status": status,
+        "observedGeneration": generation,
+        "lastTransitionTime": last_transition_time,
+    });
+    if let Some(reason) = reason {
+        condition["reason"] = json!(reason);
+    }
+    if let Some(message) = message {
+        condition["message"] = json!(message);
+    }
+    condition
 }
 
 /// The current time. The workspace builds `chrono` without its `clock` feature, so
@@ -391,7 +500,7 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
             json_output = ?outcome.json_output,
             "model probe: one endpoint checked"
         );
-        let patch = kube::api::Patch::Merge(outcome.patch());
+        let patch = kube::api::Patch::Merge(outcome.patch_for(object, now));
         if let Err(e) = api
             .patch_status(&name, &kube::api::PatchParams::default(), &patch)
             .await
@@ -454,7 +563,7 @@ pub(crate) async fn probe_named(
         json_output = ?outcome.json_output,
         "model probe: one endpoint checked"
     );
-    let patch = kube::api::Patch::Merge(outcome.patch());
+    let patch = kube::api::Patch::Merge(outcome.patch_for(object, now()));
     if let Err(e) = api
         .patch_status(&name, &kube::api::PatchParams::default(), &patch)
         .await
@@ -678,5 +787,140 @@ mod tests {
         assert!(try_start(b));
         finish(a);
         finish(b);
+    }
+
+    /// The `Ready` condition's six cases (nova#1006). They sit in their own module so
+    /// `cargo test ready_condition` names exactly this contract.
+    mod ready_condition {
+        use super::*;
+
+        /// What a probe found: whether it answered, and what it can do.
+        fn outcome(
+            reachable: Option<bool>,
+            tool_calling: Option<bool>,
+            json_output: Option<bool>,
+        ) -> Outcome {
+            Outcome {
+                reachable,
+                tool_calling,
+                json_output,
+                context_tokens: None,
+                checked_at: "2026-11-15T06:00:00Z".to_string(),
+                message: None,
+            }
+        }
+
+        fn purposes(list: &[&str]) -> Vec<String> {
+            list.iter().map(|purpose| purpose.to_string()).collect()
+        }
+
+        fn at(hour: u32) -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 11, 15, hour, 0, 0).unwrap()
+        }
+
+        /// An `ask`-only endpoint answers JSON and may not call tools at all: that is Ready.
+        #[test]
+        fn an_ask_only_endpoint_that_answers_json_is_ready() {
+            let condition = ready_condition(
+                &purposes(&["ask"]),
+                &outcome(Some(true), None, Some(true)),
+                None,
+                Some(1),
+                at(6),
+            );
+            assert_eq!(condition["status"], json!("True"), "{condition}");
+            assert_eq!(condition["type"], json!("Ready"), "{condition}");
+            assert!(condition.get("reason").is_none(), "{condition}");
+            assert!(condition.get("message").is_none(), "{condition}");
+        }
+
+        #[test]
+        fn an_agents_endpoint_without_tool_calls_is_not_ready() {
+            let condition = ready_condition(
+                &purposes(&["agents"]),
+                &outcome(Some(true), Some(false), Some(true)),
+                None,
+                Some(1),
+                at(6),
+            );
+            assert_eq!(condition["status"], json!("False"), "{condition}");
+            assert_eq!(
+                condition["reason"],
+                json!("ToolCallingMissing"),
+                "{condition}"
+            );
+        }
+
+        #[test]
+        fn an_unreachable_endpoint_keeps_the_probes_message() {
+            let mut probe = outcome(Some(false), None, None);
+            probe.message = Some("the endpoint answered 500".to_string());
+            let condition =
+                ready_condition(&purposes(&["ask", "agents"]), &probe, None, Some(1), at(6));
+            assert_eq!(condition["status"], json!("False"), "{condition}");
+            assert_eq!(
+                condition["reason"],
+                json!("EndpointUnreachable"),
+                "{condition}"
+            );
+            assert_eq!(
+                condition["message"],
+                json!("the endpoint answered 500"),
+                "{condition}"
+            );
+        }
+
+        /// An absent `spec.purposes` is the CRD's default, `["ask","agents"]`.
+        #[test]
+        fn no_purposes_means_both() {
+            let condition = ready_condition(
+                &[],
+                &outcome(Some(true), None, Some(true)),
+                None,
+                Some(1),
+                at(6),
+            );
+            assert_eq!(condition["status"], json!("False"), "{condition}");
+            assert_eq!(
+                condition["reason"],
+                json!("ToolCallingMissing"),
+                "{condition}"
+            );
+        }
+
+        #[test]
+        fn the_transition_time_survives_an_unchanged_status() {
+            let previous = json!({"type": "Ready", "status": "True", "lastTransitionTime": "2026-11-15T06:00:00Z"});
+            let condition = ready_condition(
+                &purposes(&["ask"]),
+                &outcome(Some(true), None, Some(true)),
+                Some(&previous),
+                Some(1),
+                at(9),
+            );
+            assert_eq!(
+                condition["lastTransitionTime"],
+                json!("2026-11-15T06:00:00Z"),
+                "{condition}"
+            );
+        }
+
+        #[test]
+        fn a_flipped_status_gets_the_new_time() {
+            let previous = json!({"type": "Ready", "status": "True", "lastTransitionTime": "2026-11-15T06:00:00Z"});
+            let condition = ready_condition(
+                &purposes(&["ask"]),
+                &outcome(Some(true), None, Some(false)),
+                Some(&previous),
+                Some(1),
+                at(9),
+            );
+            assert_eq!(condition["status"], json!("False"), "{condition}");
+            assert_eq!(
+                condition["lastTransitionTime"],
+                json!("2026-11-15T09:00:00Z"),
+                "{condition}"
+            );
+        }
     }
 }
