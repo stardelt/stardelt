@@ -596,7 +596,16 @@ pub async fn reconcile_spark_cluster(
             return Ok(Action::await_change());
         }
     };
-    objects::apply::<NetworkPolicy>(&ctx.client, &namespace, &policy, false).await?;
+    if let Err(e) = objects::apply::<NetworkPolicy>(&ctx.client, &namespace, &policy, false).await {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster ingress policy not applied");
+        return Ok(Action::await_change());
+    }
 
     let runtime = match Api::<ConfigMap>::namespaced(ctx.client.clone(), &namespace)
         .get(RUNTIME_CATALOGUE)
@@ -642,14 +651,24 @@ pub async fn reconcile_spark_cluster(
         }
     };
 
-    objects::apply_dynamic(
+    if let Err(e) = objects::apply_dynamic(
         &ctx.client,
         &namespace,
         &objects::spark_connect_resource(),
         &desired,
         false,
     )
-    .await?;
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster SparkConnect not applied");
+        return Ok(Action::await_change());
+    }
 
     let (state, server_name, server_pod) = match connects.get(&format!("spc-{name}")).await {
         Ok(live) => (
@@ -1347,6 +1366,93 @@ mod tests {
         assert!(log.contains("fieldManager=stardelt-operator"), "{log}");
         assert!(log.contains("\"phase\":\"Starting\""), "{log}");
         assert!(log.contains("\"endpoint\":null"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_spark_connect_is_reported_as_failed() {
+        // operator#783: an apply that fails before the first status write must still leave the
+        // reason in `status.message`, not an empty status.
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    200,
+                    r#"{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"spc-trial-ingress","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/sparkconnects/spc-trial") {
+                return (
+                    403,
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"admission webhook \"validate-sparkoperator-k8s-io-v1alpha1-sparkconnect.sparkoperator.k8s.io\" denied the request: sparkConf key \"spark.kubernetes.authenticate.executor.serviceAccountName\" is not allowed: configure the service account via the CRD spec instead","reason":"Forbidden","code":403}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"mobility-analytics"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Failed"}}"#.into(),
+            )
+        });
+        let action =
+            reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
+                .await
+                .expect("reconcile");
+        assert_eq!(action, Action::await_change());
+        let log = requests.lock().expect("requests").join("\n");
+        let reported = log
+            .lines()
+            .find(|line| line.starts_with("PATCH") && line.contains("/sparkclusters/trial/status"))
+            .unwrap_or_else(|| panic!("no status written: {log}"));
+        assert!(reported.contains("\"phase\":\"Failed\""), "{reported}");
+        assert!(
+            reported.contains("configure the service account via the CRD spec instead"),
+            "{reported}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_ingress_policy_is_reported_as_failed() {
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    403,
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"networkpolicies.networking.k8s.io \"spc-trial-ingress\" is forbidden","reason":"Forbidden","code":403}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"mobility-analytics"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Failed"}}"#.into(),
+            )
+        });
+        let action =
+            reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
+                .await
+                .expect("reconcile");
+        assert_eq!(action, Action::await_change());
+        let log = requests.lock().expect("requests").join("\n");
+        let reported = log
+            .lines()
+            .find(|line| line.starts_with("PATCH") && line.contains("/sparkclusters/trial/status"))
+            .unwrap_or_else(|| panic!("no status written: {log}"));
+        assert!(reported.contains("\"phase\":\"Failed\""), "{reported}");
+        assert!(
+            reported.contains("networkpolicies.networking.k8s.io"),
+            "{reported}"
+        );
+        assert!(
+            !log.lines()
+                .any(|line| line.starts_with("PATCH") && line.contains("/sparkconnects/spc-trial")),
+            "the SparkConnect must not be applied after the policy was refused: {log}"
+        );
     }
 
     #[tokio::test]
