@@ -15,6 +15,13 @@
       "query_params": [],
       "body": true
     },
+    "ask_history": {
+      "method": "GET",
+      "path": "/api/ask/history",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
     "auth_config": {
       "method": "GET",
       "path": "/api/auth/config",
@@ -829,6 +836,15 @@
       "query_params": [
         "catalog"
       ],
+      "body": false
+    },
+    "verified_queries_check": {
+      "method": "POST",
+      "path": "/api/verified-queries/{id}/check",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
       "body": false
     },
     "verified_queries_create": {
