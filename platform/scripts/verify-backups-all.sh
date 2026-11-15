@@ -17,7 +17,7 @@
 #   1. enumerates the PVCs that exist right now (`kubectl get pvc`),
 #   2. maps each to its mechanism from the table below (first pattern wins) and
 #      reads the age of its newest backup:
-#        CloudNative-PG  status.lastSuccessfulBackup on the Cluster
+#        CloudNative-PG  status.lastSuccessfulBackup, or the newest completed Backup for a plugin cluster
 #        CronJob         status.lastSuccessfulTime (an incremental mirror's
 #                        newest object ages while the source is idle, so the
 #                        completed run — not an object — is the signal)
@@ -188,6 +188,9 @@ scheduledbackups_json="$(kubectl -n "$NAMESPACE" get scheduledbackup -o json 2>/
 # The plugin form of the backup config (platform#192): the Cluster names an
 # ObjectStore CR, whose spec.configuration carries the destination and keys.
 objectstores_json="$(kubectl -n "$NAMESPACE" get objectstore -o json 2>/dev/null || echo '{"items":[]}')"
+# A barman-cloud-plugin cluster writes Backup objects and the LastBackupSucceeded
+# condition; `status.lastSuccessfulBackup` stops at the plugin-migration date (#1500).
+backups_json="$(kubectl -n "$NAMESPACE" get backups.postgresql.cnpg.io -o json 2>/dev/null || echo '{"items":[]}')"
 now="$(date -u +%s)"
 
 declare -A pvc_mech=() pvc_target=() pvc_reason=() s3_uri=()
@@ -414,9 +417,28 @@ for pvc in "${pvcs[@]}"; do
           <<<"$objectstores_json")"
       fi
       scheduled="$(jq -r --arg n "$target-daily" 'any(.items[]?; .metadata.name == $n)' <<<"$scheduledbackups_json")"
-      last_backup="$(jq -r --arg c "$target" \
-        '.items[] | select(.metadata.name == $c) | (.status.lastSuccessfulBackup // "")' \
-        <<<"$clusters_json")"
+      # Which signal says "a base backup completed"? An in-tree barmanObjectStore advances
+      # status.lastSuccessfulBackup; a barman-cloud plugin writes Backup objects and the
+      # LastBackupSucceeded condition, and leaves status.lastSuccessfulBackup at the
+      # migration date (platform#1500). Read the signal this cluster's method writes.
+      if [ -n "$wal_plugin" ]; then
+        last_backup="$(jq -r --arg c "$target" '
+          [ .items[]
+            | select(.spec.cluster.name == $c and .status.phase == "completed")
+            | (.status.startedAt // "") ]
+          | map(select(. != "")) | max // ""' <<<"$backups_json")"
+        if [ -z "$last_backup" ]; then
+          last_backup="$(jq -r --arg c "$target" '
+            [ .items[] | select(.metadata.name == $c)
+              | .status.conditions[]? | select(.type == "LastBackupSucceeded")
+              | (.lastTransitionTime // "") ]
+            | map(select(. != "")) | max // ""' <<<"$clusters_json")"
+        fi
+      else
+        last_backup="$(jq -r --arg c "$target" \
+          '.items[] | select(.metadata.name == $c) | (.status.lastSuccessfulBackup // "")' \
+          <<<"$clusters_json")"
+      fi
       if [ "$exists" != true ]; then
         verdict="FAIL"
         mech_disp="CNPG $target (missing)"
@@ -436,11 +458,11 @@ for pvc in "${pvcs[@]}"; do
         failures+=("$pvc: no ScheduledBackup $target-daily — apply manifests/cnpg-backup-schedule.yaml")
       elif ! age="$(ts_age "$last_backup")"; then
         verdict="FAIL"
-        failures+=("$pvc: cannot parse status.lastSuccessfulBackup '$last_backup' on Cluster $target")
+        failures+=("$pvc: cannot parse the last-backup timestamp '$last_backup' on Cluster $target (status.lastSuccessfulBackup or a Backup)")
       elif [ -z "$age" ]; then
         verdict="FAIL"
         age_disp="never"
-        failures+=("$pvc: Cluster $target has never completed a base backup (status.lastSuccessfulBackup is empty) — check 'kubectl -n $NAMESPACE get backups'")
+        failures+=("$pvc: Cluster $target has never completed a base backup (no status.lastSuccessfulBackup, no completed Backup, no LastBackupSucceeded condition) — check 'kubectl -n $NAMESPACE get backups'")
       elif [ "$age" -gt "$MAX_AGE_SECONDS" ]; then
         verdict="FAIL"
         age_disp="$(fmt_age "$age")"
