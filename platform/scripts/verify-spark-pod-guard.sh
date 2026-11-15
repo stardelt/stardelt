@@ -7,6 +7,8 @@
 # Read-only against the cluster: every pod and ConfigMap is created/deleted with
 # --dry-run=server as one of spark-connect, spark-stream-driver or spark-batch-driver,
 # so the admission policies decide and nothing is persisted.
+# Case 3 is the one exception: Pod Security refuses hostNetwork before the policy in a baseline
+# namespace (platform#1455), so that line accepts either refusal and says which.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
@@ -34,6 +36,23 @@ deny() {  # <sa> <policy> <label>; the YAML to apply is on stdin
     echo "✓ ${label} denied by the policy"
   else
     echo "✗ ${label} was refused, but not by $policy: $(tail -1 "$out")"; problems=$((problems + 1))
+  fi
+}
+
+deny_or_pss() {  # <sa> <policy> <label>; the YAML to apply is on stdin.
+  # In a namespace with `pod-security.kubernetes.io/enforce: baseline` Pod Security refuses
+  # hostNetwork before any ValidatingAdmissionPolicy sees the pod (platform#1455), so both
+  # refusals are the expected answer and the line says which one answered.
+  local sa="$1" policy="$2" label="$3" out
+  out="$(mktemp)"; trap 'rm -f "$out"' RETURN
+  if kubectl -n "$NS" apply --dry-run=server --as="$sa" -f - >"$out" 2>&1; then
+    echo "✗ ${label} was admitted; the policy should deny it"; problems=$((problems + 1))
+  elif grep -q "$policy" "$out"; then
+    echo "✓ ${label} denied by the policy"
+  elif grep -q 'violates PodSecurity' "$out" && grep -q 'host namespaces' "$out"; then
+    echo "✓ ${label} refused by Pod Security (hostNetwork) before the policy"
+  else
+    echo "✗ ${label} was refused, but by neither $policy nor Pod Security: $(tail -1 "$out")"; problems=$((problems + 1))
   fi
 }
 
@@ -128,7 +147,7 @@ spec:
 EOF
 
 # 3. Host access: the pod would see the node's network.
-deny "$SA" spark-connect-executor-pods deny-host-network.yaml <<EOF
+deny_or_pss "$SA" spark-connect-executor-pods deny-host-network.yaml <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
