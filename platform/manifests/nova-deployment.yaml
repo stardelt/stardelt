@@ -369,6 +369,11 @@ spec:
             # culler is what actually stops an idle server, Nova only counts down.
             - name: NOVA_WORKSPACE_IDLE_SECONDS
               value: "3600"
+            # How often the model-endpoint probe re-checks every endpoint (stardelt-nova#609
+            # slice c2): seconds, 300 (5 min) to 604800 (7 days). A new endpoint is probed by
+            # the next one-minute round regardless. Nova's own default is 86400.
+            - name: NOVA_MODEL_PROBE_SECONDS
+              value: "86400"
             - name: RUST_LOG
               value: info,tower_http=info
           readinessProbe:

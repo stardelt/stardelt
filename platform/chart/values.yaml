@@ -626,6 +626,9 @@ nova:
   #   - endpoint: default
   #     connection: llm-key
   #     key: api-key
+  # How often the model-endpoint probe re-checks every endpoint, in seconds; 300-604800.
+  # A new endpoint is probed by the next one-minute round regardless. Nova's default is 86400.
+  modelProbeSeconds: 86400
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.
   #   oidc — Nova is a client of the IdP configured under `identity:` above.
