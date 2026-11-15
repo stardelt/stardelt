@@ -525,6 +525,22 @@ pub fn pipeline_notebook_egress(namespace: &str) -> NetworkPolicy {
                     ])]),
                     ports: Some(vec![port(8333)]),
                 },
+                // A group's Spark Connect server (a SparkCluster): its own ingress admits only the
+                // owner group's pods (stardelt-platform#1425). The shared server has no such label.
+                NetworkPolicyEgressRule {
+                    to: Some(vec![NetworkPolicyPeer {
+                        pod_selector: Some(LabelSelector {
+                            match_expressions: Some(vec![LabelSelectorRequirement {
+                                key: CONNECT_POD_LABEL.to_string(),
+                                operator: "Exists".to_string(),
+                                values: None,
+                            }]),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ports: Some(vec![port(15002)]),
+                },
                 // The public internet, never a private range and never the metadata address.
                 NetworkPolicyEgressRule {
                     to: Some(vec![NetworkPolicyPeer {
@@ -1122,7 +1138,7 @@ mod tests {
         let policy = pipeline_notebook_egress("data");
         let spec = policy.spec.as_ref().unwrap();
         let rules = spec.egress.as_ref().unwrap();
-        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.len(), 5);
 
         // Rule 1: DNS on TCP and UDP 53.
         let dns = rules[0].ports.as_ref().unwrap();
@@ -1179,8 +1195,28 @@ mod tests {
             Some(IntOrString::Int(8333))
         );
 
-        // Rule 4: the public internet, every private range and the metadata address excepted.
-        let public = rules[3].to.as_ref().unwrap();
+        // Rule 4: a group's Spark Connect server on 15002, selected by its connect label.
+        let spark_peers = rules[3].to.as_ref().unwrap();
+        assert_eq!(spark_peers.len(), 1);
+        assert!(spark_peers[0].namespace_selector.is_none());
+        let spark = spark_peers[0]
+            .pod_selector
+            .as_ref()
+            .unwrap()
+            .match_expressions
+            .as_ref()
+            .unwrap();
+        assert_eq!(spark.len(), 1);
+        assert_eq!(spark[0].key, CONNECT_POD_LABEL);
+        assert_eq!(spark[0].operator, "Exists");
+        assert!(spark[0].values.is_none());
+        assert_eq!(
+            rules[3].ports.as_ref().unwrap()[0].port,
+            Some(IntOrString::Int(15002))
+        );
+
+        // Rule 5: the public internet, every private range and the metadata address excepted.
+        let public = rules[4].to.as_ref().unwrap();
         assert_eq!(public.len(), 1);
         let block = public[0].ip_block.as_ref().unwrap();
         assert_eq!(block.cidr, "0.0.0.0/0");
@@ -1193,7 +1229,7 @@ mod tests {
                 "169.254.169.254/32".to_string(),
             ]
         );
-        assert!(rules[3].ports.is_none());
+        assert!(rules[4].ports.is_none());
     }
 
     #[test]
