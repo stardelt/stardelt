@@ -5,6 +5,7 @@ export type IconName =
   | 'search' | 'plus' | 'arrow' | 'download' | 'table' | 'spark' | 'notebook' | 'users'
   | 'sliders' | 'key' | 'play' | 'list'
   | 'folder' | 'eye' | 'volume'      // ← the three new names
+  | 'chip'
   | 'sun'
   | 'moon'
   | 'mail'
@@ -109,6 +110,12 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M12 3v4M12 17v4M3 12h4M17 12h4" />
       <path d="m6 6 2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18" />
       <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  chip: (
+    <>
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" />
     </>
   ),
   notebook: (

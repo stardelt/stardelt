@@ -42,6 +42,12 @@ pub struct ModelEndpointRow {
     pub context_tokens: Option<i64>,
     pub checked_at: Option<String>,
     pub message: Option<String>,
+    /// `spec.quota.perGroupMonthlyTokens`: the tokens one group may spend a month, if set.
+    #[serde(rename = "perGroupMonthlyTokens")]
+    pub quota_per_group_monthly: Option<i64>,
+    /// `spec.quota.perPersonDailyTokens`: the tokens one person may spend a day, if set.
+    #[serde(rename = "perPersonDailyTokens")]
+    pub quota_per_person_daily: Option<i64>,
 }
 
 /// The `ModelEndpoint` resources of the platform namespace.
@@ -61,6 +67,7 @@ pub(crate) fn endpoints_api(client: kube::Client) -> Api<DynamicObject> {
 pub(crate) fn row(object: &Value) -> ModelEndpointRow {
     let spec = object.get("spec").unwrap_or(&Value::Null);
     let status = object.get("status").unwrap_or(&Value::Null);
+    let quota = crate::model_calls::quota_of(object);
     ModelEndpointRow {
         name: object
             .pointer("/metadata/name")
@@ -104,6 +111,8 @@ pub(crate) fn row(object: &Value) -> ModelEndpointRow {
             .get("message")
             .and_then(Value::as_str)
             .map(str::to_string),
+        quota_per_group_monthly: quota.per_group_monthly,
+        quota_per_person_daily: quota.per_person_daily,
     }
 }
 
@@ -120,7 +129,7 @@ fn rows(objects: &[Value]) -> Vec<ModelEndpointRow> {
     operation_id = "model_endpoints_list",
     path = "/api/model-endpoints",
     tag = "public",
-    description = "Every `ModelEndpoint` of the platform namespace, name order: `name`, `model`, `location` (`on-premise` | `cloud`, default `on-premise`), `purposes` (default `[\"ask\",\"agents\"]`), `sendRows` (may query results be sent to this model; off by default) and the probe's last answer — `reachable`, `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`, `message`, each `null` until the probe has run. The endpoint's `url` and its `keyRef` are absent on purpose: the shape says that a model exists, what it is, where prompts go and whether it works, never the internal hostname or the name of the Connection holding the key. Without a cluster connection (demo mode, a local run) the answer is an empty list: no endpoint means no AI feature. A cluster that refuses or fails is a 502, never an empty list that would read as \"no model\". Answers `Cache-Control: no-store`.",
+    description = "Every `ModelEndpoint` of the platform namespace, name order: `name`, `model`, `location` (`on-premise` | `cloud`, default `on-premise`), `purposes` (default `[\"ask\",\"agents\"]`), `sendRows` (may query results be sent to this model; off by default), the quota of `spec.quota` — `perGroupMonthlyTokens` and `perPersonDailyTokens`, each `null` for no limit — and the probe's last answer — `reachable`, `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`, `message`, each `null` until the probe has run. The endpoint's `url` and its `keyRef` are absent on purpose: the shape says that a model exists, what it is, where prompts go and whether it works, never the internal hostname or the name of the Connection holding the key. Without a cluster connection (demo mode, a local run) the answer is an empty list: no endpoint means no AI feature. A cluster that refuses or fails is a 502, never an empty list that would read as \"no model\". Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per endpoint, name order; empty when none is connected", body = [ModelEndpointRow]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -259,7 +268,8 @@ mod tests {
                     "model": "frontier-1",
                     "keyRef": {"name": "llm-key", "key": "api-key"},
                     "location": "cloud",
-                    "sendRows": true
+                    "sendRows": true,
+                    "quota": {"perGroupMonthlyTokens": 2000000}
                 },
                 "status": {
                     "reachable": true,
@@ -288,6 +298,8 @@ mod tests {
         assert_eq!(a.context_tokens, None);
         assert_eq!(a.checked_at, None);
         assert_eq!(a.message, None);
+        assert_eq!(a.quota_per_group_monthly, None);
+        assert_eq!(a.quota_per_person_daily, None);
 
         let b = row(&objects[1]);
         assert_eq!(b.name, "cloud");
@@ -299,6 +311,21 @@ mod tests {
         assert_eq!(b.context_tokens, Some(32768));
         assert_eq!(b.checked_at.as_deref(), Some("2026-11-15T00:00:00Z"));
         assert_eq!(b.message.as_deref(), Some("ok"));
+        assert_eq!(b.quota_per_group_monthly, Some(2_000_000));
+        assert_eq!(b.quota_per_person_daily, None);
+    }
+
+    /// The quota travels to the UI under the CRD's own field names, so a reader can match
+    /// `perGroupMonthlyTokens` in the answer against `spec.quota` in the resource.
+    #[test]
+    fn the_quota_is_serialised_under_the_crd_names() {
+        let value = serde_json::to_value(row(&objects()[1])).expect("JSON");
+        assert_eq!(value["perGroupMonthlyTokens"], json!(2_000_000));
+        assert_eq!(value["perPersonDailyTokens"], Value::Null);
+        assert_eq!(
+            serde_json::to_value(row(&objects()[0])).expect("JSON")["perGroupMonthlyTokens"],
+            Value::Null
+        );
     }
 
     #[test]

@@ -494,6 +494,10 @@ export type ModelEndpoint = {
   contextTokens?: number | null
   checkedAt?: string | null
   message?: string | null
+  /** `spec.quota.perGroupMonthlyTokens`: tokens one group may spend a month, if set. */
+  perGroupMonthlyTokens?: number | null
+  /** `spec.quota.perPersonDailyTokens`: tokens one person may spend a day, if set. */
+  perPersonDailyTokens?: number | null
 }
 
 /** The month's tokens for one group and endpoint (`GET /api/admin/model-usage`). */

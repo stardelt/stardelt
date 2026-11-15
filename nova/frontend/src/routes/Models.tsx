@@ -19,11 +19,6 @@ import { formatDurationMs, formatTime, relativeTime } from '../format'
 /** How many calls the page asks for; the API accepts 1 to 500. */
 const LIMITS = [50, 100, 200, 500] as const
 
-/** Where a prompt goes, in Nova's words rather than the spec's. */
-function wherePromptsGo(location: string): string {
-  return location === 'cloud' ? 'leaves your cluster' : 'on-premise'
-}
-
 /**
  * The probe's verdict in one phrase: `Ready`, `Not ready` or `Not probed`. An endpoint that
  * answers but cannot call tools is not ready either — Ask and the agents need the tool call
@@ -35,11 +30,36 @@ function probeWord(endpoint: ModelEndpoint): string {
   return 'Not probed'
 }
 
+/**
+ * What the probe measured, so `Ready` is not a word an administrator has to trust: the answer,
+ * the tool call, the JSON output and the context window it found. Only a reachable endpoint has
+ * measurements; a failed one shows its `message` instead (the probe has nothing else to say).
+ */
+function probeChecks(endpoint: ModelEndpoint): string | null {
+  if (endpoint.reachable !== true) return null
+  const mark = (ok: boolean) => (ok ? '✓' : '✕')
+  const parts = [
+    `${mark(endpoint.reachable)} answers`,
+    `${mark(endpoint.toolCalling === true)} tools`,
+    `${mark(endpoint.jsonOutput === true)} JSON`,
+  ]
+  if (endpoint.contextTokens != null) {
+    parts.push(`${endpoint.contextTokens.toLocaleString('en-US')} tokens`)
+  }
+  return parts.join(' · ')
+}
+
 /** When the probe last looked, as "12 min ago"; an unparsable stamp reads as unknown. */
 function checkedLabel(checkedAt: string | null | undefined): string | null {
   if (!checkedAt) return null
   const ms = Date.parse(checkedAt)
   return Number.isNaN(ms) ? null : relativeTime(ms)
+}
+
+/** The feature the API records in the call row, in Nova's words rather than the column's. */
+function featureWord(feature: string): string {
+  const words: Record<string, string> = { ask: 'Ask', agent: 'Agent', probe: 'Probe' }
+  return words[feature] ?? feature
 }
 
 export default function Models() {
@@ -180,7 +200,11 @@ export default function Models() {
                   </tr>
                 )}
                 {groups.map((row) => (
-                  <UsageRow key={`${row.group}-${row.endpoint}`} row={row} />
+                  <UsageRow
+                    key={`${row.group}-${row.endpoint}`}
+                    row={row}
+                    endpoint={rows.find((e) => e.name === row.endpoint)}
+                  />
                 ))}
               </tbody>
             </table>
@@ -262,14 +286,19 @@ function EndpointRow({
   onProbe: () => void
 }) {
   const word = probeWord(endpoint)
+  const checks = probeChecks(endpoint)
   const checked = checkedLabel(endpoint.checkedAt)
   const bad = endpoint.reachable === false
   return (
     <tr className="border-t border-border/70">
       <td className="td px-5 py-3 font-mono text-xs break-words">{endpoint.name}</td>
       <td className="td px-3 py-3 break-words">{endpoint.model}</td>
-      <td className="td px-3 py-3 text-text-dim whitespace-nowrap">
-        {wherePromptsGo(endpoint.location)}
+      <td className="td px-3 py-3 whitespace-nowrap">
+        {endpoint.location === 'cloud' ? (
+          <span className="text-warn">⚠ leaves your cluster</span>
+        ) : (
+          <span className="text-text-dim">on-premise</span>
+        )}
       </td>
       <td className="td px-3 py-3 text-text-dim">
         {endpoint.purposes.length > 0 ? endpoint.purposes.join(', ') : '—'}
@@ -277,6 +306,9 @@ function EndpointRow({
       <td className="td px-3 py-3">
         <span className={bad ? 'text-bad whitespace-nowrap' : 'whitespace-nowrap'}>{word}</span>
         {checked && <span className="text-text-mute text-xs"> · checked {checked}</span>}
+        {checks && (
+          <p className="text-text-mute text-xs mt-0.5 break-words">{checks}</p>
+        )}
         {endpoint.message && (
           <p className="text-text-mute text-xs mt-0.5 max-w-md break-words">{endpoint.message}</p>
         )}
@@ -295,8 +327,30 @@ function EndpointRow({
   )
 }
 
-/** One group and endpoint of the month: the tokens, the calls, and "about" when estimated. */
-function UsageRow({ row }: { row: ModelUsageRow }) {
+/**
+ * One group and endpoint of the month: the tokens, the calls, and "about" when estimated. The
+ * quota line is the one fact an administrator acts on — how much of the month's allowance this
+ * group has spent, amber from 80 % and red from 100 % (the refusal starts there). Without a
+ * quota the row says `no limit` rather than leaving the reader to guess.
+ */
+function UsageRow({
+  row,
+  endpoint,
+}: {
+  row: ModelUsageRow
+  endpoint: ModelEndpoint | undefined
+}) {
+  const used = row.tokensIn + row.tokensOut
+  const quota = endpoint?.perGroupMonthlyTokens ?? null
+  const percent = quota ? Math.round((used / quota) * 100) : null
+  const quotaTone =
+    percent == null
+      ? 'text-text-mute'
+      : percent >= 100
+        ? 'text-bad'
+        : percent >= 80
+          ? 'text-warn'
+          : 'text-text-dim'
   return (
     <tr className="border-t border-border/70">
       <td className="td px-5 py-3 break-words">{row.group}</td>
@@ -307,6 +361,13 @@ function UsageRow({ row }: { row: ModelUsageRow }) {
       </td>
       <td className="td px-3 py-3 text-right whitespace-nowrap">
         {row.tokensOut.toLocaleString('en-US')}
+        {quota != null && percent != null ? (
+          <p className={`text-xs font-normal ${quotaTone}`}>
+            of {quota.toLocaleString('en-US')} · {percent} %
+          </p>
+        ) : (
+          <p className="text-text-mute text-xs font-normal">no limit</p>
+        )}
       </td>
       <td className="td px-3 py-3 text-right text-text-dim whitespace-nowrap">
         {row.calls.toLocaleString('en-US')}
@@ -327,7 +388,7 @@ function CallRow({ call }: { call: ModelUsageCall }) {
       <td className="td px-3 py-3 text-text-dim break-words">
         {call.group ?? <span className="text-text-mute">—</span>}
       </td>
-      <td className="td px-3 py-3 text-text-dim break-words">{call.feature}</td>
+      <td className="td px-3 py-3 text-text-dim break-words">{featureWord(call.feature)}</td>
       <td className="td px-3 py-3 font-mono text-xs break-words">{call.endpoint}</td>
       <td className="td px-3 py-3 text-text-dim break-words">{call.model}</td>
       <td className="td px-3 py-3 text-right text-text-dim whitespace-nowrap">
