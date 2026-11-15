@@ -279,6 +279,9 @@ impl HelmRunner for CommandHelmRunner {
     ) -> BoxFuture<'static, anyhow::Result<String>> {
         Box::pin(async move {
             let mut child = tokio::process::Command::new("helm")
+                // A controller aborted at leader stand-down must not leave a helm child running
+                // next to a new leader (platform#1458).
+                .kill_on_drop(true)
                 .args(&args)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())

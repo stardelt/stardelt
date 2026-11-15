@@ -71,17 +71,37 @@ pub async fn run() -> anyhow::Result<()> {
     apply_crds(&client).await?;
     // Leader election (#75): only the replica that holds the Lease reconciles. Outside a
     // pod (`cargo run`) there is no POD_NAME and every controller starts at once.
-    if let Some((pod, namespace)) = crate::leader::identity() {
+    let Some((pod, namespace)) = crate::leader::identity() else {
+        return run_controllers(client).await;
+    };
+    loop {
         crate::leader::acquire(client.clone(), &namespace, &pod).await?;
         crate::metrics::set_leader(true);
-        let renewer = client.clone();
-        tokio::spawn(async move {
-            let reason = crate::leader::keep(renewer, namespace, pod).await;
-            crate::metrics::set_leader(false);
-            tracing::error!(reason = %reason, "lost the leader lease; exiting so another replica leads");
-            std::process::exit(1);
-        });
+        tracing::info!(pod = %pod, "leading; controllers started");
+        let mut renewer = tokio::spawn(crate::leader::keep(
+            client.clone(),
+            namespace.clone(),
+            pod.clone(),
+        ));
+        let reason = tokio::select! {
+            reason = &mut renewer => match reason {
+                Ok(reason) => reason,
+                Err(error) => anyhow::bail!("the lease renewer stopped: {error}"),
+            },
+            result = run_controllers(client.clone()) => {
+                renewer.abort();
+                crate::metrics::set_leader(false);
+                return result;
+            }
+        };
+        crate::metrics::set_leader(false);
+        // Dropping `run_controllers` cancels every watcher before another replica can take
+        // the Lease; `helm.rs` sets `kill_on_drop(true)` so no `helm` child outlives it.
+        tracing::warn!(reason = %reason, "lost the leader lease; standing down until it is free");
     }
+}
+
+async fn run_controllers(client: Client) -> anyhow::Result<()> {
     let ctx = Arc::new(Context {
         client: client.clone(),
         helm: Arc::new(CommandHelmRunner),

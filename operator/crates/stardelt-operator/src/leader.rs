@@ -8,8 +8,9 @@
 //! 2. then starts the controllers;
 //! 3. renews the Lease in `keep` every `RENEW_EVERY`. When it cannot renew for
 //!    `RENEW_DEADLINE` (shorter than the lease), or another pod holds it, `keep` returns
-//!    and the process exits, so the pod restarts as a follower and never runs a
-//!    `helm upgrade` next to a new leader.
+//!    and the caller stands down: it stops its controllers, sets the leader metric to 0
+//!    and waits in `acquire` again, so a follower never runs a `helm upgrade` next to a
+//!    new leader and the process does not restart (platform#1458).
 //!
 //! "Stopped renewing" is measured on this replica's own clock: the Lease's
 //! `resourceVersion` has not changed for `LEASE_SECONDS`. The holder's `renewTime` is
@@ -218,7 +219,7 @@ async fn renew_once(api: &Api<Lease>, me: &str) -> Renewal {
     }
 }
 
-/// Renew the Lease until leadership is lost, and return the reason. The caller exits.
+/// Renew the Lease until leadership is lost, and return the reason. The caller stands down.
 ///
 /// The leader gives up after `RENEW_DEADLINE` without a successful renewal. That is
 /// shorter than `LEASE_SECONDS`, so it has stopped before a follower may take over.
