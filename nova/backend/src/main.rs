@@ -123,6 +123,7 @@ mod mcp;
 mod mcp_audit;
 mod metrics;
 mod migrations;
+mod model_endpoints;
 mod notebooks;
 mod openapi;
 mod people;
@@ -679,6 +680,9 @@ fn api_router() -> Router<Arc<AppState>> {
         // The SQL compute classes and the one this caller lands in (stardelt-nova#236): read
         // from the `SqlWarehouse` objects, non-authoritative — the engine selects by identity.
         .route("/warehouses", get(warehouses::list))
+        // The model endpoints an administrator connected (operator#609 slice c): Ask reads
+        // whether one exists, where prompts go and what the probe last found.
+        .route("/model-endpoints", get(model_endpoints::list))
         // The Spark clusters a person may use (internal#161 slice 5a): the operator translates
         // a SparkCluster into the Spark server, Nova only lists it and sets `spec.state`.
         .route("/compute", get(compute::list))
