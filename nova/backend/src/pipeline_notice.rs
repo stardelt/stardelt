@@ -67,7 +67,7 @@ pub fn spawn(state: Arc<AppState>) {
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             if let Err(e) = run_once(&state).await {
-                tracing::warn!(error = %e, "the pipeline notice tick failed");
+                tracing::warn!(error = %format!("{e:#}"), "the pipeline notice tick failed");
             }
             // One `run_once` at a time: the tick is awaited in the loop, never overlapped.
             ticks.tick().await;

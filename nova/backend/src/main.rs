@@ -169,7 +169,7 @@ use axum::{
 };
 use serde::Serialize;
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -913,23 +913,49 @@ async fn main() -> anyhow::Result<()> {
     } else {
         match kube::Config::infer().await {
             Ok(mut config) => {
+                info!(
+                    url = %config.cluster_url,
+                    ca_file = ?config.root_cert_file,
+                    "cluster config"
+                );
                 // A half-reachable API server (accepts TCP, never answers) would otherwise
                 // stall every workload read for the client's 30 s default — enough to make
                 // the UI feel hung on a screen a person is watching. Short timeouts turn
-                // that into a fast, honest "the cluster did not answer".
-                config.connect_timeout = Some(std::time::Duration::from_secs(3));
-                config.read_timeout = Some(std::time::Duration::from_secs(5));
-                config.write_timeout = Some(std::time::Duration::from_secs(5));
+                // that into a fast, honest "the cluster did not answer". The in-cluster
+                // round trip measures in milliseconds (2026-11-15: 3.6 ms to
+                // `apiserver_version`), so 3 s leaves no room for a TLS handshake while
+                // the node is in one of platform#554's I/O stalls; 10 s/15 s still ends
+                // far below the client's 30 s default.
+                config.connect_timeout = Some(std::time::Duration::from_secs(10));
+                config.read_timeout = Some(std::time::Duration::from_secs(15));
+                config.write_timeout = Some(std::time::Duration::from_secs(15));
                 match kube::Client::try_from(config) {
-                    Ok(client) => Some(client),
+                    Ok(client) => {
+                        // One probe, so the first log names the phase that fails: kube's
+                        // TraceLayer prints only hyper's "client error (Connect)" for
+                        // every request.
+                        match client.apiserver_version().await {
+                            Ok(v) => info!(version = %v.git_version, "cluster client ready"),
+                            Err(e) => {
+                                warn!(error = %format!("{e:#}"), "cluster client cannot reach the API")
+                            }
+                        }
+                        Some(client)
+                    }
                     Err(e) => {
-                        info!(error = %e, "no cluster client — workload images will be omitted");
+                        warn!(
+                            error = %format!("{e:#}"),
+                            "no cluster client — workload images will be omitted"
+                        );
                         None
                     }
                 }
             }
             Err(e) => {
-                info!(error = %e, "no cluster client — workload images will be omitted");
+                warn!(
+                    error = %format!("{e:#}"),
+                    "no cluster client — workload images will be omitted"
+                );
                 None
             }
         }

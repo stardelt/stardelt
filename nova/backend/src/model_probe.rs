@@ -331,7 +331,7 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
     let objects = match api.list(&kube::api::ListParams::default()).await {
         Ok(objects) => objects,
         Err(e) => {
-            warn!(error = %e, "model probe: the endpoint list failed — trying again next round");
+            warn!(error = %format!("{e:#}"), "model probe: the endpoint list failed — trying again next round");
             return;
         }
     };
