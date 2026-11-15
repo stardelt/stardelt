@@ -530,6 +530,10 @@ fn group_list_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::S
         "message": "mcp.callsPerMinute is from 1 to 600"
     },
     {
+        "rule": "!has(self.mcp) || !has(self.mcp.writesPerHour) || (self.mcp.writesPerHour >= 1 && self.mcp.writesPerHour <= 600)",
+        "message": "mcp.writesPerHour is from 1 to 600"
+    },
+    {
         "rule": "!has(self.mcp) || !has(self.mcp.auditRetentionDays) || (self.mcp.auditRetentionDays >= 0 && self.mcp.auditRetentionDays <= 3650)",
         "message": "mcp.auditRetentionDays is from 0 to 3650 (0 keeps the rows)"
     }
@@ -641,6 +645,14 @@ pub struct McpSpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub calls_per_minute: Option<u32>,
+    /// `tools/call`s of a write tool one person may make per hour on `/mcp`
+    /// (`NOVA_MCP_WRITES_PER_HOUR`); 1–600. Empty = Nova's own default (20).
+    #[serde(
+        default,
+        rename = "writesPerHour",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub writes_per_hour: Option<u32>,
     /// Days the `mcp_call` audit rows are kept (`NOVA_MCP_AUDIT_RETENTION_DAYS`); 0–3650.
     /// Empty = Nova's own default (30); `0` keeps the rows and switches the purge off.
     #[serde(
@@ -3822,6 +3834,8 @@ mod tests {
         let crd = serde_json::to_string(&PlatformInstance::crd()).unwrap();
         assert!(crd.contains("mcp.callsPerMinute is from 1 to 600"));
         assert!(crd.contains("\"callsPerMinute\""));
+        assert!(crd.contains("mcp.writesPerHour is from 1 to 600"));
+        assert!(crd.contains("\"writesPerHour\""));
         assert!(crd.contains("mcp.auditRetentionDays is from 0 to 3650 (0 keeps the rows)"));
         assert!(crd.contains("\"auditRetentionDays\""));
     }

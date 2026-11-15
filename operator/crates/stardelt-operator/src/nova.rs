@@ -404,6 +404,9 @@ fn env(namespace: &str, base_domain: Option<&str>, airflow: bool, mcp: &McpSpec)
         if let Some(calls) = mcp.calls_per_minute {
             env.push(value_env("NOVA_MCP_CALLS_PER_MINUTE", &calls.to_string()));
         }
+        if let Some(writes) = mcp.writes_per_hour {
+            env.push(value_env("NOVA_MCP_WRITES_PER_HOUR", &writes.to_string()));
+        }
         if let Some(days) = mcp.audit_retention_days {
             env.push(value_env(
                 "NOVA_MCP_AUDIT_RETENTION_DAYS",
@@ -1142,6 +1145,7 @@ mod tests {
                 max_rows: Some(500),
                 query_timeout_seconds: Some(30),
                 calls_per_minute: Some(120),
+                writes_per_hour: Some(30),
                 audit_retention_days: Some(90),
                 ..McpSpec::default()
             },
@@ -1162,6 +1166,11 @@ mod tests {
         assert_eq!(
             named(&tuned, "NOVA_MCP_CALLS_PER_MINUTE").value.as_deref(),
             Some("120")
+        );
+        assert!(!custom.iter().any(|e| e.name == "NOVA_MCP_WRITES_PER_HOUR"));
+        assert_eq!(
+            named(&tuned, "NOVA_MCP_WRITES_PER_HOUR").value.as_deref(),
+            Some("30")
         );
         assert!(
             !custom

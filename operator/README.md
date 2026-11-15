@@ -85,6 +85,8 @@ accepts every group the audience accepts, and while the list is set Nova refuses
 names none of the groups.
 `mcp.callsPerMinute` (1–600) renders `NOVA_MCP_CALLS_PER_MINUTE`, the `tools/call`s one person may make per
 minute on `/mcp`; leave it out and Nova uses its own default (60).
+`mcp.writesPerHour` (1–600) renders `NOVA_MCP_WRITES_PER_HOUR`, the write `tools/call`s one person may
+make per hour on `/mcp`; leave it out and Nova uses its own default (20).
 `mcp.auditRetentionDays` (0–3650) renders `NOVA_MCP_AUDIT_RETENTION_DAYS`, the days the stored
 `/mcp` audit rows are kept; leave it out and Nova keeps them 30 days, and `0` keeps them and switches
 the hourly purge off.
