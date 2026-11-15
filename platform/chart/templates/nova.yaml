@@ -156,6 +156,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # The projected model keys are mode 0440; the kubelet gives them this group.
+        fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       {{- $pullSecrets := .Values.nova.imagePullSecrets | default .Values.images.pullSecrets }}
       {{- with $pullSecrets }}
@@ -171,6 +173,12 @@ spec:
               name: http
             - containerPort: 8081
               name: internal
+          {{- with .Values.nova.modelKeys }}
+          volumeMounts:
+            - name: model-keys
+              mountPath: /var/run/stardelt/models
+              readOnly: true
+          {{- end }}
           env:
             - name: NOVA_TRINO_URL
               value: {{ tpl .Values.nova.trinoURL . | quote }}
@@ -392,6 +400,21 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+      {{- with .Values.nova.modelKeys }}
+      volumes:
+        - name: model-keys
+          projected:
+            defaultMode: 0440
+            sources:
+              {{- range . }}
+              - secret:
+                  name: {{ printf "conn-%s" .connection | quote }}
+                  optional: true
+                  items:
+                    - key: {{ .key | quote }}
+                      path: {{ printf "%s/key" .endpoint | quote }}
+              {{- end }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

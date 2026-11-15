@@ -613,6 +613,15 @@ nova:
     # compares the rendered string against the empty string. The operator's CRD carries the same
     # knob as `spec.mcp.auditRetentionDays` (stardelt-operator#740).
     auditRetentionDays: ""
+  # Model endpoints whose API keys the kubelet projects into Nova (operator#609 slice c1).
+  # Each entry becomes the read-only file `/var/run/stardelt/models/<endpoint>/key`, so Nova
+  # never reads a Secret through the API and a rotated key arrives without a restart. The key
+  # is a key of the Connection's synced Secret `conn-<connection>`; a Secret that does not
+  # exist yet only leaves the file absent (the volume source is optional).
+  modelKeys: []
+  #   - endpoint: default
+  #     connection: llm-key
+  #     key: api-key
   # Sign-in (contract: docs/architecture/identity).
   #   dev  — no login; what CI and the Nova demo mode rely on.
   #   oidc — Nova is a client of the IdP configured under `identity:` above.
