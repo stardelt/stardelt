@@ -8,6 +8,7 @@ import {
 } from '../api'
 import { isAdmin } from '../roles'
 import ErrorBox from './ErrorBox'
+import VerifiedQueries from './VerifiedQueries'
 
 /** The card's three states, as `useQuery` reports them; the data is optional while a refetch runs. */
 export type DocsState = {
@@ -304,6 +305,8 @@ export default function TableAbout({
           </div>
 
           {!doc.canEdit && <p className="mt-3 text-text-mute text-xs break-words">{doc.editRule}</p>}
+
+          <VerifiedQueries ns={ns} tbl={tbl} catalog={catalog} canEdit={doc.canEdit} />
         </>
       )}
 

@@ -260,6 +260,16 @@ export type TableDocsUpdate = {
   guide?: string | null
 }
 
+/** One verified query: a question about a table that its owners answered (#1018). */
+export type VerifiedQuery = {
+  id: number
+  question: string
+  sql: string
+  verifiedBy: string
+  verifiedAt: string
+}
+export type VerifiedQueryList = { items: VerifiedQuery[] }
+
 export type QueryColumn = { name: string; type: string }
 export type QueryResult = {
   columns: QueryColumn[]
@@ -1614,6 +1624,11 @@ export const api = {
       catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),
       { description },
     ),
+  verifiedQueries: (ns: string, tbl: string, catalog?: string) =>
+    jget<VerifiedQueryList>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog)),
+  createVerifiedQuery: (ns: string, tbl: string, body: { question: string; sql: string }, catalog?: string) =>
+    jpost<VerifiedQuery>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog), body),
+  deleteVerifiedQuery: (id: number) => jdel(`/api/verified-queries/${id}`),
   tableHistory: (ns: string, tbl: string, catalog?: string) =>
     jget<QueryResult>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/history`, catalog)),
   rollback:     (ns: string, tbl: string, snapshotId: string, catalog?: string) =>
