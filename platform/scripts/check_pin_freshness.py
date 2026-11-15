@@ -125,6 +125,46 @@ def resolve_digest(app: str, tag: str = "dev") -> tuple[str | None, str]:
     return digest, ""
 
 
+def pin_text(repo: Path, manifest: str) -> tuple[str, list[str]]:
+    """The committed text of `manifest`, and a note when the working tree differs.
+
+    A pin belongs to a commit. A rollout leaves the checkout dirty, and a dirty file made
+    this script print a row about a digest `main` does not carry (2026-11-15: the operator
+    in the tree, the Nova pin now). Read `origin/main` when it resolves, else `HEAD`, else
+    the file — and say when the working tree is not what was judged.
+    """
+    path = repo / manifest
+    notes: list[str] = []
+    rev = ""
+    for candidate in ("origin/main", "HEAD"):
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", candidate],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            rev = candidate
+            break
+    if not rev:
+        notes.append(f"! {manifest}: no git revision to read, judging the working tree")
+        return path.read_text(), notes
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{rev}:{manifest}"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        notes.append(f"! {manifest}: not in {rev}, judging the working tree")
+        return path.read_text(), notes
+    if rev == "HEAD":
+        notes.append(f"! {manifest}: origin/main does not resolve here, judging HEAD")
+    try:
+        on_disk = path.read_text()
+    except OSError:
+        on_disk = proc.stdout
+    if on_disk != proc.stdout:
+        notes.append(f"! {manifest} differs in the working tree; judging {rev}")
+    return proc.stdout, notes
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -135,10 +175,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     lines: list[str] = []
+    notes: list[str] = []
     offline_failed = False
     for app, manifest, kind, tag in APPS:
-        path = REPO / manifest
-        text = path.read_text()
+        text, file_notes = pin_text(REPO, manifest)
+        notes.extend(file_notes)
         pinned = parse_pins(text, kind)
         resolved, err = resolve_digest(app, tag)
         if resolved is None:
@@ -148,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
         lines.extend(compare(app, pinned, resolved, manifest, tag))
 
+    for note in dict.fromkeys(notes):
+        print(note)
     for line in lines:
         print(line)
     if offline_failed:

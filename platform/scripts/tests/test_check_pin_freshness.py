@@ -3,10 +3,13 @@
 Standard library only; discovered by `python3 -m unittest discover -s scripts/tests`.
 """
 
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_pin_freshness import compare, exit_code, parse_pins
+from scripts.check_pin_freshness import compare, exit_code, parse_pins, pin_text
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -97,6 +100,50 @@ class CompareTest(unittest.TestCase):
         )
         self.assertIn("demo resolves to dddddddd…", stale[0])
         self.assertNotIn(" dev@", stale[0])
+
+
+class PinTextTest(unittest.TestCase):
+    """A pin is read from a commit, not from whatever a rollout left in the tree."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.write("a")
+        self.git("init", "-q")
+        self.git("add", "pins.yaml")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "pin")
+
+    def write(self, hex_digit):
+        (self.dir / "pins.yaml").write_text(f"tag: dev@sha256:{hex_digit * 64}\n")
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.dir), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def test_a_clean_tree_without_a_remote_reads_head_and_says_so(self):
+        text, notes = pin_text(self.dir, "pins.yaml")
+        self.assertIn("a" * 64, text)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("origin/main does not resolve here, judging HEAD", notes[0])
+
+    def test_a_dirty_file_is_named_and_the_commit_wins(self):
+        self.write("b")
+        text, notes = pin_text(self.dir, "pins.yaml")
+        self.assertIn("a" * 64, text)
+        self.assertNotIn("b" * 64, text)
+        self.assertTrue(any("differs in the working tree; judging HEAD" in n for n in notes), notes)
+
+    def test_origin_main_wins_over_a_different_head(self):
+        first = self.git("rev-parse", "HEAD")
+        self.write("c")
+        self.git("add", "pins.yaml")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "head moves")
+        self.git("update-ref", "refs/remotes/origin/main", first)
+        text, notes = pin_text(self.dir, "pins.yaml")
+        self.assertIn("a" * 64, text)
+        self.assertNotIn("c" * 64, text)
+        self.assertTrue(any("judging origin/main" in n for n in notes), notes)
 
 
 if __name__ == "__main__":
