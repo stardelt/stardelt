@@ -16,7 +16,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::{info, warn};
 
 use crate::query_hints::commas;
@@ -78,13 +78,15 @@ fn sha256(text: &str) -> String {
         .collect()
 }
 
-/// Insert one row. The caller decides whether an error is worth a log line.
-pub(crate) async fn record(pool: &PgPool, call: &Call<'_>) -> Result<(), sqlx::Error> {
+/// Insert one row and answer its `id`. The caller decides whether an error is worth a log
+/// line; the insert is best effort only because the callers treat it so.
+pub(crate) async fn record(pool: &PgPool, call: &Call<'_>) -> Result<i64, sqlx::Error> {
     sqlx::query(
         "INSERT INTO model_call (sub, group_name, feature, endpoint, model, tokens_in, \
             tokens_out, tokens_estimated, latency_ms, outcome, prompt_bytes, prompt_sha256, \
             answer_bytes, answer_sha256) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
+         RETURNING id",
     )
     .bind(call.sub)
     .bind(call.group)
@@ -100,9 +102,9 @@ pub(crate) async fn record(pool: &PgPool, call: &Call<'_>) -> Result<(), sqlx::E
     .bind(sha256(call.prompt))
     .bind(call.answer.map(|answer| answer.len() as i64))
     .bind(call.answer.map(sha256))
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map(|_| ())
+    .map(|row| row.get("id"))
 }
 
 /// Remove old rows once an hour for as long as Nova runs.

@@ -691,6 +691,9 @@ fn api_router() -> Router<Arc<AppState>> {
         // A question in words, one checked SQL statement out (nova#891, Ask slice a): the
         // model receives the question and table documentation, never rows.
         .route("/ask", post(ask::ask))
+        // One 👍 or 👎 on the row an answer wrote (stardelt-nova#1011, Ask slice b): the model
+        // check's input; somebody else's call id is a 404.
+        .route("/ask/feedback", post(ask::feedback))
         // The Spark clusters a person may use (internal#161 slice 5a): the operator translates
         // a SparkCluster into the Spark server, Nova only lists it and sets `spec.state`.
         .route("/compute", get(compute::list))

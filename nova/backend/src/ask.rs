@@ -64,6 +64,8 @@ pub(crate) struct AskAnswer {
     /// The `ModelEndpoint` that answered — never its URL.
     pub endpoint: String,
     pub model: String,
+    /// The `model_call` row the answer's last call wrote; `null` when the store failed.
+    pub call_id: Option<i64>,
     /// The statement; `null` when no table matched, kept when the check failed.
     pub sql: Option<String>,
     /// One sentence saying what the statement answers, or why there is none.
@@ -157,6 +159,8 @@ struct First {
     sql: String,
     sentence: String,
     content: String,
+    /// The `model_call` row this answer wrote, when the store took it.
+    call_id: Option<i64>,
 }
 
 /// Everything a chat call needs that does not change between the first call and the retry.
@@ -220,7 +224,8 @@ impl Attempt<'_> {
                     ChatError::Refused(sentence) => ("refused", sentence.clone()),
                     ChatError::Transport(sentence) => ("error", sentence.clone()),
                 };
-                self.record(outcome, None, None, started.elapsed().as_millis() as u64)
+                let _ = self
+                    .record(outcome, None, None, started.elapsed().as_millis() as u64)
                     .await;
                 return Err(fail(
                     StatusCode::BAD_GATEWAY,
@@ -230,18 +235,20 @@ impl Attempt<'_> {
         };
         let parsed = parse_answer(&answer.content);
         let outcome = if parsed.is_some() { "ok" } else { "error" };
-        self.record(
-            outcome,
-            answer.usage.as_ref(),
-            Some(&answer.content),
-            answer.latency_ms,
-        )
-        .await;
+        let call_id = self
+            .record(
+                outcome,
+                answer.usage.as_ref(),
+                Some(&answer.content),
+                answer.latency_ms,
+            )
+            .await;
         match parsed {
             Some((sql, sentence)) => Ok(First {
                 sql,
                 sentence,
                 content: answer.content,
+                call_id,
             }),
             None => Err(fail(
                 StatusCode::BAD_GATEWAY,
@@ -250,14 +257,15 @@ impl Attempt<'_> {
         }
     }
 
-    /// The one row this call writes. Best effort, like every `model_call` write.
+    /// The one row this call writes, and its `id` when the store took it. Best effort: a
+    /// failure is a warning, never a failed answer.
     async fn record(
         &self,
         outcome: &str,
         usage: Option<&Value>,
         answer: Option<&str>,
         latency_ms: u64,
-    ) {
+    ) -> Option<i64> {
         let call = crate::model_calls::Call {
             sub: self.sub,
             group: self.group,
@@ -270,8 +278,12 @@ impl Attempt<'_> {
             prompt: self.prompt,
             answer,
         };
-        if let Err(e) = crate::model_calls::record(self.pool, &call).await {
-            tracing::warn!(error = %e, "could not store the ask model call");
+        match crate::model_calls::record(self.pool, &call).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not store the ask model call");
+                None
+            }
         }
     }
 }
@@ -416,6 +428,7 @@ pub(crate) async fn ask(
         return answer(AskAnswer {
             endpoint: name,
             model,
+            call_id: None,
             sql: None,
             sentence: NO_TABLE.to_string(),
             tables: Vec::new(),
@@ -476,6 +489,7 @@ pub(crate) async fn ask(
         return answer(AskAnswer {
             endpoint: name,
             model,
+            call_id: first.call_id,
             sql: Some(first.sql),
             sentence: first.sentence,
             tables: candidates,
@@ -502,6 +516,7 @@ pub(crate) async fn ask(
         Ok(()) => answer(AskAnswer {
             endpoint: name,
             model,
+            call_id: second.call_id,
             sql: Some(second.sql),
             sentence: second.sentence,
             tables: candidates,
@@ -511,12 +526,74 @@ pub(crate) async fn ask(
         Err(second_error) => answer(AskAnswer {
             endpoint: name,
             model,
+            call_id: second.call_id,
             sql: Some(second.sql),
             sentence: second.sentence,
             tables: candidates,
             explain: "failed".to_string(),
             error: Some(second_error),
         }),
+    }
+}
+
+/// `POST /api/ask/feedback` body.
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AskFeedback {
+    /// The `model_call` row `POST /api/ask` answered as `callId`.
+    pub call_id: i64,
+    /// `up` or `down`.
+    pub vote: String,
+}
+
+/// `POST /api/ask/feedback` — one 👍 or 👎 on the row an Ask answer wrote (nova#891 slice b).
+#[utoipa::path(
+    post,
+    operation_id = "ask_feedback",
+    path = "/api/ask/feedback",
+    tag = "public",
+    description = "Writes the caller's own 👍 or 👎 on the `model_call` row that `/api/ask` returned as `callId` — the row the answer's model call wrote, and the input of the model check. A vote is `up` or `down`. A call id that belongs to somebody else is a `404`, never a `403`: an id probe learns nothing. The vote overwrites the row's earlier one; retention is the row's own. Every answer carries `Cache-Control: no-store`.",
+    request_body = AskFeedback,
+    responses(
+        (status = 204, description = "The vote is stored"),
+        (status = 400, description = "`vote` is not `up` or `down`", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No call with that id belongs to the caller", body = crate::openapi::ErrorResponse),
+        (status = 500, description = "The vote was not stored", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No state store", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn feedback(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+    Json(body): Json<AskFeedback>,
+) -> Response {
+    if body.vote != "up" && body.vote != "down" {
+        return fail(StatusCode::BAD_REQUEST, "a vote is up or down");
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Ask needs Nova's database, and this installation has none",
+        );
+    };
+    let sub = match caller.as_ref() {
+        Some(caller) => caller.0.identity.sub.clone(),
+        None => state.dev_user.clone(),
+    };
+    let result = sqlx::query("UPDATE model_call SET feedback = $1 WHERE id = $2 AND sub = $3")
+        .bind(&body.vote)
+        .bind(body.call_id)
+        .bind(&sub)
+        .execute(pool)
+        .await;
+    match result {
+        Ok(done) if done.rows_affected() == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => fail(StatusCode::NOT_FOUND, "no such call"),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not store the ask vote");
+            fail(StatusCode::INTERNAL_SERVER_ERROR, "the vote was not stored")
+        }
     }
 }
 
@@ -623,6 +700,7 @@ mod tests {
         let answer = AskAnswer {
             endpoint: "default".into(),
             model: "qwen3-4b".into(),
+            call_id: Some(7),
             sql: None,
             sentence: NO_TABLE.into(),
             tables: vec![AskTable {
@@ -639,6 +717,34 @@ mod tests {
         assert_eq!(value["error"], Value::Null);
         assert_eq!(value["tables"][0]["catalog"], json!("warehouse"));
         assert!(value.get("endpoint").is_some());
+        // The id the feedback route takes back, in camel case.
+        assert_eq!(value["callId"], json!(7));
+        assert!(
+            serde_json::to_string(&answer)
+                .unwrap()
+                .contains("\"callId\":7")
+        );
+    }
+
+    #[test]
+    fn an_answer_without_a_stored_call_answers_a_null_call_id() {
+        let answer = AskAnswer {
+            endpoint: "default".into(),
+            model: "qwen3-4b".into(),
+            call_id: None,
+            sql: Some("SELECT 1".into()),
+            sentence: "One.".into(),
+            tables: vec![],
+            explain: "passed".into(),
+            error: None,
+        };
+        let value = serde_json::to_value(&answer).unwrap();
+        assert_eq!(value["callId"], Value::Null);
+        assert!(
+            serde_json::to_string(&answer)
+                .unwrap()
+                .contains("\"callId\":null")
+        );
     }
 
     #[test]
@@ -705,5 +811,136 @@ mod tests {
             json!("Ask needs Nova's database, and this installation has none")
         );
         assert_eq!(cache.as_deref(), Some("no-store"));
+    }
+
+    // --- the feedback route (slice b) -------------------------------------------------
+
+    fn feedback_app(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/ask/feedback", post(feedback))
+            .with_state(state)
+    }
+
+    /// One `POST /api/ask/feedback`, its status and its body.
+    async fn feedback_call(app: &Router, body: Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/ask/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_vote_that_is_neither_up_nor_down_is_a_400() {
+        let (status, body) = feedback_call(
+            &feedback_app(crate::router_tests::test_state()),
+            json!({"callId": 1, "vote": "sideways"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("a vote is up or down"));
+    }
+
+    #[tokio::test]
+    async fn a_vote_without_a_state_store_is_a_503_and_does_not_panic() {
+        let (status, body) = feedback_call(
+            &feedback_app(crate::router_tests::test_state()),
+            json!({"callId": 1, "vote": "up"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["error"],
+            json!("Ask needs Nova's database, and this installation has none")
+        );
+    }
+
+    /// One caller, as the middleware would put it on the request.
+    fn principal(sub: &str) -> crate::auth::Principal {
+        crate::auth::Principal {
+            identity: crate::auth::Identity {
+                sub: sub.into(),
+                display_name: sub.into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: false,
+            },
+            via: "session",
+            access_token: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_vote_lands_on_the_callers_own_row_and_another_persons_id_is_a_404() {
+        use crate::db::test_support::migrated_pool;
+
+        let pool = migrated_pool().await;
+        let call = |sub: &'static str| crate::model_calls::Call {
+            sub,
+            group: None,
+            feature: "ask",
+            endpoint: "default",
+            model: "qwen3-4b",
+            tokens: crate::model_calls::Tokens {
+                input: 10,
+                output: 5,
+                estimated: false,
+            },
+            latency_ms: 120,
+            outcome: "ok",
+            prompt: "how many rows?",
+            answer: Some("{\"sql\": \"SELECT 1\", \"sentence\": \"One.\"}"),
+        };
+        // The id `/api/ask` would have answered as `callId`.
+        let id = crate::model_calls::record(&pool, &call("alice"))
+            .await
+            .unwrap();
+        let feedback_of = |id: i64| {
+            sqlx::query_scalar::<_, Option<String>>("SELECT feedback FROM model_call WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+        };
+
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let vote = |call_id: i64| json!({"callId": call_id, "vote": "down"});
+
+        // Somebody else's id: a 404, and nothing is written.
+        let response = feedback(
+            State(Arc::clone(&state)),
+            Some(axum::Extension(principal("bob"))),
+            Json(serde_json::from_value(vote(id)).unwrap()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(feedback_of(id).await.unwrap(), None);
+
+        // The caller's own id: a 204, and the row carries the vote.
+        let response = feedback(
+            State(Arc::clone(&state)),
+            Some(axum::Extension(principal("alice"))),
+            Json(serde_json::from_value(vote(id)).unwrap()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(feedback_of(id).await.unwrap().as_deref(), Some("down"));
     }
 }

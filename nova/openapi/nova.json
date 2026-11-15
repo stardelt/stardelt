@@ -800,6 +800,81 @@
         }
       }
     },
+    "/api/ask/feedback": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/ask/feedback` — one 👍 or 👎 on the row an Ask answer wrote (nova#891 slice b).",
+        "description": "Writes the caller's own 👍 or 👎 on the `model_call` row that `/api/ask` returned as `callId` — the row the answer's model call wrote, and the input of the model check. A vote is `up` or `down`. A call id that belongs to somebody else is a `404`, never a `403`: an id probe learns nothing. The vote overwrites the row's earlier one; retention is the row's own. Every answer carries `Cache-Control: no-store`.",
+        "operationId": "ask_feedback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskFeedback"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The vote is stored"
+          },
+          "400": {
+            "description": "`vote` is not `up` or `down`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No call with that id belongs to the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The vote was not stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No state store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/config": {
       "get": {
         "tags": [
@@ -8774,6 +8849,14 @@
           "explain"
         ],
         "properties": {
+          "callId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The `model_call` row the answer's last call wrote; `null` when the store failed."
+          },
           "endpoint": {
             "type": "string",
             "description": "The `ModelEndpoint` that answered — never its URL."
@@ -8808,6 +8891,25 @@
             "items": {
               "$ref": "#/components/schemas/AskTable"
             }
+          }
+        }
+      },
+      "AskFeedback": {
+        "type": "object",
+        "description": "`POST /api/ask/feedback` body.",
+        "required": [
+          "callId",
+          "vote"
+        ],
+        "properties": {
+          "callId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The `model_call` row `POST /api/ask` answered as `callId`."
+          },
+          "vote": {
+            "type": "string",
+            "description": "`up` or `down`."
           }
         }
       },
