@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Prove the operator path on the current cluster is actually up (fresh-node work package,
 # stardelt-platform#293; platform#1017), and optionally walk it through its lifecycle
-# (platform#1019): the PlatformInstance and Lakehouse reach Ready, every Deployment is
-# available, no pod is waiting to start, and Nova, Trino and the identity provider answer on
-# their real ports.
+# (platform#1019): the PlatformInstance and Lakehouse reach Ready, the namespace carries the Pod
+# Security floor the operator writes, every Deployment is available, no pod is waiting to start,
+# and Nova, Trino and the identity provider answer on their real ports.
 #
 #   scripts/verify-fresh-node.sh            # the readiness checks
 #   scripts/verify-fresh-node.sh upgrade    # …then upgrade the operator image and check it converges
@@ -104,20 +104,31 @@ readiness() {
     echo "verify-fresh-node: UNVERIFIED (needs kubectl and curl)" >&2
     exit 3
   fi
+  # 2. the namespace carries the Pod Security floor the operator writes (operator#761, #1096 Q5)
+  local psa_enforce psa_warn psa_audit
+  psa_enforce="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null || true)"
+  psa_warn="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/warn}' 2>/dev/null || true)"
+  psa_audit="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/audit}' 2>/dev/null || true)"
+  if [ "$psa_enforce" = "baseline" ] && [ "$psa_warn" = "restricted" ] && [ "$psa_audit" = "restricted" ]; then
+    ok namespace "enforce=baseline, warn/audit=restricted"
+  else
+    bad namespace "\"expected enforce=baseline warn/audit=restricted, got enforce=${psa_enforce:-none} warn=${psa_warn:-none} audit=${psa_audit:-none}\""
+  fi
+
   if ! kubectl -n "$NAMESPACE" get platforminstance "$PLATFORM_INSTANCE" >/dev/null 2>&1; then
     unknown instance "\"${instance_ref} is not readable in ${NAMESPACE}\""
     echo "verify-fresh-node: UNVERIFIED (no PlatformInstance on this cluster)" >&2
     exit 3
   fi
 
-  # 2. the PlatformInstance is Ready
+  # 3. the PlatformInstance is Ready
   if kubectl -n "$NAMESPACE" wait --for=condition=Ready "$instance_ref" --timeout="$WAIT" >/dev/null 2>&1; then
     ok instance "${instance_ref} is Ready"
   else
     bad instance "\"not Ready within ${WAIT}\""
   fi
 
-  # 3. every operator component reports ready
+  # 4. every operator component reports ready
   local components component_total component_names component_closed name ready
   components="$(kubectl -n "$NAMESPACE" get platforminstance "$PLATFORM_INSTANCE" \
     -o jsonpath='{range .status.components[*]}{.name}{"\t"}{.ready}{"\n"}{end}' 2>/dev/null || true)"
@@ -144,7 +155,7 @@ readiness() {
     bad components "\"not ready:${component_closed}\""
   fi
 
-  # 4. the Lakehouse is Ready when the profile installs one
+  # 5. the Lakehouse is Ready when the profile installs one
   if ! kubectl -n "$NAMESPACE" get lakehouse "$LAKEHOUSE" >/dev/null 2>&1; then
     note lakehouse '"not installed"'
   elif kubectl -n "$NAMESPACE" wait --for=condition=Ready "lakehouse/${LAKEHOUSE}" --timeout="$WAIT" >/dev/null 2>&1; then
@@ -153,7 +164,7 @@ readiness() {
     bad lakehouse "\"not Ready within ${WAIT}\""
   fi
 
-  # 5. every Deployment is available
+  # 6. every Deployment is available
   local deploys line rest have want deploy_total deploy_up
   local -a deploy_short=()
   deploys="$(kubectl -n "$NAMESPACE" get deploy \
@@ -197,7 +208,7 @@ readiness() {
     done
   fi
 
-  # 6. no pod is waiting to start
+  # 7. no pod is waiting to start
   local pods reasons reason
   local -a pod_waiting=()
   pods="$(kubectl -n "$NAMESPACE" get pods \
@@ -223,7 +234,7 @@ readiness() {
     done
   fi
 
-  # 7. Nova answers
+  # 8. Nova answers
   local nova_url rc body
   nova_url="http://127.0.0.1:18080/api/health"
   rc=0
@@ -238,7 +249,7 @@ readiness() {
     esac
   fi
 
-  # 8. Trino answers
+  # 9. Trino answers
   local trino_url
   trino_url="https://127.0.0.1:18443/v1/info"
   rc=0
@@ -254,7 +265,7 @@ readiness() {
     fi
   fi
 
-  # 9. the identity provider answers
+  # 10. the identity provider answers
   local oidc_url
   oidc_url="http://127.0.0.1:18081/realms/stardelt/.well-known/openid-configuration"
   rc=0

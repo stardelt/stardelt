@@ -1,4 +1,4 @@
-"""Tests for scripts/verify-fresh-node.sh (platform#1017, platform#1019).
+"""Tests for scripts/verify-fresh-node.sh (platform#1017, platform#1019, platform#1480).
 
 Standard library only, like the other tests here: `python3 -m unittest discover -s scripts/tests -v`
 runs them in CI. `kubectl`, `curl` and `helm` are replaced by small shell stubs first on PATH, so
@@ -36,6 +36,16 @@ case "$joined" in
     ;;
 esac
 case "$joined" in
+  # the namespace's Pod Security floor (platform#1480): each label is asked for on its own.
+  *" get namespace "*)
+    case "$joined" in
+      *"/enforce"*) printf '%s' "${FAKE_ENFORCE-baseline}" ;;
+      *"/warn"*) printf '%s' "${FAKE_WARN-restricted}" ;;
+      *"/audit"*) printf '%s' "${FAKE_AUDIT-restricted}" ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+    ;;
   *" get lakehouse/"*)
     [ -f "$FAKE_DIR/lakehouse" ] && exit 0
     exit 1
@@ -161,7 +171,9 @@ class Result:
 class FreshNodeTest(unittest.TestCase):
     """Runs the script against stub tools; every case starts from the all-good fixtures."""
 
-    def run_script_full(self, args=(), overrides=None, remove=None, marker=None, env_extra=None):
+    def run_script_full(
+        self, args=(), overrides=None, remove=None, marker=None, env_extra=None, merge_streams=None
+    ):
         files = dict(GOOD_FILES)
         files.update(overrides or {})
         for name in remove or []:
@@ -192,15 +204,21 @@ class FreshNodeTest(unittest.TestCase):
                 }
             )
             env.update(env_extra or {})
+            run_kwargs = {"capture_output": True}
+            if merge_streams:
+                # stderr into stdout, so "the namespace line comes before the instance line" is a
+                # real ordering assertion and not two separately captured buffers.
+                run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
             done = subprocess.run(
                 ["bash", str(SCRIPT), *args],
                 env=env,
-                capture_output=True,
                 text=True,
                 timeout=120,
+                **run_kwargs,
             )
             artifacts = {path.name: path.read_text() for path in fake.iterdir() if path.is_file()}
-        return Result(done.returncode, done.stdout + done.stderr, artifacts)
+        merged = done.stdout if merge_streams else done.stdout + done.stderr
+        return Result(done.returncode, merged, artifacts)
 
     def run_script(self, overrides=None, remove=None, marker=None):
         result = self.run_script_full(overrides=overrides, remove=remove, marker=marker)
@@ -249,6 +267,48 @@ class FreshNodeTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("✗ nova", out)
         self.assertIn("verify-fresh-node: FAIL", out)
+
+    # -- the namespace's Pod Security floor (platform#1480) -------------------
+    # The stub answers the three label queries from $FAKE_ENFORCE/$FAKE_WARN/$FAKE_AUDIT, which
+    # default to the floor the operator writes; an empty value stands for a label that is absent.
+    def test_a_namespace_with_the_floor_is_reported(self):
+        result = self.run_script_full(
+            merge_streams=True,
+            remove=["instance_present"],
+            env_extra={
+                "FAKE_ENFORCE": "baseline",
+                "FAKE_WARN": "restricted",
+                "FAKE_AUDIT": "restricted",
+            },
+        )
+        # No PlatformInstance on this cluster is the script's existing UNVERIFIED rule (exit 3),
+        # not a failure of this check.
+        self.assertEqual(result.code, 3, result.out)
+        self.assertIn("✓ namespace enforce=baseline, warn/audit=restricted", result.out)
+        self.assertIn("? instance", result.out)
+        self.assertIn(
+            "verify-fresh-node: UNVERIFIED (no PlatformInstance on this cluster)", result.out
+        )
+        self.assertLess(
+            result.out.index("✓ namespace"),
+            result.out.index("? instance"),
+            "the namespace check must run before the PlatformInstance probe",
+        )
+
+    def test_a_namespace_without_the_floor_is_a_failure(self):
+        result = self.run_script_full(
+            merge_streams=True,
+            remove=["instance_present"],
+            env_extra={"FAKE_ENFORCE": "", "FAKE_WARN": "restricted", "FAKE_AUDIT": "restricted"},
+        )
+        self.assertEqual(result.code, 3, result.out)
+        self.assertIn('✗ namespace "expected enforce=baseline', result.out)
+        self.assertIn("got enforce=none warn=restricted audit=restricted", result.out)
+        self.assertLess(
+            result.out.index("✗ namespace"),
+            result.out.index("? instance"),
+            "the namespace check must run before the PlatformInstance probe",
+        )
 
     def test_a_base_domain_that_is_not_set_prints_the_placeholder(self):
         code, out = self.run_script(remove=["base_domain"])
