@@ -258,6 +258,56 @@ fn phase_from_state(state: Option<&str>) -> &'static str {
     }
 }
 
+/// The phase and the message of a `SparkCluster`, from the SparkConnect's `status.state`
+/// **and** its server pod. The Spark operator sets `state: Running` from a one-second
+/// readiness sample, so it says Running for a pod in `CrashLoopBackOff` (platform#1482,
+/// operator#773). A cluster is Running only while its server pod's `Ready` condition is
+/// `True`; the waiting reason goes into `status.message`.
+fn phase_and_message(
+    state: Option<&str>,
+    server_pod: Option<&str>,
+    pod: Option<&Pod>,
+) -> (&'static str, Option<String>) {
+    let phase = phase_from_state(state);
+    if phase != "Running" {
+        return (phase, None);
+    }
+    let Some(name) = server_pod else {
+        return (
+            "Starting",
+            Some("the server pod is not there yet".to_string()),
+        );
+    };
+    let Some(pod) = pod else {
+        return (
+            "Starting",
+            Some(format!("the server pod {name} is not readable yet")),
+        );
+    };
+    let ready = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
+    if ready {
+        return ("Running", None);
+    }
+    let reason = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| {
+            cs.iter()
+                .find_map(|c| c.state.as_ref()?.waiting.as_ref().map(|w| w.reason.clone()))
+        })
+        .flatten()
+        .unwrap_or_else(|| "not ready".to_string());
+    (
+        "Starting",
+        Some(format!("the server pod {name} is not ready ({reason})")),
+    )
+}
+
 /// How often a busy cluster refreshes `lastActivityAt`. Longer than the 60 s poll, so a
 /// running job does not cause a status write per minute forever.
 pub const IDLE_HEARTBEAT_SECS: i64 = 300;
@@ -535,9 +585,12 @@ pub async fn reconcile_spark_cluster(
     )
     .await?;
 
-    let (phase, server_name, server_pod) = match connects.get(&format!("spc-{name}")).await {
+    let (state, server_name, server_pod) = match connects.get(&format!("spc-{name}")).await {
         Ok(live) => (
-            phase_from_state(live.data.pointer("/status/state").and_then(|v| v.as_str())),
+            live.data
+                .pointer("/status/state")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             live.data
                 .pointer("/status/server/serviceName")
                 .and_then(|v| v.as_str())
@@ -547,9 +600,24 @@ pub async fn reconcile_spark_cluster(
                 .and_then(Value::as_str)
                 .map(str::to_string),
         ),
-        Err(e) if is_not_found(&e) => ("Starting", None, None),
+        Err(e) if is_not_found(&e) => (None, None, None),
         Err(e) => return Err(e),
     };
+
+    let pod = match server_pod.as_deref() {
+        Some(pod_name) => {
+            match Api::<Pod>::namespaced(ctx.client.clone(), &namespace)
+                .get(pod_name)
+                .await
+            {
+                Ok(pod) => Some(pod),
+                Err(e) if is_not_found(&e) => None,
+                Err(e) => return Err(e),
+            }
+        }
+        None => None,
+    };
+    let (phase, message) = phase_and_message(state.as_deref(), server_pod.as_deref(), pod.as_ref());
 
     let endpoint =
         (phase == "Running").then(|| endpoint_for(server_name.as_deref(), &name, &namespace));
@@ -592,7 +660,7 @@ pub async fn reconcile_spark_cluster(
             endpoint.as_deref(),
             started_at.as_deref(),
             last_activity.as_deref(),
-            None,
+            message.as_deref(),
             generation,
         ),
     )
@@ -831,6 +899,49 @@ mod tests {
         assert_eq!(preset(SparkClusterSize::Small), (1, "2Gi", 1, "2Gi", 2));
         assert_eq!(preset(SparkClusterSize::Medium), (2, "4Gi", 2, "4Gi", 4));
         assert_eq!(preset(SparkClusterSize::Large), (4, "8Gi", 4, "8Gi", 8));
+    }
+
+    fn pod(status: Value) -> Pod {
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "p", "namespace": "data"},
+            "status": status,
+        }))
+        .expect("pod fixture")
+    }
+
+    fn ready_pod() -> Pod {
+        pod(json!({"conditions": [{"type": "Ready", "status": "True"}]}))
+    }
+
+    fn crashloop_pod() -> Pod {
+        pod(json!({
+            "conditions": [],
+            "containerStatuses": [{
+                "name": "spark-kubernetes-driver",
+                "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+            }],
+        }))
+    }
+
+    #[test]
+    fn phase_and_message_reads_the_server_pod() {
+        assert_eq!(
+            phase_and_message(Some("running"), Some("p"), Some(&ready_pod())),
+            ("Running", None)
+        );
+        assert_eq!(
+            phase_and_message(Some("running"), Some("p"), Some(&crashloop_pod())),
+            (
+                "Starting",
+                Some("the server pod p is not ready (CrashLoopBackOff)".to_string())
+            )
+        );
+        assert_eq!(
+            phase_and_message(Some("failed"), Some("p"), Some(&ready_pod())),
+            ("Failed", None)
+        );
     }
 
     #[test]
@@ -1197,7 +1308,13 @@ mod tests {
             if method == "GET" && path.contains("/sparkconnects/spc-trial") {
                 return (
                     200,
-                    r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"},"status":{"state":"Running","server":{"serviceName":"spc-trial-server"}}}"#.into(),
+                    r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"},"status":{"state":"Running","server":{"serviceName":"spc-trial-server","podName":"spc-trial-server"}}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/pods/spc-trial-server") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server","namespace":"data"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}"#.into(),
                 );
             }
             if method == "PATCH" && path.contains("/networkpolicies/") {
@@ -1230,8 +1347,60 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("\"startedAt\":\"20"), "{log}");
-        // The driver reports no pod, so the idle clock is not started.
+        // The driver pod carries no app selector, so the idle clock is not started.
         assert!(log.contains("\"lastActivityAt\":null"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn a_server_pod_in_crashloopbackoff_is_not_running() {
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/sparkconnects/spc-trial") {
+                return (
+                    200,
+                    r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"},"status":{"state":"Running","server":{"serviceName":"spc-trial-server","podName":"spc-trial-server"}}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/pods/spc-trial-server") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server","namespace":"data"},"status":{"conditions":[],"containerStatuses":[{"name":"spark-kubernetes-driver","state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    200,
+                    r#"{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"spc-trial-ingress","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/sparkclusters/trial/status") {
+                return (
+                    200,
+                    r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"mobility-analytics"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Starting"}}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"}}"#.into(),
+            )
+        });
+        let action =
+            reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
+                .await
+                .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+        let log = requests.lock().expect("requests").join("\n");
+        assert!(log.contains("\"phase\":\"Starting\""), "{log}");
+        assert!(log.contains("\"endpoint\":null"), "{log}");
+        assert!(
+            log.contains("the server pod spc-trial-server is not ready (CrashLoopBackOff)"),
+            "{log}"
+        );
     }
 
     #[tokio::test]
@@ -1495,7 +1664,7 @@ mod tests {
             if method == "GET" && path.ends_with("/pods/spc-trial-server-abc") {
                 return (
                     200,
-                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server-abc","namespace":"data","labels":{"spark-app-selector":"app-1"}}}"#.into(),
+                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server-abc","namespace":"data","labels":{"spark-app-selector":"app-1"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}"#.into(),
                 );
             }
             if method == "GET" && path.ends_with("/pods") {
@@ -1557,7 +1726,7 @@ mod tests {
             if method == "GET" && path.ends_with("/pods/spc-trial-server-abc") {
                 return (
                     200,
-                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server-abc","namespace":"data","labels":{"spark-app-selector":"app-1"}}}"#.into(),
+                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server-abc","namespace":"data","labels":{"spark-app-selector":"app-1"}},"status":{"conditions":[{"type":"Ready","status":"True"}]}}"#.into(),
                 );
             }
             if method == "GET" && path.ends_with("/pods") {
