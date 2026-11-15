@@ -137,6 +137,12 @@ pub fn spark_connect(
         "spark.kubernetes.namespace".to_string(),
         namespace.to_string(),
     );
+    // The executors run user code and keep the runtime's token-less ServiceAccount
+    // (platform#1096); the driver creates the executor pods (operator#773).
+    spark_conf.insert(
+        "spark.kubernetes.authenticate.executor.serviceAccountName".to_string(),
+        runtime.service_account.clone(),
+    );
 
     let image = spec.image.clone().unwrap_or_else(|| runtime.image.clone());
 
@@ -167,7 +173,7 @@ pub fn spark_connect(
                     "memory": driver_mem,
                     "template": {
                         "spec": {
-                            "serviceAccountName": runtime.service_account,
+                            "serviceAccountName": crate::spark::CLUSTER_DRIVER,
                             "containers": [{
                                 "name": "spark-kubernetes-driver",
                                 "env": env,
@@ -400,6 +406,59 @@ pub async fn reconcile_spark_cluster(
             }
         }
         crate::crd::SparkClusterState::Running => {}
+    }
+
+    // The driver's identity must exist before the SparkConnect's driver pod is created.
+    if let Err(e) = objects::apply(
+        &ctx.client,
+        &namespace,
+        &crate::spark::cluster_driver_service_account(&namespace),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+        return Ok(Action::await_change());
+    }
+    if let Err(e) = objects::apply(
+        &ctx.client,
+        &namespace,
+        &crate::spark::cluster_driver_role(&namespace),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+        return Ok(Action::await_change());
+    }
+    if let Err(e) = objects::apply(
+        &ctx.client,
+        &namespace,
+        &crate::spark::cluster_driver_role_binding(&namespace),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+        return Ok(Action::await_change());
     }
 
     // The server authenticates nobody: the policy that admits only the owner's pods, Nova
@@ -717,7 +776,10 @@ mod tests {
                     .lock()
                     .expect("requests poisoned")
                     .push(format!("{method} {path}?{query} {body}"));
-                let (status, document) = handler(&method, &path, &body);
+                let (status, document) = match identity_response(&path) {
+                    Some(response) => response,
+                    None => handler(&method, &path, &body),
+                };
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
                         .status(status)
@@ -735,6 +797,33 @@ mod tests {
             client,
             helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
         })
+    }
+
+    /// The three driver identities always answer with a document of their own kind: a typed
+    /// server-side apply refuses a response of another kind (operator#773).
+    fn identity_response(path: &str) -> Option<(u16, String)> {
+        let object = if path.contains("/serviceaccounts/spark-cluster-driver") {
+            json!({
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+            })
+        } else if path.contains("/roles/spark-cluster-driver") {
+            json!({
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+            })
+        } else if path.contains("/rolebindings/spark-cluster-driver") {
+            json!({
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+            })
+        } else {
+            return None;
+        };
+        Some((200, object.to_string()))
     }
 
     #[test]
@@ -841,13 +930,30 @@ mod tests {
             object
                 .data
                 .pointer("/spec/server/template/spec/serviceAccountName"),
-            Some(&json!("spark-runtime"))
+            Some(&json!("spark-cluster-driver"))
         );
         assert_eq!(
             object
                 .data
                 .pointer("/spec/sparkConf/spark.sql.shuffle.partitions"),
             Some(&json!("16"))
+        );
+    }
+
+    #[test]
+    fn the_driver_and_the_executors_have_different_identities() {
+        let object = spark_connect("trial", "data", &spec(), &runtime(), &owner()).expect("build");
+        assert_eq!(
+            object
+                .data
+                .pointer("/spec/server/template/spec/serviceAccountName"),
+            Some(&json!("spark-cluster-driver"))
+        );
+        assert_eq!(
+            object.data.pointer(
+                "/spec/sparkConf/spark.kubernetes.authenticate.executor.serviceAccountName"
+            ),
+            Some(&json!("spark-runtime"))
         );
     }
 
@@ -922,6 +1028,65 @@ mod tests {
             runtime_entry(&cm, "spark-4.0-py3.12").unwrap_err(),
             "the runtime catalogue stardelt-spark-runtimes is missing"
         );
+    }
+
+    #[tokio::test]
+    async fn the_driver_identity_is_applied_before_the_connect() {
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/sparkconnects/spc-trial") {
+                return (
+                    200,
+                    r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    200,
+                    r#"{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"spc-trial-ingress","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/sparkclusters/trial/status") {
+                return (
+                    200,
+                    r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"mobility-analytics"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Starting"}}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"}}"#.into(),
+            )
+        });
+        let action =
+            reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
+                .await
+                .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+        let log = requests.lock().expect("requests").join("\n");
+        let lines: Vec<&str> = log.lines().collect();
+        let connect = lines
+            .iter()
+            .position(|line| line.starts_with("PATCH") && line.contains("/sparkconnects/spc-trial"))
+            .expect("the SparkConnect is written");
+        for path in [
+            "serviceaccounts/spark-cluster-driver",
+            "roles/spark-cluster-driver",
+            "rolebindings/spark-cluster-driver",
+        ] {
+            let index = lines
+                .iter()
+                .position(|line| line.starts_with("PATCH") && line.contains(path))
+                .unwrap_or_else(|| panic!("{path} is applied: {log}"));
+            assert!(
+                index < connect,
+                "{path} must be applied before the SparkConnect: {log}"
+            );
+        }
     }
 
     #[tokio::test]

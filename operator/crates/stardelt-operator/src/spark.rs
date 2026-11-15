@@ -264,6 +264,44 @@ pub fn batch_driver_role_binding(namespace: &str) -> RoleBinding {
     }
 }
 
+/// The ServiceAccount a `SparkCluster`'s driver runs as (operator#773). Its own, because the
+/// executor's `spark-executor` mounts no token and has no Role; the batch and stream drivers
+/// are separate identities for the same reason (platform#1208, #1210).
+pub const CLUSTER_DRIVER: &str = "spark-cluster-driver";
+
+pub fn cluster_driver_service_account(namespace: &str) -> ServiceAccount {
+    ServiceAccount {
+        metadata: meta_part_of_only(CLUSTER_DRIVER, namespace),
+        ..ServiceAccount::default()
+    }
+}
+
+/// The SparkCluster driver's Role: the Connect driver's rules, not a copy, so the drivers
+/// cannot drift.
+pub fn cluster_driver_role(namespace: &str) -> Role {
+    Role {
+        metadata: meta_part_of_only(CLUSTER_DRIVER, namespace),
+        rules: Some(pod_and_config_map_rules()),
+    }
+}
+
+pub fn cluster_driver_role_binding(namespace: &str) -> RoleBinding {
+    RoleBinding {
+        metadata: meta_part_of_only(CLUSTER_DRIVER, namespace),
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".into(),
+            name: CLUSTER_DRIVER.into(),
+            namespace: Some(namespace.into()),
+            ..Subject::default()
+        }]),
+        role_ref: RoleRef {
+            api_group: Some("rbac.authorization.k8s.io".into()),
+            kind: "Role".into(),
+            name: CLUSTER_DRIVER.into(),
+        },
+    }
+}
+
 /// The identity a `StreamApp`'s driver runs as (platform#1210 option B): its own, so the
 /// admission policies can tell stardelt's `stream_job.py` apart from user code in the shared
 /// Connect driver. It keeps the default `automountServiceAccountToken`: the driver creates pods.
@@ -1464,6 +1502,42 @@ mod tests {
         assert_eq!(subjects.len(), 1);
         assert_eq!(subjects[0].kind, "ServiceAccount");
         assert_eq!(subjects[0].name, "spark-batch-driver");
+        assert_eq!(subjects[0].namespace.as_deref(), Some("stardelt"));
+    }
+
+    #[test]
+    fn the_cluster_driver_has_the_connect_rules_but_keeps_its_token() {
+        let sa = cluster_driver_service_account("stardelt");
+        assert_eq!(sa.metadata.name.as_deref(), Some("spark-cluster-driver"));
+        assert_eq!(sa.metadata.namespace.as_deref(), Some("stardelt"));
+        let labels = sa.metadata.labels.as_ref().expect("labels");
+        assert_eq!(labels.get("app.kubernetes.io/name"), None);
+        assert_eq!(labels["app.kubernetes.io/part-of"], "stardelt");
+        assert_eq!(
+            sa.automount_service_account_token, None,
+            "the SparkCluster driver creates the executor pods, so it mounts its token"
+        );
+        let cluster = cluster_driver_role("stardelt");
+        assert_eq!(
+            cluster.metadata.name.as_deref(),
+            Some("spark-cluster-driver")
+        );
+        assert_eq!(
+            cluster.rules,
+            role("stardelt").rules,
+            "the SparkCluster driver holds the Connect driver's rules, not a copy of them"
+        );
+        let binding = cluster_driver_role_binding("stardelt");
+        assert_eq!(
+            binding.metadata.name.as_deref(),
+            Some("spark-cluster-driver")
+        );
+        assert_eq!(binding.role_ref.kind, "Role");
+        assert_eq!(binding.role_ref.name, "spark-cluster-driver");
+        let subjects = binding.subjects.expect("subjects");
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].kind, "ServiceAccount");
+        assert_eq!(subjects[0].name, "spark-cluster-driver");
         assert_eq!(subjects[0].namespace.as_deref(), Some("stardelt"));
     }
 
