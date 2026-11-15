@@ -1205,6 +1205,7 @@ test.describe('table documentation', () => {
     tags: string[]
     owner: string | null
     domain: string | null
+    guide: string | null
     columns: Array<{ name: string; type: string; description: string | null }>
     canEdit: boolean
     editRule: string
@@ -1215,6 +1216,7 @@ test.describe('table documentation', () => {
     tags: ['finance', 'pii'],
     owner: 'data-eng',
     domain: 'sales',
+    guide: null,
     columns: [
       { name: 'id', type: 'long', description: 'the order id' },
       { name: 'amount', type: 'double', description: 'the amount' },
@@ -1230,6 +1232,7 @@ test.describe('table documentation', () => {
     if ('tags' in body) next.tags = (body.tags as string[] | null) ?? []
     if ('owner' in body) next.owner = (body.owner as string | null) ?? null
     if ('domain' in body) next.domain = (body.domain as string | null) ?? null
+    if ('guide' in body) next.guide = (body.guide as string | null) ?? null
     return next
   }
 
@@ -1388,6 +1391,31 @@ test.describe('table documentation', () => {
     await expect(page.getByRole('status')).toHaveText('Saved.')
     bodies = puts(requests).map((request) => JSON.parse(request.body ?? '{}'))
     expect(bodies[2]).toEqual({ description: null })
+    await context.close()
+  })
+
+  test('the guide is read and edited like the description', async ({ browser }) => {
+    // stardelt-nova#1017: `stardelt.guide` (stardelt-nova#1016) reaches the About card.
+    const { context, page, card, requests } = await open(browser, {
+      doc: makeDoc({ guide: 'Join on customer_id.\nLeave out test rows.' }),
+    })
+    await expect(card.getByText('How to use this table', { exact: true })).toBeVisible()
+    await expect(card).toContainText('Join on customer_id.')
+    await expect(card).toContainText('Leave out test rows.')
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.screenshot({ path: '../docs/screenshots/1017/table-guide-1440-dark.png' })
+
+    // An owner may change it; the body carries the guide alone.
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    await page.getByLabel('How to use this table').fill('Join on customer_id.\nLeave out test rows.\nRevenue is net of returns.')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByRole('status')).toHaveText('Saved.')
+    const body = JSON.parse(puts(requests)[0]?.body ?? '{}')
+    expect(body).toEqual({ guide: 'Join on customer_id.\nLeave out test rows.\nRevenue is net of returns.' })
+    expect(puts(requests)[0].body).toContain('"guide":')
+    await expect(card).toContainText('Revenue is net of returns.')
     await context.close()
   })
 

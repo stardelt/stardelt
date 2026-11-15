@@ -19,6 +19,7 @@ export type DocsState = {
 }
 
 const MAX_DESCRIPTION = 4000
+const MAX_GUIDE = 16000
 const MAX_TAGS = 20
 const TAG_RULE =
   'Tags are lower-case letters, digits, dash and underscore, up to 32 characters'
@@ -85,6 +86,7 @@ export default function TableAbout({
 
   const [editing, setEditing] = useState(false)
   const [description, setDescription] = useState('')
+  const [guide, setGuide] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [tagDraft, setTagDraft] = useState('')
   const [tagError, setTagError] = useState<string | null>(null)
@@ -111,6 +113,7 @@ export default function TableAbout({
   function openEdit() {
     if (!doc) return
     setDescription(doc.description ?? '')
+    setGuide(doc.guide ?? '')
     setTags(doc.tags)
     setTagDraft('')
     setTagError(null)
@@ -157,6 +160,8 @@ export default function TableAbout({
 
   const nextDescription = description.trim()
   const descriptionChanged = nextDescription !== (doc?.description ?? '')
+  const nextGuide = guide.trim()
+  const guideChanged = nextGuide !== (doc?.guide ?? '')
   const tagsChanged = doc ? !sameList(tags, doc.tags) : false
   const nextOwner = admin ? owner.trim() : owner
   const ownerChanged = (nextOwner === '' ? null : nextOwner) !== (doc?.owner ?? null)
@@ -175,7 +180,7 @@ export default function TableAbout({
     : (owner === '' && doc?.canEdit === true) || (owner !== '' && !groups.includes(owner))
   const domainInvalid = domain.trim() !== '' && !DOMAIN_RE.test(domain.trim())
   const tagsInvalid = (draftTag !== '' && !TAG_RE.test(draftTag)) || tags.length > MAX_TAGS
-  const changed = descriptionChanged || tagsChanged || ownerTouched || domainChanged
+  const changed = descriptionChanged || guideChanged || tagsChanged || ownerTouched || domainChanged
   const canSave = changed && !ownerInvalid && !domainInvalid && !tagsInvalid && !saving
 
   async function save(event: FormEvent) {
@@ -203,6 +208,7 @@ export default function TableAbout({
 
     const body: TableDocsUpdate = {}
     if (descriptionChanged) body.description = nextDescription === '' ? null : nextDescription
+    if (guideChanged) body.guide = nextGuide === '' ? null : nextGuide
     if (!sameList(finalTags, doc.tags)) body.tags = finalTags
     if (ownerChanged) body.owner = nextOwner === '' ? null : nextOwner
     if (domainChanged) body.domain = nextDomain === '' ? null : nextDomain
@@ -253,6 +259,16 @@ export default function TableAbout({
           </p>
           {!doc.description && doc.canEdit && (
             <p className="mt-1 text-xs text-text-mute">Say what the table holds and where it comes from.</p>
+          )}
+
+          {doc.guide && (
+            <div className="mt-4">
+              <div className="label mb-1">How to use this table</div>
+              <p className="text-sm text-text-dim whitespace-pre-wrap break-words">{doc.guide}</p>
+            </div>
+          )}
+          {!doc.guide && doc.canEdit && (
+            <p className="mt-1 text-xs text-text-mute">Add a guide: which columns join, which rows to leave out, what the numbers mean. People and agents read it.</p>
           )}
 
           <div className="mt-4 grid gap-4 sm:grid-cols-3">
@@ -311,6 +327,19 @@ export default function TableAbout({
               onChange={(event) => setDescription(event.target.value)}
             />
             <div className="mt-1 text-right text-xs text-text-mute">{description.length} / {MAX_DESCRIPTION}</div>
+          </div>
+
+          <div>
+            <label htmlFor={`${id}-guide`} className="label block mb-1.5">How to use this table</label>
+            <textarea
+              id={`${id}-guide`}
+              className="input min-h-[9rem] resize-y"
+              maxLength={MAX_GUIDE}
+              value={guide}
+              onChange={(event) => setGuide(event.target.value)}
+              placeholder="Join on customer_id to shop.customers. Leave out rows with status = 'test'. Revenue is net of returns."
+            />
+            <div className="mt-1 text-right text-xs text-text-mute">{guide.length} / {MAX_GUIDE}</div>
           </div>
 
           <div>

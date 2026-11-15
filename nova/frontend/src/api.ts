@@ -239,6 +239,8 @@ export type TableDocumentation = {
   tags: string[]
   owner: string | null
   domain: string | null
+  /** The `stardelt.guide` property: how to use the table, in plain text, or `null`. */
+  guide: string | null
   columns: ColumnDoc[]
   canEdit: boolean
   editRule: string
@@ -255,6 +257,7 @@ export type TableDocsUpdate = {
   tags?: string[] | null
   owner?: string | null
   domain?: string | null
+  guide?: string | null
 }
 
 export type QueryColumn = { name: string; type: string }
