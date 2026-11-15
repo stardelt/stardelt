@@ -16,6 +16,7 @@ SWITCH = {
     "NOVA_MCP_AUDIENCE": "mcpAudience",
     "NOVA_MCP_ALLOWED_CLIENTS": "mcpAllowedClients",
     "NOVA_MCP_ALLOWED_GROUPS": "mcpAllowedGroups",
+    "NOVA_MCP_WRITES_PER_HOUR": "mcpWritesPerHour",
 }
 
 
@@ -49,3 +50,8 @@ class Switch(unittest.TestCase):
         self.assertIn("--from-literal=mcpAllowedGroups=", script)
         self.assertIn("MCP_ALLOWED_CLIENTS", script)
         self.assertIn("MCP_ALLOWED_GROUPS", script)
+
+    def test_install_identity_writes_the_write_budget(self):
+        script = (REPO / "scripts" / "identity-bootstrap.sh").read_text()
+        self.assertIn("--from-literal=mcpWritesPerHour=", script)
+        self.assertIn("MCP_WRITES_PER_HOUR", script)

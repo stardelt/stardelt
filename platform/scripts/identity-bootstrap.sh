@@ -193,6 +193,12 @@ mcp_allowed_groups="${MCP_ALLOWED_GROUPS:-}"
 if [ -z "$mcp_allowed_groups" ]; then
   mcp_allowed_groups="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.mcpAllowedGroups}' 2>/dev/null || true)"
 fi
+# The per-person write budget (`NOVA_MCP_WRITES_PER_HOUR`): empty = Nova's 20. A re-run keeps
+# whatever the live ConfigMap says unless MCP_WRITES_PER_HOUR is given.
+mcp_writes_per_hour="${MCP_WRITES_PER_HOUR:-}"
+if [ -z "$mcp_writes_per_hour" ]; then
+  mcp_writes_per_hour="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.mcpWritesPerHour}' 2>/dev/null || true)"
+fi
 apply_configmap stardelt-identity \
   --from-literal=issuerUrl="https://id.${BASE_DOMAIN}/realms/stardelt" \
   --from-literal=tokenEndpoint="https://id.${BASE_DOMAIN}/realms/stardelt/protocol/openid-connect/token" \
@@ -204,5 +210,6 @@ apply_configmap stardelt-identity \
   --from-literal=mcpAudience="${mcp_audience}" \
   --from-literal=mcpAllowedClients="${mcp_allowed_clients}" \
   --from-literal=mcpAllowedGroups="${mcp_allowed_groups}" \
+  --from-literal=mcpWritesPerHour="${mcp_writes_per_hour}" \
   --from-literal=trinoUrl="https://trino.${NAMESPACE}.svc.cluster.local:8443"
 echo "› ConfigMap stardelt-identity (issuer https://id.${BASE_DOMAIN}/realms/stardelt)"

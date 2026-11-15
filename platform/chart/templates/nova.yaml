@@ -262,6 +262,10 @@ spec:
             - name: NOVA_MCP_CALLS_PER_MINUTE
               value: {{ . | quote }}
             {{- end }}
+            {{- if ne (.Values.nova.mcp.writesPerHour | toString) "" }}
+            - name: NOVA_MCP_WRITES_PER_HOUR
+              value: {{ .Values.nova.mcp.writesPerHour | quote }}
+            {{- end }}
             {{- if ne (.Values.nova.mcp.auditRetentionDays | toString) "" }}
             - name: NOVA_MCP_AUDIT_RETENTION_DAYS
               value: {{ .Values.nova.mcp.auditRetentionDays | quote }}

@@ -194,6 +194,12 @@ spec:
             - name: NOVA_MCP_ALLOWED_GROUPS
               valueFrom:
                 configMapKeyRef: { name: stardelt-identity, key: mcpAllowedGroups, optional: true }
+            # The per-person write budget (stardelt-nova#984): 20 by default, 1-600. The
+            # same ConfigMap rule as the switch, so a re-apply cannot reset an
+            # administrator's value.
+            - name: NOVA_MCP_WRITES_PER_HOUR
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpWritesPerHour, optional: true }
             # ---- Sign-in (contract: docs/architecture/identity) --------------
             # `dev` keeps the no-login behaviour (CI, `make demo`, the kind gate).
             # To turn on SSO on a manifest install: run scripts/identity-bootstrap.sh

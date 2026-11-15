@@ -608,6 +608,10 @@ nova:
     # `tools/call`s one person may make per minute on /mcp; 1-600. Empty = Nova's own default (60).
     # The operator's CRD carries the same knob as `spec.mcp.callsPerMinute` (stardelt-operator#738).
     callsPerMinute: ""
+    # `tools/call`s of a write tool (`pipeline_start`) one person may make per hour; 1-600.
+    # Empty = Nova's own default (20). The reads keep `callsPerMinute`. The operator's CRD
+    # carries the same knob as `spec.mcp.writesPerHour` (stardelt-operator#753).
+    writesPerHour: ""
     # Days the stored audit rows of /mcp tool calls are kept; 0-3650. Empty = Nova's own default (30);
     # 0 keeps them and switches the hourly purge off — `0` is a value, not "unset": the template
     # compares the rendered string against the empty string. The operator's CRD carries the same
