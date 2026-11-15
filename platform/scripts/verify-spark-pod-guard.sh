@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# The three Spark drivers — Connect, StreamApp and batch — may create executor pods and
-# their own spark-*-conf-map ConfigMaps only (platform#1096, #1302, #1307, #1308).
+# The four Spark drivers — Connect, StreamApp, batch and a SparkCluster's own — may create
+# executor pods and their own spark-*-conf-map ConfigMaps only (platform#1096, #1302, #1307,
+# #1308, platform#1487).
 #
 #   NS=stardelt bash scripts/verify-spark-pod-guard.sh
 #
 # Read-only against the cluster: every pod and ConfigMap is created/deleted with
-# --dry-run=server as one of spark-connect, spark-stream-driver or spark-batch-driver,
-# so the admission policies decide and nothing is persisted.
+# --dry-run=server as one of spark-connect, spark-stream-driver, spark-batch-driver or
+# spark-cluster-driver, so the admission policies decide and nothing is persisted. The
+# SparkCluster policies exist only after one has reconciled — run
+# `scripts/verify-spark-cluster.sh` first on a fresh cluster.
 # Case 3 is the one exception: Pod Security refuses hostNetwork before the policy in a baseline
 # namespace (platform#1455), so that line accepts either refusal and says which.
 set -euo pipefail
@@ -15,16 +18,22 @@ NS="${NS:-${NAMESPACE:-stardelt}}"
 SA="system:serviceaccount:${NS}:spark-connect"
 SA_STREAM="system:serviceaccount:${NS}:spark-stream-driver"
 SA_BATCH="system:serviceaccount:${NS}:spark-batch-driver"
+SA_CLUSTER="system:serviceaccount:${NS}:spark-cluster-driver"
 IMAGE="ghcr.io/stardelt/spark:dev@sha256:1acae61431891d5354fc959374adf3d5c1fbfc5cf7a7a39b099ef7c6eba89709"
 problems=0
 command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
 
 POLICIES="spark-connect-executor-pods spark-connect-configmaps \
           spark-stream-executor-pods spark-stream-configmaps \
-          spark-batch-executor-pods spark-batch-configmaps"
+          spark-batch-executor-pods spark-batch-configmaps \
+          spark-cluster-executor-pods spark-cluster-configmaps"
 for policy in $POLICIES; do
   kubectl get validatingadmissionpolicy "$policy" >/dev/null 2>&1 || {
-    echo "UNVERIFIED (ValidatingAdmissionPolicy $policy is not installed — kubectl < 1.30, or make install-spark / step-airflow has not run)"; exit 3; }
+    hint="kubectl < 1.30, or make install-spark / step-airflow has not run"
+    case "$policy" in
+      spark-cluster-*) hint="$hint; the SparkCluster policies exist only after one has reconciled — run scripts/verify-spark-cluster.sh first" ;;
+    esac
+    echo "UNVERIFIED (ValidatingAdmissionPolicy $policy is not installed — $hint)"; exit 3; }
 done
 
 deny() {  # <sa> <policy> <label>; the YAML to apply is on stdin
@@ -257,5 +266,25 @@ deny_configmap "$SA_BATCH" spark-batch-configmaps "a foreign ConfigMap created b
 deny_configmap_delete "$SA_BATCH" spark-batch-configmaps "kube-root-ca.crt deletion by the batch driver"
 admit_configmap "$SA_BATCH" "a Spark ConfigMap created by the batch driver"
 
-[ "$problems" -eq 0 ] && { echo "PASS (15 cases: 11 denied, 4 admitted)"; exit 0; }
+# --- The SparkCluster driver (platform#1487, operator#773, #775) -------------------
+# The operator creates this table when a SparkCluster reconciles, so its absence is
+# `UNVERIFIED` above rather than a failure: run scripts/verify-spark-cluster.sh first.
+
+deny "$SA_CLUSTER" spark-cluster-executor-pods "a default-ServiceAccount pod from the SparkCluster driver" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spark-guard-probe-cluster-default-sa
+  namespace: ${NS}
+spec:
+  serviceAccountName: default
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: ${IMAGE}
+EOF
+
+deny_configmap "$SA_CLUSTER" spark-cluster-configmaps "a foreign ConfigMap created by the SparkCluster driver"
+
+[ "$problems" -eq 0 ] && { echo "PASS (17 cases: 13 denied, 4 admitted)"; exit 0; }
 echo "FAIL ($problems problem(s))"; exit 1

@@ -33,6 +33,8 @@ if argv[:2] == ["delete", "configmap"]:
             prefix = "spark-stream"
         elif "spark-batch-driver" in arg:
             prefix = "spark-batch"
+        elif "spark-cluster-driver" in arg:
+            prefix = "spark-cluster"
     print(f"{prefix}-configmaps denied")
     sys.exit(1)
 if argv[:1] == ["apply"]:
@@ -42,6 +44,8 @@ if argv[:1] == ["apply"]:
         prefix = "spark-stream"
     elif "spark-batch-driver" in joined:
         prefix = "spark-batch"
+    elif "spark-cluster-driver" in joined:
+        prefix = "spark-cluster"
     if "fixtures/spark-executor-pod.yaml" in joined:
         sys.exit(0)
     stdin = sys.stdin.read()
@@ -86,7 +90,7 @@ class HostNetworkCase(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("✓ deny-host-network.yaml refused by Pod Security (hostNetwork) before the policy",
                       done.stdout)
-        self.assertIn("PASS (15 cases: 11 denied, 4 admitted)", done.stdout)
+        self.assertIn("PASS (17 cases: 13 denied, 4 admitted)", done.stdout)
 
     def test_an_admitted_host_network_probe_fails(self):
         done = self.run_script("admitted")
