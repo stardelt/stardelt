@@ -168,6 +168,8 @@ export default function Shell() {
     .filter(e => e.purposes.includes('ask') && e.reachable === true && e.jsonOutput === true)
     .sort((a, b) => a.name.localeCompare(b.name))[0]
   const [askOpen, setAskOpen] = useState(false)
+  // A question handed to the panel by the ⌘K row; cleared once the panel has asked it.
+  const [askQuestion, setAskQuestion] = useState<string | null>(null)
   useEffect(() => { if (!askEndpoint) setAskOpen(false) }, [askEndpoint])
 
   // ⌘J / Ctrl+J opens Ask — when an endpoint can answer it, and never from a field where
@@ -261,7 +263,9 @@ export default function Shell() {
           onClick={() => setNavOpen(false)}
         />
       )}
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} onSwitchTheme={toggleTheme} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} onSwitchTheme={toggleTheme}
+        askReady={askEndpoint != null}
+        onAsk={(q) => { setAskQuestion(q); setAskOpen(true) }} />
       <aside
         id="primary-nav"
         className={[
@@ -445,7 +449,14 @@ export default function Shell() {
               <Outlet />
             </ErrorBoundary>
           </main>
-          {askOpen && askEndpoint && <AskPanel endpoint={askEndpoint} onClose={() => setAskOpen(false)} />}
+          {askOpen && askEndpoint && (
+            <AskPanel
+              endpoint={askEndpoint}
+              onClose={() => setAskOpen(false)}
+              initialQuestion={askQuestion ?? undefined}
+              onInitialQuestion={() => setAskQuestion(null)}
+            />
+          )}
         </div>
       </div>
     </div>

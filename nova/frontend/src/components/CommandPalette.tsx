@@ -41,11 +41,17 @@ export default function CommandPalette({
   onClose,
   admin,
   onSwitchTheme,
+  askReady,
+  onAsk,
 }: {
   open: boolean
   onClose: () => void
   admin: boolean
   onSwitchTheme: () => void
+  /** Whether an endpoint can answer Ask; without one the Ask row never appears. */
+  askReady: boolean
+  /** Takes a question out of the palette and into the Ask panel. */
+  onAsk?: (question: string) => void
 }) {
   const ref = useRef<HTMLDialogElement>(null)
   const opener = useRef<HTMLElement | null>(null)
@@ -257,8 +263,22 @@ export default function CommandPalette({
       { key: 'action:preferences', group: 'Actions', label: 'Preferences', hint: 'Theme and navigation', icon: 'sliders', to: '/preferences' },
       { key: 'action:theme',       group: 'Actions', label: 'Switch theme', hint: 'The paired theme', icon: 'sun', to: '', run: onSwitchTheme },
     ]
-    return all.filter(a => !q || a.label.toLowerCase().includes(q) || a.hint.toLowerCase().includes(q))
-  }, [query, onSwitchTheme])
+    const filtered = all.filter(a => !q || a.label.toLowerCase().includes(q) || a.hint.toLowerCase().includes(q))
+    // The typed question is the palette's last row whenever an endpoint can answer it; an
+    // empty query keeps it away so it cannot shadow every page match.
+    if (askReady && onAsk && q) {
+      filtered.push({
+        key: 'action:ask',
+        group: 'Ask',
+        label: `Ask: ${query.trim()}`,
+        hint: 'A question in, checked SQL out',
+        icon: 'spark',
+        to: '',
+        run: () => onAsk(query.trim()),
+      })
+    }
+    return filtered
+  }, [query, onSwitchTheme, askReady, onAsk])
 
   const rows = useMemo(
     () => [...pages, ...catalogRows, ...schemaRows, ...tableRows, ...pipelineRows, ...queryRows, ...savedRows, ...actions],

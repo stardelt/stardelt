@@ -12,7 +12,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ApiError, api, errorMessage, type AskAnswer, type ModelEndpoint } from '../api'
+import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type ModelEndpoint } from '../api'
+import { formatTime } from '../format'
 import { tokenizeSql } from '../sqlHighlight'
 import { TOKEN_CLASS } from '../sqlTokens'
 
@@ -36,23 +37,38 @@ const EXAMPLES = 3
 const EMPTY =
   'Ask a question about the tables you can see. stardelt writes SQL, checks it as you, and never runs it without you.'
 
-export default function AskPanel({ endpoint, onClose }: {
+export default function AskPanel({ endpoint, onClose, initialQuestion, onInitialQuestion }: {
   /** The ready endpoint Shell found; its model and location fill the footer. */
   endpoint: ModelEndpoint
   onClose: () => void
+  /** A question handed in from outside the panel (the ⌘K row), asked once. */
+  initialQuestion?: string
+  /** Called after `initialQuestion` was taken, so the shell can forget it. */
+  onInitialQuestion?: () => void
 }) {
   const navigate = useNavigate()
   const [question, setQuestion] = useState('')
   const [turns, setTurns] = useState<Turn[]>([])
   const [busy, setBusy] = useState(false)
   const [step, setStep] = useState(0)
+  const [showHistory, setShowHistory] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   // `busy` is state, so two fast Enters would both pass its check; the ref is the guard.
   const inFlight = useRef(false)
+  // React runs an effect twice in development; the question from outside is asked once.
+  const askedInitial = useRef(false)
 
   const examples = useQuery({ queryKey: ['ask', 'examples'], queryFn: () => api.readTables() })
   const exampleTables = (examples.data?.tables ?? []).slice(0, EXAMPLES)
+
+  const history = useQuery({
+    queryKey: ['ask', 'history'],
+    queryFn: api.askHistory,
+    enabled: showHistory,
+    retry: false,
+  })
+  const conversations = history.data?.items ?? []
 
   const sqlOfLastTurn = turns.length > 0 ? turns[turns.length - 1].answer?.sql ?? null : null
 
@@ -131,6 +147,40 @@ export default function AskPanel({ endpoint, onClose }: {
 
   const cloud = endpoint.location === 'cloud'
 
+  // A question handed in by the ⌘K row: ask it once, then tell the shell it was taken.
+  useEffect(() => {
+    if (initialQuestion == null) {
+      askedInitial.current = false
+      return
+    }
+    if (askedInitial.current) return
+    askedInitial.current = true
+    void send(initialQuestion)
+    onInitialQuestion?.()
+  }, [initialQuestion, onInitialQuestion])
+
+  /** Show one stored conversation as it was; the model is never asked again. */
+  function openConversation(c: AskConversation) {
+    setTurns([{
+      question: c.question,
+      answer: {
+        endpoint: c.endpoint,
+        model: c.model ?? '',
+        sql: c.sql,
+        sentence: c.sentence,
+        tables: c.tables,
+        explain: c.explain,
+        error: c.error,
+        callId: c.callId ?? undefined,
+      },
+    }])
+    setShowHistory(false)
+    requestAnimationFrame(() => {
+      const el = bodyRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  }
+
   return (
     <aside
       id="ask-panel"
@@ -139,33 +189,68 @@ export default function AskPanel({ endpoint, onClose }: {
     >
       <div className="h-14 shrink-0 border-b border-border px-4 flex items-center gap-2">
         <span className="text-sm font-medium mr-auto">Ask</span>
+        <button
+          type="button"
+          className="btn-ghost px-2 py-1 text-xs"
+          aria-expanded={showHistory}
+          aria-controls="ask-history"
+          onClick={() => setShowHistory(v => !v)}
+        >History</button>
         <button type="button" className="btn-ghost px-2.5 py-2" aria-label="Close Ask" onClick={onClose}>✕</button>
       </div>
 
       <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-        {turns.map((turn, i) => (
-          <TurnView key={i} turn={turn} onVote={vote.bind(null, i)} />
-        ))}
-
-        {busy && (
-          <span role="status" aria-live="polite" className="text-xs text-text-mute">{STEPS[step]}</span>
-        )}
-
-        {turns.length === 0 && !busy && (
-          <div className="space-y-3">
-            <p className="text-sm text-text-dim">{EMPTY}</p>
-            {exampleTables.map(table => {
-              const ask = `How many rows did ${table.namespace}.${table.name} get yesterday?`
-              return (
-                <button
-                  key={`${table.namespace}.${table.name}`}
-                  type="button"
-                  className="btn-ghost text-left text-sm w-full"
-                  onClick={() => void send(ask)}
-                >{ask}</button>
-              )
-            })}
+        {showHistory ? (
+          <div id="ask-history" className="space-y-1">
+            {conversations.length === 0 && history.error == null && (
+              <p className="text-sm text-text-dim">No questions yet.</p>
+            )}
+            {history.error != null && (
+              <p role="status" className="text-sm text-text-dim">{errorMessage(history.error)}</p>
+            )}
+            {conversations.map(c => (
+              <button
+                key={c.id}
+                type="button"
+                className="btn-ghost w-full text-left"
+                onClick={() => openConversation(c)}
+              >
+                <span className="block truncate text-sm">{c.question}</span>
+                <span className="block text-xs text-text-mute">
+                  {formatTime(c.createdAt)}
+                  {c.explain === 'passed' && ' ✓ checked'}
+                  {c.explain === 'failed' && ' ✕ not runnable'}
+                </span>
+              </button>
+            ))}
           </div>
+        ) : (
+          <>
+            {turns.map((turn, i) => (
+              <TurnView key={i} turn={turn} onVote={vote.bind(null, i)} />
+            ))}
+
+            {busy && (
+              <span role="status" aria-live="polite" className="text-xs text-text-mute">{STEPS[step]}</span>
+            )}
+
+            {turns.length === 0 && !busy && (
+              <div className="space-y-3">
+                <p className="text-sm text-text-dim">{EMPTY}</p>
+                {exampleTables.map(table => {
+                  const ask = `How many rows did ${table.namespace}.${table.name} get yesterday?`
+                  return (
+                    <button
+                      key={`${table.namespace}.${table.name}`}
+                      type="button"
+                      className="btn-ghost text-left text-sm w-full"
+                      onClick={() => void send(ask)}
+                    >{ask}</button>
+                  )
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
 

@@ -46,6 +46,27 @@ const FAILED = {
   error: 'Table gold.shop.customer_ltv does not exist',
 }
 
+const HISTORY_SQL = "SELECT count(*) AS orders\nFROM lakehouse.staging.orders\nWHERE ordered_at >= current_date - INTERVAL '7' DAY"
+
+/** Two stored conversations, as `GET /api/ask/history` answers them: newest first. */
+const HISTORY = {
+  items: [
+    {
+      id: 2, question: 'How many orders came in this week?', endpoint: 'lab', model: 'llama-3.3-70b',
+      callId: 43, sql: HISTORY_SQL, sentence: 'Orders placed in the last seven days.',
+      tables: [{ catalog: 'lakehouse', namespace: 'staging', table: 'orders' }],
+      explain: 'passed', error: null, createdAt: '2026-11-15T10:00:00Z',
+    },
+    {
+      id: 1, question: 'What did the shop read yesterday?', endpoint: 'lab', model: 'llama-3.3-70b',
+      callId: 41, sql: SQL, sentence: 'Customer rows the shop read yesterday.',
+      tables: [{ catalog: 'gold', namespace: 'shop', table: 'customer_ltv' }],
+      explain: 'failed', error: 'Table gold.shop.customer_ltv does not exist',
+      createdAt: '2026-11-14T10:00:00Z',
+    },
+  ],
+}
+
 type Options = {
   /** What `/api/model-endpoints` answers; one ready row by default. */
   endpoints?: unknown[]
@@ -53,6 +74,8 @@ type Options = {
   ask?: (route: Route) => void
   /** What `/api/ask/feedback` answers; a 204 by default. */
   feedback?: (route: Route) => void
+  /** What `/api/ask/history` answers; two stored conversations, newest first, by default. */
+  history?: (route: Route) => void
   /** Whether the shell is expected to show the Ask button (it is, unless no endpoint is ready). */
   ready?: boolean
 }
@@ -74,6 +97,7 @@ async function stub(page: Page, options: Options = {}) {
     if (pathname === '/api/model-endpoints') return json(route, options.endpoints ?? [ENDPOINT])
     if (pathname === '/api/lineage/read-tables') return json(route, READ_TABLES)
     if (pathname === '/api/ask') return options.ask ? options.ask(route) : json(route, PASSED)
+    if (pathname === '/api/ask/history') return options.history ? options.history(route) : json(route, HISTORY)
     if (pathname === '/api/ask/feedback') {
       if (options.feedback) return options.feedback(route)
       return route.fulfill({ status: 204 })
@@ -192,4 +216,54 @@ test('a spent budget is a calm notice, not an error', async ({ page }) => {
   await expect(panel.getByText('Your group used its 2 M tokens for November')).toBeVisible()
   await expect(panel.locator('[role="alert"]')).toHaveCount(0)
   await expect(panel.locator('[role="status"]')).toHaveCount(1)
+})
+
+test('History lists the last conversations, newest first, with their check line', async ({ page }) => {
+  await stub(page)
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await panel.getByRole('button', { name: 'History' }).click()
+  const rows = panel.locator('#ask-history button')
+  await expect(rows).toHaveCount(2)
+  await expect(rows.nth(0)).toContainText('How many orders came in this week?')
+  await expect(rows.nth(0)).toContainText('✓ checked')
+  await expect(rows.nth(1)).toContainText('What did the shop read yesterday?')
+  await expect(rows.nth(1)).toContainText('✕ not runnable')
+})
+
+test('opening a stored conversation shows it, and the model is not asked again', async ({ page }) => {
+  let asked = 0
+  await stub(page, {
+    ask: (route) => {
+      asked += 1
+      return json(route, PASSED)
+    },
+  })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await panel.getByRole('button', { name: 'History' }).click()
+  await panel.locator('#ask-history button').first().click()
+
+  await expect(panel.getByTestId('ask-sql')).toHaveText(HISTORY_SQL)
+  await expect(panel.getByText('Orders placed in the last seven days.')).toBeVisible()
+  await expect(panel.getByText('✓ Checked: EXPLAIN passed as you')).toBeVisible()
+  expect(asked).toBe(0)
+  await expect(panel.locator('#ask-history')).toHaveCount(0)
+})
+
+test('a person with no history is told so', async ({ page }) => {
+  await stub(page, { history: (route) => json(route, { items: [] }) })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await panel.getByRole('button', { name: 'History' }).click()
+  await expect(panel.locator('#ask-history').getByText('No questions yet.')).toBeVisible()
+})
+
+test('a history that cannot be read shows the API sentence, never an empty list', async ({ page }) => {
+  await stub(page, { history: (route) => json(route, { error: 'the history was not read' }, 503) })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await panel.getByRole('button', { name: 'History' }).click()
+  await expect(panel.getByRole('status').filter({ hasText: 'the history was not read' })).toBeVisible()
+  await expect(panel.locator('#ask-history').getByText('No questions yet.')).toHaveCount(0)
 })
