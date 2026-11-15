@@ -7,8 +7,11 @@ an **external** OIDC provider (Entra ID, Okta, a corporate Keycloak) or the **pl
 Keycloak, that every building block authenticates against. Either way the platform publishes
 the same ConfigMap, `stardelt-identity`, with `issuerUrl`, `tokenEndpoint`, `groupClaim`
 (`groups`) and `adminGroup` (`stardelt-admins`). The platforms' own installer adds `authMode`,
-`publicUrl` and `trinoUrl` (the coordinator's in-cluster TLS endpoint, which exists under exactly
-the same condition — see "TLS on the coordinator"). `tokenEndpoint` is the provider's OAuth2
+`publicUrl`, `trinoUrl` (the coordinator's in-cluster TLS endpoint, which exists under exactly the
+same condition — see "TLS on the coordinator"), `mcpEnabled` and `mcpAudience`. The components read
+them from that ConfigMap (Nova takes `authMode`, `publicUrl`, `mcpEnabled` and `mcpAudience`), so
+changing one is a ConfigMap patch followed by a restart of the Deployment, not `kubectl set env`
+(see "Turning on sign-in"). `tokenEndpoint` is the provider's OAuth2
 client-credentials endpoint, resolved once here so no component builds the realm path itself:
 `platform` derives it from the Keycloak this platform deploys, `external` takes it from
 `identity.tokenEndpoint` (the `token_endpoint` of `<issuerUrl>/.well-known/openid-configuration`).
@@ -660,10 +663,19 @@ helm upgrade --install stardelt chart -n stardelt \
   --set identity.mode=platform --set platform.baseDomain=example.com \
   --set nova.auth.mode=oidc
 
-# manifest path — set two values on the Deployment after `make install-identity`
-kubectl -n stardelt set env deploy/nova \
-  NOVA_AUTH_MODE=oidc NOVA_PUBLIC_URL=https://example.com
+# manifest path — `make install-identity` writes authMode=oidc and publicUrl into the
+# stardelt-identity ConfigMap, and Nova reads both from there. To change them later, patch the
+# ConfigMap and restart; never `kubectl set env` the Deployment (see below).
+kubectl -n stardelt patch configmap stardelt-identity --type merge \
+  -p '{"data":{"authMode":"oidc","publicUrl":"https://example.com"}}'
+kubectl -n stardelt rollout restart deploy/nova
 ```
+
+Both variables are `valueFrom: configMapKeyRef` in `manifests/nova-deployment.yaml`. `kubectl set env`
+would write a literal `value` next to that reference and leave the Deployment's last-applied
+annotation stale, so the next `kubectl apply -f manifests/nova-deployment.yaml` fails with
+`env[N].valueFrom: Invalid value: "": may not be specified when 'value' is not empty` — the same
+drift the MCP variables caused. The ConfigMap is the source of truth for every one of these values.
 
 The issuer, client secret and session secret are read from `stardelt-identity`,
 `stardelt-oidc-clients` (key `nova`) and `stardelt-nova-session` — all created by
