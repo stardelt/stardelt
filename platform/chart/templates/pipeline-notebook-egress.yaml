@@ -51,6 +51,15 @@ spec:
       ports:
         - protocol: TCP
           port: 8333
+    # A group's Spark Connect server (a SparkCluster): its own ingress admits only the
+    # owner group's pods (stardelt-platform#1425). The shared server has no such label.
+    - to:
+        - podSelector:
+            matchExpressions:
+              - { key: sparkoperator.k8s.io/connect-name, operator: Exists }
+      ports:
+        - protocol: TCP
+          port: 15002
     # The public internet: public datasets, and the public IdP token endpoint. Never a
     # private range, and never the cloud metadata address.
     - to:
