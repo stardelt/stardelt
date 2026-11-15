@@ -13,6 +13,7 @@
 # A missing `helm` or operator checkout is a printed note and exit 0 (this script also runs on
 # machines without the operator repo, and pin-image.sh must keep working there); a `helm`
 # failure is this script's failure.
+# It also names the chart's revision, so a pin never renders a stale chart silently.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -25,12 +26,24 @@ if [ "${#digest}" -ne 71 ] || [ "${digest#sha256:}" = "$digest" ]; then
 fi
 
 op_dir="${OPERATOR_DIR:-../stardelt-operator}"
-if ! command -v helm >/dev/null 2>&1; then
-  echo "› helm not found — the operator chart was not rendered"
-  exit 0
-fi
 if [ ! -f "$op_dir/chart/Chart.yaml" ]; then
   echo "› no operator chart at $op_dir/chart — the chart was not rendered (set OPERATOR_DIR)"
+  exit 0
+fi
+# The chart is whatever this checkout holds, and a shared checkout can be far behind
+# (2026-11-15: 96 commits, 351 lines of chart). Name the revision it renders; a pin that
+# moves the image forward must not render a chart backward (platform#1491's mirror).
+chart_rev="$(git -C "$op_dir" rev-parse --short=7 HEAD 2>/dev/null || true)"
+if [ -n "$chart_rev" ]; then
+  echo "› chart from $op_dir at $chart_rev"
+  chart_main="$(git -C "$op_dir" rev-parse --short=7 origin/main 2>/dev/null || true)"
+  if [ -n "$chart_main" ] && [ "$chart_rev" != "$chart_main" ]; then
+    behind="$(git -C "$op_dir" rev-list --count "HEAD..origin/main" 2>/dev/null || true)"
+    echo "! $op_dir is ${behind:-?} commit(s) behind origin/main ($chart_rev vs $chart_main) — this is not the pinned build's chart (set OPERATOR_DIR, or: git -C $op_dir pull --ff-only)" >&2
+  fi
+fi
+if ! command -v helm >/dev/null 2>&1; then
+  echo "› helm not found — the operator chart was not rendered"
   exit 0
 fi
 

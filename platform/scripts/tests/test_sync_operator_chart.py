@@ -85,6 +85,41 @@ class SyncOperatorChartTest(unittest.TestCase):
                 argv.index(first), argv.index(second), f"{first!r} must precede {second!r}"
             )
 
+    def git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.operator), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def make_git_chart(self):
+        """Turn self.operator into a git checkout; return its first commit's sha."""
+        self.git("init", "-q")
+        self.git("add", "chart/Chart.yaml")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "chart")
+        return self.git("rev-parse", "HEAD")
+
+    def test_the_rendered_chart_names_its_revision(self):
+        first = self.make_git_chart()
+        result = self.run_script(DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("› chart from", result.stdout)
+        self.assertIn(first[:7], result.stdout)
+
+    def test_a_checkout_behind_origin_main_is_named_before_it_renders(self):
+        first = self.make_git_chart()
+        (self.operator / "chart" / "Chart.yaml").write_text(
+            "apiVersion: v2\nname: stardelt-operator\nversion: 0.1.0\n# moved\n"
+        )
+        self.git("add", "chart/Chart.yaml")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "newer")
+        newest = self.git("rev-parse", "HEAD")
+        # A stale checkout: HEAD on the older commit, origin/main on the newer one.
+        self.git("reset", "-q", "--hard", first)
+        self.git("update-ref", "refs/remotes/origin/main", newest)
+        result = self.run_script(DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1 commit(s) behind origin/main", result.stderr)
+        self.assertIn(first[:7], result.stderr)
+
     def test_renders_the_chart_at_the_digest(self):
         result = self.run_script(DIGEST, "stardelt")
         self.assertEqual(result.returncode, 0, result.stderr)
