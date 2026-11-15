@@ -11,10 +11,15 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
+use axum::Json;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tracing::{info, warn};
+
+use crate::query_hints::commas;
 
 /// How long rows are kept when `NOVA_MODEL_CALL_RETENTION_DAYS` is not set.
 const DEFAULT_RETENTION_DAYS: i64 = 30;
@@ -147,6 +152,137 @@ fn retention_days_from(get: impl Fn(&str) -> Option<String>) -> Option<i64> {
     }
 }
 
+/// `spec.quota` of one endpoint; either field absent means no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Quota {
+    pub per_group_monthly: Option<i64>,
+    pub per_person_daily: Option<i64>,
+}
+
+/// Read `spec.quota` from a `ModelEndpoint` object as the API server returns it.
+// called by the Ask endpoint (nova#891) and the agent proxy (slice 3); remove the allow there
+#[allow(dead_code)]
+pub(crate) fn quota_of(object: &Value) -> Quota {
+    let quota = object.pointer("/spec/quota").unwrap_or(&Value::Null);
+    Quota {
+        per_group_monthly: quota.get("perGroupMonthlyTokens").and_then(Value::as_i64),
+        per_person_daily: quota.get("perPersonDailyTokens").and_then(Value::as_i64),
+    }
+}
+
+/// A spent budget: what was used, against which limit, over which window.
+pub(crate) struct Refusal {
+    pub used: i64,
+    pub limit: i64,
+    pub window: &'static str,
+    pub subject: &'static str,
+}
+
+impl Refusal {
+    /// The sentence the UI shows, e.g. "Your group used 2,015,000 of its 2,000,000 tokens
+    /// this month. Ask an administrator to raise the quota."
+    pub(crate) fn sentence(&self) -> String {
+        let used = commas(self.used);
+        let limit = commas(self.limit);
+        let spent = match (self.subject, self.window) {
+            ("group", "month") => {
+                format!("Your group used {used} of its {limit} tokens this month")
+            }
+            ("person", "day") => format!("You used {used} of your {limit} tokens today"),
+            (_, window) => format!("{used} of {limit} tokens were used this {window}"),
+        };
+        format!("{spent}. Ask an administrator to raise the quota.")
+    }
+}
+
+/// Tokens the group spent this calendar month.
+async fn group_tokens(pool: &PgPool, group: &str) -> sqlx::Result<i64> {
+    sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(tokens_in + tokens_out), 0) AS BIGINT) FROM model_call \
+         WHERE group_name = $1 AND at >= date_trunc('month', now())",
+    )
+    .bind(group)
+    .fetch_one(pool)
+    .await
+}
+
+/// Tokens the person spent today.
+async fn person_tokens(pool: &PgPool, sub: &str) -> sqlx::Result<i64> {
+    sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(tokens_in + tokens_out), 0) AS BIGINT) FROM model_call \
+         WHERE sub = $1 AND at >= date_trunc('day', now())",
+    )
+    .bind(sub)
+    .fetch_one(pool)
+    .await
+}
+
+/// Check both limits before a call. `group` is `None` for a person without a group (the
+/// per-group limit is skipped then). The first spent budget wins.
+///
+/// A database error is **not** a refusal: it is logged and the call goes through, the same
+/// rule [`record`] follows — a broken audit table must not stop the product.
+// called by the Ask endpoint (nova#891) and the agent proxy (slice 3); remove the allow there
+#[allow(dead_code)]
+pub(crate) async fn check(
+    pool: &PgPool,
+    quota: &Quota,
+    group: Option<&str>,
+    sub: &str,
+) -> Result<(), Refusal> {
+    if let (Some(limit), Some(group)) = (quota.per_group_monthly, group) {
+        match group_tokens(pool, group).await {
+            Ok(used) if used >= limit => {
+                return Err(Refusal {
+                    used,
+                    limit,
+                    window: "month",
+                    subject: "group",
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "the group model budget could not be read — the call goes through")
+            }
+        }
+    }
+    if let Some(limit) = quota.per_person_daily {
+        match person_tokens(pool, sub).await {
+            Ok(used) if used >= limit => {
+                return Err(Refusal {
+                    used,
+                    limit,
+                    window: "day",
+                    subject: "person",
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "the person's model budget could not be read — the call goes through")
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The 429 answer: the sentence in `message`, plus the numbers, so the UI needs no second call.
+// called by the Ask endpoint (nova#891) and the agent proxy (slice 3); remove the allow there
+#[allow(dead_code)]
+pub(crate) fn refuse(refusal: &Refusal) -> Response {
+    let body = json!({
+        "error": "model_budget_exceeded",
+        "message": refusal.sentence(),
+        "limit": refusal.limit,
+        "used": refusal.used,
+        "window": refusal.window,
+    });
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +331,206 @@ mod tests {
         assert_eq!(retention_days_from(|_| Some("0".into())), None);
         assert_eq!(retention_days_from(|_| Some("7".into())), Some(7));
         assert_eq!(retention_days_from(|_| Some("x".into())), Some(30));
+    }
+
+    #[test]
+    fn a_quota_is_read_from_the_crd_or_is_no_limit() {
+        assert_eq!(quota_of(&json!({"spec": {"model": "m"}})), Quota::default());
+        assert_eq!(
+            quota_of(&json!({"spec": {"quota": {"perGroupMonthlyTokens": 2_000_000}}})),
+            Quota {
+                per_group_monthly: Some(2_000_000),
+                per_person_daily: None,
+            }
+        );
+        assert_eq!(
+            quota_of(&json!({"spec": {"quota": {"perPersonDailyTokens": 20_000}}})),
+            Quota {
+                per_group_monthly: None,
+                per_person_daily: Some(20_000),
+            }
+        );
+        assert_eq!(
+            quota_of(
+                &json!({"spec": {"quota": {"perGroupMonthlyTokens": 2_000_000,
+                "perPersonDailyTokens": 20_000}}})
+            ),
+            Quota {
+                per_group_monthly: Some(2_000_000),
+                per_person_daily: Some(20_000),
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusal_says_what_was_spent_and_asks_for_an_administrator() {
+        let month = Refusal {
+            used: 2_015_000,
+            limit: 2_000_000,
+            window: "month",
+            subject: "group",
+        };
+        assert_eq!(
+            month.sentence(),
+            "Your group used 2,015,000 of its 2,000,000 tokens this month. \
+             Ask an administrator to raise the quota."
+        );
+        let day = Refusal {
+            used: 20_000,
+            limit: 20_000,
+            window: "day",
+            subject: "person",
+        };
+        assert_eq!(
+            day.sentence(),
+            "You used 20,000 of your 20,000 tokens today. \
+             Ask an administrator to raise the quota."
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_spent_group_budget_refuses_the_next_call() {
+        let pool = migrated_pool().await;
+        let call = |sub: &'static str, group: Option<&'static str>, tokens: i64| Call {
+            sub,
+            group,
+            feature: "ask",
+            endpoint: "default",
+            model: "m",
+            tokens: Tokens {
+                input: tokens,
+                output: 0,
+                estimated: false,
+            },
+            latency_ms: 1,
+            outcome: "ok",
+            prompt: "",
+            answer: None,
+        };
+        // This month, this group: 10 tokens. Another group: 100. 40 days old: 50.
+        record(&pool, &call("old", Some("analytics"), 50))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE model_call SET at = now() - interval '40 days' WHERE sub = 'old'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        record(&pool, &call("alice", Some("analytics"), 10))
+            .await
+            .unwrap();
+        record(&pool, &call("bob", Some("finance"), 100))
+            .await
+            .unwrap();
+
+        let spent = Quota {
+            per_group_monthly: Some(10),
+            per_person_daily: None,
+        };
+        let refusal = check(&pool, &spent, Some("analytics"), "alice")
+            .await
+            .expect_err("the group budget is spent");
+        assert_eq!((refusal.used, refusal.limit), (10, 10));
+        assert_eq!((refusal.window, refusal.subject), ("month", "group"));
+        // The 40-day-old row and the other group are not counted.
+        assert!(refusal.used < 60);
+
+        assert!(
+            check(&pool, &Quota::default(), Some("analytics"), "alice")
+                .await
+                .is_ok(),
+            "no quota is no limit"
+        );
+        assert!(
+            check(
+                &pool,
+                &Quota {
+                    per_group_monthly: Some(11),
+                    per_person_daily: None,
+                },
+                Some("analytics"),
+                "alice"
+            )
+            .await
+            .is_ok(),
+            "a limit above the spend lets the call through"
+        );
+        assert!(
+            check(
+                &pool,
+                &Quota {
+                    per_group_monthly: Some(1),
+                    per_person_daily: None,
+                },
+                None,
+                "alice"
+            )
+            .await
+            .is_ok(),
+            "a person without a group skips the group limit"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_spent_daily_budget_refuses_the_next_call() {
+        let pool = migrated_pool().await;
+        let call = |sub: &'static str, tokens: i64| Call {
+            sub,
+            group: None,
+            feature: "ask",
+            endpoint: "default",
+            model: "m",
+            tokens: Tokens {
+                input: 0,
+                output: tokens,
+                estimated: false,
+            },
+            latency_ms: 1,
+            outcome: "ok",
+            prompt: "",
+            answer: None,
+        };
+        // Today, this person: 5 tokens. Another person: 100. Two days ago: 50.
+        record(&pool, &call("alice", 50)).await.unwrap();
+        sqlx::query("UPDATE model_call SET at = now() - interval '2 days' WHERE sub = 'alice'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        record(&pool, &call("alice", 5)).await.unwrap();
+        record(&pool, &call("bob", 100)).await.unwrap();
+
+        let spent = Quota {
+            per_group_monthly: None,
+            per_person_daily: Some(5),
+        };
+        let refusal = check(&pool, &spent, None, "alice")
+            .await
+            .expect_err("the daily budget is spent");
+        assert_eq!((refusal.used, refusal.limit), (5, 5));
+        assert_eq!((refusal.window, refusal.subject), ("day", "person"));
+        assert!(
+            check(&pool, &Quota::default(), None, "alice").await.is_ok(),
+            "no quota is no limit"
+        );
+        assert!(
+            check(
+                &pool,
+                &Quota {
+                    per_group_monthly: None,
+                    per_person_daily: Some(101),
+                },
+                None,
+                "bob"
+            )
+            .await
+            .is_ok(),
+            "another person's day is their own: bob spent 100, not alice's 5"
+        );
+        assert!(
+            check(&pool, &spent, None, "bob").await.is_err(),
+            "bob's own 100 tokens are over the 5-token limit"
+        );
     }
 
     #[tokio::test]

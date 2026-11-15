@@ -124,6 +124,7 @@ mod mcp_audit;
 mod metrics;
 mod migrations;
 mod model_calls;
+mod model_chat;
 mod model_endpoints;
 mod model_probe;
 mod model_usage;

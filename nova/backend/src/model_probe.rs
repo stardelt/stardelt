@@ -18,7 +18,6 @@
 //! [`DEFAULT_INTERVAL`] (a day). A new endpoint is therefore probed within a minute, and needs no
 //! scheduler of its own.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,14 +26,10 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::AppState;
+use crate::model_chat::{Answer, CALL_TIMEOUT, Chat, ChatError, base_url, chat, key_for};
 
-/// Where the kubelet projects each endpoint's key (`stardelt-operator` `nova.rs`
-/// `MODEL_KEYS_PATH`, and the chart's `mountPath`). Nova never reads a Secret.
-const MODEL_KEYS_PATH: &str = "/var/run/stardelt/models";
-/// A probe call's token cap: thinking mode eats an uncapped budget (platform#1099).
-const MAX_TOKENS: u32 = 512;
-/// One call's wall-clock limit; the spike's slowest answer was 91 s on a CPU model.
-const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+// A probe call's token cap is `model_chat::MAX_TOKENS` (thinking mode eats an uncapped
+// budget, platform#1099); the timeout and the body-length rule live there too.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(86_400);
 const MIN_INTERVAL: u64 = 300;
 const MAX_INTERVAL: u64 = 604_800;
@@ -42,8 +37,6 @@ const MAX_INTERVAL: u64 = 604_800;
 const ROUND_EVERY: Duration = Duration::from_secs(60);
 /// The `/models` call is a convenience: it never holds the round up.
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
-/// How much of an error body a message may carry.
-const BODY_CHARS: usize = 200;
 /// The plain chat check's prompt — also the text whose bytes and hash the call record keeps.
 const CHAT_PROMPT: &str = "Reply with one short sentence about lakes.";
 
@@ -73,21 +66,6 @@ fn now() -> DateTime<Utc> {
     DateTime::<Utc>::from(std::time::SystemTime::now())
 }
 
-/// Where the projected keys live; `NOVA_MODEL_KEYS_DIR` is the test seam.
-pub(crate) fn keys_dir() -> PathBuf {
-    match std::env::var("NOVA_MODEL_KEYS_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(MODEL_KEYS_PATH),
-    }
-}
-
-/// The endpoint's key, or `None` when nothing was projected for it (or it is unreadable).
-fn key_at(dir: &Path, name: &str) -> Option<String> {
-    let key = std::fs::read_to_string(dir.join(name).join("key")).ok()?;
-    let key = key.trim();
-    (!key.is_empty()).then(|| key.to_string())
-}
-
 /// Whether this endpoint needs a probe now: no `status.checkedAt` yet (a new endpoint), an
 /// unparseable one, or one older than `max_age` (the daily round).
 fn needs_probe(checked_at: Option<&str>, now: DateTime<Utc>, max_age: Duration) -> bool {
@@ -101,26 +79,14 @@ fn needs_probe(checked_at: Option<&str>, now: DateTime<Utc>, max_age: Duration) 
     now.signed_duration_since(checked_at) > max_age
 }
 
-/// The endpoint's base URL without its trailing slash: the CRD's example is
-/// `https://llm.internal.example/v1`, so the calls below append `/models` and
-/// `/chat/completions`.
-fn base_url(url: &str) -> String {
-    url.trim_end_matches('/').to_string()
+/// A fragment as the body `chat` merges it into.
+fn fragment(raw: &str) -> Value {
+    serde_json::from_str(raw).expect("the checks are valid JSON")
 }
 
-/// One chat call's body; `extra` carries what a specific check adds (`tools`, `response_format`).
-fn chat_body(model: &str, extra: Value) -> Value {
-    let mut body = json!({
-        "model": model,
-        "max_tokens": MAX_TOKENS,
-        "messages": [{"role": "user", "content": CHAT_PROMPT}],
-    });
-    if let (Some(object), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
-        for (key, value) in extra {
-            object.insert(key.clone(), value.clone());
-        }
-    }
-    body
+/// The messages of a probe call: one plain question.
+fn messages() -> Value {
+    json!([{"role": "user", "content": CHAT_PROMPT}])
 }
 
 /// The tool check's body fragment: one function, `sql_explain`.
@@ -128,39 +94,6 @@ const TOOL_CHECK: &str = r#"{"tools": [{"type": "function", "function": {"name":
 
 /// The JSON check's body fragment: an object with both fields, as the spike measured it.
 const JSON_CHECK: &str = r#"{"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object", "properties": {"sql": {"type": "string"}, "explanation": {"type": "string"}}, "required": ["sql", "explanation"]}}}}"#;
-
-/// A fragment as the body `chat_body` merges it into.
-fn fragment(raw: &str) -> Value {
-    serde_json::from_str(raw).expect("the checks are valid JSON")
-}
-
-/// The first `n` characters of a body, never a multi-byte boundary panic.
-fn short(body: &str) -> String {
-    body.chars().take(BODY_CHARS).collect()
-}
-
-/// One call: the shared headers, the endpoint's own base and the body. A transport error
-/// is handed back as text, so the outcome says what went wrong without a `reqwest` type.
-async fn send(
-    client: &reqwest::Client,
-    base: &str,
-    key: Option<&str>,
-    body: &Value,
-) -> Result<reqwest::Response, String> {
-    let mut request = client.post(format!("{base}/chat/completions")).json(body);
-    if let Some(key) = key {
-        request = request.bearer_auth(key);
-    }
-    request
-        .send()
-        .await
-        .map_err(|e| e.without_url().to_string())
-}
-
-/// A non-2xx answer as the message it belongs in: `503: <first 200 characters>`.
-fn refusal(status: reqwest::StatusCode, body: &str) -> String {
-    format!("{}: {}", status.as_u16(), short(body))
-}
 
 /// Record the plain chat check as one `model_call` row (design nova#890, slice 1). Best
 /// effort: an endpoint that answered, refused or failed still gets its row, and a failed
@@ -230,55 +163,45 @@ pub(crate) async fn probe(
     }
 
     // (b) Does it answer at all? Everything after this is pointless when it does not.
+    let plain = Chat {
+        base_url: &base,
+        model,
+        key,
+        messages: messages(),
+        extra: json!({}),
+    };
     let started = std::time::Instant::now();
-    match send(client, &base, key, &chat_body(model, json!({}))).await {
-        Ok(response) if response.status().is_success() => {
+    match chat(client, &plain).await {
+        Ok(Answer {
+            content,
+            usage,
+            latency_ms,
+            ..
+        }) => {
             outcome.reachable = Some(true);
-            let body: Value = response.json().await.unwrap_or(Value::Null);
-            let answer = body
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str);
             note(
                 db,
                 name,
                 model,
-                started.elapsed().as_millis() as u64,
+                latency_ms,
                 "ok",
-                body.get("usage"),
-                answer,
+                usage.as_ref(),
+                Some(&content),
             )
             .await;
         }
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        Err(ChatError::Refused(message)) => {
             outcome.reachable = Some(false);
-            outcome.message = Some(refusal(status, &body));
-            note(
-                db,
-                name,
-                model,
-                started.elapsed().as_millis() as u64,
-                "refused",
-                None,
-                None,
-            )
-            .await;
+            outcome.message = Some(message);
+            let elapsed = started.elapsed().as_millis() as u64;
+            note(db, name, model, elapsed, "refused", None, None).await;
             return outcome;
         }
-        Err(e) => {
+        Err(ChatError::Transport(message)) => {
             outcome.reachable = Some(false);
-            outcome.message = Some(e);
-            note(
-                db,
-                name,
-                model,
-                started.elapsed().as_millis() as u64,
-                "error",
-                None,
-                None,
-            )
-            .await;
+            outcome.message = Some(message);
+            let elapsed = started.elapsed().as_millis() as u64;
+            note(db, name, model, elapsed, "error", None, None).await;
             return outcome;
         }
     }
@@ -286,48 +209,46 @@ pub(crate) async fn probe(
     // (c) A tool call for `sql_explain`, and (d) JSON in the shape it was asked for. A call
     // that fails carries its reason, so the status says why it is not usable.
     let mut detail: Option<String> = None;
-    match send(client, &base, key, &chat_body(model, fragment(TOOL_CHECK))).await {
-        Ok(response) if response.status().is_success() => {
-            let body: Value = response.json().await.unwrap_or(Value::Null);
+    let tool_call = Chat {
+        base_url: &base,
+        model,
+        key,
+        messages: messages(),
+        extra: fragment(TOOL_CHECK),
+    };
+    match chat(client, &tool_call).await {
+        Ok(answer) => {
             outcome.tool_calling = Some(
-                body.pointer("/choices/0/message/tool_calls/0/function/name")
+                answer
+                    .message
+                    .pointer("/tool_calls/0/function/name")
                     .and_then(Value::as_str)
                     == Some("sql_explain"),
             );
         }
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        Err(ChatError::Refused(message) | ChatError::Transport(message)) => {
             outcome.tool_calling = Some(false);
-            detail = Some(refusal(status, &body));
-        }
-        Err(e) => {
-            outcome.tool_calling = Some(false);
-            detail = Some(e);
+            detail = Some(message);
         }
     }
 
-    match send(client, &base, key, &chat_body(model, fragment(JSON_CHECK))).await {
-        Ok(response) if response.status().is_success() => {
-            let body: Value = response.json().await.unwrap_or(Value::Null);
-            let content = body
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+    let json_call = Chat {
+        base_url: &base,
+        model,
+        key,
+        messages: messages(),
+        extra: fragment(JSON_CHECK),
+    };
+    match chat(client, &json_call).await {
+        Ok(answer) => {
             outcome.json_output = Some(matches!(
-                serde_json::from_str::<Value>(content),
+                serde_json::from_str::<Value>(&answer.content),
                 Ok(Value::Object(object)) if object.contains_key("sql") && object.contains_key("explanation")
             ));
         }
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        Err(ChatError::Refused(message) | ChatError::Transport(message)) => {
             outcome.json_output = Some(false);
-            detail.get_or_insert_with(|| refusal(status, &body));
-        }
-        Err(e) => {
-            outcome.json_output = Some(false);
-            detail.get_or_insert(e);
+            detail.get_or_insert(message);
         }
     }
 
@@ -422,7 +343,6 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
         }
     };
     let now = now();
-    let dir = keys_dir();
     for object in &objects {
         let name = object
             .metadata
@@ -454,7 +374,7 @@ async fn round(state: &Arc<AppState>, max_age: Duration) {
             warn!(endpoint = %name, "model probe: no url or model — skipped");
             continue;
         }
-        let key = key_at(&dir, &name);
+        let key = key_for(&name);
         let outcome = probe(
             &client,
             &name,
@@ -517,8 +437,7 @@ pub(crate) async fn probe_named(
         warn!(endpoint = %name, "model probe: no url or model — skipped");
         return;
     }
-    let dir = keys_dir();
-    let key = key_at(&dir, &name);
+    let key = key_for(&name);
     let outcome = probe(
         &client,
         &name,
@@ -595,17 +514,6 @@ mod tests {
         assert!(needs_probe(Some("not a date"), now, day));
     }
 
-    #[test]
-    fn the_key_file_is_trimmed_and_a_missing_one_is_none() {
-        let dir = std::env::temp_dir().join(format!("nova-model-keys-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("endpoint")).unwrap();
-        std::fs::write(dir.join("endpoint").join("key"), "  sk-1 \n").unwrap();
-        assert_eq!(key_at(&dir, "endpoint"), Some("sk-1".to_string()));
-        assert_eq!(key_at(&dir, "nothing-projected"), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// A transport error must not carry the endpoint's URL into `status.message`, which
     /// `GET /api/model-endpoints` serves (nova#990).
     #[tokio::test]
@@ -617,16 +525,18 @@ mod tests {
             .timeout(CALL_TIMEOUT)
             .build()
             .unwrap();
-        let error = send(
+        let outcome = probe(
             &client,
+            "probe-check",
             &format!("http://127.0.0.1:{port}/v1"),
+            "m",
             None,
-            &json!({}),
+            None,
         )
-        .await
-        .unwrap_err();
-        assert!(!error.contains("http://"), "{error}");
-        assert!(!error.contains(&port.to_string()), "{error}");
+        .await;
+        let message = outcome.message.expect("a message");
+        assert!(!message.contains("http://"), "{message}");
+        assert!(!message.contains(&port.to_string()), "{message}");
     }
 
     /// A mock endpoint: `/models` names a context window, `/chat/completions` answers the
