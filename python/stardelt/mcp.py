@@ -36,6 +36,7 @@ DEFAULT_TOOLS = (
     "table_history",
     "table_documentation_get",
     "verified_queries_list",
+    "ask_history",
     "catalog_metrics_get",
     "query_log_list",
     "query_log_detail",

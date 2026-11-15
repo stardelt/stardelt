@@ -66,6 +66,22 @@ def test_the_default_tools_are_read_only_and_exist_in_the_contract():
     assert set(tools["query_log_list"]["inputSchema"]["properties"]) >= {"scope", "state", "limit", "cursor"}
 
 
+def test_the_ask_history_is_offered_by_default():
+    # The list is derived from DEFAULT_TOOLS, so the set test above cannot notice an omission;
+    # an agent that cannot read the person's own questions is the bug this names (#891 slice c).
+    srv, _ = server()
+    tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
+    ask = tools["ask_history"]
+    assert ask["description"] == "GET /api/ask/history: the Stardelt API operation ask_history"
+    assert ask["inputSchema"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    assert ask["annotations"]["readOnlyHint"] is True
+
+
 def test_allow_adds_one_operation_and_a_write_is_marked_destructive():
     srv, _ = server(allowed=list(mcp.DEFAULT_TOOLS) + ["query_run"])
     tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
