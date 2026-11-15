@@ -1,5 +1,6 @@
 platform_target	status	operator_symbol	ticket_or_reason
 step-preflight	not-planned	-	checks the administrator's shell; the operator reports missing prerequisites in status
+step-namespace	not-planned	-	stardelt-platform#1096: the namespace's Pod Security labels are a separate slice for the operator path (it needs patch on namespaces; operator#756 do-NOT)
 step-reloader	not-planned	-	D-op-3: the operator restarts workloads itself
 step-cnpg	built	cnpg	-
 step-cnpg-cluster	built	ensure_catalog_database	-

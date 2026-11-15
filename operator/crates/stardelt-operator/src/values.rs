@@ -1171,6 +1171,16 @@ mod tests {
         assert_eq!(s["s3"]["resources"]["requests"]["memory"], "256Mi");
         assert_eq!(s["s3"]["resources"]["limits"]["cpu"], "2");
         assert_eq!(s["s3"]["resources"]["requests"]["cpu"], "100m");
+        // Pod Security `baseline` refuses hostPath (stardelt-platform#1096 question 5): the
+        // chart defaults every component's log volume to one, so all three that have it name
+        // emptyDir. `volume` has no log volume by default and is not listed.
+        for component in ["master", "filer", "s3"] {
+            assert_eq!(
+                s[component]["logs"]["type"],
+                serde_json::json!("emptyDir"),
+                "{component} must not use the chart's hostPath log volume"
+            );
+        }
         // Every profile keeps the cap: the profile sizes storage, it does not replace s3.
         for profile in [Profile::Demo, Profile::Full, Profile::Airgap] {
             let values = effective_values("seaweedfs", profile, None, None);
