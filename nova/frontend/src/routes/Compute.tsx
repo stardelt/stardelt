@@ -98,6 +98,9 @@ export default function Compute() {
                       <p className="text-sm text-text-dim">
                         {since ? `Running since ${since} · ` : ''}Stops after {c.idleStopMinutes} min idle
                       </p>
+                      {c.phase === 'Failed' && c.message && (
+                        <p className="text-sm text-bad">{c.message}</p>
+                      )}
                       <div className="flex gap-2">
                         {(c.phase === 'Stopped' || c.phase === 'Failed') && (
                           <button

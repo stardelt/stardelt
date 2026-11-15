@@ -70,6 +70,9 @@ pub struct ComputeCluster {
     #[serde(default)]
     pub spark_conf: std::collections::BTreeMap<String, String>,
     pub phase: String,
+    /// The operator's reason while the phase is `Failed` or `Starting` (for example a refused
+    /// `SparkConnect`, a runtime that is not in the catalogue, or a driver that cannot start).
+    pub message: Option<String>,
     pub endpoint: Option<String>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
@@ -138,6 +141,15 @@ fn phase_of(object: &Value) -> String {
     }
 }
 
+/// The operator's `status.message`, once it has reported one. Empty is `None`.
+fn message_of(object: &Value) -> Option<String> {
+    object
+        .pointer("/status/message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+}
+
 /// The environment variables of a spec, skipping entries that carry no `value` (a
 /// `connectionRef` entry cannot be edited and is not shown).
 fn env_of(spec: &Value) -> Vec<ComputeEnvVar> {
@@ -201,6 +213,7 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .unwrap_or_default(),
         phase: phase_of(object),
+        message: message_of(object),
         endpoint: text(status.get("endpoint")),
         started_at: text(status.get("startedAt")),
         last_activity_at: text(status.get("lastActivityAt")),
@@ -240,6 +253,7 @@ fn demo_clusters() -> Vec<ComputeCluster> {
         env: Vec::new(),
         spark_conf: std::collections::BTreeMap::new(),
         phase: "Running".to_string(),
+        message: None,
         endpoint: None,
         started_at: None,
         last_activity_at: None,
@@ -371,7 +385,7 @@ async fn set_state(
     operation_id = "compute_list",
     path = "/api/compute",
     tag = "public",
-    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise), the Connect `endpoint` and `startedAt` while it runs, `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
+    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs, `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's clusters, sorted by name", body = ComputeResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -815,7 +829,9 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::{may_act, may_use, owner_of, phase_of, validate_spec, visible_clusters};
+    use super::{
+        may_act, may_use, message_of, owner_of, phase_of, validate_spec, visible_clusters,
+    };
     use crate::auth::Identity;
 
     fn who(user: &str, groups: &[&str], admin: bool) -> Identity {
@@ -907,6 +923,49 @@ mod tests {
 
         let idle = cluster("trial", json!({}));
         assert_eq!(phase_of(&idle), "Stopped");
+    }
+
+    #[test]
+    fn message_of_reads_the_operator_reason_and_treats_empty_as_none() {
+        let mut failed = cluster("trial", json!({"state": "Running"}));
+        failed["status"] = json!({
+            "phase": "Failed",
+            "message": "unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11"
+        });
+        assert_eq!(
+            message_of(&failed).as_deref(),
+            Some("unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11")
+        );
+
+        // An empty message and a missing one are the same answer: nothing to show.
+        let mut empty = cluster("trial", json!({}));
+        empty["status"] = json!({"phase": "Starting", "message": ""});
+        assert!(message_of(&empty).is_none());
+
+        let missing = cluster("trial", json!({}));
+        assert!(message_of(&missing).is_none());
+    }
+
+    #[test]
+    fn the_view_carries_the_failure_reason() {
+        let mut failed = cluster("failed-trial", json!({"owner": {"group": "sales"}}));
+        failed["status"] = json!({
+            "phase": "Failed",
+            "message": "unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11"
+        });
+        let mut running = cluster("running-trial", json!({"owner": {"group": "sales"}}));
+        running["status"] = json!({"phase": "Running"});
+        let views = visible_clusters(&[failed, running], &who("bob", &["sales"], false));
+        let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["failed-trial", "running-trial"]);
+        assert_eq!(views[0].phase, "Failed");
+        assert_eq!(
+            views[0].message.as_deref(),
+            Some("unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11")
+        );
+        // A cluster the operator reports as Running carries no reason.
+        assert_eq!(views[1].phase, "Running");
+        assert!(views[1].message.is_none());
     }
 
     #[test]

@@ -1008,6 +1008,8 @@ export type ComputeCluster = {
   sparkConf?: Record<string, string>
   runtime: string
   phase: 'Starting' | 'Running' | 'Stopping' | 'Stopped' | 'Failed' | string
+  /** The operator's reason while the phase is `Failed` or `Starting`; absent when it has none. */
+  message?: string | null
   endpoint: string | null
   startedAt: string | null
   lastActivityAt: string | null
