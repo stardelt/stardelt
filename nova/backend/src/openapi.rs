@@ -151,6 +151,7 @@ pub struct ErrorResponse {
         crate::statements::cancel,
         crate::admin_catalogs::list,
         crate::mcp_audit::list,
+        crate::model_usage::list,
         crate::admin_catalogs::update_access,
         crate::admin_catalogs::create_team,
         crate::apps::list,
@@ -293,6 +294,9 @@ pub struct ErrorResponse {
         crate::admin_catalogs::NewTeamResponse,
         crate::mcp_audit::McpCall,
         crate::mcp_audit::McpCalls,
+        crate::model_usage::ModelUsage,
+        crate::model_usage::UsageRow,
+        crate::model_usage::UsageCall,
         ErrorResponse,
     )),
     tags(

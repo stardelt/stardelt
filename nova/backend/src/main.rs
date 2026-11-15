@@ -126,6 +126,7 @@ mod migrations;
 mod model_calls;
 mod model_endpoints;
 mod model_probe;
+mod model_usage;
 mod notebooks;
 mod openapi;
 mod people;
@@ -854,6 +855,9 @@ fn admin_router() -> Router<Arc<AppState>> {
         // The administrator's read of the MCP calls (stardelt-nova#970, T7): the queryable
         // copy of the one audit line per tool call. Same administrator gate.
         .route("/admin/mcp-audit", get(mcp_audit::list))
+        // What the platform used of each model endpoint this month (nova#890): the Models page's
+        // data. Same administrator gate.
+        .route("/admin/model-usage", get(model_usage::list))
         // The administrator's "Probe now" on one model endpoint (operator#609): the same
         // minute-round probe, started on request. Same administrator gate.
         .route(

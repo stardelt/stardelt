@@ -414,6 +414,78 @@
         }
       }
     },
+    "/api/admin/model-usage": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
+        "operationId": "admin_model_usage",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many calls, 1 to 500 (default 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "description": "Only this group in `calls`; the totals stay the whole month",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The month's totals and the last calls",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelUsage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Nova has no state store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/teams": {
       "post": {
         "tags": [
@@ -10709,6 +10781,33 @@
           }
         }
       },
+      "ModelUsage": {
+        "type": "object",
+        "description": "The answer of `GET /api/admin/model-usage`.",
+        "required": [
+          "month",
+          "groups",
+          "calls"
+        ],
+        "properties": {
+          "calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageCall"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageRow"
+            }
+          },
+          "month": {
+            "type": "string",
+            "description": "`YYYY-MM`, the calendar month the totals cover (UTC)."
+          }
+        }
+      },
       "NamespacesResponse": {
         "type": "object",
         "description": "Iceberg `ListNamespaces` result: each namespace is a list of levels.",
@@ -13925,6 +14024,102 @@
           },
           "table": {
             "type": "string"
+          }
+        }
+      },
+      "UsageCall": {
+        "type": "object",
+        "description": "One recorded call, without `sub`-scoped text.",
+        "required": [
+          "atMs",
+          "sub",
+          "feature",
+          "endpoint",
+          "model",
+          "tokensIn",
+          "tokensOut",
+          "tokensEstimated",
+          "latencyMs",
+          "outcome"
+        ],
+        "properties": {
+          "atMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "feature": {
+            "type": "string"
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latencyMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "sub": {
+            "type": "string"
+          },
+          "tokensEstimated": {
+            "type": "boolean"
+          },
+          "tokensIn": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tokensOut": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UsageRow": {
+        "type": "object",
+        "description": "The month's tokens, per group and endpoint.",
+        "required": [
+          "group",
+          "endpoint",
+          "tokensIn",
+          "tokensOut",
+          "calls",
+          "estimatedCalls"
+        ],
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "estimatedCalls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Calls whose token counts were estimated (`ceil(bytes / 4)`), so the page can say \"about\"."
+          },
+          "group": {
+            "type": "string",
+            "description": "The group, or `(none)` for `nova`'s probe rows and callers without a group."
+          },
+          "tokensIn": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tokensOut": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
