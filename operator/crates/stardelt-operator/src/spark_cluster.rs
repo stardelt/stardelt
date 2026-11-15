@@ -511,6 +511,74 @@ pub async fn reconcile_spark_cluster(
         return Ok(Action::await_change());
     }
 
+    // The driver runs the group's own code, so the two admission policies that bound what it may
+    // create go in before the SparkConnect exists (operator#773, operator#775). Each identity keeps
+    // its own policy; these name the cluster driver alone.
+    if let Err(e) = objects::apply_cluster(
+        &ctx.client,
+        &crate::spark::cluster_pod_guard_policy(),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster pod guard not applied");
+        return Ok(Action::await_change());
+    }
+    if let Err(e) = objects::apply_cluster(
+        &ctx.client,
+        &crate::spark::cluster_pod_guard_binding(&namespace),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster pod guard not applied");
+        return Ok(Action::await_change());
+    }
+    if let Err(e) = objects::apply_cluster(
+        &ctx.client,
+        &crate::spark::cluster_config_map_guard_policy(),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster config map guard not applied");
+        return Ok(Action::await_change());
+    }
+    if let Err(e) = objects::apply_cluster(
+        &ctx.client,
+        &crate::spark::cluster_config_map_guard_binding(&namespace),
+        false,
+    )
+    .await
+    {
+        patch_status(
+            &clusters,
+            &name,
+            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+        )
+        .await?;
+        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster config map guard not applied");
+        return Ok(Action::await_change());
+    }
+
     // The server authenticates nobody: the policy that admits only the owner's pods, Nova
     // and Airflow goes in before the SparkConnect exists (internal#161 slice 4d).
     let policy = match crate::network_policy::spark_connect_ingress(&name, &namespace, &spec.owner)
@@ -867,8 +935,9 @@ mod tests {
         })
     }
 
-    /// The three driver identities always answer with a document of their own kind: a typed
-    /// server-side apply refuses a response of another kind (operator#773).
+    /// The driver identities and the two cluster guards always answer with a document of their own
+    /// kind: a typed server-side apply refuses a response of another kind (operator#773,
+    /// operator#775).
     fn identity_response(path: &str) -> Option<(u16, String)> {
         let object = if path.contains("/serviceaccounts/spark-cluster-driver") {
             json!({
@@ -887,6 +956,30 @@ mod tests {
                 "apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "RoleBinding",
                 "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+            })
+        } else if path.contains("/validatingadmissionpolicies/spark-cluster-executor-pods") {
+            json!({
+                "apiVersion": "admissionregistration.k8s.io/v1",
+                "kind": "ValidatingAdmissionPolicy",
+                "metadata": { "name": "spark-cluster-executor-pods" }
+            })
+        } else if path.contains("/validatingadmissionpolicybindings/spark-cluster-executor-pods") {
+            json!({
+                "apiVersion": "admissionregistration.k8s.io/v1",
+                "kind": "ValidatingAdmissionPolicyBinding",
+                "metadata": { "name": "spark-cluster-executor-pods-data" }
+            })
+        } else if path.contains("/validatingadmissionpolicies/spark-cluster-configmaps") {
+            json!({
+                "apiVersion": "admissionregistration.k8s.io/v1",
+                "kind": "ValidatingAdmissionPolicy",
+                "metadata": { "name": "spark-cluster-configmaps" }
+            })
+        } else if path.contains("/validatingadmissionpolicybindings/spark-cluster-configmaps") {
+            json!({
+                "apiVersion": "admissionregistration.k8s.io/v1",
+                "kind": "ValidatingAdmissionPolicyBinding",
+                "metadata": { "name": "spark-cluster-configmaps-data" }
             })
         } else {
             return None;
@@ -1188,6 +1281,10 @@ mod tests {
             "serviceaccounts/spark-cluster-driver",
             "roles/spark-cluster-driver",
             "rolebindings/spark-cluster-driver",
+            "validatingadmissionpolicies/spark-cluster-executor-pods",
+            "validatingadmissionpolicybindings/spark-cluster-executor-pods-data",
+            "validatingadmissionpolicies/spark-cluster-configmaps",
+            "validatingadmissionpolicybindings/spark-cluster-configmaps-data",
         ] {
             let index = lines
                 .iter()

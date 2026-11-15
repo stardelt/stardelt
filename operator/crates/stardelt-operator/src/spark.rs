@@ -742,6 +742,11 @@ pub const CONFIG_MAP_GUARD: &str = "spark-connect-configmaps";
 pub const BATCH_POD_GUARD: &str = "spark-batch-executor-pods";
 /// The batch path's ConfigMap guard: one `spark-exec-<hash>-conf-map` per application, nothing else.
 pub const BATCH_CONFIG_MAP_GUARD: &str = "spark-batch-configmaps";
+/// The SparkCluster driver's pod guard: the batch policy's shape, keyed to `CLUSTER_DRIVER`
+/// (operator#773). Its own identity, so the shared Connect server's rule does not widen.
+pub const CLUSTER_POD_GUARD: &str = "spark-cluster-executor-pods";
+/// One `spark-exec-<hash>-conf-map` per session, nothing else (operator#773).
+pub const CLUSTER_CONFIG_MAP_GUARD: &str = "spark-cluster-configmaps";
 /// The stream path's ConfigMap guard: one `spark-exec-<hash>-conf-map` per application, nothing else.
 pub const STREAM_CONFIG_MAP_GUARD: &str = "spark-stream-configmaps";
 
@@ -1008,6 +1013,127 @@ pub fn batch_config_map_guard_binding(namespace: &str) -> ValidatingAdmissionPol
         },
         spec: ValidatingAdmissionPolicyBindingSpec {
             policy_name: BATCH_CONFIG_MAP_GUARD.into(),
+            validation_actions: vec!["Deny".into()],
+            match_resources: Some(MatchResources {
+                namespace_selector: Some(LabelSelector {
+                    match_labels: Some(BTreeMap::from([(
+                        "kubernetes.io/metadata.name".to_string(),
+                        namespace.to_string(),
+                    )])),
+                    match_expressions: None,
+                }),
+                ..MatchResources::default()
+            }),
+            ..ValidatingAdmissionPolicyBindingSpec::default()
+        },
+    }
+}
+
+/// What a pod created by a `SparkCluster` driver may be (operator#773): the batch policy's shape,
+/// keyed to [`CLUSTER_DRIVER`]. A per-group cluster runs the group's own code, so it gets the same
+/// allow-list and no catalog-Secret arm.
+pub fn cluster_pod_guard_policy() -> ValidatingAdmissionPolicy {
+    ValidatingAdmissionPolicy {
+        metadata: ObjectMeta {
+            name: Some(CLUSTER_POD_GUARD.into()),
+            ..ObjectMeta::default()
+        },
+        spec: Some(ValidatingAdmissionPolicySpec {
+            failure_policy: Some("Fail".into()),
+            match_constraints: Some(MatchResources {
+                resource_rules: Some(vec![
+                    rule(&["pods"], &["CREATE"]),
+                    rule(&["pods/ephemeralcontainers"], &["UPDATE"]),
+                ]),
+                ..MatchResources::default()
+            }),
+            match_conditions: Some(vec![MatchCondition {
+                name: "created-by-spark-cluster-driver".into(),
+                expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':spark-cluster-driver'".into(),
+            }]),
+            validations: Some(vec![
+                validation("object.spec.serviceAccountName == 'spark-executor'", "a pod created by the Spark Connect driver must run as ServiceAccount spark-executor"),
+                validation("!has(object.spec.hostNetwork) || object.spec.hostNetwork == false", "the Spark Connect driver may not create a host-network pod"),
+                validation("!has(object.spec.hostPID) || object.spec.hostPID == false", "the Spark Connect driver may not create a host-PID pod"),
+                validation("!has(object.spec.hostIPC) || object.spec.hostIPC == false", "the Spark Connect driver may not create a host-IPC pod"),
+                validation("!has(object.spec.initContainers) || object.spec.initContainers.size() == 0", "the Spark Connect driver may not create a pod with init containers"),
+                validation("!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0", "the Spark Connect driver may not add an ephemeral container"),
+                validation("object.spec.containers.all(c, c.image.startsWith('ghcr.io/stardelt/spark:'))", "every container a Spark Connect driver creates must use the stardelt Spark image"),
+                validation("object.spec.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged != true)", "the Spark Connect driver may not create a privileged container"),
+                validation("object.spec.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))", "the Spark Connect driver may not bind a host port"),
+                validation("!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.configMap) || has(v.emptyDir))", "executor pods may mount only configMap and emptyDir volumes (no secret, hostPath, PVC, projected or csi volume)"),
+                validation("object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == 'stardelt-s3-creds'))", "executor pods may read only Secret stardelt-s3-creds (secretKeyRef)"),
+                validation("object.spec.containers.all(c, !has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef) || e.secretRef.name == 'stardelt-s3-creds'))", "executor pods may read only Secret stardelt-s3-creds (envFrom)"),
+            ]),
+            ..ValidatingAdmissionPolicySpec::default()
+        }),
+        status: None,
+    }
+}
+
+/// The SparkCluster policy's binding, per namespace like [`pod_guard_binding`].
+pub fn cluster_pod_guard_binding(namespace: &str) -> ValidatingAdmissionPolicyBinding {
+    ValidatingAdmissionPolicyBinding {
+        metadata: ObjectMeta {
+            name: Some(format!("{CLUSTER_POD_GUARD}-{namespace}")),
+            ..ObjectMeta::default()
+        },
+        spec: ValidatingAdmissionPolicyBindingSpec {
+            policy_name: CLUSTER_POD_GUARD.into(),
+            validation_actions: vec!["Deny".into()],
+            match_resources: Some(MatchResources {
+                namespace_selector: Some(LabelSelector {
+                    match_labels: Some(BTreeMap::from([(
+                        "kubernetes.io/metadata.name".to_string(),
+                        namespace.to_string(),
+                    )])),
+                    match_expressions: None,
+                }),
+                ..MatchResources::default()
+            }),
+            ..ValidatingAdmissionPolicyBindingSpec::default()
+        },
+    }
+}
+
+/// What ConfigMaps a SparkCluster driver may create or delete: one
+/// `spark-exec-<hash>-conf-map` per session and nothing else. Without the name filter the group's
+/// own code could delete `trino-catalog`, `keycloak-realm` or `airflow-config`.
+pub fn cluster_config_map_guard_policy() -> ValidatingAdmissionPolicy {
+    ValidatingAdmissionPolicy {
+        metadata: ObjectMeta {
+            name: Some(CLUSTER_CONFIG_MAP_GUARD.into()),
+            ..ObjectMeta::default()
+        },
+        spec: Some(ValidatingAdmissionPolicySpec {
+            failure_policy: Some("Fail".into()),
+            match_constraints: Some(MatchResources {
+                resource_rules: Some(vec![rule(&["configmaps"], &["CREATE", "DELETE"])]),
+                ..MatchResources::default()
+            }),
+            match_conditions: Some(vec![MatchCondition {
+                name: "created-by-spark-cluster-driver".into(),
+                expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':spark-cluster-driver'".into(),
+            }]),
+            validations: Some(vec![validation(
+                "request.name.startsWith('spark-') && request.name.endsWith('-conf-map')",
+                "the Spark Connect driver may create or delete only its own spark-*-conf-map ConfigMaps",
+            )]),
+            ..ValidatingAdmissionPolicySpec::default()
+        }),
+        status: None,
+    }
+}
+
+/// The SparkCluster ConfigMap policy's binding, per namespace like [`config_map_guard_binding`].
+pub fn cluster_config_map_guard_binding(namespace: &str) -> ValidatingAdmissionPolicyBinding {
+    ValidatingAdmissionPolicyBinding {
+        metadata: ObjectMeta {
+            name: Some(format!("{CLUSTER_CONFIG_MAP_GUARD}-{namespace}")),
+            ..ObjectMeta::default()
+        },
+        spec: ValidatingAdmissionPolicyBindingSpec {
+            policy_name: CLUSTER_CONFIG_MAP_GUARD.into(),
             validation_actions: vec!["Deny".into()],
             match_resources: Some(MatchResources {
                 namespace_selector: Some(LabelSelector {
@@ -1675,6 +1801,69 @@ mod tests {
         assert_eq!(
             batch_config_map_guard_binding("data").spec.policy_name,
             "spark-batch-configmaps"
+        );
+    }
+
+    #[test]
+    fn the_cluster_policy_matches_only_the_cluster_driver() {
+        let policy = cluster_pod_guard_policy();
+        assert_eq!(
+            policy.metadata.name.as_deref(),
+            Some("spark-cluster-executor-pods")
+        );
+        assert!(policy.metadata.namespace.is_none());
+        let spec = policy.spec.as_ref().expect("spec");
+        let conditions = spec.match_conditions.as_ref().expect("match conditions");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].name, "created-by-spark-cluster-driver");
+        assert!(conditions[0].expression.contains(":spark-cluster-driver'"));
+        assert!(!conditions[0].expression.contains(":spark-connect'"));
+        assert!(!conditions[0].expression.contains(":spark-batch-driver'"));
+        assert!(!conditions[0].expression.contains(":spark-stream-driver'"));
+        assert_eq!(
+            cluster_pod_guard_binding("data").metadata.name.as_deref(),
+            Some("spark-cluster-executor-pods-data")
+        );
+        assert_eq!(
+            cluster_pod_guard_binding("data").spec.policy_name,
+            "spark-cluster-executor-pods"
+        );
+    }
+
+    #[test]
+    fn the_cluster_config_map_policy_matches_only_the_cluster_driver() {
+        let policy = cluster_config_map_guard_policy();
+        assert_eq!(
+            policy.metadata.name.as_deref(),
+            Some("spark-cluster-configmaps")
+        );
+        assert!(policy.metadata.namespace.is_none());
+        let spec = policy.spec.as_ref().expect("spec");
+        let conditions = spec.match_conditions.as_ref().expect("match conditions");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].name, "created-by-spark-cluster-driver");
+        assert!(conditions[0].expression.contains(":spark-cluster-driver'"));
+        assert!(!conditions[0].expression.contains(":spark-connect'"));
+        assert!(!conditions[0].expression.contains(":spark-batch-driver'"));
+        assert!(!conditions[0].expression.contains(":spark-stream-driver'"));
+        assert_eq!(
+            cluster_config_map_guard_binding("data")
+                .metadata
+                .name
+                .as_deref(),
+            Some("spark-cluster-configmaps-data")
+        );
+        assert_eq!(
+            cluster_config_map_guard_binding("data").spec.policy_name,
+            "spark-cluster-configmaps"
+        );
+    }
+
+    #[test]
+    fn the_cluster_validations_are_the_batch_validations() {
+        assert_eq!(
+            cluster_pod_guard_policy().spec.unwrap().validations,
+            batch_pod_guard_policy().spec.unwrap().validations
         );
     }
 
