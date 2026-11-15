@@ -90,6 +90,9 @@ async function stub(
     if (path === '/api/catalog/namespaces/sales/tables') {
       return json(r, { identifiers: [{ namespace: ['sales'], name: 'orders' }] })
     }
+    if (path === '/api/catalog/tables/sales/orders/verified-queries/check' && method === 'POST') {
+      return json(r, { checked: rows.length, passed: 1, failed: rows.length - 1, items: rows })
+    }
     if (path === '/api/catalog/tables/sales/orders/verified-queries') {
       if (method === 'POST') {
         const body = r.request().postDataJSON() as { question: string; sql: string }
@@ -268,4 +271,25 @@ test('each verified query shows its last check, can be checked now and opens in 
   // The list is refetched with the outcome the check answered.
   await expect(section.getByText('✕ expected 3 rows, got 4')).toHaveCount(0)
   await expect(section.getByText('✓ Checked')).toHaveCount(2)
+})
+
+test('an owner checks every verified query in one call and sees the totals', async ({ page }) => {
+  await stub(page, { canEdit: true, rows: [FAILING, PASSING] })
+  await page.goto('/catalog?catalog=warehouse&ns=sales&tbl=orders')
+
+  const section = page.getByRole('region', { name: 'Verified queries' })
+  await expect(section).toBeVisible()
+
+  // One request, not one per query.
+  const calls: string[] = []
+  page.on('request', (r) => {
+    const url = new URL(r.url())
+    if (r.method() === 'POST' && url.pathname.endsWith('/verified-queries/check')) calls.push(url.pathname)
+  })
+
+  await section.getByRole('button', { name: 'Check all' }).click()
+
+  // The stub answers checked 2, passed 1, failed 1.
+  await expect(section.getByText('1 of 2 passed · 1 failed')).toBeVisible()
+  expect(calls).toEqual(['/api/catalog/tables/sales/orders/verified-queries/check'])
 })

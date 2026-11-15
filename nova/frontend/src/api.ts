@@ -1659,6 +1659,12 @@ export const api = {
   deleteVerifiedQuery: (id: number) => jdel(`/api/verified-queries/${id}`),
   /** Run one verified query as the caller and compare it with its expected result (#912). */
   checkVerifiedQuery: (id: number) => jpost<VerifiedQuery>(`/api/verified-queries/${id}/check`, {}),
+  /** Run every verified query of one table in one call, one after another (#912 slice 1b). */
+  checkAllVerifiedQueries: (ns: string, tbl: string, catalog?: string) =>
+    jpost<{ checked: number; passed: number; failed: number; items: VerifiedQuery[] }>(
+      catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries/check`, catalog),
+      {},
+    ),
   tableHistory: (ns: string, tbl: string, catalog?: string) =>
     jget<QueryResult>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/history`, catalog)),
   rollback:     (ns: string, tbl: string, snapshotId: string, catalog?: string) =>

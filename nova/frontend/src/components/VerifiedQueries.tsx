@@ -28,8 +28,9 @@ function checkedAt(item: { lastCheckAt?: string | null }): number | null {
  * runs the SQL or renders Markdown — a verified query is text plus the statement.
  *
  * Each query shows the outcome of its last check, and anyone who may see the list may run it
- * again: the check reads only and runs as the caller (#912). The statement opens in the SQL
- * editor, which is what a reader wants next.
+ * again: the check reads only and runs as the caller (#912). With two or more queries a
+ * `Check all` runs them in one call and says how many passed (#912 slice 1b). The statement
+ * opens in the SQL editor, which is what a reader wants next.
  */
 export default function VerifiedQueries({
   ns,
@@ -61,6 +62,9 @@ export default function VerifiedQueries({
   const [deleteError, setDeleteError] = useState<unknown>(null)
   const [checking, setChecking] = useState<number | null>(null)
   const [checkError, setCheckError] = useState<unknown>(null)
+  const [checkingAll, setCheckingAll] = useState(false)
+  /** The totals of the last "Check all", or `null` before there was one. */
+  const [bulk, setBulk] = useState<{ checked: number; passed: number; failed: number } | null>(null)
 
   const items = list.data?.items ?? []
 
@@ -124,9 +128,42 @@ export default function VerifiedQueries({
     }
   }
 
+  async function checkAll() {
+    if (checkingAll) return
+    setCheckingAll(true)
+    setCheckError(null)
+    try {
+      const answer = await api.checkAllVerifiedQueries(ns, tbl, catalog)
+      setBulk({ checked: answer.checked, passed: answer.passed, failed: answer.failed })
+      await qc.invalidateQueries({ queryKey })
+    } catch (error) {
+      setCheckError(error)
+    } finally {
+      setCheckingAll(false)
+    }
+  }
+
   return (
     <section className="mt-4" aria-label="Verified queries">
-      <div className="label mb-1">Verified queries</div>
+      <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="label">Verified queries</span>
+        {items.length >= 2 && (
+          <button
+            type="button"
+            className="btn-ghost py-0.5 px-2 text-xs"
+            disabled={checkingAll}
+            onClick={() => void checkAll()}
+          >
+            {checkingAll ? 'Checking all…' : 'Check all'}
+          </button>
+        )}
+        {bulk !== null && (
+          <span className={bulk.failed === 0 ? 'text-xs text-ok' : 'text-xs text-bad'}>
+            {`${bulk.passed} of ${bulk.checked} passed`}
+            {bulk.failed === 0 ? '' : ` · ${bulk.failed} failed`}
+          </span>
+        )}
+      </div>
 
       {items.length > 0 ? (
         <ul className="space-y-3">

@@ -728,6 +728,11 @@ fn api_router() -> Router<Arc<AppState>> {
             "/verified-queries/{id}/check",
             post(verified_queries::check),
         )
+        // Every answer of one table in one call: what a scheduled job uses (#912 slice 1b).
+        .route(
+            "/catalog/tables/{ns}/{tbl}/verified-queries/check",
+            post(verified_queries::check_all),
+        )
         .route(
             "/catalog/tables/{ns}/{tbl}/columns/{column}/description",
             put(catalog_docs::update_column),
@@ -1753,6 +1758,22 @@ mod router_tests {
             (
                 StatusCode::NOT_FOUND,
                 serde_json::json!({"error": "not found"})
+            )
+        );
+        // The table's bulk check is wired and, without a database, says so before it calls
+        // the catalog (#912 slice 1b).
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/catalog/tables/sales/orders/verified-queries/check",
+            None,
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({"error": "this needs Nova's database, and this installation has none; ask your administrator"})
             )
         );
     }

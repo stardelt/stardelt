@@ -53,6 +53,8 @@ pub const MAX_EXPECTED_ROWS: usize = 100;
 const DIFF_CHARS: usize = 300;
 /// Rows one list answers, newest first.
 const LIST_LIMIT: usize = 50;
+/// Rows one bulk check runs, in id order.
+const CHECK_ALL_LIMIT: usize = 50;
 /// The answer when a statement runs and no expected result is stored.
 pub const RAN_WITHOUT_EXPECTED: &str = "ran, no expected result to compare";
 /// The answer when the rows equal the expected result.
@@ -106,6 +108,33 @@ pub struct NewVerifiedQuery {
     #[serde(default)]
     #[schema(value_type = Option<Vec<Vec<Object>>>)]
     pub expected: Option<serde_json::Value>,
+}
+
+/// `POST /api/catalog/tables/{ns}/{tbl}/verified-queries/check` answer: every query of one
+/// table checked, with the totals.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CheckAllAnswer {
+    /// How many queries were checked.
+    pub checked: usize,
+    /// How many of them passed.
+    pub passed: usize,
+    /// How many of them failed.
+    pub failed: usize,
+    /// The rows as the checks left them, in id order.
+    pub items: Vec<VerifiedQuery>,
+}
+
+/// The totals of one bulk check: how many rows, how many pass, how many fail.
+fn totals(items: &[VerifiedQuery]) -> (usize, usize, usize) {
+    let passed = items
+        .iter()
+        .filter(|item| item.last_check_passed == Some(true))
+        .count();
+    let failed = items
+        .iter()
+        .filter(|item| item.last_check_passed == Some(false))
+        .count();
+    (items.len(), passed, failed)
 }
 
 /// The row a delete or a check needs before it can ask the table's rule: where it lives and
@@ -346,8 +375,23 @@ pub async fn check(
     let Ok(id) = id.parse::<i64>() else {
         return not_found();
     };
+    let caller = caller.as_ref().map(|c| &c.0);
+    match check_one(&s, caller, id).await {
+        Ok(row) => Json(row).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Run one verified query as `caller` and store the outcome: the body of `check`, shared with
+/// the table's bulk check so both run and record a check the same way.
+#[allow(clippy::result_large_err)]
+async fn check_one(
+    s: &Arc<AppState>,
+    caller: Option<&Principal>,
+    id: i64,
+) -> Result<VerifiedQuery, Response> {
     let Some(pool) = s.db.as_ref() else {
-        return unavailable();
+        return Err(unavailable());
     };
     let row = match sqlx::query_as::<_, CheckTarget>(
         "SELECT catalog, namespace, table_name, sql, expected FROM verified_query WHERE id = $1",
@@ -357,28 +401,24 @@ pub async fn check(
     .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return not_found(),
-        Err(e) => return store_failed(e),
+        Ok(None) => return Err(not_found()),
+        Err(e) => return Err(store_failed(e)),
     };
-    let caller = caller.as_ref().map(|c| &c.0);
-    if let Err(response) = crate::catalog_docs::documentation_for(
-        &s,
+    crate::catalog_docs::documentation_for(
+        s,
         caller,
         Some(&row.catalog),
         &row.namespace,
         &row.table_name,
     )
-    .await
-    {
-        return response;
-    }
+    .await?;
     let statement = match crate::mcp::classify(&row.sql, false) {
         Ok(statement) => statement,
-        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return Err(error(StatusCode::BAD_REQUEST, &message)),
     };
-    let sub = crate::catalog_docs::caller_identity(&s, caller).sub;
+    let sub = crate::catalog_docs::caller_identity(s, caller).sub;
     let (passed, message) =
-        match crate::trino::execute_from_tagged(&s, statement, caller, "nova-eval", "eval").await {
+        match crate::trino::execute_from_tagged(s, statement, caller, "nova-eval", "eval").await {
             Err(message) => (false, message),
             Ok(result) => match row.expected.as_ref() {
                 None => (true, RAN_WITHOUT_EXPECTED.to_string()),
@@ -410,10 +450,93 @@ pub async fn check(
                 passed,
                 "verified query checked",
             );
-            Json(updated).into_response()
+            Ok(updated)
         }
-        Err(e) => store_failed(e),
+        Err(e) => Err(store_failed(e)),
     }
+}
+
+/// `POST /api/catalog/tables/{ns}/{tbl}/verified-queries/check` — run every verified query of
+/// one table as the caller, one after another, and answer the totals.
+#[utoipa::path(
+    post,
+    operation_id = "verified_queries_check_all",
+    path = "/api/catalog/tables/{ns}/{tbl}/verified-queries/check",
+    tag = "public",
+    description = "Run every verified query of one table as the caller, one after another, in id order and at most 50, and answer how many were checked, how many passed and how many failed, with the rows as the checks left them. Each row is checked exactly as `POST /api/verified-queries/{id}/check` checks it; a scheduled job calls this once instead of once per query. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        crate::catalog::CatalogParam,
+    ),
+    responses(
+        (status = 200, description = "The totals and the rows the checks left", body = CheckAllAnswer),
+        (status = 400, description = "A name is not a single path segment, the catalog name is invalid, or a stored statement is no longer one read-only statement", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn check_all(
+    State(s): State<Arc<AppState>>,
+    Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<CatalogParam>,
+    caller: Option<Extension<Principal>>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (name, _doc) =
+        match crate::catalog_docs::documentation_for(&s, caller, q.catalog.as_deref(), &ns, &tbl)
+            .await
+        {
+            Ok(found) => found,
+            Err(response) => return response,
+        };
+    let sql = format!(
+        "SELECT id FROM verified_query \
+         WHERE catalog = $1 AND namespace = $2 AND table_name = $3 \
+         ORDER BY id LIMIT {CHECK_ALL_LIMIT}"
+    );
+    let ids = match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+        .bind(&name)
+        .bind(&ns)
+        .bind(&tbl)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => return store_failed(e),
+    };
+    // One after another, never in parallel: the engine is shared with every other caller.
+    let mut items = Vec::with_capacity(ids.len());
+    for id in ids {
+        match check_one(&s, caller, id).await {
+            Ok(row) => items.push(row),
+            Err(response) => return response,
+        }
+    }
+    let (checked, passed, failed) = totals(&items);
+    let sub = crate::catalog_docs::caller_identity(&s, caller).sub;
+    tracing::info!(
+        target: "audit",
+        sub = %sub,
+        catalog = %name,
+        table = %format!("{ns}.{tbl}"),
+        checked,
+        passed,
+        failed,
+        "verified queries checked",
+    );
+    Json(CheckAllAnswer {
+        checked,
+        passed,
+        failed,
+        items,
+    })
+    .into_response()
 }
 
 /// Compare a statement's result with an expected one.
@@ -696,6 +819,33 @@ mod tests {
         );
         assert_eq!(value["lastCheckPassed"], serde_json::json!(true));
         assert_eq!(value["lastCheckMessage"], serde_json::json!(RESULT_MATCHES));
+    }
+
+    #[test]
+    fn totals_count_the_rows_that_passed_and_the_rows_that_failed() {
+        let row = |passed: Option<bool>| VerifiedQuery {
+            id: 1,
+            question: "q".into(),
+            sql: "SELECT 1".into(),
+            verified_by: "ada".into(),
+            verified_at: "2026-11-15T11:03:46.000Z".into(),
+            expected: None,
+            last_check_at: None,
+            last_check_passed: passed,
+            last_check_message: None,
+        };
+        let items = [
+            row(Some(true)),
+            row(Some(false)),
+            row(Some(true)),
+            row(None),
+        ];
+        assert_eq!(totals(&items), (4, 2, 1));
+    }
+
+    #[test]
+    fn totals_of_no_rows_are_zero() {
+        assert_eq!(totals(&[]), (0, 0, 0));
     }
 
     #[test]
