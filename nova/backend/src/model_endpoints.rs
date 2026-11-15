@@ -45,7 +45,7 @@ pub struct ModelEndpointRow {
 }
 
 /// The `ModelEndpoint` resources of the platform namespace.
-fn endpoints_api(client: kube::Client) -> Api<DynamicObject> {
+pub(crate) fn endpoints_api(client: kube::Client) -> Api<DynamicObject> {
     Api::namespaced_with(
         client,
         &crate::cluster::namespace(),

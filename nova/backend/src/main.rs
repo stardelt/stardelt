@@ -124,6 +124,7 @@ mod mcp_audit;
 mod metrics;
 mod migrations;
 mod model_endpoints;
+mod model_probe;
 mod notebooks;
 mod openapi;
 mod people;
@@ -1136,6 +1137,9 @@ async fn main() -> anyhow::Result<()> {
     // minutes, with Nova's own service token, one round at a time (stardelt-nova#263).
     // Not in demo mode (the seeded tables are the numbers) and not without a catalog.
     catalog_metrics::spawn_refresher(Arc::clone(&state));
+    // The ModelEndpoint probe (stardelt-operator#609 slice c2): one round after a minute, then
+    // every NOVA_MODEL_PROBE_SECONDS (a day by default); a new endpoint is probed at the first round.
+    model_probe::spawn_loop(Arc::clone(&state));
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
