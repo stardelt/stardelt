@@ -61,6 +61,23 @@ fn peer(labels: &[(&str, &str)]) -> NetworkPolicyPeer {
     }
 }
 
+/// A peer selected by a label's presence. The Spark Operator labels every `SparkConnect` server
+/// pod with `sparkoperator.k8s.io/connect-name`; the value is the CR's name (stardelt-operator#460).
+fn peer_key_exists(key: &str) -> NetworkPolicyPeer {
+    NetworkPolicyPeer {
+        pod_selector: Some(LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: key.to_string(),
+                operator: "Exists".to_string(),
+                values: None,
+            }]),
+        }),
+        namespace_selector: None,
+        ip_block: None::<IPBlock>,
+    }
+}
+
 /// The same pod labels in **any** namespace: the customer's Prometheus lives in its
 /// own namespace, and a peer without a namespace selector matches only this policy's
 /// namespace (stardelt-operator#607).
@@ -268,7 +285,9 @@ fn port_udp(number: i32) -> NetworkPolicyPort {
 /// Ingress to the serving Lakekeeper pod only: the chart's db-migration Job carries
 /// `name=lakekeeper` too, and `component=catalog` keeps migrations (Postgres only) out.
 /// Callers are same-namespace; the metrics scraper is the one read-only peer from any
-/// namespace (stardelt-operator#607).
+/// namespace (stardelt-operator#607). A StreamApp driver (`stardelt.io/component: stream`) and a
+/// group `SparkCluster`'s driver (`sparkoperator.k8s.io/connect-name`, any value) do catalog
+/// work, so both are admitted; their executors and a pipeline task pod are not.
 pub fn lakekeeper_ingress(namespace: &str) -> NetworkPolicy {
     NetworkPolicy {
         metadata: meta(LAKEKEEPER_POLICY, namespace),
@@ -296,6 +315,8 @@ pub fn lakekeeper_ingress(namespace: &str) -> NetworkPolicy {
                         ]),
                         peer(&[("app.kubernetes.io/name", "nova")]),
                         peer(&[("app.kubernetes.io/name", "spark-connect")]),
+                        peer(&[("stardelt.io/component", "stream")]),
+                        peer_key_exists(CONNECT_POD_LABEL),
                         peer(&[("release", "airflow"), ("component", "worker")]),
                         peer(&[(BOOTSTRAP_POD_LABEL, BOOTSTRAP_POD_VALUE)]),
                         peer(&[("app.kubernetes.io/name", "access-sync")]),
@@ -632,7 +653,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_policy_admits_the_six_catalog_callers_on_8181() {
+    fn the_policy_admits_the_eight_catalog_callers_on_8181() {
         let policy = lakekeeper_ingress("data");
         let spec = policy.spec.as_ref().unwrap();
         // pod selector
@@ -668,9 +689,29 @@ mod tests {
             ingress[0].ports.as_ref().unwrap(),
             &vec![expected_port_8181]
         );
-        // six peers
+        // eight peers
         let from = ingress[0].from.as_ref().unwrap();
-        assert_eq!(from.len(), 6);
+        assert_eq!(from.len(), 8, "{from:?}");
+        assert!(
+            from.iter().any(|p| p
+                .pod_selector
+                .as_ref()
+                .and_then(|s| s.match_labels.as_ref())
+                .map(|l| l.get("stardelt.io/component") == Some(&"stream".to_string()))
+                .unwrap_or(false)),
+            "the StreamApp driver's peer is missing: {from:?}"
+        );
+        assert!(
+            from.iter().any(|p| p
+                .pod_selector
+                .as_ref()
+                .and_then(|s| s.match_expressions.as_ref())
+                .map(|e| e
+                    .iter()
+                    .any(|r| r.key == CONNECT_POD_LABEL && r.operator == "Exists"))
+                .unwrap_or(false)),
+            "a group SparkCluster driver's peer is missing: {from:?}"
+        );
         // ... rest of test continues - let us just append new test at end
     }
 
