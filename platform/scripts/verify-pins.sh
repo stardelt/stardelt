@@ -44,7 +44,7 @@ rows=(
   "spark|spark-connect|manifests/spark.yaml|image"
   "superset|superset|helm-values/superset.yaml|tag"
   "superset-worker|superset-worker|helm-values/superset.yaml|tag"
-  "airflow|airflow-api-server|helm-values/airflow.yaml|value"
+  "airflow|airflow-api-server|helm-values/airflow.yaml|worker-tag"
   "notebook|hub|helm-values/jupyterhub.yaml|hub"
   "notebook-task|airflow-dag-processor|helm-values/airflow.yaml|env"
   "group-roles|airflow-group-roles|manifests/airflow-group-roles.yaml|cronjob"
@@ -75,6 +75,15 @@ for row in sys.argv[1:]:
         )
     elif kind in ("tag", "value"):
         m = re.search(r"^\s*(?:tag|value):\s*[\"']?\S+@(sha256:[0-9a-f]{64})", text, re.M)
+    elif kind == "worker-tag":
+        # The Airflow KubernetesExecutor pod image. It is the second image in the file and
+        # the first `value:` with a digest is not it once `images.statsd.tag` exists (#1594),
+        # so the row names the env var instead of taking the file's first `tag:`/`value:`.
+        m = re.search(
+            r"name:\s*AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG\s*\n\s*value:\s*[\"']?[^\"'@\n]+@(sha256:[0-9a-f]{64})",
+            text,
+            re.M,
+        )
     elif kind == "manifest-images":
         found = re.findall(r"^\s*image:\s*(\S+)\s*$", text, re.M)
         if not found or any("@sha256:" not in image for image in found):

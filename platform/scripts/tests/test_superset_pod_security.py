@@ -50,7 +50,12 @@ class SupersetPodSecurityTest(unittest.TestCase):
                 containers = self.values[workload]["initContainers"]
                 self.assertEqual(len(containers), 1)
                 self.assertEqual(containers[0]["name"], name)
-                self.assertEqual(containers[0]["image"], "apache/superset:dockerize")
+                # The image is the chart default pinned by digest (#1594), so compare the
+                # reference without its digest instead of the chart's bare tag.
+                self.assertTrue(
+                    containers[0]["image"].startswith("apache/superset:dockerize@sha256:"),
+                    containers[0]["image"],
+                )
                 self.assertEqual(containers[0]["command"], ["/bin/sh", "-c", command])
                 self.assertEqual(containers[0]["securityContext"], CONTAINER)
                 self.assertEqual(

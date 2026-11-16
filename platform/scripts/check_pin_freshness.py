@@ -59,7 +59,11 @@ def parse_pins(text: str, kind: str) -> list[str]:
             re.M,
         )
     elif kind == "tag":
-        pattern = re.compile(r'^\s*tag:\s*"?\S+@(sha256:[0-9a-f]{64})"?\s*$', re.M)
+        # The stardelt image's own tag, `dev@<digest>`. Scoped to that tag: the bundled
+        # sub-images carry `tag:` lines of their own now (Postgres and Redis in
+        # helm-values/superset.yaml, #1594) and an unscoped match counted them as this
+        # app's pins.
+        pattern = re.compile(r'^\s*tag:\s*"?dev@(sha256:[0-9a-f]{64})"?\s*$', re.M)
     elif kind == "digest":
         pattern = re.compile(r"^\s*digest: (sha256:[0-9a-f]{64})\s*$", re.M)
         found = pattern.findall(text)

@@ -44,6 +44,11 @@ statsd:
 
 # stardelt-owned image with DAGs baked in
 images:
+  # The chart's statsd exporter pod, which the scheduler and the workers push metrics
+  # to. Left at the chart default it is the bare tag `v0.30.0`, which floats.
+  statsd:
+    repository: quay.io/prometheus/statsd-exporter
+    tag: v0.30.0@sha256:378cb79c4ac7d6941e5ed71b1f3cd6f4707cf42c72c104ffe81fa4d9026ef659
   airflow:
     # GHCR, not Docker Hub, and the tag CI actually publishes. The digest is what
     # runs (digests, not tags): `demo` moves on every demos merge, so a bare tag
@@ -95,6 +100,8 @@ workers:
 # Bundled Postgres — single instance, small storage
 postgresql:
   enabled: true
+  image:
+    tag: 16.1.0-debian-11-r15@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64
   primary:
     persistence:
       size: 2Gi
