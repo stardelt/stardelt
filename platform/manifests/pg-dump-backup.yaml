@@ -61,7 +61,7 @@ spec:
             - name: pg-dump
               # Same image as the StatefulSet (scripts derive nothing from the
               # tag here): pg_dump must not be newer than the server it reads.
-              image: docker.io/bitnamilegacy/postgresql:14.17.0-debian-12-r3
+              image: docker.io/bitnamilegacy/postgresql:14.17.0-debian-12-r3@sha256:769d9d755a41e845d00c8eda9bd2c0945ee9c437d64cc215db7a4bd05cd17f17
               command: ["/bin/bash", "-ec"]
               args:
                 - |
@@ -198,7 +198,7 @@ spec:
           initContainers:
             - name: pg-dump
               # Same image as `airflow-postgresql` (PostgreSQL 16).
-              image: docker.io/bitnamilegacy/postgresql:16.1.0-debian-11-r15
+              image: docker.io/bitnamilegacy/postgresql:16.1.0-debian-11-r15@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64
               command: ["/bin/bash", "-ec"]
               args:
                 - |
