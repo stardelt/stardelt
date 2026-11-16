@@ -228,6 +228,10 @@ verify-streaming: _context ## The broker, the Spark Operator's watch and every S
 verify-compute: _context ## The SparkCluster CRD, runtime catalogue, Nova RBAC and every cluster's reconcile state (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-compute.sh
 
+.PHONY: verify-spark-cluster
+verify-spark-cluster: _context ## One SparkCluster up and down: identity, guards, the executor path and the catalog (manual)
+	@NS=$(NAMESPACE) bash scripts/verify-spark-cluster.sh
+
 verify-spark-guard: _context ## The Spark Connect driver may create executor pods only (platform#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-spark-pod-guard.sh
 

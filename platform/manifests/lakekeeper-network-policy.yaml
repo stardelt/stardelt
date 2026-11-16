@@ -23,6 +23,9 @@
 #     (`NOVA_LAKEKEEPER_URL` in manifests/nova-deployment.yaml).
 #   - Spark Connect driver: the second engine over the same catalog (the
 #     per-session catalog URI the notebook helper configures, platform#317).
+#   - SparkCluster driver: the Iceberg REST catalog for a group pipeline's writes and for
+#     remote signing (platform#1524). Its pod is labelled
+#     `sparkoperator.k8s.io/connect-name`, not `app.kubernetes.io/name: spark-connect`.
 #   - Airflow task pods: the NYC-taxi DAG writes through pyiceberg
 #     (`CATALOG_URI` in helm-values/airflow.yaml; every KubernetesExecutor task
 #     pod carries release=airflow, component=worker, tier=airflow).
@@ -80,6 +83,13 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: spark-connect
+        # A group SparkCluster's driver (a SparkConnect server pod, stardelt-operator#460): it
+        # does the catalog work for a pipeline — Iceberg namespaces and tables, and every S3
+        # sign request when the warehouse uses remote signing (platform#1511). The label is the
+        # Spark Operator's own; the value is the SparkConnect object's name.
+        - podSelector:
+            matchExpressions:
+              - {key: sparkoperator.k8s.io/connect-name, operator: Exists}
         # StreamApp driver (D42) — the Spark driver reads and writes the sink
         # table through the REST catalog. The executors read data files only;
         # the label selects both pods and is harmless for the executor.

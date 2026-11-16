@@ -5,10 +5,10 @@
 #   NS=stardelt bash scripts/verify-spark-cluster.sh
 #
 # Creates one `small` SparkCluster named `verify-spark-cluster`, polls its phase and asserts the
-# nine things the phase alone has lied about before (operator#774): the endpoint, the server
+# ten things the phase alone has lied about before (operator#774): the endpoint, the server
 # pod's readiness and identity, the driver's ServiceAccount/Role/RoleBinding, the two admission
-# policies with their bindings, the ingress NetworkPolicy, a TLS-clean server log and the
-# executor path.
+# policies with their bindings, the ingress NetworkPolicy, a TLS-clean server log, the executor
+# path and the catalogue.
 # The CR and the objects it owns are deleted on every exit path — the trap is the contract.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -200,7 +200,35 @@ else
   bad "a pod labelled spark-role=executor reaches the driver on 7078 (the policy names it: ${admitted}; the probe connects: ${reachable})"
 fi
 
+# 10. The catalogue path (platform#1524): the driver is the process that writes Iceberg namespaces
+#     and tables and asks Lakekeeper to sign S3 requests, so lakekeeper-ingress must admit a group
+#     SparkCluster's server pod — labelled `sparkoperator.k8s.io/connect-name` by the Spark
+#     Operator, never `app.kubernetes.io/name: spark-connect` — and the driver must reach
+#     lakekeeper:8181, the chart's Service and REST port in this namespace.
+named="$(kubectl -n "$NS" get networkpolicy lakekeeper-ingress -o json 2>/dev/null | python3 -c '
+import json, sys
+rules = ((json.load(sys.stdin).get("spec") or {}).get("ingress") or [])
+found = False
+for rule in rules:
+    if 8181 not in {p.get("port") for p in (rule.get("ports") or [])}:
+        continue
+    for p in rule.get("from") or []:
+        for e in ((p.get("podSelector") or {}).get("matchExpressions") or []):
+            if e.get("key") == "sparkoperator.k8s.io/connect-name" and e.get("operator") == "Exists":
+                found = True
+print("yes" if found else "no")
+' 2>/dev/null || true)"
+connects=no
+if kubectl -n "$NS" exec "$POD" -- timeout 10 bash -c '</dev/tcp/lakekeeper/8181' >/dev/null 2>&1; then
+  connects=yes
+fi
+if [ "$named" = yes ] && [ "$connects" = yes ]; then
+  ok "the driver reaches the catalog on lakekeeper:8181, and lakekeeper-ingress names it"
+else
+  bad "the driver reaches the catalog on lakekeeper:8181 (the policy names it: ${named}; the probe connects: ${connects})"
+fi
+
 # The FAIL branch exits first on purpose: a trailing unconditional `exit` makes ShellCheck
 # (0.9 SC2317, 0.11 SC2329) call the trap-only `cleanup` unreachable.
-[ "$problems" -eq 0 ] || { echo "FAIL ($((9 - problems)) of 9 checks passed; $problems failed)"; exit 1; }
-echo "PASS (9 of 9: the endpoint, the driver's identity, its guards, a TLS-clean log and the executor path)"
+[ "$problems" -eq 0 ] || { echo "FAIL ($((10 - problems)) of 10 checks passed; $problems failed)"; exit 1; }
+echo "PASS (10 of 10: the endpoint, the driver's identity, its guards, a TLS-clean log, the executor path and the catalog)"
