@@ -202,7 +202,7 @@ pub fn catalog_cluster(lakehouse: &str, namespace: &str, profile: Profile) -> Dy
         metadata: meta(CATALOG_CLUSTER, namespace, lakehouse, "lakekeeper"),
         data: json!({"spec": {
             "instances": 1,
-            "imageName": "ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie",
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2",
             "storage": {"size": size},
             "plugins": continuous_backup(CATALOG_CLUSTER),
             "bootstrap": {"initdb": {"database": "lakekeeper", "owner": "lakekeeper"}},
@@ -241,7 +241,7 @@ pub fn keycloak_pg_cluster(namespace: &str) -> DynamicObject {
         metadata: platform_meta("keycloak-pg", namespace, "keycloak-pg"),
         data: json!({"spec": {
             "instances": 1,
-            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
             "storage": {"size": "1Gi"},
             "plugins": continuous_backup("keycloak-pg"),
             "bootstrap": {"initdb": {"database": "keycloak", "owner": "keycloak"}},
@@ -285,7 +285,7 @@ pub fn openfga_pg_cluster(namespace: &str) -> DynamicObject {
         metadata: platform_meta("openfga-pg", namespace, "openfga-pg"),
         data: json!({"spec": {
             "instances": 1,
-            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
             "storage": {"size": "1Gi"},
             "plugins": continuous_backup("openfga-pg"),
             "bootstrap": {"initdb": {"database": "openfga", "owner": "openfga"}},
@@ -393,7 +393,7 @@ pub fn nova_pg_cluster(namespace: &str) -> DynamicObject {
         metadata: platform_meta(NOVA_CLUSTER, namespace, NOVA_CLUSTER),
         data: json!({"spec": {
             "instances": 1,
-            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
             "storage": {"size": "1Gi"},
             "plugins": continuous_backup(NOVA_CLUSTER),
             "bootstrap": {"initdb": {"database": "nova", "owner": "nova"}},
@@ -1080,7 +1080,7 @@ mod tests {
         assert_eq!(spec["instances"], 1);
         assert_eq!(
             spec["imageName"],
-            "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie"
+            "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4"
         );
         assert_eq!(spec["storage"]["size"], "1Gi");
         assert_eq!(spec["bootstrap"]["initdb"]["database"], "nova");
@@ -1598,7 +1598,7 @@ mod tests {
         let cluster = catalog_cluster("main", "data", Profile::Full);
         assert_eq!(
             cluster.data["spec"]["imageName"],
-            "ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie"
+            "ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2"
         );
         assert_eq!(
             cluster.data["spec"]["plugins"][0]["parameters"]["barmanObjectName"],
@@ -1625,7 +1625,7 @@ mod tests {
         let cluster = keycloak_pg_cluster("stardelt");
         assert_eq!(
             cluster.data["spec"]["imageName"],
-            "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie"
+            "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4"
         );
         assert_eq!(
             cluster.data["spec"]["postgresql"]["parameters"]["max_connections"],
@@ -1635,6 +1635,25 @@ mod tests {
             cluster.data["spec"]["probes"]["startup"]["failureThreshold"],
             120
         );
+    }
+
+    #[test]
+    fn every_cluster_pins_its_postgres_image_by_digest() {
+        for cluster in [
+            catalog_cluster("main", "data", Profile::Full),
+            keycloak_pg_cluster("stardelt"),
+            openfga_pg_cluster("stardelt"),
+            nova_pg_cluster("stardelt"),
+        ] {
+            let image = cluster.data["spec"]["imageName"]
+                .as_str()
+                .expect("every Cluster names its postgres image");
+            assert!(
+                image.contains("@sha256:"),
+                "{} runs the floating tag {image}",
+                cluster.metadata.name.as_deref().unwrap_or("?")
+            );
+        }
     }
 
     fn location() -> S3Location {
