@@ -77,6 +77,11 @@ rows=(
   "hub-image|hub|helm-values/jupyterhub.yaml|name-tag:quay.io/jupyterhub/k8s-hub:make install-notebooks"
   "proxy|proxy|helm-values/jupyterhub.yaml|name-tag:quay.io/jupyterhub/configurable-http-proxy:make install-notebooks"
   "user-scheduler|user-scheduler|helm-values/jupyterhub.yaml|name-tag:registry.k8s.io/kube-scheduler:make install-notebooks"
+  "external-secrets|external-secrets|helm-values/external-secrets.yaml|tag:v2.15.0:make external-secrets"
+  "external-secrets-cert-controller|external-secrets-cert-controller|helm-values/external-secrets.yaml|tag:v2.15.0:make external-secrets"
+  "external-secrets-webhook|external-secrets-webhook|helm-values/external-secrets.yaml|tag:v2.15.0:make external-secrets"
+  "spark-operator-controller|spark-operator-controller|helm-values/spark-operator.yaml|tag:2.5.2:make install-spark-operator"
+  "spark-operator-webhook|spark-operator-webhook|helm-values/spark-operator.yaml|tag:2.5.2:make install-spark-operator"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'
