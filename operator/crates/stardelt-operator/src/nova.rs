@@ -216,7 +216,9 @@ pub fn roles(namespace: &str) -> Vec<Role> {
                     &["get", "list", "patch", "create"],
                     "stardelt.io",
                 ),
-                rule(&["sqlwarehouses"], &["get", "list"], "stardelt.io"),
+                // `patch` is the two activity annotations the engine's scaler reads
+                // (platform#131 step A); metadata only, never a spec or a status.
+                rule(&["sqlwarehouses"], &["get", "list", "patch"], "stardelt.io"),
                 // Model endpoints (operator#609 slice b): Nova reads them and writes its probe into
                 // `status`. It never creates or deletes one; that is the administrator's.
                 rule(
@@ -607,10 +609,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    /// Every (apiGroup, resource, verb) that Nova may use. 38 entries: the list that
+    /// Every (apiGroup, resource, verb) that Nova may use. 39 entries: the list that
     /// `scripts/check-nova-rbac-parity.sh` in stardelt-platform compares between the manifest
     /// and the chart.
-    const GRANTED: [(&str, &str, &str); 38] = [
+    const GRANTED: [(&str, &str, &str); 39] = [
         ("apps", "deployments", "get"),
         ("apps", "deployments", "list"),
         ("apps", "statefulsets", "get"),
@@ -645,6 +647,7 @@ mod tests {
         ("stardelt.io", "catalogs", "create"),
         ("stardelt.io", "sqlwarehouses", "get"),
         ("stardelt.io", "sqlwarehouses", "list"),
+        ("stardelt.io", "sqlwarehouses", "patch"),
         ("stardelt.io", "modelendpoints", "get"),
         ("stardelt.io", "modelendpoints", "list"),
         ("stardelt.io", "modelendpoints", "watch"),
