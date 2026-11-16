@@ -99,7 +99,8 @@ pub struct SqlWarehouse {
 }
 
 /// The `SqlWarehouse` resources of the platform namespace, through the cluster client.
-fn warehouses_api(client: kube::Client) -> Api<DynamicObject> {
+/// Also the handle the activity reporter patches the two annotations through (platform#131).
+pub(crate) fn warehouses_api(client: kube::Client) -> Api<DynamicObject> {
     Api::namespaced_with(
         client,
         &crate::cluster::namespace(),

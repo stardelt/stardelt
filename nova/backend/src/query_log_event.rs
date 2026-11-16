@@ -71,6 +71,8 @@ pub struct QueryLogRecord {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub query_type: Option<String>,
+    /// The engine's `context.resourceGroupId`: the resource-group path the query landed in.
+    pub resource_group: Vec<String>,
     /// The statement with catalog credentials hidden ([`redact_catalog_secrets`]), cut at
     /// [`MAX_SQL_BYTES`].
     pub sql_text: String,
@@ -125,6 +127,10 @@ struct Context {
     catalog: Option<String>,
     schema: Option<String>,
     query_type: Option<String>,
+    /// `["global", "wh-<name>"]` inside a class, `["global"]` at the root, `[]` in an event
+    /// that predates the resource group.
+    #[serde(default)]
+    resource_group_id: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +398,7 @@ pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
         catalog: event.context.catalog,
         schema: event.context.schema,
         query_type: event.context.query_type,
+        resource_group: event.context.resource_group_id,
         sql_hash: hex_sha256(&sql),
         sql_text: cut(&sql, MAX_SQL_BYTES),
         created_at: event.create_time,
@@ -403,6 +410,20 @@ pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
         tables_read: io.inputs.iter().map(TableRef::dotted).collect(),
         tables_written: io.output.iter().map(TableRef::dotted).collect(),
     })
+}
+
+/// The `SqlWarehouse` a query belongs to, from its resource-group path: `["global", "wh-demo"]`
+/// → `Some("demo")`. The root (`["global"]`), a second element that is not `wh-<dns-label>`, and
+/// an empty path all answer `None`: such a query keeps no class warm.
+pub fn class_of(group: &[String]) -> Option<String> {
+    let name = group.get(1)?.strip_prefix("wh-")?;
+    let mut chars = name.chars();
+    (name.len() <= 63
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+    .then(|| name.to_string())
 }
 
 /// One entry of `statistics.operatorSummaries`: the engine sends each as a JSON string.
@@ -759,5 +780,36 @@ mod tests {
         }
         let out = redact_catalog_secrets("CREATE CATALOG c USING x WITH (token = '\u{e9}");
         assert_eq!(out, "CREATE CATALOG c USING x WITH (token = '***'");
+    }
+
+    #[test]
+    fn class_of_reads_only_a_warehouse_group() {
+        let some =
+            |group: &[&str]| class_of(&group.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(some(&["global", "wh-demo"]), Some("demo".to_string()));
+        for no in [
+            vec!["global"],
+            vec![],
+            vec!["admin"],
+            vec!["global", "wh-"],
+            vec!["global", "wh-Demo"],
+            vec!["global", "global"],
+        ] {
+            assert_eq!(some(&no), None, "{no:?}");
+        }
+    }
+
+    #[test]
+    fn an_event_keeps_its_resource_group() {
+        let mut event: serde_json::Value = serde_json::from_str(CREATED).unwrap();
+        event["context"]["resourceGroupId"] = serde_json::json!(["global", "wh-demo"]);
+        let record = parse(serde_json::to_vec(&event).unwrap().as_slice()).unwrap();
+        assert_eq!(record.resource_group, ["global", "wh-demo"]);
+
+        // The shipped fixture with a resource group still parses it.
+        assert_eq!(
+            parse(PROFILE.as_bytes()).unwrap().resource_group,
+            ["global"]
+        );
     }
 }

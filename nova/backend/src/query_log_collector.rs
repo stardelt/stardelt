@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -259,6 +260,86 @@ async fn ingest_lineage(
     }
 }
 
+/// What the classes' own events say the engine is doing (platform#131 step A): the query ids
+/// running in each class, and when its last query ended. Two annotations on the `SqlWarehouse`
+/// are the whole output; the scaling is the platform's access-sync job.
+pub const QUERIES_ANNOTATION: &str = "stardelt.io/queries-in-flight";
+pub const LAST_QUERY_ANNOTATION: &str = "stardelt.io/last-query-at";
+
+/// A created event with no completed event after this long is forgotten: an engine that is
+/// killed mid-query never posts one, and the class must not stay "busy" for ever.
+const MAX_IN_FLIGHT: chrono::Duration = chrono::Duration::hours(1);
+
+/// How often one snapshot reaches the cluster.
+const ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Default)]
+pub struct Activity {
+    inner: std::sync::Mutex<std::collections::HashMap<String, ClassActivity>>,
+}
+
+#[derive(Default)]
+struct ClassActivity {
+    /// query id -> the event's `create_time` (RFC 3339), so a lost completed event expires.
+    in_flight: std::collections::HashMap<String, String>,
+    last_query: Option<String>,
+}
+
+impl Activity {
+    fn with<T>(&self, class: &str, f: impl FnOnce(&mut ClassActivity) -> T) -> T {
+        // A poisoned lock must not stop the reporter: the map is a cache of event state.
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(inner.entry(class.to_string()).or_default())
+    }
+
+    fn created(&self, class: &str, query_id: &str, created_at: &str) {
+        self.with(class, |activity| {
+            activity
+                .in_flight
+                .insert(query_id.to_string(), created_at.to_string());
+        });
+    }
+
+    fn finished(&self, class: &str, query_id: &str, ended_at: &str) {
+        self.with(class, |activity| {
+            activity.in_flight.remove(query_id);
+            // A completed event with no created event is still activity: the stamp is the point.
+            activity.last_query = Some(ended_at.to_string());
+        });
+    }
+
+    /// `class -> (queries in flight, last completed query)` at `now`, with every created event
+    /// older than [`MAX_IN_FLIGHT`] dropped first.
+    fn snapshot(
+        &self,
+        now: DateTime<Utc>,
+    ) -> std::collections::BTreeMap<String, (usize, Option<String>)> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .iter()
+            .map(|(class, activity)| {
+                let in_flight = activity
+                    .in_flight
+                    .values()
+                    .filter(
+                        |created_at| match DateTime::parse_from_rfc3339(created_at.as_str()) {
+                            Ok(created) => now - created.with_timezone(&Utc) <= MAX_IN_FLIGHT,
+                            Err(_) => false,
+                        },
+                    )
+                    .count();
+                (class.clone(), (in_flight, activity.last_query.clone()))
+            })
+            .collect()
+    }
+}
+
 /// The collector's routes. `token` is the shared bearer token.
 pub fn router(
     token: &str,
@@ -302,7 +383,7 @@ fn env_nonempty(name: &str) -> Option<String> {
 ///
 /// The same listener also serves `/metrics`, so a deployment without `NOVA_EVENTS_TOKEN`
 /// has no scrape target either.
-pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
+pub async fn start(db: Option<sqlx::PgPool>, client: Option<kube::Client>) -> anyhow::Result<()> {
     let Some(addr) = env_nonempty("NOVA_INTERNAL_ADDR") else {
         return Ok(());
     };
@@ -312,6 +393,8 @@ pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
         );
         return Ok(());
     };
+    let activity = std::sync::Arc::new(Activity::default());
+    let reporter_activity = std::sync::Arc::clone(&activity);
     let (tx, mut rx) = mpsc::channel::<Accepted>(QUEUE_LEN);
     let (lineage_tx, mut lineage_rx) =
         mpsc::channel::<lineage_event::LineageEvent>(LINEAGE_QUEUE_LEN);
@@ -326,6 +409,18 @@ pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
                 warehouse = %a.warehouse,
                 "query event"
             );
+            if let Some(class) = crate::query_log_event::class_of(&a.record.resource_group) {
+                match a.record.state {
+                    crate::query_log_event::QueryState::Queued => {
+                        activity.created(&class, &a.record.query_id, &a.record.created_at)
+                    }
+                    _ => activity.finished(
+                        &class,
+                        &a.record.query_id,
+                        a.record.ended_at.as_deref().unwrap_or(&a.record.created_at),
+                    ),
+                }
+            }
             if let Some(pool) = &db_clone {
                 match crate::query_log_store::upsert(pool, &a).await {
                     Ok(()) => {
@@ -364,7 +459,92 @@ pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
             warn!(error = %e, "query-log collector stopped");
         }
     });
+    if let Some(client) = client {
+        spawn_activity_reporter(client, reporter_activity);
+    }
     Ok(())
+}
+
+/// The merge patch for one class, or `None` when both annotations already say this.
+///
+/// Only the keys that change: `queries-in-flight` is written down to `0` (a finished query must
+/// clear a count that is on the object), `last-query-at` is never removed and never written when
+/// the class has no stamp yet.
+fn annotations_to_write(
+    live: &serde_json::Map<String, serde_json::Value>,
+    count: usize,
+    stamp: Option<&str>,
+) -> Option<serde_json::Value> {
+    let text = |value: &serde_json::Value| value.as_str().map(str::to_string);
+    let mut desired = serde_json::Map::new();
+    let count = count.to_string();
+    if live.get(QUERIES_ANNOTATION).and_then(text).as_deref() != Some(count.as_str()) {
+        desired.insert(QUERIES_ANNOTATION.to_string(), serde_json::json!(count));
+    }
+    if let Some(stamp) = stamp
+        && live.get(LAST_QUERY_ANNOTATION).and_then(text).as_deref() != Some(stamp)
+    {
+        desired.insert(LAST_QUERY_ANNOTATION.to_string(), serde_json::json!(stamp));
+    }
+    (!desired.is_empty()).then(|| serde_json::json!({ "metadata": { "annotations": desired } }))
+}
+
+/// Report each class's activity as the two annotations the engine's scaler reads
+/// (platform#131 step A). One tick per [`ACTIVITY_INTERVAL`]; a class whose two values are
+/// already on the object is not patched, and a failed patch is logged and retried next tick.
+pub fn spawn_activity_reporter(client: kube::Client, activity: std::sync::Arc<Activity>) {
+    tokio::spawn(async move {
+        let api = crate::warehouses::warehouses_api(client);
+        let mut ticker = tokio::time::interval(ACTIVITY_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let now = DateTime::<Utc>::from(std::time::SystemTime::now());
+            let snapshot = activity.snapshot(now);
+            if snapshot.is_empty() {
+                continue;
+            }
+            let objects = match api.list(&kube::api::ListParams::default()).await {
+                Ok(list) => list.items,
+                Err(e) => {
+                    warn!(error = %e, "warehouse activity: cannot list sqlwarehouses");
+                    continue;
+                }
+            };
+            for object in objects {
+                let Some(name) = object.metadata.name.as_deref() else {
+                    continue;
+                };
+                let Some((count, stamp)) = snapshot.get(name) else {
+                    continue;
+                };
+                let empty = serde_json::Map::new();
+                let live = object
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .map(|annotations| {
+                        annotations
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                            .collect::<serde_json::Map<String, serde_json::Value>>()
+                    })
+                    .unwrap_or(empty);
+                let Some(patch) = annotations_to_write(&live, *count, stamp.as_deref()) else {
+                    continue;
+                };
+                if let Err(e) = api
+                    .patch(
+                        name,
+                        &kube::api::PatchParams::default(),
+                        &kube::api::Patch::Merge(&patch),
+                    )
+                    .await
+                {
+                    warn!(error = %e, warehouse = %name, "warehouse activity: patch failed");
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -658,6 +838,7 @@ mod tests {
             catalog: None,
             schema: None,
             query_type: Some("SELECT".to_string()),
+            resource_group: vec![],
             sql_text: "select * from orders".to_string(),
             sql_hash: "x".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -819,6 +1000,7 @@ mod tests {
             catalog: None,
             schema: None,
             query_type: Some("SELECT".to_string()),
+            resource_group: vec![],
             sql_text: "select 1".to_string(),
             sql_hash: "x".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
@@ -863,5 +1045,83 @@ mod tests {
             .unwrap();
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("nova_build_info"), "{body}");
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::<Utc>::from(std::time::SystemTime::now())
+    }
+
+    #[test]
+    fn a_created_event_counts_and_a_completed_event_clears() {
+        let activity = Activity::default();
+        let created = (now() - chrono::Duration::minutes(5)).to_rfc3339();
+        activity.created("demo", "q1", &created);
+        activity.created("demo", "q2", &created);
+        activity.finished("demo", "q1", "2026-01-01T00:00:09Z");
+        assert_eq!(
+            activity.snapshot(now()).get("demo"),
+            Some(&(1, Some("2026-01-01T00:00:09Z".to_string())))
+        );
+    }
+
+    #[test]
+    fn a_completed_event_without_a_created_one_never_goes_negative() {
+        let activity = Activity::default();
+        activity.finished("demo", "never", "2026-01-01T00:00:09Z");
+        assert_eq!(
+            activity.snapshot(now()).get("demo"),
+            Some(&(0, Some("2026-01-01T00:00:09Z".to_string())))
+        );
+    }
+
+    #[test]
+    fn a_created_event_older_than_an_hour_is_forgotten() {
+        let activity = Activity::default();
+        activity.created("demo", "stale", "2020-01-01T00:00:00Z");
+        let live = (now() - chrono::Duration::minutes(5)).to_rfc3339();
+        activity.created("demo", "live", &live);
+        assert_eq!(
+            activity.snapshot(now()).get("demo").map(|(n, _)| *n),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_class_with_nothing_to_report_is_not_patched() {
+        let mut live = serde_json::Map::new();
+        live.insert(QUERIES_ANNOTATION.to_string(), serde_json::json!("0"));
+        assert_eq!(annotations_to_write(&live, 0, None), None);
+    }
+
+    #[test]
+    fn the_patch_names_only_the_annotation_that_changed() {
+        let live = serde_json::Map::new();
+        assert_eq!(
+            annotations_to_write(&live, 2, None),
+            Some(serde_json::json!({
+                "metadata": { "annotations": { "stardelt.io/queries-in-flight": "2" } }
+            }))
+        );
+
+        let mut live = serde_json::Map::new();
+        live.insert(QUERIES_ANNOTATION.to_string(), serde_json::json!("0"));
+        live.insert(LAST_QUERY_ANNOTATION.to_string(), serde_json::json!("old"));
+        assert_eq!(
+            annotations_to_write(&live, 0, Some("2026-01-01T00:00:09Z")),
+            Some(serde_json::json!({
+                "metadata": { "annotations": { "stardelt.io/last-query-at": "2026-01-01T00:00:09Z" } }
+            }))
+        );
+    }
+
+    #[test]
+    fn an_unknown_class_is_not_written() {
+        let activity = Activity::default();
+        activity.created("demo", "q1", "2026-01-01T00:00:00Z");
+        let snapshot = activity.snapshot(now());
+        // The reporter matches the snapshot key against `metadata.name`: a class the object is
+        // not named after is never patched.
+        assert!(snapshot.contains_key("demo"));
+        assert_eq!(snapshot.get("small"), None);
     }
 }
