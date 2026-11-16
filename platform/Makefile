@@ -370,7 +370,7 @@ install: step-preflight ## Install all stardelt components (idempotent)
 # The steps are idempotent: each converges the live state to what this
 # repository declares and leaves it alone when it is already there.
 # ---------------------------------------------------------------------------
-.PHONY: step-preflight step-namespace step-reloader step-cnpg step-barman-cloud-plugin step-cnpg-cluster step-s3-secrets
+.PHONY: step-preflight step-namespace step-reloader step-cnpg step-barman-cloud-plugin step-cnpg-cluster step-s3-secrets roll-cnpg-image
 .PHONY: step-storage step-openfga step-catalog-clients step-lakekeeper step-access-sync
 .PHONY: step-trino step-app-secrets step-airflow step-superset step-pgdump step-nova
 .PHONY: step-apps step-pins step-verify
@@ -1180,6 +1180,9 @@ external-secrets: deps _context _helm-repos ## Install External Secrets Operator
 
 verify-external-secrets: _context ## Prove external secret mode: ESO, a Fake store, the synced Secret
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-external-secrets.sh
+
+roll-cnpg-image: _context ## Roll a Postgres Cluster whose imageName carries a new digest (platform#1619)
+	@NAMESPACE=$(NAMESPACE) bash scripts/roll-cnpg-image.sh $(CLUSTERS)
 
 # The sandbox secret store (decision D23, platform#160): OpenBao, opt-in, never part of `install`. Production
 # installs use the customer's own store through External Secrets and do not run this. The seal key and the
