@@ -147,6 +147,7 @@ user_id() { # user_id <username> -> the Keycloak id, empty when absent
 if [ "$mode" = check ]; then
   check_rows=0
   check_ok=0
+  check_missing=""
 
   render() { # render <id> — run the row's check and print PASS or MISSING
     local id="$1" rc=0
@@ -179,6 +180,7 @@ if [ "$mode" = check ]; then
       check_ok=$((check_ok + 1))
       printf 'PASS     %-2s  %s\n' "$id" "$check_msg"
     else
+      check_missing="$check_missing$id "
       printf 'MISSING  %-2s  %s — %s\n' "$id" "$check_msg" "$check_fix"
     fi
   }
@@ -226,14 +228,17 @@ if [ "$mode" = check ]; then
     check_msg="checkout at origin/main"
   }
 
-  # 0b. The CLI the rollout steps call.
+  # 0b. The CLI a human needs to re-deploy the shop (stardelt bundle deploy, step 9).
   check_0b() {
-    if command -v stardelt >/dev/null 2>&1 && stardelt --version >/dev/null 2>&1; then
-      check_msg="the stardelt CLI is on PATH"
-      return 0
-    fi
-    check_msg="the stardelt CLI is not on PATH"
-    check_fix="python3 -m venv ~/.local/venvs/stardelt-cli && ~/.local/venvs/stardelt-cli/bin/pip install 'stardelt==0.2.1'"
+    local venv="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}" cli
+    for cli in "$(command -v stardelt 2>/dev/null || true)" "$venv/bin/stardelt"; do
+      if [ -n "$cli" ] && [ -x "$cli" ] && "$cli" --help >/dev/null 2>&1; then
+        check_msg="the stardelt CLI answers ($cli)"
+        return 0
+      fi
+    done
+    check_msg="the stardelt CLI is not installed — needed only to re-deploy the shop with stardelt bundle deploy"
+    check_fix="python3 -m venv $venv && $venv/bin/pip install 'stardelt @ git+https://github.com/stardelt/stardelt-python@v0.2.1'"
     return 1
   }
 
@@ -602,6 +607,10 @@ PY
   if [ "$check_ok" -eq "$check_rows" ]; then
     echo "$check_ok of $check_rows ready — the public demo rollout is complete"
     exit 0
+  fi
+  if [ "$check_missing" = "0b " ]; then
+    echo "$check_ok of $check_rows ready — the demo answers; 0b is this shell, not the cluster: install the CLI (above) to re-deploy the shop"
+    exit 1
   fi
   echo "$check_ok of $check_rows ready — run the fixes above, then make public-demo-check again"
   exit 1
