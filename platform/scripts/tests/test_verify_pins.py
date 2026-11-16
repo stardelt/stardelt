@@ -99,6 +99,18 @@ CHART_ROWS = (
     "continuous-image-puller,hub-image,proxy,user-scheduler"
 )
 
+STRIMZI_OPERATOR_PINNED = (
+    "quay.io/strimzi/operator:1.3.1"
+    "@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb"
+)
+STRIMZI_OPERATOR_BARE = "quay.io/strimzi/operator:1.3.1"
+KAFKA_BROKER_PINNED = (
+    "quay.io/strimzi/kafka:1.3.1-kafka-4.3.2"
+    "@sha256:9cea505e434a53cea40941d2c6e9aa5896792fe9c9380feb1d7adea3867a3a0b"
+)
+KAFKA_BROKER_BARE = "quay.io/strimzi/kafka:1.3.1-kafka-4.3.2"
+KAFKA_ROWS = "kafka-broker,kafka-entity-operator"
+
 SHIM = """#!/usr/bin/env bash
 set -euo pipefail
 # Fake kubectl: every call is appended to FAKE_LOG and answered from FAKE_IMAGES_<name>.
@@ -154,6 +166,16 @@ if [ "${args[0]-}" = get ] && [ "${args[1]-}" = ds ]; then
   printf '%s\\n' "$value"
   exit 0
 fi
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = pod ]; then
+  name="$(printf '%s' "${args[2]-}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
+  var="FAKE_POD_${name}"
+  value="${!var-}"
+  if [ -z "$value" ]; then
+    exit 1
+  fi
+  printf '%s\\n' "$value"
+  exit 0
+fi
 exit 0
 """
 
@@ -176,12 +198,14 @@ class VerifyPins(unittest.TestCase):
         secret_hub: str | None = None,
         statefulsets=None,
         daemonsets=None,
+        pods=None,
     ):
         """images maps CronJob name -> list of image strings the cluster reports.
 
         deploys maps Deployment name -> the single image string the cluster reports.
         secret_hub is the plain values.yaml the Secret `hub` carries; the shim base64-encodes it.
         statefulsets and daemonsets map StatefulSet/DaemonSet name -> that single image string.
+        pods maps Pod name -> that single image string (the Kafka broker is a StrimziPodSet pod).
         """
         env = dict(
             os.environ,
@@ -200,6 +224,8 @@ class VerifyPins(unittest.TestCase):
             env["FAKE_STS_" + name.upper().replace("-", "_")] = value
         for name, value in (daemonsets or {}).items():
             env["FAKE_DS_" + name.upper().replace("-", "_")] = value
+        for name, value in (pods or {}).items():
+            env["FAKE_POD_" + name.upper().replace("-", "_")] = value
         return subprocess.run(
             ["bash", str(SCRIPT)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
         )
@@ -412,6 +438,51 @@ class VerifyPins(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("✗ reloader", done.stdout)
         self.assertIn("make step-reloader", done.stdout)
+
+    def test_the_kafka_bus_rows_read_the_broker_pod_and_both_entity_containers(self):
+        done = self.run_script(
+            {},
+            pods={"kafka-kafka-0": KAFKA_BROKER_PINNED},
+            deploys={
+                "kafka_entity_operator": STRIMZI_OPERATOR_PINNED
+                + "\n"
+                + STRIMZI_OPERATOR_PINNED
+            },
+            rows=KAFKA_ROWS,
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("verify-pins: PASS", done.stdout)
+        self.assertEqual(done.stdout.count("matches manifests/kafka.yaml"), 2)
+        self.assertNotIn("✗", done.stdout)
+        self.assert_read_only()
+
+    def test_a_broker_pod_left_on_the_bare_tag_fails(self):
+        done = self.run_script(
+            {},
+            pods={"kafka-kafka-0": KAFKA_BROKER_BARE},
+            deploys={
+                "kafka_entity_operator": STRIMZI_OPERATOR_PINNED
+                + "\n"
+                + STRIMZI_OPERATOR_PINNED
+            },
+            rows=KAFKA_ROWS,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("kubectl apply -f manifests/kafka.yaml", done.stdout)
+
+    def test_one_entity_operator_container_on_the_bare_tag_fails(self):
+        done = self.run_script(
+            {},
+            pods={"kafka-kafka-0": KAFKA_BROKER_PINNED},
+            deploys={
+                "kafka_entity_operator": STRIMZI_OPERATOR_PINNED
+                + "\n"
+                + STRIMZI_OPERATOR_BARE
+            },
+            rows=KAFKA_ROWS,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn(STRIMZI_OPERATOR_BARE, done.stdout)
 
 
 if __name__ == "__main__":

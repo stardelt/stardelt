@@ -17,7 +17,8 @@
 # JupyterHub Deployments hub, proxy and user-scheduler; they are read by the tag they carry
 # (`sts-tag:`, `ds-tag:`) or by their repository (`name-tag:`), because those files name several
 # tags with digests. The CNPG operator, the barman-cloud plugin and Reloader (#1616) are three
-# more Deployments read by the tag they carry (`tag:`).
+# more Deployments read by the tag they carry (`tag:`). The Kafka broker is a StrimziPodSet pod and
+# the entity operator a two-container Deployment, read by `refpod:`/`refdeploy:` (#1631).
 #
 #   scripts/verify-pins.sh
 #   ROWS=access-sync,demo-reset scripts/verify-pins.sh   # only these rows (the test uses it)
@@ -83,6 +84,8 @@ rows=(
   "spark-operator-controller|spark-operator-controller|helm-values/spark-operator.yaml|tag:2.5.2:make install-spark-operator"
   "spark-operator-webhook|spark-operator-webhook|helm-values/spark-operator.yaml|tag:2.5.2:make install-spark-operator"
   "strimzi-cluster-operator|strimzi-cluster-operator|helm-values/strimzi.yaml|tag:1.3.1:make install-kafka"
+  "kafka-broker|kafka-kafka-0|manifests/kafka.yaml|refpod:quay.io/strimzi/kafka:1.3.1-kafka-4.3.2"
+  "kafka-entity-operator|kafka-entity-operator|manifests/kafka.yaml|refdeploy:quay.io/strimzi/operator:1.3.1"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'
@@ -133,6 +136,16 @@ for row in sys.argv[1:]:
             text,
             re.M,
         )
+    elif kind.startswith(("refpod:", "refdeploy:")):
+        # `ref<live>:<repository>:<tag>`: the pin is written as a full image reference in a
+        # manifest (`image: "quay.io/strimzi/kafka:1.3.1-kafka-4.3.2@sha256:…"`), not as a
+        # standalone `tag:` line, so the row names the repository and tag it means (#1631).
+        parts = kind.split(":", 2)
+        m = re.search(
+            r"^\s*image:\s*[\"']?" + re.escape(parts[1] + ":" + parts[2]) + r"@(sha256:[0-9a-f]{64})",
+            text,
+            re.M,
+        )
     elif kind in ("tag", "value"):
         m = re.search(r"^\s*(?:tag|value):\s*[\"']?\S+@(sha256:[0-9a-f]{64})", text, re.M)
     elif kind == "worker-tag":
@@ -166,6 +179,8 @@ for row in sys.argv[1:]:
         if kind.startswith(("tag:", "sts-tag:", "ds-tag:", "name-tag:")) and kind.count(":") > 1
         else ""
     )
+    if kind.startswith(("refpod:", "refdeploy:")):
+        hint = "kubectl apply -f " + path
     print(f"{app}\t{deploy}\t{path}\t{digest}\t{kind}\t{hint}")
 PY
 )"
@@ -201,10 +216,27 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
              -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
     sts-tag:*) live="$(kubectl -n "$NAMESPACE" get sts "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
     ds-tag:*) live="$(kubectl -n "$NAMESPACE" get ds "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
+    refpod:*) live="$(kubectl -n "$NAMESPACE" get pod "$deploy" -o jsonpath='{.spec.containers[0].image}' 2>/dev/null || true)" ;;
+    refdeploy:*) live="$(kubectl -n "$NAMESPACE" get deploy "$deploy" -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}' 2>/dev/null || true)" ;;
     *) live="$(kubectl -n "$NAMESPACE" get deploy "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
   esac
   if [[ -z "$live" ]]; then
     echo "? $app no pin in the live configuration"; status=3; continue
+  fi
+  if [[ "$kind" == refdeploy:* ]]; then
+    bad=""
+    while IFS= read -r image; do
+      [ -z "$image" ] && continue
+      [[ "$image" == *"@$digest" ]] || bad="$image"
+    done <<<"$live"
+    if [ -z "$bad" ]; then
+      printf '✓ %-18s %s\n' "$app" "${digest:0:19}… matches $path"
+    else
+      printf '✗ %-18s live %s != pin %s (%s) — kubectl apply -f %s\n' \
+        "$app" "$bad" "$digest" "$path" "$path"
+      status=1
+    fi
+    continue
   fi
   if [[ "$live" == *"@$digest" ]]; then
     printf '✓ %-18s %s\n' "$app" "${digest:0:19}… matches $path"
@@ -217,6 +249,7 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
         env) hint="run make step-airflow" ;;
         cronjob) hint="run make step-airflow" ;;
         sts-tag:*|ds-tag:*|name-tag:*) hint="${row_hint:-run ./scripts/pin-image.sh $app}" ;;
+        refpod:*|refdeploy:*) hint="kubectl apply -f $path" ;;
         any-image) hint="kubectl apply -f $path" ;;
         tag:*) hint="${row_hint:-run ./scripts/pin-image.sh $app}" ;;
         *) hint="run ./scripts/pin-image.sh $app" ;;
@@ -230,7 +263,7 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
 done <<< "$pins"
 
 case "$status" in
-  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment, the CNPG operator, the barman-cloud plugin, Reloader and the two alpine CronJobs carry the checked-in pins)" ;;
+  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment, the CNPG operator, the barman-cloud plugin, Reloader, the two alpine CronJobs and the Kafka broker and entity operator carry the checked-in pins)" ;;
   1) echo "verify-pins: FAIL (a pin does not match the live configuration)" >&2 ;;
   *) echo "verify-pins: UNVERIFIED (a pin or Deployment could not be read)" >&2 ;;
 esac
