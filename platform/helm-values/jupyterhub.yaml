@@ -306,7 +306,11 @@ hub:
       admin_groups: ["stardelt-admins"]
   resources:
     requests: { cpu: "50m", memory: "256Mi" }
-    limits:   { cpu: "500m", memory: "512Mi" }
+    # 500m was the hub's ceiling and it sat on it (424m measured on the lab, 2026-11-16): every
+    # page load took seconds, and a spawn's readiness check starved until `startTimeout` fired,
+    # so the hub dropped a server that was already serving. A hub process is single-threaded
+    # Tornado: it needs headroom for the spawn polls, not a burst allowance.
+    limits:   { cpu: "2", memory: "1Gi" }
   # Nova shows and controls the person's workspace (stardelt-nova#652 W3): state,
   # start, stop. No access:servers — Nova can never open a server or run code in
   # it. The chart generates the service token and stores it in Secret `hub` under
@@ -470,7 +474,9 @@ singleuser:
                 '`stardelt-demos/` holds the bundle sources of the shop (examples/shop-bundle).' \
                 > "$HOME/README.md"
             fi
-  startTimeout: 300
+  # A notebook that boots in 5 s can still take longer than the hub's poll under load; the
+  # timeout is a ceiling, not a wait. 300 s is what fired on the lab 2026-11-16.
+  startTimeout: 600
   memory:
     limit: 1G
     guarantee: 256M
