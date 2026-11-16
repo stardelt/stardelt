@@ -12,6 +12,10 @@ injector:
 csi:
   enabled: false
 server:
+  # The chart defaults the tag to its appVersion. Pin the image by digest like the rest of
+  # the install: the tag stays for readability, the kubelet pulls the digest.
+  image:
+    tag: "2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f"
   # Pod Security `restricted` (platform#1096 question 5): the chart's pod block is already
   # correct (`runAsNonRoot`, uid 100, seccomp); the container declares the two missing fields.
   statefulSet:
