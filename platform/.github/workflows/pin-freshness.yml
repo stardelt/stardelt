@@ -48,3 +48,16 @@ jobs:
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
               --label bug --label P2 --body-file "$RUNNER_TEMP/pins.txt"
           fi
+      - name: Close the issue when both checks pass
+        if: steps.check.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search 'in:title "Pins are stale"' --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            echo "no open pin issue"
+            exit 0
+          fi
+          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "Both checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\` and \`check-operator-pins.sh\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
+          gh issue close "$number" --repo "$GITHUB_REPOSITORY"
