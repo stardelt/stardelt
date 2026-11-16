@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Prove that the live Deployments, the group-roles CronJob and the two spawned-notebook pins run
-# the digests this repository pins.
+# Prove that the live Deployments, the group-roles CronJobs, the two spawned-notebook pins and the
+# three helper CronJobs run the images this repository pins.
 #
 # Why: the recurring failure is a correct pin plus a Deployment that was never rolled to it
 # (stardelt-platform#697, #704, #503, #501, #509, #510). verify-images proves a pin is readable,
 # check-pins proves the registry tag has not moved; neither asks the cluster what it runs.
-# The group-roles CronJob is applied by make step-airflow, and the two notebook pins are not
+# The group-roles CronJobs are applied by make step-airflow, and the two notebook pins are not
 # Deployments: the JupyterHub spawn image lives in Secret hub and the pipeline notebook image in
-# Airflow's PIPELINE_NOTEBOOK_IMAGE, both pinned by hand.
+# Airflow's PIPELINE_NOTEBOOK_IMAGE, both pinned by hand. The helper CronJobs (access-sync,
+# demo-reset, lakehouse-backup) are applied by hand too, and nothing read them until #1567: their
+# digests could sit unapplied while every check stayed green (platform#1563).
 #
 #   scripts/verify-pins.sh
+#   ROWS=access-sync,demo-reset scripts/verify-pins.sh   # only these rows (the test uses it)
 #
 # Exit codes: 0 all match, 1 at least one differs, 3 the check proved nothing (no kubectl, no
 # Deployment, a pin that cannot be parsed). Needs: kubectl, python3.
@@ -43,6 +46,9 @@ rows=(
   "notebook-task|airflow-dag-processor|helm-values/airflow.yaml|env"
   "group-roles|airflow-group-roles|manifests/airflow-group-roles.yaml|cronjob"
   "superset-group-roles|superset-group-roles|manifests/superset-group-roles.yaml|cronjob"
+  "access-sync|access-sync|manifests/access-sync.yaml|manifest-images"
+  "demo-reset|demo-reset|manifests/demo-reset.yaml|manifest-images"
+  "lakehouse-backup|lakehouse-backup|manifests/object-store-backup.yaml|manifest-images"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'
@@ -63,6 +69,13 @@ for row in sys.argv[1:]:
         )
     elif kind in ("tag", "value"):
         m = re.search(r"^\s*(?:tag|value):\s*[\"']?\S+@(sha256:[0-9a-f]{64})", text, re.M)
+    elif kind == "manifest-images":
+        found = re.findall(r"^\s*image:\s*(\S+)\s*$", text, re.M)
+        if not found or any("@sha256:" not in image for image in found):
+            print(f"{app}\t{deploy}\t{path}\tERROR: every image must be pinned by digest in {path}")
+            continue
+        print(f"{app}\t{deploy}\t{path}\t{','.join(sorted(found))}\tmanifest-images")
+        continue
     else:
         m = re.search(r"^\s*image:\s*(ghcr\.io/stardelt/[^\s\"']+@sha256:[0-9a-f]{64})", text, re.M)
     if not m:
@@ -75,8 +88,25 @@ PY
 
 status=0
 while IFS=$'\t' read -r app deploy path digest kind; do
+  if [ -n "${ROWS:-}" ] && [[ ",$ROWS," != *",$app,"* ]]; then continue; fi
   if [[ "$digest" == ERROR:* ]]; then
     echo "? $app $digest"; status=3; continue
+  fi
+  if [ "$kind" = "manifest-images" ]; then
+    live="$(kubectl -n "$NAMESPACE" get cronjob "$deploy" -o jsonpath='{range .spec.jobTemplate.spec.template.spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.jobTemplate.spec.template.spec.containers[*]}{.image}{"\n"}{end}' 2>/dev/null || true)"
+    if [ -z "$live" ]; then
+      echo "? $app no CronJob $NAMESPACE/$deploy"; status=3; continue
+    fi
+    want="$(printf '%s' "$digest" | tr ',' '\n' | sort)"
+    got="$(printf '%s\n' "$live" | sed '/^$/d' | sort)"
+    if [ "$want" = "$got" ]; then
+      printf '✓ %-18s %d image(s) match %s\n' "$app" "$(printf '%s\n' "$want" | wc -l)" "$path"
+    else
+      printf '✗ %-18s live %s != pin %s (%s) — kubectl apply -f %s\n' \
+        "$app" "$(printf '%s' "$got" | tr '\n' ' ')" "$(printf '%s' "$want" | tr '\n' ' ')" "$path" "$path"
+      status=1
+    fi
+    continue
   fi
   case "$kind" in
     hub) live="$(kubectl -n "$NAMESPACE" get secret hub \
@@ -111,7 +141,7 @@ while IFS=$'\t' read -r app deploy path digest kind; do
 done <<< "$pins"
 
 case "$status" in
-  0) echo "verify-pins: PASS (live Deployments, both group-roles CronJobs and spawned-notebook pins carry the checked-in pins)" ;;
+  0) echo "verify-pins: PASS (live Deployments, both group-roles CronJobs, the spawned-notebook pins and the three helper CronJobs carry the checked-in pins)" ;;
   1) echo "verify-pins: FAIL (a pin does not match the live configuration)" >&2 ;;
   *) echo "verify-pins: UNVERIFIED (a pin or Deployment could not be read)" >&2 ;;
 esac
