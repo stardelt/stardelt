@@ -4,7 +4,9 @@
 # prints the old values. Unlike scripts/check-operator-pins.sh (two checkouts) and verify-pins.sh
 # (image digests), this asks the Deployment. A second loop passes `--identity`: that proves the
 # identity overlays (values/<component>-identity.yaml) are compiled in too, which the plain output
-# cannot show because it never contains them.
+# cannot show because it never contains them. The digests it compares against the running binary
+# are the loader, notebook and Superset digests — and, since platform#1632, the External Secrets,
+# Spark operator and Strimzi cluster operator digests.
 #
 # Exit codes: 0 every probe passes, 1 a value differs or the binary cannot answer, 3 the check
 # proved nothing (no kubectl, no Deployment). Needs: kubectl, grep.
@@ -42,6 +44,9 @@ digest_of() { # file [line pattern]
 LOADER="$(digest_of helm-values/airflow.yaml)"
 NOTEBOOK="$(digest_of helm-values/jupyterhub.yaml '^[[:space:]]+tag: "dev@sha256:')"
 SUPERSET="$(digest_of helm-values/superset.yaml)"
+ESO="$(digest_of helm-values/external-secrets.yaml)"
+SPARK_OPERATOR="$(digest_of helm-values/spark-operator.yaml)"
+STRIMZI_OPERATOR="$(digest_of helm-values/strimzi.yaml)"
 
 # A probe records its lines instead of printing them: a short `kubectl exec` stream can cut the
 # document's tail, and a probe that misses must be re-read once before it is reported.
@@ -125,6 +130,15 @@ attempt() { # component [extra args...] -> one read; 0 when every probe of it pa
         check_contains "seaweedfs: volume sizing block" "$volume" "name: data"
         check_contains "seaweedfs: volume size" "$volume" "size: $SEAWEEDFS_VOLUME_SIZE"
         ;;
+      external-secrets)
+        check_contains "external-secrets: image" "$out" "$ESO"
+        ;;
+      spark-operator)
+        check_contains "spark-operator: image" "$out" "$SPARK_OPERATOR"
+        ;;
+      kafka)
+        check_contains "kafka: cluster operator image" "$out" "$STRIMZI_OPERATOR"
+        ;;
     esac
   fi
   [ "${#FAIL_LINES[@]}" -eq 0 ]
@@ -151,7 +165,7 @@ probe() { # component [extra args...] -> one read, and a second when the first m
   return 0
 }
 
-for component in airflow jupyterhub superset seaweedfs; do
+for component in airflow jupyterhub superset seaweedfs external-secrets spark-operator kafka; do
   probe "$component"
 done
 

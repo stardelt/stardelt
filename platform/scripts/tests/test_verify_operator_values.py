@@ -70,10 +70,18 @@ def digest_of(path, pattern=None):
     return re.search(r"sha256:[0-9a-f]{64}", match.group(0)).group(0)
 
 
+ESO = digest_of("helm-values/external-secrets.yaml")
+SPARK_OPERATOR = digest_of("helm-values/spark-operator.yaml")
+STRIMZI = digest_of("helm-values/strimzi.yaml")
+
+
 def fixtures():
     loader = digest_of("helm-values/airflow.yaml")
     notebook = digest_of("helm-values/jupyterhub.yaml", r'^\s+tag: "dev@sha256:')
     superset = digest_of("helm-values/superset.yaml")
+    eso = digest_of("helm-values/external-secrets.yaml")
+    spark_operator = digest_of("helm-values/spark-operator.yaml")
+    strimzi = digest_of("helm-values/strimzi.yaml")
     # The trino identity document keeps the three needles the truncated read must still satisfy
     # before it misses `passwordAuthSecret` in the removed tail.
     trino_identity = "\n".join(
@@ -133,6 +141,10 @@ def fixtures():
         + "\n",
         "trino-plain.yaml": "data:\n  catalog: {}\n",
         "trino-identity.yaml": trino_identity + "\n",
+        "external-secrets-plain.yaml": f'image:\n  tag: "v2.15.0@{eso}"\n',
+        "spark-operator-plain.yaml": f'controller:\n  replicas: 1\nimage:\n  tag: "2.5.2@{spark_operator}"\n',
+        "kafka-plain.yaml": f'image:\n  tag: "1.3.1@{strimzi}"\n'
+        f'topicOperator:\n  image:\n    tag: "1.3.1@{strimzi}"\n',
     }
 
 
@@ -167,24 +179,33 @@ class TestVerifyOperatorValues(unittest.TestCase):
     def test_a_full_document_passes_every_probe_without_a_retry(self):
         done = self.run_script()
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (14 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (17 probes)", done.stdout)
         self.assertNotIn("re-reading values once", done.stderr)
-        self.assertEqual(len(self.calls()), 8, "four plain reads and four with --identity")
+        self.assertEqual(len(self.calls()), 11, "seven plain reads and four with --identity")
 
     def test_a_first_read_that_misses_the_tail_is_re_read_and_passes(self):
         done = self.run_script("first")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (14 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (17 probes)", done.stdout)
         self.assertIn("re-reading values once", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
 
     def test_a_second_read_that_also_misses_fails_once(self):
         done = self.run_script("always")
         self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertIn("verify-operator-values: FAIL (1 of 14 probes)", done.stdout)
+        self.assertIn("verify-operator-values: FAIL (1 of 17 probes)", done.stdout)
         self.assertEqual((done.stdout + done.stderr).count("trino identity: password file"), 1)
         self.assertIn("is not in the running operator", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
+
+    def test_a_kafka_operator_pin_the_operator_does_not_carry_fails(self):
+        (self.dir / "kafka-plain.yaml").write_text(
+            f'image:\n  tag: "1.3.1@sha256:{"0" * 64}"\n'
+        )
+        done = self.run_script()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("verify-operator-values: FAIL", done.stdout)
+        self.assertIn("kafka: cluster operator image", done.stderr)
 
 
 if __name__ == "__main__":
