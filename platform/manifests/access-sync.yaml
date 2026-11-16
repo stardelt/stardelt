@@ -97,6 +97,16 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["trino-warehouses", "trino-group-file"]
     verbs: ["get", "update", "patch"]
+  # One engine, one replica count (platform#131 step A): read the worker Deployment and
+  # patch its `scale` subresource. `resourceNames` keeps this to the one Deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["trino-worker"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["trino-worker"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -1568,6 +1568,132 @@ def patch_warehouse_status(name, phase, rendered_group, engine, reason, message)
     return True
 
 
+# One engine, one worker Deployment (platform#131 step A): the classes are resource groups
+# inside this Trino, so the replica count belongs to the engine and not to one class. Nova
+# reports the activity as two annotations; the scaling and its status are this job's.
+TRINO_WORKER = "trino-worker"
+DEPLOYMENT_PATH = "/apis/apps/v1/namespaces/%s/deployments/%s" % (NAMESPACE, TRINO_WORKER)
+SCALE_PATH = DEPLOYMENT_PATH + "/scale"
+QUERIES_ANNOTATION = "stardelt.io/queries-in-flight"
+LAST_QUERY_ANNOTATION = "stardelt.io/last-query-at"
+
+
+def idle_minutes(text):
+    """`15m` -> 15, `2h` -> 120, anything else -> None (the CRD's pattern, restated)."""
+    match = re.fullmatch(r"([1-9][0-9]*)(m|h)", text or "")
+    if not match:
+        return None
+    return int(match.group(1)) * (1 if match.group(2) == "m" else 60)
+
+
+def scale_decision(warehouses, now):
+    """`(workers, entries)` for the engine, from the `Ready` classes' annotations.
+
+    One Trino serves every class, so there is one replica count. A class is *always on*
+    when it has no `autoStop`, no measurement yet, or a stamp this job cannot read: then
+    the engine never scales to zero (an unmeasured class is not an idle one). Otherwise
+    the engine may go to zero only when every class has been idle for at least its own
+    `autoStop`. `minWorkers` is the engine's floor while it is up; `maxWorkers` its cap.
+
+    `entries` is `[(name, in_flight, last_query)]` for every `Ready` class, in the API's
+    order. `workers` is None when there is nothing to decide (no `Ready` class).
+    """
+    ready = [
+        item for item in warehouses if (item.get("status") or {}).get("phase") == "Ready"
+    ]
+    if not ready:
+        return None, []
+    floor, cap, in_flight = 1, 1, 0
+    always_on = recent = False
+    entries = []
+    for item in ready:
+        name = (item.get("metadata") or {}).get("name") or ""
+        spec = item.get("spec") or {}
+        annotations = (item.get("metadata") or {}).get("annotations") or {}
+        floor = max(floor, int(spec.get("minWorkers") or 1))
+        cap = max(cap, int(spec.get("maxWorkers") or 1))
+        count = int(annotations.get(QUERIES_ANNOTATION) or 0)
+        in_flight += count
+        stamp = annotations.get(LAST_QUERY_ANNOTATION)
+        entries.append((name, count, stamp))
+        minutes = idle_minutes(spec.get("autoStop"))
+        if minutes is None or not stamp:
+            always_on = True
+            continue
+        try:
+            then = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            always_on = True
+            continue
+        if (now - then).total_seconds() / 60.0 < minutes:
+            recent = True
+    if always_on or recent or in_flight > 0:
+        return min(cap, max(floor, 1)), entries
+    return 0, entries
+
+
+def patch_scale_status(name, scale):
+    """Write `status.scale` only when it differs (the idempotence rule of every status write)."""
+    path = "%s/%s" % (SQLWAREHOUSE_PATH, name)
+    status, live = k8s_request("GET", path)
+    if status != 200 or not live:
+        fail("cannot read SqlWarehouse %s (HTTP %s)" % (name, status))
+    if ((live.get("status") or {}).get("scale") or {}) == scale:
+        return False
+    status, _ = k8s_request("PATCH", path + "/status", {"status": {"scale": scale}})
+    if status not in (200, 201):
+        fail("cannot write SqlWarehouse %s status (HTTP %s)" % (name, status))
+    return True
+
+
+def converge_scale(warehouses, now=None):
+    """Scale the one worker Deployment from the classes' annotations (platform#131 step A).
+
+    Returns 0, or 1 when the cluster refused a read or a write. A missing Deployment is
+    not a failure: the platform may run a Trino shape without dedicated workers, and the
+    next tick tries again.
+    """
+    now = now or datetime.now(timezone.utc)
+    workers, entries = scale_decision(warehouses, now)
+    if workers is None:
+        return 0
+    status, deployment = k8s_request("GET", DEPLOYMENT_PATH)
+    if status == 404:
+        print("scale: no Deployment %s; skipped" % TRINO_WORKER)
+        return 0
+    if status != 200 or not deployment:
+        print(
+            "access-sync: cannot read Deployment %s (HTTP %s)" % (TRINO_WORKER, status),
+            file=sys.stderr,
+        )
+        return 1
+    current = int((deployment.get("spec") or {}).get("replicas") or 0)
+    if current != workers:
+        code, _ = k8s_request("PATCH", SCALE_PATH, {"spec": {"replicas": workers}})
+        if code not in (200, 201):
+            print(
+                "access-sync: cannot scale Deployment %s to %d (HTTP %s)"
+                % (TRINO_WORKER, workers, code),
+                file=sys.stderr,
+            )
+            return 1
+        print("scale: %s %d -> %d" % (TRINO_WORKER, current, workers))
+    ready = int((deployment.get("status") or {}).get("readyReplicas") or 0)
+    if workers == 0:
+        phase = "Stopped"
+    elif ready < workers or current != workers:
+        phase = "Starting"
+    else:
+        phase = "Running"
+    print("scale: %s %s at %d worker(s)" % (TRINO_WORKER, phase, workers))
+    for name, count, stamp in entries:
+        scale = {"phase": phase, "workers": workers, "queriesInFlight": count}
+        if stamp:
+            scale["lastQueryAt"] = stamp
+        patch_scale_status(name, scale)
+    return 0
+
+
 def converge_warehouses(warehouses, members, unknown):
     """Render the warehouses into both ConfigMaps and write their statuses.
 
@@ -1786,6 +1912,11 @@ def main():
     #    file restarts it (Reloader, platform#313) — writing only on a difference
     #    keeps a converged tick from restarting the engine.
     failures += converge_warehouses(warehouses, members, unknown)
+
+    # 5b. The engine's workers (platform#131 step A): the classes' annotations are Nova's
+    #     report; scale the one worker Deployment and write `status.scale` on every class.
+    #     Re-list so the phases step 5 just wrote are the ones read here.
+    failures += converge_scale(list_warehouses())
 
     # 6. The catalog decision table (platform#359): after the grants were written,
     #    so the bridge never sees a permission the warehouse does not have. A failed

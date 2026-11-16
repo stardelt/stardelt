@@ -443,6 +443,13 @@ class FakeCluster:
                 }
             ).items()
         }
+        # The one engine's worker Deployment (platform#131 step A). `converge_scale` reads
+        # it, patches the `scale` subresource and reads its ready count back on the next tick.
+        self.deployment = {
+            "metadata": {"name": "trino-worker"},
+            "spec": {"replicas": 1},
+            "status": {"readyReplicas": 1},
+        }
         self.calls = []
 
     def list_items(self):
@@ -462,6 +469,13 @@ class FakeCluster:
         configmap_path = re.fullmatch(
             r"/api/v1/namespaces/stardelt/configmaps/([^/]+)", path
         )
+        deployment_path = "/apis/apps/v1/namespaces/stardelt/deployments/trino-worker"
+        if method == "GET" and path == deployment_path:
+            return 200, json.loads(json.dumps(self.deployment))
+        if method == "PATCH" and path == deployment_path + "/scale":
+            self.deployment["spec"]["replicas"] = body["spec"]["replicas"]
+            self.deployment["status"]["readyReplicas"] = body["spec"]["replicas"]
+            return 200, json.loads(json.dumps(self.deployment))
         if method == "GET" and path == collection:
             return 200, {"items": self.list_items()}
         if method == "GET" and object_path:
@@ -2061,6 +2075,140 @@ class WarehouseMainTest(JobTestCase):
         self.assertIn("warehouse small: rendered wh-small (3 member(s))", logged)
         for principal in ("sub-1", "sub-2", "sub-admin", "alice", "bob", TOKEN_SUB):
             self.assertNotIn(principal, logged)
+
+
+class WarehouseScaleTest(JobTestCase):
+    """`converge_scale` (platform#131 step A): one engine, one replica count."""
+
+    NOW = access_sync.datetime(2026, 11, 16, 12, 0, tzinfo=access_sync.timezone.utc)
+
+    def warehouse(self, name, *, auto_stop=None, min_workers=1, max_workers=1, stamps=None):
+        spec = {"lakehouseRef": {"name": "main"}, "minWorkers": min_workers, "maxWorkers": max_workers}
+        if auto_stop:
+            spec["autoStop"] = auto_stop
+        metadata = {"name": name}
+        if stamps:
+            metadata["annotations"] = dict(stamps)
+        return {
+            "metadata": metadata,
+            "spec": spec,
+            "status": {"phase": "Ready", "renderedGroup": "wh-" + name},
+        }
+
+    def decision(self, *warehouses):
+        return access_sync.scale_decision(list(warehouses), self.NOW)
+
+    def test_a_class_without_auto_stop_keeps_the_engine_up(self):
+        old = {"stardelt.io/last-query-at": "2026-11-16T08:00:00Z"}
+        workers, _ = self.decision(
+            self.warehouse("small", stamps=old),
+            self.warehouse("idle", auto_stop="15m", stamps=old),
+        )
+        self.assertEqual(workers, 1)
+
+    def test_every_class_idle_scales_the_engine_to_zero(self):
+        old = {"stardelt.io/last-query-at": "2026-11-16T08:00:00Z"}
+        workers, _ = self.decision(
+            self.warehouse("small", auto_stop="15m", stamps=old),
+            self.warehouse("large", auto_stop="2h", stamps=old),
+        )
+        self.assertEqual(workers, 0)
+
+    def test_one_recent_query_keeps_the_engine_up(self):
+        workers, _ = self.decision(
+            self.warehouse(
+                "small",
+                auto_stop="15m",
+                stamps={"stardelt.io/last-query-at": "2026-11-16T08:00:00Z"},
+            ),
+            self.warehouse(
+                "large",
+                auto_stop="2h",
+                stamps={"stardelt.io/last-query-at": "2026-11-16T11:59:00Z"},
+            ),
+        )
+        self.assertEqual(workers, 1)
+
+    def test_an_in_flight_query_keeps_the_engine_up(self):
+        workers, _ = self.decision(
+            self.warehouse(
+                "small",
+                auto_stop="15m",
+                stamps={
+                    "stardelt.io/last-query-at": "2026-11-16T08:00:00Z",
+                    "stardelt.io/queries-in-flight": "2",
+                },
+            )
+        )
+        self.assertEqual(workers, 1)
+
+    def test_an_unmeasured_class_is_not_an_idle_one(self):
+        workers, _ = self.decision(self.warehouse("small", auto_stop="15m"))
+        self.assertEqual(workers, 1)
+
+    def test_the_scale_subresource_is_patched_and_the_status_says_stopped(self):
+        stamps = {"stardelt.io/last-query-at": "2026-11-16T08:00:00Z"}
+        cluster = FakeCluster(
+            [
+                self.warehouse("small", auto_stop="15m", stamps=stamps),
+                self.warehouse("large", auto_stop="2h", stamps=stamps),
+            ]
+        )
+        access_sync.k8s_request = cluster.request
+        self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
+        self.assertEqual(cluster.deployment["spec"]["replicas"], 0)
+        self.assertEqual(
+            cluster.status("small")["scale"],
+            {
+                "phase": "Stopped",
+                "workers": 0,
+                "queriesInFlight": 0,
+                "lastQueryAt": "2026-11-16T08:00:00Z",
+            },
+        )
+        patches = len(cluster.patches())
+        self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
+        self.assertEqual(len(cluster.patches()), patches, "a converged tick must not patch")
+
+    def test_a_stopped_engine_that_has_a_query_marks_starting(self):
+        cluster = FakeCluster(
+            [
+                self.warehouse(
+                    "small",
+                    auto_stop="15m",
+                    stamps={
+                        "stardelt.io/last-query-at": "2026-11-16T08:00:00Z",
+                        "stardelt.io/queries-in-flight": "1",
+                    },
+                )
+            ]
+        )
+        cluster.deployment["spec"]["replicas"] = 0
+        cluster.deployment["status"]["readyReplicas"] = 0
+        access_sync.k8s_request = cluster.request
+        self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
+        self.assertEqual(cluster.deployment["spec"]["replicas"], 1)
+        self.assertEqual(cluster.status("small")["scale"]["phase"], "Starting")
+
+    def test_a_missing_deployment_is_skipped(self):
+        cluster = FakeCluster(
+            [
+                self.warehouse(
+                    "small",
+                    auto_stop="15m",
+                    stamps={"stardelt.io/last-query-at": "2026-11-16T08:00:00Z"},
+                )
+            ]
+        )
+        real = cluster.request
+        access_sync.k8s_request = lambda method, path, body=None: (
+            (404, None) if path.startswith("/apis/apps/") else real(method, path, body)
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = access_sync.converge_scale(cluster.list_items(), self.NOW)
+        self.assertEqual(code, 0)
+        self.assertIn("scale: no Deployment trino-worker; skipped", out.getvalue())
 
 
 if __name__ == "__main__":
