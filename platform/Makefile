@@ -1348,6 +1348,7 @@ uninstall: _context ## Uninstall all stardelt components (reverse order)
 	@kubectl delete -f manifests/spark-connect-pod-guard.yaml --ignore-not-found
 	@kubectl delete -f manifests/spark-stream-rbac.yaml --ignore-not-found
 	@kubectl delete -f manifests/spark-confmap-janitor.yaml --ignore-not-found
+	@kubectl -n $(NAMESPACE) delete configmap spark-confmap-janitor-script --ignore-not-found
 	@kubectl delete -f manifests/spark-operator-metrics.yaml --ignore-not-found
 	@kubectl -n $(NAMESPACE) delete configmap stardelt-spark-runtimes --ignore-not-found
 	@kubectl delete -f manifests/trino-tls.yaml               --ignore-not-found

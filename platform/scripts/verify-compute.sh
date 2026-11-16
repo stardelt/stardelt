@@ -41,6 +41,17 @@ if ! err="$(kubectl get crd "$CRD" 2>&1 >/dev/null)"; then
   exit 3
 fi
 
+# 1b. The janitor's script survived the last apply (platform#1258 follow-up). The manifest
+# apply no longer carries the ConfigMap; a direct apply must not leave the script empty.
+if [ -z "$(kubectl -n "$NS" get configmap spark-confmap-janitor-script \
+     -o jsonpath='{.data.spark-confmap-janitor\.sh}' 2>/dev/null || true)" ]; then
+  echo "✗ janitor   spark-confmap-janitor-script carries no spark-confmap-janitor.sh — every janitor pod will exit 127"
+  echo "            hint: make spark-confmap-janitor-config"
+  problems=$((problems + 1))
+else
+  echo "✓ janitor   the script ConfigMap carries spark-confmap-janitor.sh"
+fi
+
 # ---------------------------------------------------------------------------
 # 2. The schema the Compute page writes. Nova sends owner, size, runtime,
 #    state and idleStopMinutes and reads status.phase; a CRD served with an
