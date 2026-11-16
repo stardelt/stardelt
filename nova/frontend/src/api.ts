@@ -104,6 +104,12 @@ export type SqlWarehouse = {
   canUse: boolean
   /** The class this caller lands in: the largest usable one, or the default class. */
   yours: boolean
+  /**
+   * The scaler's verdict on the shared engine; `null` until it has written one. `phase` is
+   * the scaler's word (`Stopped`, `Starting`, `Running`) — every class carries the same one,
+   * because there is one engine (#1059).
+   */
+  scale: { phase: string; workers: number; queriesInFlight: number; lastQueryAt?: string | null } | null
 }
 
 /**
@@ -1650,6 +1656,8 @@ export const api = {
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
   /** The SQL compute classes and the one the caller lands in (#236). */
   warehouses:   ()                            => jget<SqlWarehouse[]>('/api/warehouses'),
+  /** Wake the engine for one class ahead of the first query (#1053): 202, `phase: "Starting"`. */
+  warehouseStart: (name: string) => jpost<{ name: string; phase: string }>(`/api/warehouses/${encodeURIComponent(name)}/start`, {}),
   /** The catalogs the caller may browse and the one a request without `?catalog=` uses. */
   catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
   /** Tables whose name contains every word of `q`, in the default catalog. */

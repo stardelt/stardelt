@@ -11,7 +11,7 @@ import CollapsiblePane, { usePaneOpen } from '../components/CollapsiblePane'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
-import WarehouseNote from '../components/WarehouseNote'
+import WarehouseNote, { useYourWarehouse } from '../components/WarehouseNote'
 import { formatCount, sqlTableRef } from '../format'
 import { tokenizeSql } from '../sqlHighlight'
 import { splitStatements, statementToRun } from '../sqlStatements'
@@ -585,6 +585,11 @@ export default function Query() {
   const [verifySql, setVerifySql] = useState('')
   const saved = useQuery({ queryKey: ['saved-queries'], queryFn: () => api.savedQueries() })
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // The engine behind this person's queries, for the scaler's word while a query waits
+  // (#1059): the first query after a quiet hour waits for the engine to come up.
+  const yourWarehouse = useYourWarehouse()
+  const engineWaking =
+    running && (yourWarehouse?.scale?.phase === 'Stopped' || yourWarehouse?.scale?.phase === 'Starting')
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState<SavedQuery | null>(null)
   const [sharing, setSharing] = useState<SavedQuery | null>(null)
@@ -842,6 +847,12 @@ export default function Query() {
           </div>
         </div>
 
+        {engineWaking && (
+          <p role="status" className="text-sm text-text-dim">
+            Starting the warehouse — this can take up to 3 minutes. Your query runs as soon as it is up.
+          </p>
+        )}
+
         {scheduled && (
           <p role="status" className="text-sm text-ok break-words">
             Scheduled{' '}
@@ -868,11 +879,25 @@ export default function Query() {
           </p>
         )}
 
-        {error && (
-          <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap break-words">
-            {error}
-          </div>
-        )}
+        {error &&
+          (error.includes('Insufficient active worker nodes') ? (
+            // The engine's own sentence for an engine that never came up (#1059): a person
+            // reads what happened and what to do, and the engine's words stay below it.
+            <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad">
+              <p>
+                The warehouse did not start in 5 minutes. Try again, or ask an administrator to
+                look at the Platform page.
+              </p>
+              <details className="mt-2 text-xs text-text-dim">
+                <summary>Engine message</summary>
+                <pre className="mt-1 whitespace-pre-wrap break-words font-mono">{error}</pre>
+              </details>
+            </div>
+          ) : (
+            <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap break-words">
+              {error}
+            </div>
+          ))}
 
         {!result && !error && !hint && !running && (
           <div className="card flex-1 min-h-0 grid place-items-center p-6 text-center">

@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type SqlWarehouse } from '../api'
 
 /**
@@ -30,19 +30,53 @@ export function warehouseHint(warehouse: SqlWarehouse): string {
  * while the answer is on its way, when the list is empty, when no row is `yours`, and when
  * the answer is not a list at all (a proxy or a test stub can return anything) — callers
  * render nothing then. The navigation card shows it on every page, so it must not throw.
+ *
+ * While the scaler reports anything but `Running` it reads again every 15 s: the engine
+ * comes up (or stops) on the scaler's two-minute tick and the line moves on by itself.
  */
 export function useYourWarehouse(): SqlWarehouse | undefined {
-  const { data } = useQuery({ queryKey: ['warehouses'], queryFn: api.warehouses })
+  const { data } = useQuery({
+    queryKey: ['warehouses'],
+    queryFn: api.warehouses,
+    refetchInterval: (q) =>
+      q.state.data?.some?.(w => w.yours && w.scale && w.scale.phase !== 'Running') ? 15_000 : false,
+  })
   return Array.isArray(data) ? data.find(warehouse => warehouse.yours) : undefined
 }
 
-/** `Warehouse: Small`, next to the Run button. Nothing while the list is empty. */
+/**
+ * `Warehouse: Small`, next to the Run button. Nothing while the list is empty. When the
+ * scaler says the shared engine is stopped, the line says so and offers **Start now**
+ * (#1059): the first query would otherwise wait up to about three minutes.
+ */
 export default function WarehouseNote({ className }: { className?: string }) {
   const warehouse = useYourWarehouse()
+  const qc = useQueryClient()
+  const start = useMutation({
+    mutationFn: api.warehouseStart,
+    // The scaler writes `status.scale`, not this call: reading again shows the new word
+    // once the scaler has run.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['warehouses'] }),
+  })
   if (!warehouse) return null
+  const phase = warehouse.scale?.phase
   return (
     <span className={className} title={warehouseHint(warehouse)}>
       Warehouse: {warehouseText(warehouse)}
+      {phase === 'Stopped' && (
+        <>
+          {' · Stopped (starts on the first query)'}
+          <button
+            type="button"
+            className="text-xs ml-1 underline disabled:no-underline disabled:text-text-mute"
+            disabled={start.isPending}
+            onClick={() => start.mutate(warehouse.name)}
+          >
+            {start.isPending ? 'Starting…' : 'Start now'}
+          </button>
+        </>
+      )}
+      {phase === 'Starting' && ' · Starting — this can take up to 3 minutes'}
     </span>
   )
 }
