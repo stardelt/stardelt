@@ -84,7 +84,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -151,6 +151,12 @@ verify-seaweedfs-ports: _context ## Only SeaweedFS reaches its unsigned ports (p
 
 verify-metrics: _context ## Every metrics endpoint a scraper can reach answers Prometheus text (#607)
 	@NS=$(NAMESPACE) bash scripts/verify-metrics.sh
+
+# platform#131 step A: Nova's two annotations, the job's status.scale and the worker Deployment
+# must agree. Read-only.
+.PHONY: verify-warehouse-scale
+verify-warehouse-scale: _context ## The three writers of a warehouse's scale state agree
+	@NS=$(NAMESPACE) bash scripts/verify-warehouse-scale.sh
 
 # The `--allow` patterns are the accepted exceptions of #1096 question 5, each with its reason:
 # SeaweedFS sets none of chart 4.25.1's securityContext/logs keys (the chart's defaults declare no
