@@ -22,9 +22,25 @@ command -v kubectl >/dev/null || { echo "verify-operator-values: UNVERIFIED (kub
 kubectl -n "$NS" get deploy stardelt-operator >/dev/null 2>&1 \
   || { echo "verify-operator-values: UNVERIFIED (no Deployment stardelt-operator in $NS)" >&2; exit 3; }
 
-digest_of() { grep -m1 -oE 'sha256:[0-9a-f]{64}' "$1"; }
+# Read the digest each row means. The loader pins with `digest: sha256:`
+# (helm-values/airflow.yaml:58, under the statsd exporter's `tag:` at :51); the notebook pin is
+# `tag: "dev@sha256:…"` at helm-values/jupyterhub.yaml:426, under the hub's own pin at :27. A
+# caller names the line where a file carries more than one image — "first match" compared the hub
+# digest with the notebook and was red on main (platform#1634).
+digest_of() { # file [line pattern]
+  local d=""
+  if [ -n "${2-}" ]; then
+    d="$(grep -E -- "$2" "$1" | grep -m1 -oE 'sha256:[0-9a-f]{64}' || true)"
+  else
+    d="$(grep -m1 -E '^[[:space:]]+digest: sha256:' "$1" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
+    if [ -z "$d" ]; then
+      d="$(grep -m1 -oE 'sha256:[0-9a-f]{64}' "$1" || true)"
+    fi
+  fi
+  printf '%s\n' "$d"
+}
 LOADER="$(digest_of helm-values/airflow.yaml)"
-NOTEBOOK="$(digest_of helm-values/jupyterhub.yaml)"
+NOTEBOOK="$(digest_of helm-values/jupyterhub.yaml '^[[:space:]]+tag: "dev@sha256:')"
 SUPERSET="$(digest_of helm-values/superset.yaml)"
 
 # A probe records its lines instead of printing them: a short `kubectl exec` stream can cut the

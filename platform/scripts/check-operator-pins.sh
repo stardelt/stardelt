@@ -17,13 +17,13 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 OPERATOR_DIR="${OPERATOR_DIR:-../stardelt-operator}"
 
-# name|platform file|operator file (relative to the operator checkout)
+# name|platform file|operator file (relative to the operator checkout)[|line pattern]
 images=(
   "nova|manifests/nova-deployment.yaml|crates/stardelt-operator/src/provision.rs"
   "loader|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml"
   "spark|manifests/spark.yaml|crates/stardelt-operator/values/spark.yaml"
   "superset|helm-values/superset.yaml|crates/stardelt-operator/values/superset.yaml"
-  "notebook|helm-values/jupyterhub.yaml|crates/stardelt-operator/values/jupyterhub.yaml"
+  "notebook|helm-values/jupyterhub.yaml|crates/stardelt-operator/values/jupyterhub.yaml|^[[:space:]]+tag: \"dev@sha256:"
 )
 
 if [ ! -d "$OPERATOR_DIR" ]; then
@@ -32,16 +32,22 @@ if [ ! -d "$OPERATOR_DIR" ]; then
 fi
 
 # The loader file pins with `digest: sha256:`; the Spark files carry the digest twice inside a
-# `ghcr.io/stardelt/spark:dev@sha256:…` reference; the notebook files pin with
-# `tag: "dev@sha256:…"` (quoted) and carry one digest each, so the first `sha256:` match is the
-# pin. Nova has no values file on the operator side: its pin is the `NOVA_IMAGE` constant in
-# provision.rs, whose only full digest it is. Read whichever form the file has: the first
-# `digest:` line, else the first `sha256:<64 hex>` match.
-digest_of() {
-  local d
-  d="$(grep -m1 -E '^[[:space:]]+digest: sha256:' "$1" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
-  if [ -z "$d" ]; then
-    d="$(grep -m1 -oE 'sha256:[0-9a-f]{64}' "$1" || true)"
+# `ghcr.io/stardelt/spark:dev@sha256:…` reference; the notebook file pins with
+# `tag: "dev@sha256:…"` (quoted) but carries the hub's and the chart's own images above it
+# (platform#1608), so a row that needs one of those names its line with the optional second
+# argument (the row's 4th field) instead of relying on "first match". Nova has no values file on
+# the operator side: its pin is the `NOVA_IMAGE` constant in provision.rs, whose only full digest
+# it is. Read whichever form the file has: the named line, else the first `digest:` line, else
+# the first `sha256:<64 hex>` match.
+digest_of() { # file [line pattern]
+  local d=""
+  if [ -n "${2-}" ]; then
+    d="$(grep -E -- "$2" "$1" | grep -m1 -oE 'sha256:[0-9a-f]{64}' || true)"
+  else
+    d="$(grep -m1 -E '^[[:space:]]+digest: sha256:' "$1" | grep -oE 'sha256:[0-9a-f]{64}' || true)"
+    if [ -z "$d" ]; then
+      d="$(grep -m1 -oE 'sha256:[0-9a-f]{64}' "$1" || true)"
+    fi
   fi
   printf '%s\n' "$d"
 }
@@ -59,15 +65,15 @@ fi
 
 fail=0
 for image in "${images[@]}"; do
-  IFS='|' read -r name platform_file operator_path <<<"$image"
+  IFS='|' read -r name platform_file operator_path pattern <<<"$image"
   operator_file="$tmpdir/$name.yaml"
   if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:$operator_path" >"$operator_file"; then
     cp "$OPERATOR_DIR/$operator_path" "$operator_file"
     note=" (working tree; no origin/main)"
   fi
 
-  platform="$(digest_of "$platform_file")"
-  operator="$(digest_of "$operator_file")"
+  platform="$(digest_of "$platform_file" "${pattern-}")"
+  operator="$(digest_of "$operator_file" "${pattern-}")"
   if [ -z "$platform" ] || [ -z "$operator" ]; then
     echo "check-operator-pins: UNVERIFIED ($name: a digest could not be read in $platform_file or $OPERATOR_DIR/$operator_path)" >&2
     exit 3

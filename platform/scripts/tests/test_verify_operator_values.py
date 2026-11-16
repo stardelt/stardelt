@@ -56,17 +56,23 @@ exit 1
 """
 
 
-def digest_of(path):
-    """The first image digest of a helm values file, as the script's `digest_of` takes it."""
-    match = re.search(r"sha256:[0-9a-f]{64}", (REPO / path).read_text())
+def digest_of(path, pattern=None):
+    """The digest the script reads: the named line, else the first `digest:` line, else the first match."""
+    text = (REPO / path).read_text()
+    if pattern:
+        line = next(l for l in text.splitlines() if re.search(pattern, l))
+        return re.search(r"sha256:[0-9a-f]{64}", line).group(0)
+    match = re.search(r"^\s+digest: sha256:[0-9a-f]{64}", text, re.M) or re.search(
+        r"sha256:[0-9a-f]{64}", text
+    )
     if not match:
         raise AssertionError(f"no digest in {path}")
-    return match.group(0)
+    return re.search(r"sha256:[0-9a-f]{64}", match.group(0)).group(0)
 
 
 def fixtures():
     loader = digest_of("helm-values/airflow.yaml")
-    notebook = digest_of("helm-values/jupyterhub.yaml")
+    notebook = digest_of("helm-values/jupyterhub.yaml", r'^\s+tag: "dev@sha256:')
     superset = digest_of("helm-values/superset.yaml")
     # The trino identity document keeps the three needles the truncated read must still satisfy
     # before it misses `passwordAuthSecret` in the removed tail.
