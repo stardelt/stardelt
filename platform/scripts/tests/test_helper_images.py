@@ -11,9 +11,11 @@ import re
 import unittest
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parents[2]
 
-IMAGE_LINE = re.compile(r"^\s*(?:-\s*)?image:\s*(\S+)\s*$")
+IMAGE_LINE = re.compile(r"^\s*(?:-\s*)?image:\s*(\S+)(?:\s+#.*)?$")
 
 AWS_CLI = "amazon/aws-cli:2.17.0"
 AWS_CLI_DIGEST = "@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
@@ -54,6 +56,33 @@ def applied_manifest_files():
     """Every YAML a `make` step or a documented lab step applies a pod image from."""
     paths = sorted((REPO / "manifests").glob("*.yaml")) + sorted((REPO / "dev").rglob("*.yaml"))
     return [path for path in paths if path.is_file()]
+
+
+def helm_values_files():
+    """Every Helm values file the install paths upgrade a chart with (`make step-*`)."""
+    return [path for path in sorted((REPO / "helm-values").rglob("*.yaml")) if path.is_file()]
+
+
+def image_values(value, path=""):
+    """Yield (path, tag, digest) for every image reference in one loaded values document.
+
+    Two shapes: an `image: repo:tag` string (a container override), and a block that names
+    `tag:` under a key called `image`/`images` (the chart's own image keys), with or without
+    a `repository:`. Anything else that happens to carry a `tag` key is not an image.
+    """
+    if isinstance(value, dict):
+        if (
+            isinstance(value.get("tag"), str)
+            and ("repository" in value or "image" in path.split(".") or "images" in path.split("."))
+        ):
+            yield path, value["tag"], value.get("digest")
+        for key, child in value.items():
+            yield from image_values(child, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from image_values(child, f"{path}[{index}]")
+    elif isinstance(value, str) and path.rsplit(".", 1)[-1].split("[")[0] == "image":
+        yield path, value, None
 
 
 class TestHelperImages(unittest.TestCase):
@@ -109,6 +138,44 @@ class TestHelperImages(unittest.TestCase):
             total,
             18,
             "an image line was added or removed — pin it and update this count",
+        )
+
+    def test_every_helm_values_image_is_pinned(self):
+        """The charts' values files are an install path too: nothing there floats by tag."""
+        lines = 0
+        for path in helm_values_files():
+            relative = str(path.relative_to(REPO))
+            for number, line in code_lines(path):
+                match = IMAGE_LINE.match(line)
+                if not match:
+                    continue
+                lines += 1
+                self.assertIn(
+                    "@sha256:",
+                    match.group(1),
+                    f"{relative}:{number}: the bare image reference",
+                )
+        self.assertEqual(
+            lines,
+            6,
+            "an image line was added or removed — pin it and update this count",
+        )
+
+        values = 0
+        for path in helm_values_files():
+            relative = str(path.relative_to(REPO))
+            document = yaml.safe_load(path.read_text()) or {}
+            for where, tag, digest in image_values(document):
+                values += 1
+                pinned = "@sha256:" in tag or str(digest or "").startswith("sha256:")
+                self.assertTrue(
+                    pinned,
+                    f"{relative}:{where}: the bare image reference {tag}",
+                )
+        self.assertEqual(
+            values,
+            19,
+            "an image value was added or removed — pin it and update this count",
         )
 
 
