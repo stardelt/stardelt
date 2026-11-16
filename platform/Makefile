@@ -86,7 +86,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
-.PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
+.PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
 .PHONY: perf-baseline
 
@@ -1229,6 +1229,13 @@ verify-trino-tls: _context ## Prove the in-cluster Trino path is TLS-only and to
 # Superset's own stored connection — the one that went stale in platform#278.
 verify-trino-auth: _context ## Prove Trino's authentication end to end, including Superset's stored connection
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trino-auth.sh
+
+# platform#131 A1: a worker drains before it exits. The chart's own connection test cannot
+# run on this install (platform#1536), so its weight-2 graceful-shutdown hook never runs;
+# this is that hook's proof. It deletes one worker pod.
+.PHONY: verify-trino-graceful-shutdown
+verify-trino-graceful-shutdown: _context ## A deleted worker drains first; the chart's own test cannot pass here
+	@NS=$(NAMESPACE) bash scripts/verify-trino-graceful-shutdown.sh
 
 install-identity: deps _context ## Install the platform IdP (Keycloak) at id.$(BASE_DOMAIN)
 	@kubectl get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 || { \
