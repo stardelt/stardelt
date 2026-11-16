@@ -82,6 +82,7 @@ rows=(
   "external-secrets-webhook|external-secrets-webhook|helm-values/external-secrets.yaml|tag:v2.15.0:make external-secrets"
   "spark-operator-controller|spark-operator-controller|helm-values/spark-operator.yaml|tag:2.5.2:make install-spark-operator"
   "spark-operator-webhook|spark-operator-webhook|helm-values/spark-operator.yaml|tag:2.5.2:make install-spark-operator"
+  "strimzi-cluster-operator|strimzi-cluster-operator|helm-values/strimzi.yaml|tag:1.3.1:make install-kafka"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'

@@ -145,7 +145,7 @@ class TestHelperImages(unittest.TestCase):
                     )
         self.assertEqual(
             total,
-            18,
+            21,
             "an image line was added or removed — pin it and update this count",
         )
         self.assertEqual(
@@ -188,7 +188,7 @@ class TestHelperImages(unittest.TestCase):
                 )
         self.assertEqual(
             values,
-            34,
+            37,
             "an image value was added or removed — pin it and update this count",
         )
 
