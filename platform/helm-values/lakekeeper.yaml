@@ -45,6 +45,8 @@ authz:
 # change every grant in the project).
 OPABridge:
   enabled: true
+  image:
+    tag: 1.22.2@sha256:951ed07a3a41f5b02f68bf6f94ba1c952642daa597c89420986fd597eb09e661
   catalogs:
     - trinoCatalog: warehouse
       lakekeeperWarehouse: warehouse
@@ -420,6 +422,8 @@ OPABridge:
       valueFrom: { secretKeyRef: { name: svc-catalog-bridge, key: scope } }
 
 catalog:
+  image:
+    tag: v0.15.0@sha256:b02a882df48042020c473a79b980a643fcc883a6f9c21b74c5b7cc8eabeec9fe
   replicas: 1
   resources:
     requests: { cpu: "50m",  memory: "256Mi" }
@@ -445,7 +449,7 @@ catalog:
   # `install-core` has no IdP, so the wait is a no-op when the ConfigMap key is absent.
   extraInitContainers:
     - name: wait-for-idp
-      image: trinodb/trino:484          # already pinned; has bash + curl, unlike the distroless catalog
+      image: trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f  # has bash + curl, unlike the distroless catalog
       imagePullPolicy: IfNotPresent
       securityContext:
         # The user must be numeric: `runAsNonRoot` is inherited from the pod-level block the

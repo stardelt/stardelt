@@ -4,6 +4,9 @@
 # S3-compatible object store for the lakehouse. Backs Iceberg tables via
 # Trino + Lakekeeper.
 
+image:
+  tag: "4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+
 master:
   replicas: 1
   data:
