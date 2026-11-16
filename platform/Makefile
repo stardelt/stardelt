@@ -249,6 +249,10 @@ verify-crds: _context ## The live CRD schemas match the operator checkout (needs
 verify-pins: _context ## The live Deployment images match the checked-in pins
 	@bash scripts/verify-pins.sh
 
+.PHONY: check-spark-runtimes-live
+check-spark-runtimes-live: _context ## The live Spark runtime catalogue matches chart/files/spark-runtimes.json
+	@NAMESPACE=$(NAMESPACE) bash scripts/check-spark-runtimes.sh --live
+
 .PHONY: verify-operator-values
 verify-operator-values: _context ## The running operator carries the golden values the pins were merged with
 	@bash scripts/verify-operator-values.sh
@@ -521,7 +525,7 @@ step-pins: ## The image digests this cluster runs
 	fi
 
 step-verify: ## The verify targets the upgrade path runs after it converged the cluster
-	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins verify-operator-values verify-connections verify-maintenance
+	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins check-spark-runtimes-live verify-operator-values verify-connections verify-maintenance
 
 install-core: deps _context _helm-repos ## Install the core only (storage+catalog+query+Nova)
 	@echo "› Reloader (restarts workloads when a credential they read changes)"

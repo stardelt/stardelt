@@ -26,6 +26,18 @@ fail() {
   exit 1
 }
 
+# --live (platform#1517): after the file-vs-file checks pass, compare the live
+# ConfigMap the operator reads with the catalogue file. A missing ConfigMap is
+# neither a pass nor a drift: it exits 3 so a caller can tell "not installed" from
+# "installed and wrong".
+live=0
+case "${1:-}" in
+  --live) live=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--live]" >&2; exit 2 ;;
+esac
+NAMESPACE="${NAMESPACE:-stardelt}"
+
 # The keys SparkConnect owns and stardelt-operator#460's builder fills from the
 # SparkCluster spec, and the two server-process UI settings: the shared Spark Connect
 # server turns the UI and its Prometheus servlet on because it is the scraped endpoint
@@ -148,3 +160,31 @@ done
 
 digest=${catalogue_image##*sha256:}
 echo "check-spark-runtimes: OK ($runtime, Spark $catalogue_spark, image ${digest:0:8}…)"
+
+# --- 6. (--live only) the live ConfigMap == the catalogue file ----------------
+if [ "$live" = "1" ]; then
+  if ! command -v kubectl > /dev/null 2>&1 \
+    || ! kubectl -n "$NAMESPACE" get configmap stardelt-spark-runtimes > /dev/null 2>&1; then
+    echo "check-spark-runtimes: UNVERIFIED (no live ConfigMap $NAMESPACE/stardelt-spark-runtimes; run make install-spark)" >&2
+    exit 3
+  fi
+
+  live_dir=$(mktemp -d)
+  trap 'rm -rf "$live_dir"' EXIT
+
+  jq -S --arg n "$runtime" '.[$n]' "$catalogue" > "$live_dir/catalogue.json"
+  kubectl -n "$NAMESPACE" get configmap stardelt-spark-runtimes -o json \
+    | jq -r --arg n "$runtime" '.data[$n]' \
+    | jq -S . > "$live_dir/configmap.json" \
+    || fail "cannot read .data[\"$runtime\"] of ConfigMap $NAMESPACE/stardelt-spark-runtimes; run make install-spark"
+
+  if diff -q "$live_dir/catalogue.json" "$live_dir/configmap.json" > /dev/null; then
+    echo "check-spark-runtimes: live ConfigMap matches the catalogue ($runtime)"
+  else
+    echo "✗ the live ConfigMap differs from $catalogue" >&2
+    difference=$(diff -u "$live_dir/catalogue.json" "$live_dir/configmap.json" || true)
+    printf '%s\n' "$difference" | head -40 >&2
+    exit 1
+  fi
+fi
+
