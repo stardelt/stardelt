@@ -11,6 +11,7 @@ export default function Platform() {
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, refetchInterval: 15_000 })
   const workloads = useQuery({ queryKey: ['workloads'], queryFn: api.workloads, refetchInterval: 15_000 })
   const warehouse = useQuery({ queryKey: ['warehouse'], queryFn: api.warehouse })
+  const warehouses = useQuery({ queryKey: ['warehouses'], queryFn: api.warehouses, refetchInterval: 15_000 })
 
   const list = apps.data ?? []
   // The "x / y services up" header counts installed services only: an app the cluster
@@ -123,6 +124,46 @@ export default function Platform() {
               ))}
             </dl>
           )}
+        <div className="mt-5">
+          <div className="label mb-2">Warehouses</div>
+          {warehouses.isLoading && <div className="text-text-mute text-sm">loading…</div>}
+          {warehouses.isError && (
+            <ErrorBox error={warehouses.error} onRetry={() => warehouses.refetch()} />
+          )}
+          {(warehouses.data ?? []).length > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-text-mute">
+                  <th className="py-1 pr-4 font-normal">Class</th>
+                  <th className="py-1 pr-4 font-normal">State</th>
+                  <th className="py-1 pr-4 font-normal">Workers</th>
+                  <th className="py-1 pr-4 font-normal">In flight</th>
+                  <th className="py-1 font-normal">Last query</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(warehouses.data ?? []).map(w => (
+                  <tr key={w.name} className="border-t border-border/70">
+                    <td className="py-1.5 pr-4 font-medium">{w.displayName ?? w.name}</td>
+                    <td
+                      className={[
+                        'py-1.5 pr-4',
+                        w.scale?.phase === 'Running' ? 'text-success'
+                          : w.scale?.phase === 'Starting' ? 'text-warn font-semibold'
+                          : 'text-text-mute',
+                      ].join(' ')}
+                    >
+                      {w.scale?.phase ?? '—'}
+                    </td>
+                    <td className="py-1.5 pr-4">{w.scale?.workers ?? '—'}</td>
+                    <td className="py-1.5 pr-4">{w.scale?.queriesInFlight ?? '—'}</td>
+                    <td className="py-1.5 font-mono text-xs text-text-dim">{w.scale?.lastQueryAt ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </section>
     </div>
   )
