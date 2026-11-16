@@ -66,15 +66,21 @@ total=0 passed=0 failed=0 allowed=0
 
 for pod in $(kubectl -n "$NS" get pods -o json \
     | jq -r '.items[] | select(.status.phase=="Running") | .metadata.name' | sort); do
+  # The list and the get are two API calls; a pipeline task pod or a CronJob pod can finish
+  # between them. A pod that is gone cannot violate the floor — skip it, do not abort the scan
+  # (2026-11-16: a finished demo pod turned a green floor into exit 1).
+  if ! kubectl -n "$NS" get pod "$pod" -o json >"$tmp/pod.read" 2>"$tmp/pod.err"; then
+    echo "– $pod: gone before the probe (skipped)"
+    continue
+  fi
   total=$((total + 1))
   # The pod spec as the API server sees it, with only what a scratch namespace cannot carry
   # removed: its identity, the node it is pinned to, and a priority class it may not have.
-  kubectl -n "$NS" get pod "$pod" -o json \
-    | jq --arg name "probe-$total" --arg ns "$PROBE" '
-        .metadata = {name: $name, namespace: $ns}
-        | .spec.serviceAccountName = "default"
-        | del(.status, .spec.nodeName, .spec.priorityClassName)
-      ' > "$tmp/pod.json"
+  jq --arg name "probe-$total" --arg ns "$PROBE" '
+      .metadata = {name: $name, namespace: $ns}
+      | .spec.serviceAccountName = "default"
+      | del(.status, .spec.nodeName, .spec.priorityClassName)
+    ' "$tmp/pod.read" >"$tmp/pod.json"
   if kubectl -n "$PROBE" create --dry-run=server -f "$tmp/pod.json" >/dev/null 2>"$tmp/err"; then
     passed=$((passed + 1))
     continue
