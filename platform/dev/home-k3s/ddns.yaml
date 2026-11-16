@@ -112,7 +112,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: ddns
-              image: python:3.13.16-slim-bookworm
+              image: python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d
               command: ["python3", "/opt/ddns/ddns.py"]
               # The record name is the platform's base domain; change both lines
               # together or the job stops maintaining the entry the Ingresses use.

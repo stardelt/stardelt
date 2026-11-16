@@ -3,13 +3,17 @@
 `scripts/check_pin_freshness.py` reads live Deployments; these two images run in a CronJob
 and in one-shot Jobs, so nothing watched them. `manifests/pg-dump-backup.yaml` already
 pinned `amazon/aws-cli:2.17.0`; the rest of the repository did not, which let two pods of
-the same manifest run different bytes (platform#1563).
+the same manifest run different bytes (platform#1563). The two helper tests are the start;
+`test_every_applied_image_is_pinned` covers every `image:` line in `manifests/` and `dev/`.
 """
 
+import re
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+
+IMAGE_LINE = re.compile(r"^\s*(?:-\s*)?image:\s*(\S+)\s*$")
 
 AWS_CLI = "amazon/aws-cli:2.17.0"
 AWS_CLI_DIGEST = "@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
@@ -46,6 +50,12 @@ def code_lines(path):
             yield number, line
 
 
+def applied_manifest_files():
+    """Every YAML a `make` step or a documented lab step applies a pod image from."""
+    paths = sorted((REPO / "manifests").glob("*.yaml")) + sorted((REPO / "dev").rglob("*.yaml"))
+    return [path for path in paths if path.is_file()]
+
+
 class TestHelperImages(unittest.TestCase):
     def assert_every_reference_is_pinned(self, image, digest, expected):
         """No bare reference anywhere, and the enumerated pins are all still there."""
@@ -79,6 +89,27 @@ class TestHelperImages(unittest.TestCase):
 
     def test_the_python_image_has_one_pinned_reference(self):
         self.assert_every_reference_is_pinned(PYTHON, PYTHON_DIGEST, PYTHON_PINS)
+
+    def test_every_applied_image_is_pinned(self):
+        """The whole class, not two names: every `image:` a pod runs carries a digest."""
+        total = 0
+        for path in applied_manifest_files():
+            relative = str(path.relative_to(REPO))
+            for number, line in code_lines(path):
+                match = IMAGE_LINE.match(line)
+                if not match:
+                    continue
+                total += 1
+                self.assertIn(
+                    "@sha256:",
+                    match.group(1),
+                    f"{relative}:{number}: the bare image reference",
+                )
+        self.assertEqual(
+            total,
+            18,
+            "an image line was added or removed — pin it and update this count",
+        )
 
 
 if __name__ == "__main__":

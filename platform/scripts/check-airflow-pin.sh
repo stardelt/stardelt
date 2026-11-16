@@ -14,8 +14,8 @@ file=helm-values/airflow.yaml
 deployments="$(sed -n 's/^    digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$file")"
 tasks="$(grep -A1 'AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG' "$file" \
   | sed -n 's/^ *value: "[a-z0-9.-]*@\(sha256:[0-9a-f]\{64\}\)"$/\1/p')"
-manifest="$(sed -n 's/^ *ghcr\.io\/stardelt\/airflow:[a-z0-9.-]*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
-  manifests/airflow-group-roles.yaml)"
+manifest="$(grep -oE 'ghcr\.io/stardelt/airflow:[a-z0-9.-]+@sha256:[0-9a-f]{64}' \
+  manifests/airflow-group-roles.yaml | head -1 | sed 's/.*@//')"
 
 if [ -z "$deployments" ] || [ -z "$tasks" ] || [ -z "$manifest" ]; then
   echo "check-airflow-pin: could not read all three digests (deployments='$deployments' tasks='$tasks' manifest='$manifest')" >&2
