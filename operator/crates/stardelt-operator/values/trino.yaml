@@ -206,6 +206,19 @@ coordinator:
       fs.cache.max-sizes=10GB
       fs.cache.ttl=7d
 worker:
+  # Graceful shutdown (platform#131 step A1): a worker stops taking new splits and finishes
+  # the queries it is already running before it exits, so a scale-down or a rollout never
+  # kills one. The chart renders `shutdown.grace-period=120s` into the worker's config, adds
+  # the preStop hook that sends the shutdown request as `user: admin`, and merges the
+  # `write system information` permission for that user into the worker's file rules
+  # (`trino` chart 1.45.0, `trino.workerAccessControlRules`). The chart refuses a
+  # `terminationGracePeriodSeconds` below 2x the grace period.
+  # The twin of stardelt-platform helm-values/trino.yaml.
+  gracefulShutdown:
+    enabled: true
+    gracePeriodSeconds: 120
+    user: admin
+  terminationGracePeriodSeconds: 240
   jvm:
     maxHeapSize: 2G
   config:
