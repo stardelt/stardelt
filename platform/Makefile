@@ -389,13 +389,13 @@ step-cnpg: ## The CloudNative-PG operator (the Postgres clusters need it)
 	@echo "› CloudNative-PG operator"
 	@helm upgrade --install cnpg cnpg/cloudnative-pg \
 	  --version $(CNPG_VERSION) \
-	  $(HELM_FLAGS)
+	  $(HELM_FLAGS) -f helm-values/cnpg.yaml
 
 step-barman-cloud-plugin: ## The barman-cloud CNPG plugin and the four ObjectStores (platform#192)
 	@echo "› CloudNativePG barman-cloud plugin"
 	@helm upgrade --install barman-cloud cnpg/plugin-barman-cloud \
 	  --version $(PLUGIN_BARMAN_CLOUD_VERSION) \
-	  $(HELM_FLAGS)
+	  $(HELM_FLAGS) -f helm-values/barman-cloud.yaml
 	@echo "› the four backup stores (one per database; no Cluster names one yet)"
 	@kubectl apply -f manifests/cnpg-objectstore.yaml
 
@@ -547,7 +547,7 @@ install-core: deps _context _helm-repos ## Install the core only (storage+catalo
 	@echo "› [1/7] CloudNative-PG operator"
 	@helm upgrade --install cnpg cnpg/cloudnative-pg \
 	  --version $(CNPG_VERSION) \
-	  $(HELM_FLAGS)
+	  $(HELM_FLAGS) -f helm-values/cnpg.yaml
 
 	@echo "› [2/7] Generated credentials (S3 key pair, once)"
 	@NAMESPACE=$(NAMESPACE) bash scripts/s3-secrets.sh

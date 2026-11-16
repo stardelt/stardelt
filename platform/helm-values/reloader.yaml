@@ -15,6 +15,10 @@
 # `reloadOnCreate`: a rotation replaces the Secret (delete, then re-create), which is a create event
 # and off by default — the pod would keep the old credential while the Secret had the new one
 # (platform#278). An update always reloads; this extends it to recreate.
+image:
+  # Pinned by digest (platform#1615): the chart's top-level `image.tag` is the Deployment's
+  # image (`reloader.image.*` is the Reloader *behaviour* block, not the image).
+  tag: "v1.4.24@sha256:3ab43d3eb96c59798644bf826b0444a846c0197d22ab4b6c101c4da3e1d6ef23"
 reloader:
   watchGlobally: false
   reloadStrategy: annotations
