@@ -29,8 +29,20 @@ PYTHON_PINNED = (
     "python:3.13.16-slim-bookworm"
     "@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d"
 )
+ALPINE_PINNED = (
+    "alpine/k8s:1.37.1"
+    "@sha256:712dc5385d1c1a3f83b747fa9e40f64d433a97f72ff42f9755ff7dd1f62846e4"
+)
+KEYCLOAK_PINNED = (
+    "quay.io/keycloak/keycloak:26.8.2"
+    "@sha256:c68e286cacd87b942ac1939a0a1481461109d6acd3a57dc496969a319a76bbf0"
+)
+KEYCLOAK = "quay.io/keycloak/keycloak:26.8.2"
 
-ROWS = "access-sync,demo-reset,lakehouse-backup"
+ROWS = (
+    "access-sync,demo-reset,lakehouse-backup,openbao-group-policies,"
+    "spark-confmap-janitor,keycloak"
+)
 
 SHIM = """#!/usr/bin/env bash
 set -euo pipefail
@@ -53,6 +65,16 @@ if [ "${args[0]-}" = get ] && [ "${args[1]-}" = cronjob ]; then
   printf '%s\\n' "$value"
   exit 0
 fi
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = deploy ]; then
+  name="$(printf '%s' "${args[2]-}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
+  var="FAKE_DEPLOY_${name}"
+  value="${!var-}"
+  if [ -z "$value" ]; then
+    exit 1
+  fi
+  printf '%s\\n' "$value"
+  exit 0
+fi
 exit 0
 """
 
@@ -67,8 +89,11 @@ class VerifyPins(unittest.TestCase):
         self.log = self.dir / "kubectl.log"
         self.log.write_text("")
 
-    def run_script(self, images):
-        """images maps CronJob name -> list of image strings the cluster reports."""
+    def run_script(self, images, deploys=None):
+        """images maps CronJob name -> list of image strings the cluster reports.
+
+        deploys maps Deployment name -> the single image string the cluster reports.
+        """
         env = dict(
             os.environ,
             PATH=f"{self.dir}:{os.environ['PATH']}",
@@ -78,6 +103,8 @@ class VerifyPins(unittest.TestCase):
         )
         for name, values in images.items():
             env["FAKE_IMAGES_" + name.upper().replace("-", "_")] = "\n".join(values)
+        for name, value in (deploys or {}).items():
+            env["FAKE_DEPLOY_" + name.upper().replace("-", "_")] = value
         return subprocess.run(
             ["bash", str(SCRIPT)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
         )
@@ -98,7 +125,10 @@ class VerifyPins(unittest.TestCase):
                 "access-sync": [PYTHON_PINNED, PYTHON_PINNED],
                 "demo-reset": [PYTHON_PINNED],
                 "lakehouse-backup": [AWS_CLI_PINNED],
-            }
+                "openbao-group-policies": [ALPINE_PINNED],
+                "spark-confmap-janitor": [ALPINE_PINNED],
+            },
+            deploys={"keycloak": KEYCLOAK_PINNED},
         )
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("PASS", done.stdout)
@@ -112,6 +142,9 @@ class VerifyPins(unittest.TestCase):
             "✓ lakehouse-backup   1 image(s) match manifests/object-store-backup.yaml",
             done.stdout,
         )
+        self.assertIn("1 image(s) match manifests/openbao-group-policies.yaml", done.stdout)
+        self.assertIn("1 image(s) match manifests/spark-confmap-janitor.yaml", done.stdout)
+        self.assertIn("matches manifests/keycloak.yaml", done.stdout)
         self.assertNotIn("✗", done.stdout)
         self.assert_read_only()
 
@@ -122,12 +155,33 @@ class VerifyPins(unittest.TestCase):
                 "demo-reset": [PYTHON_PINNED],
                 # The pre-#1563 bare tag: the manifest was pinned, the CronJob was not applied.
                 "lakehouse-backup": [AWS_CLI],
-            }
+                "openbao-group-policies": [ALPINE_PINNED],
+                "spark-confmap-janitor": [ALPINE_PINNED],
+            },
+            deploys={"keycloak": KEYCLOAK_PINNED},
         )
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("FAIL", done.stdout + done.stderr)
         self.assertIn(AWS_CLI, done.stdout)
         self.assertIn("kubectl apply -f manifests/object-store-backup.yaml", done.stdout)
+        self.assert_read_only()
+
+    def test_keycloak_left_on_the_bare_tag_fails(self):
+        """A keycloak Deployment that was never applied: quay.io is not ghcr.io/stardelt, so the
+        image kind cannot read it and pin-image.sh has no keycloak app to send a reader to."""
+        done = self.run_script(
+            {
+                "access-sync": [PYTHON_PINNED, PYTHON_PINNED],
+                "demo-reset": [PYTHON_PINNED],
+                "lakehouse-backup": [AWS_CLI_PINNED],
+                "openbao-group-policies": [ALPINE_PINNED],
+                "spark-confmap-janitor": [ALPINE_PINNED],
+            },
+            deploys={"keycloak": KEYCLOAK},
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL", done.stdout + done.stderr)
+        self.assertIn("kubectl apply -f manifests/keycloak.yaml", done.stdout)
         self.assert_read_only()
 
 

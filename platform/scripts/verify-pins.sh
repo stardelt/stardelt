@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Prove that the live Deployments, the group-roles CronJobs, the two spawned-notebook pins and the
-# three helper CronJobs run the images this repository pins.
+# Prove that the live Deployments, the group-roles CronJobs, the two spawned-notebook pins, the
+# three helper CronJobs, the Keycloak Deployment and the two alpine CronJobs run the images this
+# repository pins.
 #
 # Why: the recurring failure is a correct pin plus a Deployment that was never rolled to it
 # (stardelt-platform#697, #704, #503, #501, #509, #510). verify-images proves a pin is readable,
@@ -9,7 +10,9 @@
 # Deployments: the JupyterHub spawn image lives in Secret hub and the pipeline notebook image in
 # Airflow's PIPELINE_NOTEBOOK_IMAGE, both pinned by hand. The helper CronJobs (access-sync,
 # demo-reset, lakehouse-backup) are applied by hand too, and nothing read them until #1567: their
-# digests could sit unapplied while every check stayed green (platform#1563).
+# digests could sit unapplied while every check stayed green (platform#1563). Keycloak
+# (manifests/keycloak.yaml, quay.io) and the alpine CronJobs openbao-group-policies and
+# spark-confmap-janitor joined them in #1579.
 #
 #   scripts/verify-pins.sh
 #   ROWS=access-sync,demo-reset scripts/verify-pins.sh   # only these rows (the test uses it)
@@ -49,6 +52,9 @@ rows=(
   "access-sync|access-sync|manifests/access-sync.yaml|manifest-images"
   "demo-reset|demo-reset|manifests/demo-reset.yaml|manifest-images"
   "lakehouse-backup|lakehouse-backup|manifests/object-store-backup.yaml|manifest-images"
+  "openbao-group-policies|openbao-group-policies|manifests/openbao-group-policies.yaml|manifest-images"
+  "spark-confmap-janitor|spark-confmap-janitor|manifests/spark-confmap-janitor.yaml|manifest-images"
+  "keycloak|keycloak|manifests/keycloak.yaml|any-image"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'
@@ -76,12 +82,16 @@ for row in sys.argv[1:]:
             continue
         print(f"{app}\t{deploy}\t{path}\t{','.join(sorted(found))}\tmanifest-images")
         continue
+    elif kind == "any-image":
+        # A Deployment image from any registry (keycloak is quay.io, not ghcr.io/stardelt). The
+        # first pinned image: line wins, so a manifest with a second image would need a new kind.
+        m = re.search(r"^\s*image:\s*(\S+@sha256:[0-9a-f]{64})\s*$", text, re.M)
     else:
         m = re.search(r"^\s*image:\s*(ghcr\.io/stardelt/[^\s\"']+@sha256:[0-9a-f]{64})", text, re.M)
     if not m:
         print(f"{app}\t{deploy}\t{path}\tERROR: no digest pin")
         continue
-    digest = m.group(1).rsplit("@", 1)[-1] if kind == "image" else m.group(1)
+    digest = m.group(1).rsplit("@", 1)[-1] if kind in ("image", "any-image") else m.group(1)
     print(f"{app}\t{deploy}\t{path}\t{digest}\t{kind}")
 PY
 )"
@@ -130,6 +140,7 @@ while IFS=$'\t' read -r app deploy path digest kind; do
         hub) hint="run make install-notebooks" ;;
         env) hint="run make step-airflow" ;;
         cronjob) hint="run make step-airflow" ;;
+        any-image) hint="kubectl apply -f $path" ;;
         *) hint="run ./scripts/pin-image.sh $app" ;;
       esac
     fi
@@ -141,7 +152,7 @@ while IFS=$'\t' read -r app deploy path digest kind; do
 done <<< "$pins"
 
 case "$status" in
-  0) echo "verify-pins: PASS (live Deployments, both group-roles CronJobs, the spawned-notebook pins and the three helper CronJobs carry the checked-in pins)" ;;
+  0) echo "verify-pins: PASS (live Deployments, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment and the two alpine CronJobs carry the checked-in pins)" ;;
   1) echo "verify-pins: FAIL (a pin does not match the live configuration)" >&2 ;;
   *) echo "verify-pins: UNVERIFIED (a pin or Deployment could not be read)" >&2 ;;
 esac
