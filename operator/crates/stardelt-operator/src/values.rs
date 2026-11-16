@@ -340,6 +340,43 @@ mod tests {
     }
 
     #[test]
+    fn the_chart_default_images_are_pinned_by_digest() {
+        // The operator installs the same three charts as stardelt-platform (planner.rs names the
+        // same versions), so its golden values carry the same six digests (platform#1623/#1624).
+        let eso = crate::values::golden_values("external-secrets");
+        let eso_digest =
+            "v2.15.0@sha256:6888f243e5f8f7592c6d7fae2a5547c9e33531441b47b53807b9093b25a00e31";
+        assert_eq!(eso["image"]["tag"], serde_json::json!(eso_digest));
+        assert_eq!(
+            eso["webhook"]["image"]["tag"],
+            serde_json::json!(eso_digest)
+        );
+        assert_eq!(
+            eso["certController"]["image"]["tag"],
+            serde_json::json!(eso_digest)
+        );
+        // The duplicate-key trap: a second `webhook:` key drops the first mapping's resources.
+        assert_eq!(eso["webhook"]["resources"]["limits"]["memory"], "128Mi");
+        assert_eq!(
+            eso["certController"]["resources"]["limits"]["memory"],
+            "128Mi"
+        );
+
+        let spark = crate::values::golden_values("spark-operator");
+        assert_eq!(
+            spark["image"]["tag"],
+            "2.5.2@sha256:57e146696e49ea1ef3cc199097dabff3d570d9638dc33155b9170293081c49c7"
+        );
+
+        let kafka = crate::values::golden_values("kafka");
+        let strimzi =
+            "1.3.1@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb";
+        assert_eq!(kafka["image"]["tag"], strimzi);
+        assert_eq!(kafka["topicOperator"]["image"]["tag"], strimzi);
+        assert_eq!(kafka["userOperator"]["image"]["tag"], strimzi);
+    }
+
+    #[test]
     fn openfga_golden_values_mirror_the_platform_shape() {
         let o = golden_values("openfga");
         assert_eq!(

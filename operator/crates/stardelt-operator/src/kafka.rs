@@ -7,6 +7,15 @@ use crate::crd::Profile;
 
 pub const NAME: &str = "kafka";
 
+/// Strimzi's broker image, pinned by digest as `stardelt-platform/manifests/kafka.yaml` does
+/// (platform#1624). The cluster operator's `STRIMZI_KAFKA_IMAGES` map cannot pin the broker, so
+/// the `Kafka` resource names the image itself.
+pub const BROKER_IMAGE: &str = "quay.io/strimzi/kafka:1.3.1-kafka-4.3.2@sha256:9cea505e434a53cea40941d2c6e9aa5896792fe9c9380feb1d7adea3867a3a0b";
+
+/// The topic and user operator containers, the same digest as `values/kafka.yaml` pins
+/// (`STRIMZI_DEFAULT_*_OPERATOR_IMAGE`) and the platform's `manifests/kafka.yaml` sets.
+pub const OPERATOR_IMAGE: &str = "quay.io/strimzi/operator:1.3.1@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb";
+
 fn meta(namespace: &str) -> ObjectMeta {
     ObjectMeta {
         name: Some(NAME.into()),
@@ -86,6 +95,7 @@ pub fn broker(namespace: &str) -> DynamicObject {
         data: json!({
             "spec": {
                 "kafka": {
+                    "image": BROKER_IMAGE,
                     "listeners": [{"name": "plain", "port": 9092, "type": "internal", "tls": false}],
                     "config": {
                         "offsets.topic.replication.factor": 1,
@@ -99,8 +109,8 @@ pub fn broker(namespace: &str) -> DynamicObject {
                 // `Kafka` workload (not a node pool), so its template is here; both operator
                 // containers need the same block.
                 "entityOperator": {
-                    "topicOperator": {},
-                    "userOperator": {},
+                    "topicOperator": {"image": OPERATOR_IMAGE},
+                    "userOperator": {"image": OPERATOR_IMAGE},
                     "template": {
                         "pod": {"securityContext": {
                             "runAsNonRoot": true,
@@ -218,5 +228,28 @@ mod tests {
                 "{name} would keep the restricted violation"
             );
         }
+    }
+
+    #[test]
+    fn the_broker_and_both_entity_operators_are_pinned_by_digest() {
+        // platform#1624 pinned these in the platform path; the operator path must not float.
+        assert_eq!(
+            BROKER_IMAGE,
+            "quay.io/strimzi/kafka:1.3.1-kafka-4.3.2@sha256:9cea505e434a53cea40941d2c6e9aa5896792fe9c9380feb1d7adea3867a3a0b"
+        );
+        assert_eq!(
+            OPERATOR_IMAGE,
+            "quay.io/strimzi/operator:1.3.1@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb"
+        );
+        let kafka = broker("data");
+        assert_eq!(kafka.data["spec"]["kafka"]["image"], BROKER_IMAGE);
+        assert_eq!(
+            kafka.data["spec"]["entityOperator"]["topicOperator"]["image"],
+            OPERATOR_IMAGE
+        );
+        assert_eq!(
+            kafka.data["spec"]["entityOperator"]["userOperator"]["image"],
+            OPERATOR_IMAGE
+        );
     }
 }
