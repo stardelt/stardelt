@@ -540,16 +540,27 @@ pub fn confmap_janitor_service_account(namespace: &str) -> ServiceAccount {
 
 /// Get, list and delete ConfigMaps — no `create`, no `update`, and no `deletecollection`
 /// (platform#1121): a collection delete would take every ConfigMap in the namespace, and this
-/// identity exists to remove one shape of them.
+/// identity exists to remove one shape of them. It also gets and lists pods, so the script can
+/// keep every ConfigMap a pod mounts (platform#1585).
 pub fn confmap_janitor_role(namespace: &str) -> Role {
     Role {
         metadata: meta_part_of_only(CONFMAP_JANITOR, namespace),
-        rules: Some(vec![PolicyRule {
-            api_groups: Some(vec!["".into()]),
-            resources: Some(vec!["configmaps".into()]),
-            verbs: vec!["get".into(), "list".into(), "delete".into()],
-            ..PolicyRule::default()
-        }]),
+        rules: Some(vec![
+            PolicyRule {
+                api_groups: Some(vec!["".into()]),
+                resources: Some(vec!["configmaps".into()]),
+                verbs: vec!["get".into(), "list".into(), "delete".into()],
+                ..PolicyRule::default()
+            },
+            PolicyRule {
+                // The script skips every ConfigMap a pod mounts; listing pods is read-only.
+                // Never add `delete` here: the janitor deletes ConfigMaps, not pods.
+                api_groups: Some(vec!["".into()]),
+                resources: Some(vec!["pods".into()]),
+                verbs: vec!["get".into(), "list".into()],
+                ..PolicyRule::default()
+            },
+        ]),
     }
 }
 
@@ -2195,7 +2206,7 @@ mod tests {
             Some("spark-confmap-janitor")
         );
         let rules = janitor.rules.as_ref().expect("rules");
-        assert_eq!(rules.len(), 1, "the janitor holds exactly one rule");
+        assert_eq!(rules.len(), 2, "the janitor holds exactly two rules");
         let rule = &rules[0];
         assert_eq!(rule.api_groups, Some(vec![String::new()]));
         assert_eq!(
@@ -2211,6 +2222,19 @@ mod tests {
             "a collection delete would take every ConfigMap in the namespace (platform#1121)"
         );
         assert!(rule.resource_names.is_none(), "the script filters by name");
+
+        let pods_rule = &rules[1];
+        assert_eq!(pods_rule.api_groups, Some(vec![String::new()]));
+        assert_eq!(
+            pods_rule.resources.as_ref().unwrap(),
+            &vec!["pods".to_string()],
+            "the script lists pods to keep every ConfigMap a pod mounts (platform#1585)"
+        );
+        assert_eq!(pods_rule.verbs, vec!["get".to_string(), "list".to_string()]);
+        assert!(
+            !pods_rule.verbs.contains(&"delete".to_string()),
+            "the janitor must never delete pods"
+        );
     }
 
     #[test]
@@ -2283,5 +2307,8 @@ mod tests {
             .expect("the ConfigMap key is spark-confmap-janitor.sh");
         assert!(!script.is_empty());
         assert!(script.starts_with("#!/usr/bin/env bash"));
+        // The pods rule above exists for this line of the script (platform#1585): the cheapest
+        // drift signal until a cross-repo byte test exists.
+        assert!(CONFMAP_JANITOR_SCRIPT.contains("referenced by a pod"));
     }
 }
