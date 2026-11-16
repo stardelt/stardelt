@@ -5,9 +5,10 @@
 #   NS=stardelt bash scripts/verify-spark-cluster.sh
 #
 # Creates one `small` SparkCluster named `verify-spark-cluster`, polls its phase and asserts the
-# eight things the phase alone has lied about before (operator#774): the endpoint, the server
+# nine things the phase alone has lied about before (operator#774): the endpoint, the server
 # pod's readiness and identity, the driver's ServiceAccount/Role/RoleBinding, the two admission
-# policies with their bindings, the ingress NetworkPolicy, and a TLS-clean server log.
+# policies with their bindings, the ingress NetworkPolicy, a TLS-clean server log and the
+# executor path.
 # The CR and the objects it owns are deleted on every exit path — the trap is the contract.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -15,6 +16,7 @@ NS="${NS:-${NAMESPACE:-stardelt}}"
 NAME=verify-spark-cluster
 NP="spc-${NAME}-ingress"
 POD="spc-${NAME}-server"
+EXEC="verify-spark-cluster-exec"
 RUNTIME=spark-4.1-py3.11
 CATALOGUE=stardelt-spark-runtimes
 problems=0
@@ -33,6 +35,9 @@ if ! grep -qx "$RUNTIME" <<<"$keys"; then
   exit 3
 fi
 
+IMAGE="$(kubectl -n "$NS" get configmap "$CATALOGUE" -o json \
+  | python3 -c 'import json,sys; print(json.loads(json.load(sys.stdin)["data"][sys.argv[1]])["image"])' "$RUNTIME")"
+
 # The CR owns the SparkConnect, the server pod and the ingress policy; deleting it is what stops
 # the clock on all of them. The operator removes the policies and the driver's Role on its own
 # schedule, so only the two owned kinds are waited for.
@@ -44,10 +49,11 @@ gone() {
   local pods np
   pods="$(kubectl -n "$NS" get pods -o name 2>/dev/null || true)"
   np="$(kubectl -n "$NS" get networkpolicy "$NP" -o name 2>/dev/null || true)"
-  ! grep -q "^pod/spc-${NAME}-" <<<"$pods" && [ -z "$np" ]
+  ! grep -qE "^pod/(spc-${NAME}-|${EXEC}$)" <<<"$pods" && [ -z "$np" ]
 }
 cleanup() {
   kubectl -n "$NS" delete sparkcluster "$NAME" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n "$NS" delete pod "$EXEC" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local deadline=$((SECONDS + 120))
   while ! gone; do
     if [ "$SECONDS" -ge "$deadline" ]; then
@@ -164,7 +170,37 @@ else
   bad "the server pod's log has no 'PKIX path building failed' (${pkix:-no log lines} line(s))"
 fi
 
+# 9. The executor path (platform#1511): Spark labels every executor pod `spark-role=executor`, and
+#    executors must reach the driver's RPC port. The policy names the rule AND a pod with that label
+#    connects — an endpoint that answers 15002 is a cluster that cannot compute, which is what this
+#    script said 8 of 8 about until now.
+admitted="$(kubectl -n "$NS" get networkpolicy "$NP" -o json 2>/dev/null | python3 -c '
+import json, sys
+rules = ((json.load(sys.stdin).get("spec") or {}).get("ingress") or [])
+found = False
+for rule in rules:
+    peers = rule.get("from") or []
+    executor = any(((p.get("podSelector") or {}).get("matchLabels") or {}).get("spark-role") == "executor" for p in peers)
+    ports = {p.get("port") for p in (rule.get("ports") or [])}
+    found = found or (executor and {7078, 7079} <= ports)
+print("yes" if found else "no")
+' 2>/dev/null || true)"
+reachable=no
+driver_ip="$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.podIP}' 2>/dev/null || true)"
+if [ -n "$driver_ip" ] \
+   && kubectl -n "$NS" delete pod "$EXEC" --ignore-not-found >/dev/null 2>&1 \
+   && kubectl -n "$NS" run "$EXEC" --image "$IMAGE" --labels='spark-role=executor' --restart=Never --command -- sleep 300 >/dev/null 2>&1 \
+   && kubectl -n "$NS" wait --for=condition=Ready pod/"$EXEC" --timeout=120s >/dev/null 2>&1 \
+   && kubectl -n "$NS" exec "$EXEC" -- timeout 10 bash -c "</dev/tcp/${driver_ip}/7078" >/dev/null 2>&1; then
+  reachable=yes
+fi
+if [ "$admitted" = yes ] && [ "$reachable" = yes ]; then
+  ok "a pod labelled spark-role=executor reaches the driver on 7078, and the policy names 7078 and 7079"
+else
+  bad "a pod labelled spark-role=executor reaches the driver on 7078 (the policy names it: ${admitted}; the probe connects: ${reachable})"
+fi
+
 # The FAIL branch exits first on purpose: a trailing unconditional `exit` makes ShellCheck
 # (0.9 SC2317, 0.11 SC2329) call the trap-only `cleanup` unreachable.
-[ "$problems" -eq 0 ] || { echo "FAIL ($((8 - problems)) of 8 checks passed; $problems failed)"; exit 1; }
-echo "PASS (8 of 8: the endpoint, the driver's identity, its guards and a TLS-clean log)"
+[ "$problems" -eq 0 ] || { echo "FAIL ($((9 - problems)) of 9 checks passed; $problems failed)"; exit 1; }
+echo "PASS (9 of 9: the endpoint, the driver's identity, its guards, a TLS-clean log and the executor path)"

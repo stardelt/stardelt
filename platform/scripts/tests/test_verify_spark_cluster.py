@@ -5,7 +5,7 @@ runs them in CI, and `python3 -m pytest scripts/tests/test_verify_spark_cluster.
 same tests. No cluster is touched — the script is read, and `bash -n` parses it.
 
 The point of each assertion here is its mutation: drop the trap, drop the CR delete in the
-cleanup, drop one of the eight checks or raise the size, and exactly one test fails.
+cleanup, drop one of the nine checks or raise the size, and exactly one test fails.
 """
 
 import re
@@ -16,7 +16,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "verify-spark-cluster.sh"
 
-# The eight checks: the words a reader sees on the ✓/✗ line, and the thing the script looks at.
+# The nine checks: the words a reader sees on the ✓/✗ line, and the thing the script looks at.
 # Losing either one is the mutation these tests exist for — a check that no longer names what it
 # proves, or one that prints the right words without asking the cluster.
 CHECKS = [
@@ -36,6 +36,8 @@ CHECKS = [
      r'if kubectl -n "\$NS" get networkpolicy "\$NP"'),
     ("the server pod's log has no 'PKIX path building failed'",
      r"grep -c 'PKIX path building failed'"),
+    ("a pod labelled spark-role=executor reaches the driver on 7078",
+     r"spark-role=executor"),
 ]
 
 
@@ -78,7 +80,7 @@ class SparkClusterVerifier(unittest.TestCase):
             "a `kubectl … | grep -q` pipeline under pipefail reports 'gone' on SIGPIPE",
         )
 
-    def test_it_names_all_eight_checks(self):
+    def test_it_names_all_checks(self):
         missing = []
         for label, subject in CHECKS:
             if not re.search(label, self.text):
@@ -86,6 +88,10 @@ class SparkClusterVerifier(unittest.TestCase):
             if not re.search(subject, self.text):
                 missing.append(f"what it looks at: {subject}")
         self.assertEqual(missing, [], "these assertions are not in the script")
+
+    def test_the_cleanup_deletes_the_probe_pod(self):
+        cleanup = self.text.split("cleanup()", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('delete pod "$EXEC"', cleanup)
 
     def test_the_cluster_is_small(self):
         self.assertIn("size: small", self.text)
