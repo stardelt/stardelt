@@ -919,6 +919,15 @@
       "query_params": [],
       "body": false
     },
+    "warehouses_start": {
+      "method": "POST",
+      "path": "/api/warehouses/{name}/start",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "workspace_get": {
       "method": "GET",
       "path": "/api/workspace",
