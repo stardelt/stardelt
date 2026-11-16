@@ -55,6 +55,11 @@ rows=(
   "openbao-group-policies|openbao-group-policies|manifests/openbao-group-policies.yaml|manifest-images"
   "spark-confmap-janitor|spark-confmap-janitor|manifests/spark-confmap-janitor.yaml|manifest-images"
   "keycloak|keycloak|manifests/keycloak.yaml|any-image"
+  "lakekeeper|lakekeeper|helm-values/lakekeeper.yaml|tag:v0.15.0:make step-lakekeeper"
+  "trino|trino-coordinator|helm-values/trino.yaml|tag:484:make step-trino"
+  "seaweedfs-s3|seaweedfs-s3|helm-values/seaweedfs.yaml|tag:4.25:make step-storage"
+  "openfga|openfga|helm-values/openfga.yaml|tag:v1.22.1:make step-openfga"
+  "airflow-statsd|airflow-statsd|helm-values/airflow.yaml|tag:v0.30.0:make step-airflow"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'
@@ -70,6 +75,16 @@ for row in sys.argv[1:]:
     elif kind == "cronjob":
         m = re.search(
             r"^\s*image:\s*(?:>-\s*)?ghcr\.io/stardelt/[^\s\"']+@(sha256:[0-9a-f]{64})",
+            text,
+            re.M,
+        )
+    elif kind.startswith("tag:"):
+        # `tag:<tag>[:<hint>]`: the file may carry other `tag:` lines with digests
+        # (lakekeeper's OPA sidecar, superset's Postgres and Redis, #1594), so the row
+        # names the tag it means instead of taking the first one.
+        parts = kind.split(":", 2)
+        m = re.search(
+            r"^\s*tag:\s*[\"']?" + re.escape(parts[1]) + r"@(sha256:[0-9a-f]{64})",
             text,
             re.M,
         )
@@ -101,12 +116,13 @@ for row in sys.argv[1:]:
         print(f"{app}\t{deploy}\t{path}\tERROR: no digest pin")
         continue
     digest = m.group(1).rsplit("@", 1)[-1] if kind in ("image", "any-image") else m.group(1)
-    print(f"{app}\t{deploy}\t{path}\t{digest}\t{kind}")
+    hint = kind.split(":", 2)[2] if kind.startswith("tag:") and kind.count(":") > 1 else ""
+    print(f"{app}\t{deploy}\t{path}\t{digest}\t{kind}\t{hint}")
 PY
 )"
 
 status=0
-while IFS=$'\t' read -r app deploy path digest kind; do
+while IFS=$'\t' read -r app deploy path digest kind row_hint; do
   if [ -n "${ROWS:-}" ] && [[ ",$ROWS," != *",$app,"* ]]; then continue; fi
   if [[ "$digest" == ERROR:* ]]; then
     echo "? $app $digest"; status=3; continue
@@ -150,6 +166,7 @@ while IFS=$'\t' read -r app deploy path digest kind; do
         env) hint="run make step-airflow" ;;
         cronjob) hint="run make step-airflow" ;;
         any-image) hint="kubectl apply -f $path" ;;
+        tag:*) hint="${row_hint:-run ./scripts/pin-image.sh $app}" ;;
         *) hint="run ./scripts/pin-image.sh $app" ;;
       esac
     fi

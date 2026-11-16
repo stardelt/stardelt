@@ -43,6 +43,29 @@ ROWS = (
     "access-sync,demo-reset,lakehouse-backup,openbao-group-policies,"
     "spark-confmap-janitor,keycloak"
 )
+CORE_ROWS = "lakekeeper,trino,seaweedfs-s3,openfga,airflow-statsd"
+
+LAKEKEEPER_PINNED = (
+    "quay.io/lakekeeper/catalog:v0.15.0"
+    "@sha256:b02a882df48042020c473a79b980a643fcc883a6f9c21b74c5b7cc8eabeec9fe"
+)
+TRINO_PINNED = (
+    "trinodb/trino:484"
+    "@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f"
+)
+SEAWEEDFS_PINNED = (
+    "chrislusf/seaweedfs:4.25"
+    "@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+)
+OPENFGA_PINNED = (
+    "openfga/openfga:v1.22.1"
+    "@sha256:b852071314f1fda1194d341a6ebac0a4f619b3cd87a6626d2ccc7048af4ec671"
+)
+STATSD_PINNED = (
+    "quay.io/prometheus/statsd-exporter:v0.30.0"
+    "@sha256:378cb79c4ac7d6941e5ed71b1f3cd6f4707cf42c72c104ffe81fa4d9026ef659"
+)
+STATSD = "quay.io/prometheus/statsd-exporter:v0.30.0"
 
 SHIM = """#!/usr/bin/env bash
 set -euo pipefail
@@ -89,7 +112,7 @@ class VerifyPins(unittest.TestCase):
         self.log = self.dir / "kubectl.log"
         self.log.write_text("")
 
-    def run_script(self, images, deploys=None):
+    def run_script(self, images, deploys=None, rows: str = ROWS):
         """images maps CronJob name -> list of image strings the cluster reports.
 
         deploys maps Deployment name -> the single image string the cluster reports.
@@ -98,7 +121,7 @@ class VerifyPins(unittest.TestCase):
             os.environ,
             PATH=f"{self.dir}:{os.environ['PATH']}",
             NAMESPACE="stardelt",
-            ROWS=ROWS,
+            ROWS=rows,
             FAKE_LOG=str(self.log),
         )
         for name, values in images.items():
@@ -182,6 +205,40 @@ class VerifyPins(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("FAIL", done.stdout + done.stderr)
         self.assertIn("kubectl apply -f manifests/keycloak.yaml", done.stdout)
+        self.assert_read_only()
+
+    def _core_deploys(self):
+        return {
+            "lakekeeper": LAKEKEEPER_PINNED,
+            "trino_coordinator": TRINO_PINNED,
+            "seaweedfs_s3": SEAWEEDFS_PINNED,
+            "openfga": OPENFGA_PINNED,
+            "airflow_statsd": STATSD_PINNED,
+        }
+
+    def test_core_service_rows_read_their_own_tag(self):
+        """The five core services are pinned by digest in helm-values (platform#1587, #1594); a
+        tag: row names the tag it means, because lakekeeper's file also carries the OPA sidecar."""
+        done = self.run_script({}, deploys=self._core_deploys(), rows=CORE_ROWS)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("verify-pins: PASS", done.stdout)
+        self.assertIn("matches helm-values/lakekeeper.yaml", done.stdout)
+        self.assertIn("matches helm-values/trino.yaml", done.stdout)
+        self.assertIn("matches helm-values/seaweedfs.yaml", done.stdout)
+        self.assertIn("matches helm-values/openfga.yaml", done.stdout)
+        self.assertIn("matches helm-values/airflow.yaml", done.stdout)
+        self.assertNotIn("✗", done.stdout)
+        self.assert_read_only()
+
+    def test_statsd_left_on_the_bare_tag_names_its_rollout(self):
+        """If the #1594 airflow rollout is skipped, its Deployment runs the bare tag, and the
+        failing row must name `make step-airflow`, not a pin-image.sh app that does not exist."""
+        deploys = self._core_deploys()
+        deploys["airflow_statsd"] = STATSD
+        done = self.run_script({}, deploys=deploys, rows=CORE_ROWS)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL", done.stdout + done.stderr)
+        self.assertIn("make step-airflow", done.stdout)
         self.assert_read_only()
 
 
