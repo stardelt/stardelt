@@ -1633,12 +1633,19 @@ def scale_decision(warehouses, now):
 
 
 def patch_scale_status(name, scale):
-    """Write `status.scale` only when it differs (the idempotence rule of every status write)."""
+    """Write `status.scale` only when it differs (the idempotence rule of every status write).
+
+    A JSON merge patch recurses, so a key the desired value omits is *kept*: a removed
+    `lastQueryAt` must be sent as `null` (platform#1539). The comparison drops `None`
+    values on both sides, so the removal is written exactly once.
+    """
     path = "%s/%s" % (SQLWAREHOUSE_PATH, name)
     status, live = k8s_request("GET", path)
     if status != 200 or not live:
         fail("cannot read SqlWarehouse %s (HTTP %s)" % (name, status))
-    if ((live.get("status") or {}).get("scale") or {}) == scale:
+    current = ((live.get("status") or {}).get("scale") or {})
+    desired = {key: value for key, value in scale.items() if value is not None}
+    if {key: value for key, value in current.items() if value is not None} == desired:
         return False
     status, _ = k8s_request("PATCH", path + "/status", {"status": {"scale": scale}})
     if status not in (200, 201):
@@ -1687,10 +1694,16 @@ def converge_scale(warehouses, now=None):
         phase = "Running"
     print("scale: %s %s at %d worker(s)" % (TRINO_WORKER, phase, workers))
     for name, count, stamp in entries:
-        scale = {"phase": phase, "workers": workers, "queriesInFlight": count}
-        if stamp:
-            scale["lastQueryAt"] = stamp
-        patch_scale_status(name, scale)
+        patch_scale_status(
+            name,
+            {
+                "phase": phase,
+                "workers": workers,
+                "queriesInFlight": count,
+                # `None` removes the key: an unmeasured class must not keep an old stamp.
+                "lastQueryAt": stamp or None,
+            },
+        )
     return 0
 
 

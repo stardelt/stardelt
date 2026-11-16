@@ -420,6 +420,19 @@ class FakeKubernetes:
         return None
 
 
+def merge_patch(target, patch):
+    """JSON merge patch (RFC 7386): objects recurse, a `None` value removes the key, the rest
+    replaces. This is what the API server does to `status.scale`; `dict.update()` is not."""
+    for key, value in patch.items():
+        if value is None:
+            target.pop(key, None)
+        elif isinstance(value, dict):
+            merge_patch(target.setdefault(key, {}), value)
+        else:
+            target[key] = value
+    return target
+
+
 class FakeCluster:
     """In-memory `SqlWarehouse` objects, their statuses and the two ConfigMaps.
 
@@ -485,7 +498,7 @@ class FakeCluster:
             item = self._warehouse(status_path.group(1))
             if not item:
                 return 404, None
-            item.setdefault("status", {}).update(body["status"])
+            merge_patch(item.setdefault("status", {}), body["status"])
             return 200, item
         if configmap_path:
             name = configmap_path.group(1)
@@ -2189,6 +2202,27 @@ class WarehouseScaleTest(JobTestCase):
         self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
         self.assertEqual(cluster.deployment["spec"]["replicas"], 1)
         self.assertEqual(cluster.status("small")["scale"]["phase"], "Starting")
+
+    def test_a_removed_measurement_clears_last_query_at_and_then_holds(self):
+        # A recent stamp: the class is measured and the engine is already up, so nothing but
+        # the removal can move. (`08:00:00Z` would stop the engine first, and the next tick
+        # would be a legitimate Stopped -> Starting scale-up, not the stuck merge patch.)
+        stamps = {"stardelt.io/last-query-at": "2026-11-16T11:59:00Z"}
+        cluster = FakeCluster([self.warehouse("small", auto_stop="15m", stamps=stamps)])
+        access_sync.k8s_request = cluster.request
+        self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
+        self.assertEqual(cluster.status("small")["scale"]["lastQueryAt"], "2026-11-16T11:59:00Z")
+        self.assertEqual(cluster.status("small")["scale"]["phase"], "Running")
+        # Nova removes the measurement (an unmeasured class is always-on, and its stamp is gone).
+        cluster.warehouses[0]["metadata"].pop("annotations", None)
+        before = len(cluster.patches())
+        self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
+        self.assertNotIn("lastQueryAt", cluster.status("small")["scale"])
+        self.assertEqual(cluster.status("small")["scale"]["phase"], "Running")
+        self.assertGreater(len(cluster.patches()), before, "the removal is written once")
+        before = len(cluster.patches())
+        self.assertEqual(access_sync.converge_scale(cluster.list_items(), self.NOW), 0)
+        self.assertEqual(len(cluster.patches()), before, "a converged tick must not patch")
 
     def test_a_missing_deployment_is_skipped(self):
         cluster = FakeCluster(
