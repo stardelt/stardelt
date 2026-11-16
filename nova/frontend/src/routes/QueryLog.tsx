@@ -5,6 +5,7 @@ import { api, errorMessage, type QueryLogItem, type QueryProfileOperator } from 
 import { EmptyState } from '../components/EmptyState'
 import { formatBytes, formatCount, formatDurationMs, formatTime, relativeTime, rowsLabel, sourceLabel } from '../format'
 import { isAdmin } from '../roles'
+import { QueryUsage } from './QueryUsage'
 
 /** Query log: the queries a person ran, simple by default, every metric one click away. */
 
@@ -82,6 +83,8 @@ export default function QueryLog() {
   const [params, setParams] = useSearchParams()
   const [open, setOpen] = useState<string | null>(() => params.get('id'))
   const columnsMenu = useRef<HTMLDetailsElement>(null)
+  // The page has two views: the queries themselves, and what they cost (platform#138 slice 2).
+  const view = params.get('view') === 'usage' ? 'usage' : 'queries'
 
   // A click elsewhere on the page dismisses the menu, like the header's app switcher.
   useEffect(() => {
@@ -102,7 +105,7 @@ export default function QueryLog() {
     queryKey: ['query-log', effectiveScope, state, rangeIdx, q],
     // Wait for /api/me first: on the first render it is still in flight, and `enabled` would
     // otherwise be true in demo mode and ask the 503 route once anyway.
-    enabled: me.isSuccess && me.data?.demo !== true,
+    enabled: me.isSuccess && me.data?.demo !== true && view === 'queries',
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.queryLog({
@@ -149,16 +152,42 @@ export default function QueryLog() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Query log</h1>
           <p className="text-text-dim text-sm mt-1">
-            {effectiveScope === 'all'
-              ? 'Queries of everyone, newest first.'
-              : effectiveScope === 'team'
-                ? 'Queries run by the service principals your groups own, newest first.'
-                : 'The queries you ran, newest first.'}
+            {view === 'usage'
+              ? effectiveScope === 'all'
+                ? 'How much compute everyone used.'
+                : effectiveScope === 'team'
+                  ? "How much compute your team's service principals used."
+                  : 'How much compute your queries used.'
+              : effectiveScope === 'all'
+                ? 'Queries of everyone, newest first.'
+                : effectiveScope === 'team'
+                  ? 'Queries run by the service principals your groups own, newest first.'
+                  : 'The queries you ran, newest first.'}
           </p>
         </div>
-        <div className="text-xs text-text-mute flex items-center gap-2" aria-live="polite">
-          <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-          {log.isFetching && !log.isLoading ? 'updating…' : 'live'}
+        <div className="flex items-center gap-3">
+          <div role="group" aria-label="View" className="flex rounded-[10px] border border-border overflow-hidden text-sm">
+            {(['queries', 'usage'] as const).map(v => (
+              <button
+                key={v}
+                type="button"
+                aria-pressed={view === v}
+                onClick={() => {
+                  const next = new URLSearchParams(params)
+                  if (v === 'usage') next.set('view', 'usage')
+                  else next.delete('view')
+                  setParams(next, { replace: true })
+                }}
+                className={`px-3 py-1.5 ${view === v ? 'bg-accent-solid text-white' : 'bg-bg-elev/60 text-text-dim hover:text-text'}`}
+              >
+                {v === 'queries' ? 'Queries' : 'Usage'}
+              </button>
+            ))}
+          </div>
+          <div className="text-xs text-text-mute flex items-center gap-2" aria-live="polite">
+            <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+            {view === 'queries' && log.isFetching && !log.isLoading ? 'updating…' : 'live'}
+          </div>
         </div>
       </header>
 
@@ -178,19 +207,21 @@ export default function QueryLog() {
               </button>
             ))}
         </div>
-        <div role="group" aria-label="Status" className="flex flex-wrap gap-1.5">
-          {STATE_CHIPS.map(c => (
-            <button
-              key={c.value || 'all'}
-              type="button"
-              aria-pressed={state === c.value}
-              onClick={() => setState(c.value)}
-              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium ${state === c.value ? 'border-accent/60 bg-accent/15 text-text' : 'border-border bg-bg-elev/60 text-text-dim hover:text-text'}`}
-            >
-              {c.label}
-            </button>
-          ))}
-        </div>
+        {view === 'queries' && (
+          <div role="group" aria-label="Status" className="flex flex-wrap gap-1.5">
+            {STATE_CHIPS.map(c => (
+              <button
+                key={c.value || 'all'}
+                type="button"
+                aria-pressed={state === c.value}
+                onClick={() => setState(c.value)}
+                className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium ${state === c.value ? 'border-accent/60 bg-accent/15 text-text' : 'border-border bg-bg-elev/60 text-text-dim hover:text-text'}`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        )}
         <select
           aria-label="Time range"
           value={rangeIdx}
@@ -201,115 +232,125 @@ export default function QueryLog() {
             <option key={r.label} value={i}>{r.label}</option>
           ))}
         </select>
-        <input
-          type="search"
-          aria-label="Search statements and query ids"
-          placeholder="Search statements or a query id"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="input !w-64 py-1.5"
-        />
-        <details
-          ref={columnsMenu}
-          className="relative ml-auto"
-          onKeyDown={e => {
-            const menu = columnsMenu.current
-            if (e.key === 'Escape' && menu?.open) {
-              menu.open = false
-              menu.querySelector('summary')?.focus()
-            }
-          }}
-        >
-          <summary className="btn-ghost py-1.5 cursor-pointer list-none">Columns</summary>
-          <div className="absolute right-0 z-10 mt-2 w-48 card p-2 space-y-1 shadow-lg bg-bg-elev">
-            {OPTIONAL_COLUMNS.map(c => {
-              const forced = c.id === 'user' && effectiveScope === 'all'
-              return (
-                <label key={c.id} className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-bg-soft/60">
-                  <input
-                    type="checkbox"
-                    checked={shown.has(c.id)}
-                    disabled={forced}
-                    onChange={() => toggleColumn(c.id)}
+        {view === 'queries' && (
+          <input
+            type="search"
+            aria-label="Search statements and query ids"
+            placeholder="Search statements or a query id"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="input !w-64 py-1.5"
+          />
+        )}
+        {view === 'queries' && (
+          <details
+            ref={columnsMenu}
+            className="relative ml-auto"
+            onKeyDown={e => {
+              const menu = columnsMenu.current
+              if (e.key === 'Escape' && menu?.open) {
+                menu.open = false
+                menu.querySelector('summary')?.focus()
+              }
+            }}
+          >
+            <summary className="btn-ghost py-1.5 cursor-pointer list-none">Columns</summary>
+            <div className="absolute right-0 z-10 mt-2 w-48 card p-2 space-y-1 shadow-lg bg-bg-elev">
+              {OPTIONAL_COLUMNS.map(c => {
+                const forced = c.id === 'user' && effectiveScope === 'all'
+                return (
+                  <label key={c.id} className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-bg-soft/60">
+                    <input
+                      type="checkbox"
+                      checked={shown.has(c.id)}
+                      disabled={forced}
+                      onChange={() => toggleColumn(c.id)}
+                    />
+                    {c.label}
+                  </label>
+                )
+              })}
+            </div>
+          </details>
+        )}
+      </div>
+
+      {view === 'usage' ? (
+        <QueryUsage scope={effectiveScope} fromMs={range.ms == null ? 0 : Date.now() - range.ms} />
+      ) : (
+        <>
+          {/* The container makes `cqw` below the visible width of the card, however wide the table is. */}
+          <div className="[container-type:inline-size]">
+          <div className="card overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Queries, newest first. Expand a row for its details.</caption>
+              <thead className="bg-bg-soft/50">
+                <tr>
+                  <th className="th px-2 py-2.5 w-8"><span className="sr-only">Show query details</span></th>
+                  <th className="th px-3 py-2.5">Status</th>
+                  <th className="th px-3 py-2.5">Query</th>
+                  <th className="th px-3 py-2.5">Warehouse</th>
+                  <th className="th px-3 py-2.5 text-right">Started</th>
+                  <th className="th px-3 py-2.5 text-right">Duration</th>
+                  <th className="th px-3 py-2.5 text-right">Rows</th>
+                  {shown.has('user') && <th className="th px-3 py-2.5">User</th>}
+                  {shown.has('source') && <th className="th px-3 py-2.5">Source</th>}
+                  {shown.has('type') && <th className="th px-3 py-2.5">Type</th>}
+                  {shown.has('error') && <th className="th px-3 py-2.5">Error</th>}
+                  {shown.has('id') && <th className="th px-3 py-2.5">Query id</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {log.isLoading && (
+                  <tr><td className="px-4 py-5 text-text-mute" colSpan={colCount}>loading…</td></tr>
+                )}
+                {demo && (
+                  <tr>
+                    <td className="px-4 py-6 text-text-mute" colSpan={colCount}>
+                      Demo mode keeps no query history. Run a query in the <Link className="underline" to="/query">SQL editor</Link> to see one in a real install.
+                    </td>
+                  </tr>
+                )}
+                {!demo && log.isError && !log.data && (
+                  <tr>
+                    <td className="px-4 py-5 text-bad" colSpan={colCount}>
+                      {errorMessage(log.error)}{' '}
+                      <button type="button" className="underline" onClick={() => log.refetch()}>Retry</button>
+                    </td>
+                  </tr>
+                )}
+                {log.data && items.length === 0 && (
+                  <tr>
+                    <td colSpan={colCount}>
+                      <EmptyState icon="search" title="No queries match">
+                        Run one in the <Link className="underline" to="/query">SQL editor</Link>, or widen the time range.
+                      </EmptyState>
+                    </td>
+                  </tr>
+                )}
+                {items.map(item => (
+                  <Row
+                    key={item.id}
+                    item={item}
+                    shown={shown}
+                    colCount={colCount}
+                    expanded={open === item.id}
+                    onToggle={() => toggleOpen(item.id)}
                   />
-                  {c.label}
-                </label>
-              )
-            })}
+                ))}
+              </tbody>
+            </table>
           </div>
-        </details>
-      </div>
+          </div>
 
-      {/* The container makes `cqw` below the visible width of the card, however wide the table is. */}
-      <div className="[container-type:inline-size]">
-      <div className="card overflow-x-auto">
-        <table className="w-full text-sm">
-          <caption className="sr-only">Queries, newest first. Expand a row for its details.</caption>
-          <thead className="bg-bg-soft/50">
-            <tr>
-              <th className="th px-2 py-2.5 w-8"><span className="sr-only">Show query details</span></th>
-              <th className="th px-3 py-2.5">Status</th>
-              <th className="th px-3 py-2.5">Query</th>
-              <th className="th px-3 py-2.5">Warehouse</th>
-              <th className="th px-3 py-2.5 text-right">Started</th>
-              <th className="th px-3 py-2.5 text-right">Duration</th>
-              <th className="th px-3 py-2.5 text-right">Rows</th>
-              {shown.has('user') && <th className="th px-3 py-2.5">User</th>}
-              {shown.has('source') && <th className="th px-3 py-2.5">Source</th>}
-              {shown.has('type') && <th className="th px-3 py-2.5">Type</th>}
-              {shown.has('error') && <th className="th px-3 py-2.5">Error</th>}
-              {shown.has('id') && <th className="th px-3 py-2.5">Query id</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {log.isLoading && (
-              <tr><td className="px-4 py-5 text-text-mute" colSpan={colCount}>loading…</td></tr>
-            )}
-            {demo && (
-              <tr>
-                <td className="px-4 py-6 text-text-mute" colSpan={colCount}>
-                  Demo mode keeps no query history. Run a query in the <Link className="underline" to="/query">SQL editor</Link> to see one in a real install.
-                </td>
-              </tr>
-            )}
-            {!demo && log.isError && !log.data && (
-              <tr>
-                <td className="px-4 py-5 text-bad" colSpan={colCount}>
-                  {errorMessage(log.error)}{' '}
-                  <button type="button" className="underline" onClick={() => log.refetch()}>Retry</button>
-                </td>
-              </tr>
-            )}
-            {log.data && items.length === 0 && (
-              <tr>
-                <td colSpan={colCount}>
-                  <EmptyState icon="search" title="No queries match">
-                    Run one in the <Link className="underline" to="/query">SQL editor</Link>, or widen the time range.
-                  </EmptyState>
-                </td>
-              </tr>
-            )}
-            {items.map(item => (
-              <Row
-                key={item.id}
-                item={item}
-                shown={shown}
-                colCount={colCount}
-                expanded={open === item.id}
-                onToggle={() => toggleOpen(item.id)}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
-      </div>
-
-      {log.hasNextPage && (
-        <div className="flex justify-center">
-          <button type="button" className="btn-ghost" disabled={log.isFetchingNextPage} onClick={() => log.fetchNextPage()}>
-            {log.isFetchingNextPage ? 'Loading…' : 'Load more'}
-          </button>
-        </div>
+          {log.hasNextPage && (
+            <div className="flex justify-center">
+              <button type="button" className="btn-ghost" disabled={log.isFetchingNextPage} onClick={() => log.fetchNextPage()}>
+                {log.isFetchingNextPage ? 'Loading…' : 'Load more'}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   )

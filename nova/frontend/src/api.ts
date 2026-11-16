@@ -1352,6 +1352,26 @@ export type QueryLogItem = {
 
 export type QueryLogPage = { items: QueryLogItem[]; nextCursor: string | null }
 
+/** One line of `GET /api/query-log/usage`: a person, a warehouse or a day, and what it cost. */
+export type UsageRow = {
+  key: string
+  queries: number
+  failed: number
+  cpuMs: number
+  wallMs: number
+  inputBytes: number
+  writtenBytes: number
+}
+
+/** `GET /api/query-log/usage` — the rows of the window and their total (its `key` is `total`). */
+export type UsagePage = {
+  by: 'principal' | 'warehouse' | 'day'
+  from: number
+  to: number
+  items: UsageRow[]
+  total: UsageRow
+}
+
 /** Everything stored about one query (`GET /api/query-log/{id}`). */
 export type QueryLogDetail = {
   id: string
@@ -1592,6 +1612,11 @@ function queryLogUrl(p: QueryLogParams): string {
   return `/api/query-log?${qs.toString()}`
 }
 
+function queryUsageUrl(p: { scope: 'mine' | 'team' | 'all'; by: UsagePage['by']; from: number }): string {
+  const qs = new URLSearchParams({ scope: p.scope, by: p.by, from: String(p.from) })
+  return `/api/query-log/usage?${qs.toString()}`
+}
+
 /** One answer of `PUT /api/settings/{key}`: the value as the store now holds it. */
 export type SettingAnswer = { key: string; value: unknown }
 
@@ -1673,6 +1698,8 @@ export const api = {
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
+  queryUsage:   (p: { scope: 'mine' | 'team' | 'all'; by: UsagePage['by']; from: number }) =>
+    jget<UsagePage>(queryUsageUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
   queryLogProfile: (id: string)               => jget<QueryProfile>(`/api/query-log/${seg(id)}/profile`),
   queryLogHistory: (id: string)               => jget<QueryHistory>(`/api/query-log/${seg(id)}/history`),
