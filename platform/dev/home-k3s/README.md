@@ -41,8 +41,15 @@ repository and `ghcr.io/stardelt/*` whenever it stops being useful.
 
    kubectl -n stardelt create secret generic cloudflare-dns \
      --from-literal=api-token="$CLOUDFLARE_API_TOKEN"
-   kubectl apply -f dev/home-k3s/ddns.yaml   # edit ZONE_NAME/RECORD_NAME first
+   # Site-specific: keep them in a ConfigMap so applying the manifest never clobbers the lab.
+   kubectl -n stardelt create configmap ddns-config \
+     --from-literal=zone=<zone> --from-literal=record=<base-domain> \
+     --dry-run=client -o yaml | kubectl apply -f -
+   kubectl apply -f dev/home-k3s/ddns.yaml
    ```
+
+   Re-applying `ddns.yaml` keeps `ddns-config`; change the zone or record with
+   `kubectl -n stardelt patch configmap ddns-config` or by re-running the two lines above.
 
    Check: `dig +short id.<base-domain>` must end in your public IPv4, and
    `dig +short id.<base-domain> AAAA` must be empty. If your line is behind

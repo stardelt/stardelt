@@ -37,7 +37,7 @@ data:
 
     API = "https://api.cloudflare.com/client/v4"
     token = os.environ["CLOUDFLARE_API_TOKEN"]
-    zone_name = os.environ.get("ZONE_NAME", "example.com")
+    zone_name = os.environ["ZONE_NAME"]
     base = os.environ["RECORD_NAME"]
     names = [base, "*." + base]
 
@@ -66,7 +66,12 @@ data:
         raise SystemExit("cannot determine the public IPv4 address")
 
 
-    zone_id = cf("GET", "/zones?name=" + zone_name)["result"][0]["id"]
+    zones = cf("GET", "/zones?name=" + zone_name).get("result") or []
+    if not zones:
+        raise SystemExit(
+            f"no zone named {zone_name!r} for this token — is ZONE_NAME (ddns-config/zone) right?"
+        )
+    zone_id = zones[0]["id"]
     ip = public_ipv4()
     for name in names:
         records = cf("GET", f"/zones/{zone_id}/dns_records?type=A&name={name}")["result"]
@@ -114,11 +119,15 @@ spec:
             - name: ddns
               image: python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d
               command: ["python3", "/opt/ddns/ddns.py"]
-              # The record name is the platform's base domain; change both lines
-              # together or the job stops maintaining the entry the Ingresses use.
               env:
-                - { name: ZONE_NAME, value: "example.com" }
-                - { name: RECORD_NAME, value: "alpha.example.com" }
+                # Site-specific values live in a ConfigMap the lab creates once (README
+                # section 1). A manifest apply never touches them (platform#1580).
+                - name: ZONE_NAME
+                  valueFrom:
+                    configMapKeyRef: { name: ddns-config, key: zone }
+                - name: RECORD_NAME
+                  valueFrom:
+                    configMapKeyRef: { name: ddns-config, key: record }
                 - name: CLOUDFLARE_API_TOKEN
                   valueFrom:
                     secretKeyRef: { name: cloudflare-dns, key: api-token }
