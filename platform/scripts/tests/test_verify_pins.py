@@ -28,6 +28,17 @@ JUPYTER_VALUES = (REPO / "helm-values" / "jupyterhub.yaml").read_text()
 SPAWN_DIGEST = re.search(r'tag:\s*"dev@(sha256:[0-9a-f]{64})"', JUPYTER_VALUES).group(1)
 HUB_DIGEST = re.search(r'tag:\s*"4\.4\.5@(sha256:[0-9a-f]{64})"', JUPYTER_VALUES).group(1)
 
+# The CNPG operator, the barman-cloud plugin and Reloader: three Deployments pinned in #1615 and
+# read by no row until #1616. The digests come from the values files, as the notebook ones do, so
+# a pin change does not need a test edit and a stale literal cannot pass.
+CNPG_VALUES = (REPO / "helm-values" / "cnpg.yaml").read_text()
+BARMAN_VALUES = (REPO / "helm-values" / "barman-cloud.yaml").read_text()
+RELOADER_VALUES = (REPO / "helm-values" / "reloader.yaml").read_text()
+CNPG_DIGEST = re.search(r'tag:\s*"1\.30\.1@(sha256:[0-9a-f]{64})"', CNPG_VALUES).group(1)
+BARMAN_DIGEST = re.search(r'tag:\s*"v0\.16\.0@(sha256:[0-9a-f]{64})"', BARMAN_VALUES).group(1)
+RELOADER_DIGEST = re.search(r'tag:\s*"v1\.4\.24@(sha256:[0-9a-f]{64})"', RELOADER_VALUES).group(1)
+CNPG_ROWS = "cnpg-operator,barman-cloud,reloader"
+
 AWS_CLI = "amazon/aws-cli:2.17.0"
 AWS_CLI_PINNED = (
     "amazon/aws-cli:2.17.0"
@@ -369,6 +380,38 @@ class VerifyPins(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("FAIL", done.stdout + done.stderr)
         self.assertIn("make openbao", done.stdout)
+
+    def test_cnpg_family_rows_read_their_deployments(self):
+        done = self.run_script(
+            {},
+            deploys={
+                "cnpg-cloudnative-pg": "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@" + CNPG_DIGEST,
+                "barman-cloud-plugin-barman-cloud": "ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.16.0@" + BARMAN_DIGEST,
+                "reloader-reloader": "ghcr.io/stakater/reloader:v1.4.24@" + RELOADER_DIGEST,
+            },
+            rows=CNPG_ROWS,
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("PASS", done.stdout)
+        self.assertIn("✓ cnpg-operator", done.stdout)
+        self.assertIn("✓ barman-cloud", done.stdout)
+        self.assertIn("✓ reloader", done.stdout)
+        self.assertNotIn("✗", done.stdout)
+        self.assert_read_only()
+
+    def test_reloader_left_on_the_bare_tag_fails_and_names_the_rollout(self):
+        done = self.run_script(
+            {},
+            deploys={
+                "cnpg-cloudnative-pg": "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1@" + CNPG_DIGEST,
+                "barman-cloud-plugin-barman-cloud": "ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.16.0@" + BARMAN_DIGEST,
+                "reloader-reloader": "ghcr.io/stakater/reloader:v1.4.24",
+            },
+            rows=CNPG_ROWS,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("✗ reloader", done.stdout)
+        self.assertIn("make step-reloader", done.stdout)
 
 
 if __name__ == "__main__":

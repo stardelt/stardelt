@@ -16,7 +16,8 @@
 # JupyterHub charts bring themselves (#1604, #1605) are StatefulSets, one DaemonSet and the three
 # JupyterHub Deployments hub, proxy and user-scheduler; they are read by the tag they carry
 # (`sts-tag:`, `ds-tag:`) or by their repository (`name-tag:`), because those files name several
-# tags with digests.
+# tags with digests. The CNPG operator, the barman-cloud plugin and Reloader (#1616) are three
+# more Deployments read by the tag they carry (`tag:`).
 #
 #   scripts/verify-pins.sh
 #   ROWS=access-sync,demo-reset scripts/verify-pins.sh   # only these rows (the test uses it)
@@ -63,6 +64,9 @@ rows=(
   "trino|trino-coordinator|helm-values/trino.yaml|tag:484:make step-trino"
   "seaweedfs-s3|seaweedfs-s3|helm-values/seaweedfs.yaml|tag:4.25:make step-storage"
   "openfga|openfga|helm-values/openfga.yaml|tag:v1.22.1:make step-openfga"
+  "cnpg-operator|cnpg-cloudnative-pg|helm-values/cnpg.yaml|tag:1.30.1:make step-cnpg"
+  "barman-cloud|barman-cloud-plugin-barman-cloud|helm-values/barman-cloud.yaml|tag:v0.16.0:make step-barman-cloud-plugin"
+  "reloader|reloader-reloader|helm-values/reloader.yaml|tag:v1.4.24:make step-reloader"
   "airflow-statsd|airflow-statsd|helm-values/airflow.yaml|tag:v0.30.0:make step-airflow"
   "superset-postgresql|superset-postgresql|helm-values/superset.yaml|sts-tag:14.17.0-debian-12-r3:make step-superset"
   "superset-redis-master|superset-redis-master|helm-values/superset.yaml|sts-tag:7.0.10-debian-11-r4:make step-superset"
@@ -220,7 +224,7 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
 done <<< "$pins"
 
 case "$status" in
-  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment and the two alpine CronJobs carry the checked-in pins)" ;;
+  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment, the CNPG operator, the barman-cloud plugin, Reloader and the two alpine CronJobs carry the checked-in pins)" ;;
   1) echo "verify-pins: FAIL (a pin does not match the live configuration)" >&2 ;;
   *) echo "verify-pins: UNVERIFIED (a pin or Deployment could not be read)" >&2 ;;
 esac
