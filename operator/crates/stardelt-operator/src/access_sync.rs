@@ -103,6 +103,22 @@ pub fn role(namespace: &str) -> Role {
                 verbs: vec!["get".into(), "update".into(), "patch".into()],
                 ..PolicyRule::default()
             },
+            // One engine, one replica count (platform#131 step A): read the worker Deployment
+            // and patch its `scale` subresource. `resource_names` keeps this to the one Deployment.
+            PolicyRule {
+                api_groups: Some(vec!["apps".into()]),
+                resources: Some(vec!["deployments".into()]),
+                resource_names: Some(vec!["trino-worker".into()]),
+                verbs: vec!["get".into()],
+                ..PolicyRule::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec!["apps".into()]),
+                resources: Some(vec!["deployments/scale".into()]),
+                resource_names: Some(vec!["trino-worker".into()]),
+                verbs: vec!["patch".into()],
+                ..PolicyRule::default()
+            },
         ]),
     }
 }
@@ -338,7 +354,7 @@ mod tests {
     fn the_role_reads_three_secrets_and_writes_the_two_config_maps() {
         let role = role("data");
         let rules = role.rules.as_ref().unwrap();
-        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.len(), 6);
         // rule 0
         assert_eq!(
             rules[0].resource_names.as_ref().unwrap(),
