@@ -9,6 +9,8 @@ from pathlib import Path
 
 import requests
 
+import stardelt
+
 from stardelt import cli
 from tests.test_api import CANARY, RESULT, FakeResponse, FakeSession
 
@@ -203,3 +205,9 @@ def test_catalog_search_passes_the_tag_owner_and_domain_filters():
     method, url, kwargs = session.calls[0]
     assert (method, url) == ("GET", "https://nova.example/api/catalog/search")
     assert kwargs["params"] == {"q": "revenue", "tag": "finance", "owner": "team-mobility", "domain": "retail"}
+
+
+def test_version_prints_the_package_version_and_calls_nothing():
+    code, out, err, session = run(["--version"])
+    assert (code, out, err) == (0, f"stardelt {stardelt.__version__}\n", "")
+    assert session.calls == []

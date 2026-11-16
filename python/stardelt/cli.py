@@ -24,7 +24,7 @@ from pathlib import Path
 
 import requests
 
-from stardelt import api, apply, bundle, lineage, login, maintenance, mcp, runs, shortcuts, skill, statements
+from stardelt import __version__, api, apply, bundle, lineage, login, maintenance, mcp, runs, shortcuts, skill, statements
 
 OK, ERROR, USAGE, AUTH = 0, 1, 2, 3
 
@@ -290,8 +290,12 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     stdin = sys.stdin if stdin is None else stdin
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--version"]:
+        stdout.write(f"stardelt {__version__}\n")
+        return OK
     try:
-        args = _parser().parse_args(shortcuts.expand(sys.argv[1:] if argv is None else argv, api.operations()))
+        args = _parser().parse_args(shortcuts.expand(arguments, api.operations()))
     except (_UsageError, ValueError) as err:
         stderr.write(f"stardelt: {err}\n")
         return USAGE
