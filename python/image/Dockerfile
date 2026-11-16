@@ -6,6 +6,16 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# The commit this image was built from. Without it a pinned digest cannot be judged: the
+# operator's maintenance CronJob runs one fixed digest (crates/stardelt-operator/src/
+# maintenance.rs IMAGE) and nothing can tell whether `stardelt/maintenance.py` changed
+# since that build (stardelt-platform#1071).
+ARG REVISION=
+LABEL org.opencontainers.image.title="stardelt-cli" \
+      org.opencontainers.image.source="https://github.com/stardelt/stardelt-python" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.revision=$REVISION
+
 WORKDIR /app
 COPY . /app
 RUN pip install --no-cache-dir /app
