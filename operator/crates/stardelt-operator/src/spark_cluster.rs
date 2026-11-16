@@ -247,6 +247,22 @@ async fn patch_status(
     Ok(())
 }
 
+/// What to do after an apply failed: retry a failure the API server can recover from (5xx,
+/// transport, TLS, timeout), wait for a human on a denial (4xx). A `SparkCluster` used to stay
+/// `Failed` until the object changed, because every branch returned `await_change`
+/// (stardelt-platform#1511: a webhook with no endpoints).
+fn action_after_failure(e: &kube::Error) -> Action {
+    let retry = match e {
+        kube::Error::Api(response) => response.code >= 500,
+        _ => true,
+    };
+    if retry {
+        Action::requeue(Duration::from_secs(30))
+    } else {
+        Action::await_change()
+    }
+}
+
 /// The phase of a live `SparkConnect`, from its `status.state`.
 fn phase_from_state(state: Option<&str>) -> &'static str {
     match state.map(str::to_ascii_lowercase).as_deref() {
@@ -472,7 +488,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
     if let Err(e) = objects::apply(
         &ctx.client,
@@ -489,7 +505,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
     if let Err(e) = objects::apply(
         &ctx.client,
@@ -506,7 +522,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
 
     // The driver runs the group's own code, so the two admission policies that bound what it may
@@ -526,7 +542,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster pod guard not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
     if let Err(e) = objects::apply_cluster(
         &ctx.client,
@@ -542,7 +558,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster pod guard not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
     if let Err(e) = objects::apply_cluster(
         &ctx.client,
@@ -558,7 +574,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster config map guard not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
     if let Err(e) = objects::apply_cluster(
         &ctx.client,
@@ -574,7 +590,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster config map guard not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
 
     // The server authenticates nobody: the policy that admits only the owner's pods, Nova
@@ -604,7 +620,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster ingress policy not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
 
     let runtime = match Api::<ConfigMap>::namespaced(ctx.client.clone(), &namespace)
@@ -667,7 +683,7 @@ pub async fn reconcile_spark_cluster(
         )
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster SparkConnect not applied");
-        return Ok(Action::await_change());
+        return Ok(action_after_failure(&e));
     }
 
     let (state, server_name, server_pod) = match connects.get(&format!("spc-{name}")).await {
@@ -1411,6 +1427,48 @@ mod tests {
             reported.contains("configure the service account via the CRD spec instead"),
             "{reported}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_transient_apply_failure_is_retried() {
+        // operator#788: a 5xx (a webhook with no endpoints) is recovered from by retrying, so the
+        // cluster must not sit `Failed` until the object changes.
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    200,
+                    r#"{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"spc-trial-ingress","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/sparkconnects/spc-trial") {
+                return (
+                    500,
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"Internal error occurred: failed calling webhook \"mutate-sparkconnects.sparkoperator.k8s.io\": no endpoints available for service \"spark-operator-webhook-svc\"","reason":"InternalError","code":500}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"mobility-analytics"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Failed"}}"#.into(),
+            )
+        });
+        let action =
+            reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
+                .await
+                .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+        let log = requests.lock().expect("requests").join("\n");
+        let reported = log
+            .lines()
+            .find(|line| line.starts_with("PATCH") && line.contains("/sparkclusters/trial/status"))
+            .unwrap_or_else(|| panic!("no status written: {log}"));
+        assert!(reported.contains("\"phase\":\"Failed\""), "{reported}");
+        assert!(reported.contains("no endpoints available"), "{reported}");
     }
 
     #[tokio::test]
