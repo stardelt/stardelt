@@ -38,6 +38,11 @@ pub const BOOTSTRAP_SCRIPT: &str = include_str!("lakekeeper_bootstrap.sh");
 /// `lakekeeper_bootstrap.sh` and `values/trino.yaml` hard-code the same word.
 pub const WAREHOUSE: &str = "warehouse";
 
+/// The aws-cli pod that creates the notebooks and archive buckets — the same digest `pg_dump.rs`
+/// uses, so a re-pushed `2.17.0` tag cannot change one operator pod and not another.
+pub const AWS_CLI_IMAGE: &str =
+    "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73";
+
 /// A generated S3 key pair.
 #[derive(Clone, PartialEq, Eq)]
 pub struct S3Keys {
@@ -547,7 +552,7 @@ pub fn notebooks_bucket_job(
                     automount_service_account_token: Some(false),
                     containers: vec![Container {
                         name: "bucket".into(),
-                        image: Some("amazon/aws-cli:2.17.0".into()),
+                        image: Some(AWS_CLI_IMAGE.into()),
                         command: Some(vec!["sh".into(), "-c".into()]),
                         args: Some(vec![NOTEBOOKS_BUCKET_SCRIPT.to_string()]),
                         env: Some(vec![
@@ -639,7 +644,7 @@ pub fn archive_bucket_job(
                     security_context: Some(archive_pod_security_context()),
                     containers: vec![Container {
                         name: "bucket".into(),
-                        image: Some("amazon/aws-cli:2.17.0".into()),
+                        image: Some(AWS_CLI_IMAGE.into()),
                         command: Some(vec!["sh".into(), "-c".into()]),
                         args: Some(vec![ARCHIVE_BUCKET_SCRIPT.to_string()]),
                         env: Some(vec![
@@ -707,7 +712,7 @@ pub fn archive_cron_job(namespace: &str, lakehouse: &str) -> CronJob {
                             security_context: Some(archive_pod_security_context()),
                             containers: vec![Container {
                                 name: "s3-sync".into(),
-                                image: Some("amazon/aws-cli:2.17.0".into()),
+                                image: Some(AWS_CLI_IMAGE.into()),
                                 command: Some(vec!["/bin/sh".into(), "-ec".into()]),
                                 args: Some(vec![script.to_string()]),
                                 env: Some(vec![
@@ -1350,7 +1355,7 @@ mod tests {
         let pod = job.spec.expect("spec").template.spec.expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("OnFailure"));
         let c = &pod.containers[0];
-        assert_eq!(c.image.as_deref(), Some("amazon/aws-cli:2.17.0"));
+        assert_eq!(c.image.as_deref(), Some(AWS_CLI_IMAGE));
         let env: Vec<(&str, Option<&str>)> = c
             .env
             .as_ref()
@@ -1425,7 +1430,7 @@ mod tests {
         let pod = job.spec.expect("spec").template.spec.expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("OnFailure"));
         let c = &pod.containers[0];
-        assert_eq!(c.image.as_deref(), Some("amazon/aws-cli:2.17.0"));
+        assert_eq!(c.image.as_deref(), Some(AWS_CLI_IMAGE));
         let env: Vec<(&str, Option<&str>)> = c
             .env
             .as_ref()
@@ -1477,7 +1482,7 @@ mod tests {
         assert_eq!(pod_spec.automount_service_account_token, Some(false));
         let c = &pod_spec.containers[0];
         assert_eq!(c.name, "s3-sync");
-        assert_eq!(c.image.as_deref(), Some("amazon/aws-cli:2.17.0"));
+        assert_eq!(c.image.as_deref(), Some(AWS_CLI_IMAGE));
         let env: Vec<(&str, Option<&str>)> = c
             .env
             .as_ref()
@@ -1698,5 +1703,13 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn helper_images_are_pinned_by_digest() {
+        assert_eq!(
+            AWS_CLI_IMAGE,
+            "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
+        );
     }
 }

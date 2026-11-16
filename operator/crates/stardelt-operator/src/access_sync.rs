@@ -26,8 +26,9 @@ pub const SCRIPT_KEY: &str = "job.py";
 /// operator as `ServicePrincipal` `catalog-operator` (operator#194, platform mode); the Secret
 /// name is the operator's convention, `sp-<name>`.
 pub const CLIENT_SECRET: &str = "sp-catalog-operator";
-/// stdlib only, no build of ours (the platform's `manifests/access-sync.yaml`).
-pub const IMAGE: &str = "python:3.13.16-slim-bookworm";
+/// stdlib only, no build of ours (the platform's `manifests/access-sync.yaml`, pinned to the
+/// same digest there: a Docker Hub re-push must not move one install path and not the other).
+pub const IMAGE: &str = "python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d";
 /// Realm the group reads come from; the same literal `keycloak.rs:224` substitutes.
 pub const REALM: &str = "stardelt";
 /// Groups whose `superset` account may hold warehouse grants without a Keycloak user: the
@@ -458,6 +459,14 @@ mod tests {
                 .iter()
                 .any(|n| n == "sp-catalog-operator"),
             "the Role must allow get on sp-catalog-operator"
+        );
+    }
+
+    #[test]
+    fn helper_images_are_pinned_by_digest() {
+        assert_eq!(
+            IMAGE,
+            "python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d"
         );
     }
 }
