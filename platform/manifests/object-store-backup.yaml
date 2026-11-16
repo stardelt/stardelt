@@ -60,7 +60,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: s3-sync
-              image: amazon/aws-cli:2.17.0
+              image: amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73
               command: ["/bin/sh", "-ec"]
               args:
                 - |

@@ -161,7 +161,7 @@ spec:
             # `activeDeadlineSeconds: 110` (12 x 6 s = 72 s); if the IdP still does not answer the
             # sync runs anyway and fails the way it does today.
             - name: wait-for-idp
-              image: python:3.13.16-slim-bookworm
+              image: python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d
               command: ["python3", "-c"]
               args:
                 - |
@@ -196,7 +196,7 @@ spec:
           containers:
             - name: sync
               # stdlib only, no build of ours.
-              image: python:3.13.16-slim-bookworm
+              image: python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d
               command: ["python3", "/opt/job/job.py"]
               env:
                 # Namespace-agnostic: the Pod reports where it runs.

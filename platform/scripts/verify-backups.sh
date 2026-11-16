@@ -57,7 +57,7 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 CLUSTER="${CLUSTER:-lakekeeper-pg}"
-S3_CHECK_IMAGE="${S3_CHECK_IMAGE:-amazon/aws-cli:2.17.0}"
+S3_CHECK_IMAGE="${S3_CHECK_IMAGE:-amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73}"
 SKIP_OBJECTS="${SKIP_OBJECTS:-}"
 SELF_TEST=0
 

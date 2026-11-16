@@ -26,7 +26,7 @@ NAMESPACE="${NAMESPACE:-stardelt}"
 BUCKET="notebooks"
 # days an executed notebook copy (_runs/) is kept; published notebooks never expire
 RUN_COPY_DAYS="${RUN_COPY_DAYS:-30}"
-S3_CHECK_IMAGE="${S3_CHECK_IMAGE:-amazon/aws-cli:2.17.0}"
+S3_CHECK_IMAGE="${S3_CHECK_IMAGE:-amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73}"
 
 command -v kubectl >/dev/null 2>&1 || { echo "create-notebooks-bucket: kubectl not found" >&2; exit 1; }
 
