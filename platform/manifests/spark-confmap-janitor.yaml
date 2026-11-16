@@ -24,6 +24,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "delete"]
+  # The script keeps every ConfigMap a pod mounts, so it lists pods. Read-only: the janitor
+  # deletes ConfigMaps by name and must never be able to delete a pod.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
