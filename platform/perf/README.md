@@ -37,5 +37,10 @@ Or `make perf-baseline` with `TRINO_URL` and `TRINO_TOKEN` in the environment.
 change. The first run of each query is discarded (cold JVM/cache/S3 listing);
 with `PERF_RUNS=1` the single run is reported as-is.
 
+`PERF_CONCURRENCY` (default `1,2,4,8`) adds a second table: N people each run
+`q6_filter` `PERF_PER_WORKER` times (default 5) at the same moment, with
+p50/p95/max and errors per level. `PERF_CONCURRENCY=0` skips it. The level where
+p95 bends is the number the sizing guide uses.
+
 Results are written to `perf/results/<UTC timestamp>.json` (git-ignored). Tables
 for a release belong in `stardelt-internal`.

@@ -17,7 +17,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from threading import Barrier, Lock, Thread
 
 
 QUERIES = (
@@ -148,6 +148,66 @@ def measure_queries(trino_url: str, catalog: str, schema: str, runs: int) -> lis
     return results
 
 
+def measure_concurrency(
+    trino_url: str, catalog: str, schema: str, levels: list[int], per_worker: int
+) -> list[dict[str, object]]:
+    """Run q6_filter from N people at once, per level. Returns one row per level."""
+    template = dict(QUERIES)["q6_filter"]
+    sql = template.format(catalog=catalog, schema=schema)
+    results: list[dict[str, object]] = []
+    for n in levels:
+        times: list[int] = []
+        lock = Lock()
+        barrier = Barrier(n)
+        errors = 0
+
+        def worker() -> None:
+            nonlocal errors
+            barrier.wait()
+            for _ in range(per_worker):
+                try:
+                    _rows, elapsed_ms = run_statement(trino_url, sql)
+                except Exception:  # noqa: BLE001 - a failed statement is counted, not fatal
+                    with lock:
+                        errors += 1
+                    continue
+                with lock:
+                    times.append(elapsed_ms)
+
+        started = time.monotonic()
+        threads = [Thread(target=worker) for _ in range(n)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        wall_ms = int(round((time.monotonic() - started) * 1000))
+        results.append(
+            {
+                "concurrency": n,
+                "statements": len(times) + errors,
+                "errors": errors,
+                "p50Ms": median(times) if times else None,
+                "p95Ms": percentile(times, 95) if times else None,
+                "maxMs": max(times) if times else None,
+                "wallMs": wall_ms,
+            }
+        )
+    return results
+
+
+def print_concurrency(results: list[dict[str, object]]) -> None:
+    print("\nconcurrent people   statements  errors   p50    p95    max   (ms)")
+    print("-" * 67)
+    for row in results:
+        p50 = "-" if row["p50Ms"] is None else str(row["p50Ms"])
+        p95 = "-" if row["p95Ms"] is None else str(row["p95Ms"])
+        max_ms = "-" if row["maxMs"] is None else str(row["maxMs"])
+        print(
+            f"{row['concurrency']:>17} {row['statements']:>12} {row['errors']:>7}"
+            f"  {p50:>5}  {p95:>5}  {max_ms:>5}"
+        )
+
+
 def print_table(results: list[dict[str, object]], runs: int) -> None:
     if runs == 1:
         print("\nquery            rows   median   p95   min   (ms, single run)")
@@ -171,9 +231,11 @@ class _SelfTestHandler(BaseHTTPRequestHandler):
     page1 = {"id": "q1", "data": [[1, "a"]], "nextUri": None}
     page2 = {"data": [[2, "b"]]}
     call_count = 0
+    call_lock = Lock()
 
     def do_POST(self):  # noqa: N802
-        type(self).call_count += 1
+        with type(self).call_lock:
+            type(self).call_count += 1
         body = dict(self.page1)
         body["nextUri"] = f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/next/1"
         self._send(body)
@@ -224,11 +286,36 @@ def self_test() -> int:
         assert single["medianMs"] == 500 and single["p95Ms"] == 500 and single["minMs"] == 500
         assert "note" in single
 
+        # Concurrency levels: two people at once, then three.
+        _SelfTestHandler.call_count = 0
+        conc = measure_concurrency(trino_url, "tpch", "sf1", [1, 3], 2)
+        assert len(conc) == 2, f"expected two rows: {conc}"
+        assert conc[1]["concurrency"] == 3, f"level mismatch: {conc[1]}"
+        assert conc[1]["statements"] == 6, f"statement count mismatch: {conc[1]}"
+        assert conc[1]["errors"] == 0, f"unexpected errors: {conc[1]}"
+        assert _SelfTestHandler.call_count == 2 + 6, f"expected 8 POSTs: {_SelfTestHandler.call_count}"
+
         print("self-test ok")
         return 0
     finally:
         server.shutdown()
         _SelfTestHandler.call_count = 0
+
+
+def parse_concurrency(raw: str) -> list[int] | None:
+    """Parse PERF_CONCURRENCY; "0" disables the section (returns None)."""
+    value = raw.strip()
+    if value == "0":
+        return None
+    try:
+        levels = [int(part) for part in value.split(",")]
+    except ValueError:
+        raise SystemExit(
+            "PERF_CONCURRENCY must be a comma-separated list of positive integers"
+        ) from None
+    if any(level < 1 for level in levels):
+        raise SystemExit("PERF_CONCURRENCY must be a comma-separated list of positive integers")
+    return levels
 
 
 def main() -> int:
@@ -248,14 +335,25 @@ def main() -> int:
     runs = int(os.environ.get("PERF_RUNS", "3"))
     if runs < 1:
         raise SystemExit("PERF_RUNS must be >= 1")
+    levels = parse_concurrency(os.environ.get("PERF_CONCURRENCY", "1,2,4,8"))
+    per_worker = int(os.environ.get("PERF_PER_WORKER", "5"))
+    if per_worker < 1:
+        raise SystemExit("PERF_PER_WORKER must be >= 1")
 
     print(f"› Trino:   {trino_url}")
     print(f"› Catalog: {catalog}.{schema}")
     print(f"› Runs:    {runs} per query" + (" (first discarded)" if runs > 1 else " (no warm-up discarded)"))
+    if levels is None:
+        print("› Concurrency: skipped")
     print()
 
     results = measure_queries(trino_url, catalog, schema, runs)
     print_table(results, runs)
+    concurrency_results = (
+        [] if levels is None else measure_concurrency(trino_url, catalog, schema, levels, per_worker)
+    )
+    if levels is not None:
+        print_concurrency(concurrency_results)
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -267,6 +365,8 @@ def main() -> int:
         "schema": schema,
         "runs": runs,
         "queries": results,
+        "concurrency": levels or [],
+        "perWorker": per_worker,
     }
     write_json(path, payload)
     print(f"\nwrote {path}")
