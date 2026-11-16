@@ -80,6 +80,13 @@ pub fn golden_values(component: &str) -> Value {
         // it has no namespace-qualified address (the DSN comes from Secret `openfga-pg-app`).
         "openfga" => serde_yaml::from_str(include_str!("../values/openfga.yaml"))
             .expect("values/openfga.yaml is not valid YAML"),
+        // The CNPG operator and its barman-cloud plugin: the platform's helm-values/cnpg.yaml and
+        // helm-values/barman-cloud.yaml, pins only (stardelt-platform#1615, D44). The chart version
+        // pins the chart, not the image; the barman sidecar is injected into every instance pod.
+        "cnpg" => serde_yaml::from_str(include_str!("../values/cnpg.yaml"))
+            .expect("values/cnpg.yaml is not valid YAML"),
+        "barman-cloud" => serde_yaml::from_str(include_str!("../values/barman-cloud.yaml"))
+            .expect("values/barman-cloud.yaml is not valid YAML"),
         // The secrets contract (decision D23): External Secrets Operator, verbatim from
         // stardelt-platform/helm-values/external-secrets.yaml — its three workloads are small and the
         // resource requests are the platform's.
@@ -258,7 +265,26 @@ mod tests {
     #[test]
     fn unknown_components_get_an_empty_document() {
         assert_eq!(golden_values("polaris"), serde_json::json!({}));
-        assert_eq!(golden_values("cnpg"), serde_json::json!({}));
+        assert_eq!(golden_values("spark"), serde_json::json!({}));
+    }
+
+    #[test]
+    fn the_cnpg_and_barman_images_are_pinned_by_digest() {
+        for component in ["cnpg", "barman-cloud"] {
+            let values = golden_values(component);
+            let tag = values["image"]["tag"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{component} has no image.tag"));
+            assert!(tag.contains("@sha256:"), "{component} floats on {tag}");
+        }
+        let barman = golden_values("barman-cloud");
+        let sidecar = barman["sidecarImage"]["tag"]
+            .as_str()
+            .expect("barman-cloud has no sidecarImage.tag");
+        assert!(
+            sidecar.contains("@sha256:"),
+            "the barman sidecar floats on {sidecar}"
+        );
     }
 
     #[test]

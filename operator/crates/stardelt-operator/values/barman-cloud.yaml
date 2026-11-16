@@ -1,0 +1,9 @@
+# The CNPG barman-cloud plugin, pinned by digest (stardelt-platform#1615 twin, D44).
+#
+# `image` is the plugin Deployment; `sidecarImage` is the image the plugin injects into every
+# instance pod that declares the plugin in `spec.plugins` — every Cluster the operator creates
+# does.
+image:
+  tag: "v0.16.0@sha256:6404a416718bd7aad943c67a25a7bb20d0558b43edfeab0bf167f013ca435882"
+sidecarImage:
+  tag: "v0.16.0@sha256:c669259e20ed1e11fad821f735c396c19d929985aa05b9544b13ecc8b5a386d0"
