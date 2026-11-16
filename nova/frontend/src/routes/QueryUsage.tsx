@@ -15,6 +15,25 @@ function dayLabel(key: string): string {
   })
 }
 
+/** `Mon 16`, the label under a day's bar — the day key is UTC, so the label is too. */
+function dayShort(key: string): string {
+  return new Date(`${key}T00:00:00Z`).toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  })
+}
+
+/**
+ * CPU time at the scale of the window: seconds are noise in a usage table, so a minute or
+ * more loses them and an hour or more loses the minutes.
+ */
+function cpuText(ms: number): string {
+  if (ms < 60_000) return formatDurationMs(ms)
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} m`
+  return `${(ms / 3_600_000).toFixed(1)} h`
+}
+
 export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; fromMs: number }) {
   const by = scope === 'mine' ? 'warehouse' : 'principal'
   const usage = useQuery({
@@ -53,7 +72,7 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
   return (
     <div className="space-y-5">
       <p className="text-sm text-text-dim" aria-live="polite">
-        {formatCount(total.queries)} queries · {formatDurationMs(total.cpuMs)} CPU ·{' '}
+        {formatCount(total.queries)} queries · {cpuText(total.cpuMs)} CPU ·{' '}
         {formatBytes(total.inputBytes)} read · {formatCount(total.failed)} failed
       </p>
 
@@ -68,8 +87,8 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
               <th className="th px-3 py-2.5 text-right">Queries</th>
               <th className="th px-3 py-2.5">CPU time</th>
               <th className="th px-3 py-2.5 text-right">Data read</th>
-              <th className="th px-3 py-2.5 text-right">Data written</th>
-              <th className="th px-3 py-2.5 text-right">Failed</th>
+              <th className="th px-3 py-2.5 text-right hidden sm:table-cell">Data written</th>
+              <th className="th px-3 py-2.5 text-right hidden sm:table-cell">Failed</th>
             </tr>
           </thead>
           <tbody>
@@ -83,11 +102,11 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
                     className="inline-block h-2 rounded bg-accent/60 mr-2 align-middle"
                     style={{ width: `${Math.max(2, Math.round(80 * row.cpuMs / maxCpu))}px` }}
                   />
-                  <span className="text-text-dim">{formatDurationMs(row.cpuMs)}</span>
+                  <span className="text-text-dim">{cpuText(row.cpuMs)}</span>
                 </td>
                 <td className="td px-3 text-right text-text-dim whitespace-nowrap">{formatBytes(row.inputBytes)}</td>
-                <td className="td px-3 text-right text-text-dim whitespace-nowrap">{formatBytes(row.writtenBytes)}</td>
-                <td className="td px-3 text-right text-text-dim whitespace-nowrap">{formatCount(row.failed)}</td>
+                <td className="td px-3 text-right text-text-dim whitespace-nowrap hidden sm:table-cell">{formatBytes(row.writtenBytes)}</td>
+                <td className="td px-3 text-right text-text-dim whitespace-nowrap hidden sm:table-cell">{formatCount(row.failed)}</td>
               </tr>
             ))}
           </tbody>
@@ -95,19 +114,26 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
       </div>
 
       <section>
-        <h2 className="text-sm font-semibold mb-2">Per day</h2>
-        <div className="flex items-end gap-1 h-24">
+        <h2 className="text-sm font-semibold mb-2">CPU time per day</h2>
+        {/* No height on the row: the label became part of each column, so the bar area
+            inside it is what carries the fixed `h-24` — a height here would overflow the
+            tallest bar over the heading above. */}
+        <div className="flex items-end gap-2">
           {perDay.map(row => {
-            const title = `${dayLabel(row.key)} · ${formatDurationMs(row.cpuMs)} CPU · ${formatCount(row.queries)} queries`
+            const title = `${dayLabel(row.key)} · ${cpuText(row.cpuMs)} CPU · ${formatCount(row.queries)} queries`
             return (
-              <div
-                key={row.key}
-                role="img"
-                aria-label={title}
-                title={title}
-                className="flex-1 rounded-t bg-accent/60"
-                style={{ height: `${Math.max(4, Math.round(100 * row.cpuMs / maxDay))}%` }}
-              />
+              <div key={row.key} className="flex flex-col items-center gap-1">
+                <div className="h-24 flex items-end">
+                  <div
+                    role="img"
+                    aria-label={title}
+                    title={title}
+                    className="w-7 shrink-0 rounded-t bg-accent/60"
+                    style={{ height: `${Math.max(4, Math.round(100 * row.cpuMs / maxDay))}%` }}
+                  />
+                </div>
+                <span className="text-[11px] text-text-mute">{dayShort(row.key)}</span>
+              </div>
             )
           })}
         </div>

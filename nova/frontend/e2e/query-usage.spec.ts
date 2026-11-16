@@ -92,14 +92,17 @@ test('the usage view answers who used the most compute, and the row is there', a
   await expect(page.getByRole('heading', { name: 'Who used the most compute' })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'alice', exact: true })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'svc-shop', exact: true })).toBeVisible()
-  // The total line sums the window: 1,113 queries and 5 failed.
-  await expect(page.getByText('1,113 queries · 2 h 59 m CPU · 11 GiB read · 5 failed')).toBeVisible()
-  // One bar per day, each with its own words for a screen reader.
-  await expect(page.getByRole('img', { name: 'Sun 15 Nov · 41 m 00 s CPU · 120 queries' })).toBeVisible()
+  // The total line sums the window: 1,113 queries and 5 failed. CPU reads in hours: the
+  // window's minutes are the noise this view drops.
+  await expect(page.getByText('1,113 queries · 3.0 h CPU · 11 GiB read · 5 failed')).toBeVisible()
+  // One bar per day, each with its own words for a screen reader, and its day under it.
+  await expect(page.getByRole('heading', { name: 'CPU time per day' })).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Sun 15 Nov · 41 m CPU · 120 queries' })).toBeVisible()
+  await expect(page.getByText('Sun 15', { exact: true })).toBeVisible()
 
-  mkdirSync(here('../../docs/screenshots/1051'), { recursive: true })
+  mkdirSync(here('../../docs/screenshots/1060'), { recursive: true })
   await page.screenshot({ path: here('screenshots/query-usage-1280-dark.png') })
-  copyFileSync(here('screenshots/query-usage-1280-dark.png'), here('../../docs/screenshots/1051/query-usage-1280-dark.png'))
+  copyFileSync(here('screenshots/query-usage-1280-dark.png'), here('../../docs/screenshots/1060/query-usage-1280-dark.png'))
 
   // The same view on a phone. The navigation collapses to a phone layout on load only,
   // so reload at the narrow width and take the scope again.
@@ -107,8 +110,13 @@ test('the usage view answers who used the most compute, and the row is there', a
   await page.goto('/queries?view=usage')
   await page.getByRole('button', { name: 'Everyone' }).click()
   await expect(page.getByRole('heading', { name: 'Who used the most compute' })).toBeVisible()
+  // At 390 px the table keeps Person, Queries, CPU time and Data read; the two columns that
+  // made it scroll are gone (`hidden sm:table-cell`).
+  await expect(page.getByRole('columnheader', { name: 'Data read' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Data written' })).toBeHidden()
+  await expect(page.getByRole('columnheader', { name: 'Failed' })).toBeHidden()
   await page.screenshot({ path: here('screenshots/query-usage-390-dark.png') })
-  copyFileSync(here('screenshots/query-usage-390-dark.png'), here('../../docs/screenshots/1051/query-usage-390-dark.png'))
+  copyFileSync(here('screenshots/query-usage-390-dark.png'), here('../../docs/screenshots/1060/query-usage-390-dark.png'))
 })
 
 test('Queries takes the view out of the address', async ({ page }) => {
