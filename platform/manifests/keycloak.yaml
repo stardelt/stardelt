@@ -26,7 +26,7 @@ spec:
   instances: 1
   # Pinned: without this an apply tracks the operator default, which silently
   # starts a major upgrade the next time the operator ships one.
-  imageName: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4
   storage:
     size: 1Gi
   # Backup through the barman-cloud plugin (CloudNativePG 1.30; the native

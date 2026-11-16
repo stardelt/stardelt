@@ -16,6 +16,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 IMAGE_LINE = re.compile(r"^\s*(?:-\s*)?image:\s*(\S+)(?:\s+#.*)?$")
+IMAGE_NAME_LINE = re.compile(r"^\s*imageName:\s*(\S+)\s*$")
 
 AWS_CLI = "amazon/aws-cli:2.17.0"
 AWS_CLI_DIGEST = "@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
@@ -120,24 +121,37 @@ class TestHelperImages(unittest.TestCase):
         self.assert_every_reference_is_pinned(PYTHON, PYTHON_DIGEST, PYTHON_PINS)
 
     def test_every_applied_image_is_pinned(self):
-        """The whole class, not two names: every `image:` a pod runs carries a digest."""
+        """The whole class, not two names: every `image:`/`imageName:` a pod runs carries a digest."""
         total = 0
+        image_names = 0
         for path in applied_manifest_files():
             relative = str(path.relative_to(REPO))
             for number, line in code_lines(path):
                 match = IMAGE_LINE.match(line)
-                if not match:
-                    continue
-                total += 1
-                self.assertIn(
-                    "@sha256:",
-                    match.group(1),
-                    f"{relative}:{number}: the bare image reference",
-                )
+                if match:
+                    total += 1
+                    self.assertIn(
+                        "@sha256:",
+                        match.group(1),
+                        f"{relative}:{number}: the bare image reference",
+                    )
+                name_match = IMAGE_NAME_LINE.match(line)
+                if name_match:
+                    image_names += 1
+                    self.assertIn(
+                        "@sha256:",
+                        name_match.group(1),
+                        f"{relative}:{number}: the bare imageName reference",
+                    )
         self.assertEqual(
             total,
             18,
             "an image line was added or removed — pin it and update this count",
+        )
+        self.assertEqual(
+            image_names,
+            5,
+            "an imageName line was added or removed — pin it and update this count",
         )
 
     def test_every_helm_values_image_is_pinned(self):

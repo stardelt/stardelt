@@ -39,7 +39,7 @@ metadata:
 spec:
   # A physical restore cannot cross a PostgreSQL major version: this must be the
   # image the source cluster archives with (manifests/cnpg-postgres.yaml).
-  imageName: ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2
   instances: 1
   storage:
     size: 2Gi
