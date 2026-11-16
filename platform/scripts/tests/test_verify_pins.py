@@ -75,6 +75,19 @@ STATSD_PINNED = (
 )
 STATSD = "quay.io/prometheus/statsd-exporter:v0.30.0"
 
+OPENBAO_PINNED = "quay.io/openbao/openbao:2.7.2" "@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f"
+SUPERSET_PG_PINNED = "docker.io/bitnamilegacy/postgresql:14.17.0-debian-12-r3" "@sha256:769d9d755a41e845d00c8eda9bd2c0945ee9c437d64cc215db7a4bd05cd17f17"
+SUPERSET_REDIS_PINNED = "docker.io/bitnamilegacy/redis:7.0.10-debian-11-r4" "@sha256:224a79826b42869bdc72a70933efd840c5a5f10a70caafca68e57be6901e36fb"
+AIRFLOW_PG_PINNED = "docker.io/bitnamilegacy/postgresql:16.1.0-debian-11-r15" "@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64"
+PAUSE_PINNED = "registry.k8s.io/pause:3.10.1" "@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+HUB_PINNED = "quay.io/jupyterhub/k8s-hub:4.4.5" "@sha256:6ce210488f5598e2dd5130d82e84d9f74b72538b66895861240bd84926ec50bd"
+PROXY_PINNED = "quay.io/jupyterhub/configurable-http-proxy:5.4.0" "@sha256:7977d796d372642aa9eb962ff36590b3019f8f24493fcf9f1d07d2c81e8e6080"
+SCHEDULER_PINNED = "registry.k8s.io/kube-scheduler:v1.30.14" "@sha256:74a5cf9cfa9fcc2246f68c650f1f5c7add20da2145f13800fd97ba1d69fc06c8"
+CHART_ROWS = (
+    "superset-postgresql,superset-redis-master,airflow-postgresql,openbao,user-placeholder,"
+    "continuous-image-puller,hub-image,proxy,user-scheduler"
+)
+
 SHIM = """#!/usr/bin/env bash
 set -euo pipefail
 # Fake kubectl: every call is appended to FAKE_LOG and answered from FAKE_IMAGES_<name>.
@@ -110,6 +123,26 @@ if [ "${args[0]-}" = get ] && [ "${args[1]-}" = secret ]; then
   printf '%s' "${FAKE_SECRET_HUB-}"
   exit 0
 fi
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = sts ]; then
+  name="$(printf '%s' "${args[2]-}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
+  var="FAKE_STS_${name}"
+  value="${!var-}"
+  if [ -z "$value" ]; then
+    exit 1
+  fi
+  printf '%s\\n' "$value"
+  exit 0
+fi
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = ds ]; then
+  name="$(printf '%s' "${args[2]-}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
+  var="FAKE_DS_${name}"
+  value="${!var-}"
+  if [ -z "$value" ]; then
+    exit 1
+  fi
+  printf '%s\\n' "$value"
+  exit 0
+fi
 exit 0
 """
 
@@ -124,11 +157,20 @@ class VerifyPins(unittest.TestCase):
         self.log = self.dir / "kubectl.log"
         self.log.write_text("")
 
-    def run_script(self, images, deploys=None, rows: str = ROWS, secret_hub: str | None = None):
+    def run_script(
+        self,
+        images,
+        deploys=None,
+        rows: str = ROWS,
+        secret_hub: str | None = None,
+        statefulsets=None,
+        daemonsets=None,
+    ):
         """images maps CronJob name -> list of image strings the cluster reports.
 
         deploys maps Deployment name -> the single image string the cluster reports.
         secret_hub is the plain values.yaml the Secret `hub` carries; the shim base64-encodes it.
+        statefulsets and daemonsets map StatefulSet/DaemonSet name -> that single image string.
         """
         env = dict(
             os.environ,
@@ -143,6 +185,10 @@ class VerifyPins(unittest.TestCase):
             env["FAKE_DEPLOY_" + name.upper().replace("-", "_")] = value
         if secret_hub is not None:
             env["FAKE_SECRET_HUB"] = base64.b64encode(secret_hub.encode()).decode()
+        for name, value in (statefulsets or {}).items():
+            env["FAKE_STS_" + name.upper().replace("-", "_")] = value
+        for name, value in (daemonsets or {}).items():
+            env["FAKE_DS_" + name.upper().replace("-", "_")] = value
         return subprocess.run(
             ["bash", str(SCRIPT)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
         )
@@ -275,6 +321,54 @@ class VerifyPins(unittest.TestCase):
         self.assertIn("FAIL", done.stdout + done.stderr)
         self.assertIn("make step-airflow", done.stdout)
         self.assert_read_only()
+
+    def test_chart_images_pass(self):
+        """#1604 and #1605 pinned the chart-default images by digest: five StatefulSets, the
+        continuous-image-puller DaemonSet and the three JupyterHub Deployments. Nothing read
+        them, so a rollback to a floating tag stayed green (the #1594 class, one step on)."""
+        done = self.run_script(
+            {},
+            deploys={"hub": HUB_PINNED, "proxy": PROXY_PINNED, "user-scheduler": SCHEDULER_PINNED},
+            statefulsets={
+                "openbao": OPENBAO_PINNED,
+                "superset-postgresql": SUPERSET_PG_PINNED,
+                "superset-redis-master": SUPERSET_REDIS_PINNED,
+                "airflow-postgresql": AIRFLOW_PG_PINNED,
+                "user-placeholder": PAUSE_PINNED,
+            },
+            daemonsets={"continuous-image-puller": PAUSE_PINNED},
+            rows=CHART_ROWS,
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("verify-pins: PASS", done.stdout)
+        self.assertIn("matches helm-values/superset.yaml", done.stdout)
+        self.assertIn("matches helm-values/airflow.yaml", done.stdout)
+        self.assertIn("matches helm-values/openbao.yaml", done.stdout)
+        self.assertIn("matches helm-values/jupyterhub.yaml", done.stdout)
+        # One ✓ per row: four files, nine rows.
+        self.assertEqual(done.stdout.count("✓"), 9, done.stdout)
+        self.assertNotIn("✗", done.stdout)
+        self.assert_read_only()
+
+    def test_openbao_left_on_the_bare_tag_fails(self):
+        """The OpenBao StatefulSet before the #1604 rollout runs the bare tag; its row must fail
+        and name `make openbao`, not a pin-image.sh app that does not exist."""
+        done = self.run_script(
+            {},
+            deploys={"hub": HUB_PINNED, "proxy": PROXY_PINNED, "user-scheduler": SCHEDULER_PINNED},
+            statefulsets={
+                "openbao": "quay.io/openbao/openbao:2.7.2",
+                "superset-postgresql": SUPERSET_PG_PINNED,
+                "superset-redis-master": SUPERSET_REDIS_PINNED,
+                "airflow-postgresql": AIRFLOW_PG_PINNED,
+                "user-placeholder": PAUSE_PINNED,
+            },
+            daemonsets={"continuous-image-puller": PAUSE_PINNED},
+            rows=CHART_ROWS,
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL", done.stdout + done.stderr)
+        self.assertIn("make openbao", done.stdout)
 
 
 if __name__ == "__main__":

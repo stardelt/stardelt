@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Prove that the live Deployments, the group-roles CronJobs, the two spawned-notebook pins, the
-# three helper CronJobs, the Keycloak Deployment and the two alpine CronJobs run the images this
-# repository pins.
+# Prove that the live Deployments, StatefulSets and DaemonSets, the group-roles CronJobs, the two
+# spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment and the two alpine
+# CronJobs run the images this repository pins.
 #
 # Why: the recurring failure is a correct pin plus a Deployment that was never rolled to it
 # (stardelt-platform#697, #704, #503, #501, #509, #510). verify-images proves a pin is readable,
@@ -12,7 +12,11 @@
 # demo-reset, lakehouse-backup) are applied by hand too, and nothing read them until #1567: their
 # digests could sit unapplied while every check stayed green (platform#1563). Keycloak
 # (manifests/keycloak.yaml, quay.io) and the alpine CronJobs openbao-group-policies and
-# spark-confmap-janitor joined them in #1579.
+# spark-confmap-janitor joined them in #1579. The images the Superset, Airflow, OpenBao and
+# JupyterHub charts bring themselves (#1604, #1605) are StatefulSets, one DaemonSet and the three
+# JupyterHub Deployments hub, proxy and user-scheduler; they are read by the tag they carry
+# (`sts-tag:`, `ds-tag:`) or by their repository (`name-tag:`), because those files name several
+# tags with digests.
 #
 #   scripts/verify-pins.sh
 #   ROWS=access-sync,demo-reset scripts/verify-pins.sh   # only these rows (the test uses it)
@@ -60,6 +64,15 @@ rows=(
   "seaweedfs-s3|seaweedfs-s3|helm-values/seaweedfs.yaml|tag:4.25:make step-storage"
   "openfga|openfga|helm-values/openfga.yaml|tag:v1.22.1:make step-openfga"
   "airflow-statsd|airflow-statsd|helm-values/airflow.yaml|tag:v0.30.0:make step-airflow"
+  "superset-postgresql|superset-postgresql|helm-values/superset.yaml|sts-tag:14.17.0-debian-12-r3:make step-superset"
+  "superset-redis-master|superset-redis-master|helm-values/superset.yaml|sts-tag:7.0.10-debian-11-r4:make step-superset"
+  "airflow-postgresql|airflow-postgresql|helm-values/airflow.yaml|sts-tag:16.1.0-debian-11-r15:make step-airflow"
+  "openbao|openbao|helm-values/openbao.yaml|sts-tag:2.7.2:make openbao"
+  "user-placeholder|user-placeholder|helm-values/jupyterhub.yaml|sts-tag:3.10.1:make install-notebooks"
+  "continuous-image-puller|continuous-image-puller|helm-values/jupyterhub.yaml|ds-tag:3.10.1:make install-notebooks"
+  "hub-image|hub|helm-values/jupyterhub.yaml|name-tag:quay.io/jupyterhub/k8s-hub:make install-notebooks"
+  "proxy|proxy|helm-values/jupyterhub.yaml|name-tag:quay.io/jupyterhub/configurable-http-proxy:make install-notebooks"
+  "user-scheduler|user-scheduler|helm-values/jupyterhub.yaml|name-tag:registry.k8s.io/kube-scheduler:make install-notebooks"
 )
 
 pins="$(python3 - "${rows[@]}" <<'PY'
@@ -91,6 +104,25 @@ for row in sys.argv[1:]:
             text,
             re.M,
         )
+    elif kind.startswith(("sts-tag:", "ds-tag:")):
+        # A StatefulSet/DaemonSet image (the chart defaults #1594/#1604/#1605 pinned). The file
+        # may carry other tags, so the row names the tag it means, as `tag:` does.
+        parts = kind.split(":", 2)
+        m = re.search(
+            r"^\s*tag:\s*[\"']?" + re.escape(parts[1]) + r"@(sha256:[0-9a-f]{64})",
+            text,
+            re.M,
+        )
+    elif kind.startswith("name-tag:"):
+        # `name: <repository>` on one line and `tag: <tag>@<digest>` on the next. Anchoring on
+        # the repository is what keeps `tag:4.4.5` from reading the hub image for the
+        # image-awaiter (both are 4.4.5 in helm-values/jupyterhub.yaml).
+        parts = kind.split(":", 2)
+        m = re.search(
+            r"^\s*name:\s*" + re.escape(parts[1]) + r"\s*\n\s*tag:\s*[\"']?\S+@(sha256:[0-9a-f]{64})",
+            text,
+            re.M,
+        )
     elif kind in ("tag", "value"):
         m = re.search(r"^\s*(?:tag|value):\s*[\"']?\S+@(sha256:[0-9a-f]{64})", text, re.M)
     elif kind == "worker-tag":
@@ -119,7 +151,11 @@ for row in sys.argv[1:]:
         print(f"{app}\t{deploy}\t{path}\tERROR: no digest pin")
         continue
     digest = m.group(1).rsplit("@", 1)[-1] if kind in ("image", "any-image") else m.group(1)
-    hint = kind.split(":", 2)[2] if kind.startswith("tag:") and kind.count(":") > 1 else ""
+    hint = (
+        kind.split(":", 2)[2]
+        if kind.startswith(("tag:", "sts-tag:", "ds-tag:", "name-tag:")) and kind.count(":") > 1
+        else ""
+    )
     print(f"{app}\t{deploy}\t{path}\t{digest}\t{kind}\t{hint}")
 PY
 )"
@@ -153,6 +189,8 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
     env) live="$(kubectl -n "$NAMESPACE" get deploy "$deploy" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PIPELINE_NOTEBOOK_IMAGE")].value}' 2>/dev/null || true)" ;;
     cronjob) live="$(kubectl -n "$NAMESPACE" get cronjob "$deploy" \
              -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
+    sts-tag:*) live="$(kubectl -n "$NAMESPACE" get sts "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
+    ds-tag:*) live="$(kubectl -n "$NAMESPACE" get ds "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
     *) live="$(kubectl -n "$NAMESPACE" get deploy "$deploy" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)" ;;
   esac
   if [[ -z "$live" ]]; then
@@ -168,6 +206,7 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
         hub) hint="run make install-notebooks" ;;
         env) hint="run make step-airflow" ;;
         cronjob) hint="run make step-airflow" ;;
+        sts-tag:*|ds-tag:*|name-tag:*) hint="${row_hint:-run ./scripts/pin-image.sh $app}" ;;
         any-image) hint="kubectl apply -f $path" ;;
         tag:*) hint="${row_hint:-run ./scripts/pin-image.sh $app}" ;;
         *) hint="run ./scripts/pin-image.sh $app" ;;
@@ -181,7 +220,7 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
 done <<< "$pins"
 
 case "$status" in
-  0) echo "verify-pins: PASS (live Deployments, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment and the two alpine CronJobs carry the checked-in pins)" ;;
+  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment and the two alpine CronJobs carry the checked-in pins)" ;;
   1) echo "verify-pins: FAIL (a pin does not match the live configuration)" >&2 ;;
   *) echo "verify-pins: UNVERIFIED (a pin or Deployment could not be read)" >&2 ;;
 esac
