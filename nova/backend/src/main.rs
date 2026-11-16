@@ -767,6 +767,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/destinations/{id}/test", post(destinations::test))
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
+        .route("/query-log/usage", get(query_log_api::usage))
         .route("/query-log/{id}", get(query_log_api::detail))
         .route("/query-log/{id}/profile", get(query_log_api::profile))
         .route("/query-log/{id}/history", get(query_log_api::history))
@@ -2416,6 +2417,66 @@ mod router_tests {
         let (status, body) = call(&alice, "GET", "/api/query-log?limit=0", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].as_str().unwrap().contains("limit"));
+    }
+
+    /// The usage answer adds the rows up with the log's visibility: alice sees her own compute,
+    /// `scope=all` is the administrator's, `by=day` walks the days in order.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn usage_adds_up_compute_with_the_query_log_visibility() {
+        let pool = db::test_support::migrated_pool().await;
+        seed_query_log(&pool).await;
+        // The fixtures are dated 2026-10-19 and the default window is the last seven days, so
+        // the seeded rows are moved into it; only their time changes, not whose they are.
+        sqlx::query("UPDATE query_log SET created_at = now() - interval '1 hour'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dir = StaticDir::new("query-log-usage");
+        let alice = log_app(pool.clone(), Some(signed_in("alice")), &dir);
+        let bob = log_app(pool.clone(), Some(signed_in("bob")), &dir);
+        let admin = log_app(pool.clone(), Some(signed_in_admin("root")), &dir);
+
+        // (a) Alice sees her own two queries under her own name, added up.
+        let (status, usage) = call(&alice, "GET", "/api/query-log/usage", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(usage["by"], "principal");
+        assert!(usage["from"].as_i64().expect("from") < usage["to"].as_i64().expect("to"));
+        let items = usage["items"].as_array().expect("an items array");
+        assert_eq!(items.len(), 1, "{usage}");
+        assert_eq!(items[0]["key"], "alice");
+        assert_eq!(usage["total"]["key"], "total");
+        assert_eq!(usage["total"]["queries"], 2);
+        assert_eq!(usage["total"]["failed"], 0);
+        assert!(usage["total"]["cpuMs"].as_i64().expect("cpuMs") > 0);
+        assert_eq!(usage["total"]["writtenBytes"], items[0]["writtenBytes"]);
+
+        // (b) The all scope is for administrators.
+        let (status, body) = call(&bob, "GET", "/api/query-log/usage?scope=all", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["error"].as_str().unwrap().contains("administrators"));
+
+        // (c) An administrator adds everybody's up per day, oldest day first.
+        let (status, usage) =
+            call(&admin, "GET", "/api/query-log/usage?scope=all&by=day", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(usage["by"], "day");
+        let keys: Vec<String> = usage["items"]
+            .as_array()
+            .expect("an items array")
+            .iter()
+            .map(|i| i["key"].as_str().expect("a day").to_string())
+            .collect();
+        assert!(!keys.is_empty(), "{usage}");
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
+        assert_eq!(usage["total"]["queries"], 3);
+
+        // (d) Anything else than principal, warehouse or day is refused with a sentence.
+        let (status, body) = call(&alice, "GET", "/api/query-log/usage?by=group", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "by must be principal, warehouse or day");
     }
 
     /// A profile follows the rule of the detail it belongs to: the owner sees it, another

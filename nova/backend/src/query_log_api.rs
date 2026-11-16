@@ -458,6 +458,225 @@ pub async fn list(
     .into_response()
 }
 
+/// The window of the usage route when the caller names none: the last seven days.
+const DEFAULT_WINDOW_MS: i64 = 7 * 86_400_000;
+/// The usage answer is a summary, not a log: the biggest 100 keys are enough.
+const USAGE_LIMIT: i64 = 100;
+
+/// What the usage route adds up by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum By {
+    Principal,
+    Warehouse,
+    Day,
+}
+
+impl By {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Principal => "principal",
+            Self::Warehouse => "warehouse",
+            Self::Day => "day",
+        }
+    }
+}
+
+/// The checked query string of the usage route; the window is always complete.
+#[derive(Debug, PartialEq)]
+struct UsageParams {
+    scope: Scope,
+    warehouse: Option<String>,
+    by: By,
+    from_ms: i64,
+    to_ms: i64,
+}
+
+fn parse_usage_params(raw: &HashMap<String, String>, now_ms: i64) -> Result<UsageParams, String> {
+    let params = parse_params(raw)?;
+    let by = match raw.get("by").map(String::as_str) {
+        None | Some("principal") => By::Principal,
+        Some("warehouse") => By::Warehouse,
+        Some("day") => By::Day,
+        Some(_) => return Err("by must be principal, warehouse or day".into()),
+    };
+    Ok(UsageParams {
+        scope: params.scope,
+        warehouse: params.warehouse,
+        by,
+        from_ms: params.from_ms.unwrap_or(now_ms - DEFAULT_WINDOW_MS),
+        to_ms: params.to_ms.unwrap_or(now_ms),
+    })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// One line of the usage answer: a person, a warehouse or a day, and what it cost.
+#[derive(Debug, Serialize, ToSchema, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRow {
+    /// The principal (engine user), the warehouse name, or the UTC day as `YYYY-MM-DD`.
+    key: String,
+    queries: i64,
+    /// How many of `queries` failed.
+    failed: i64,
+    cpu_ms: i64,
+    wall_ms: i64,
+    input_bytes: i64,
+    written_bytes: i64,
+}
+
+impl UsageRow {
+    fn total(items: &[UsageRow]) -> Self {
+        Self {
+            key: "total".into(),
+            queries: items.iter().map(|i| i.queries).sum(),
+            failed: items.iter().map(|i| i.failed).sum(),
+            cpu_ms: items.iter().map(|i| i.cpu_ms).sum(),
+            wall_ms: items.iter().map(|i| i.wall_ms).sum(),
+            input_bytes: items.iter().map(|i| i.input_bytes).sum(),
+            written_bytes: items.iter().map(|i| i.written_bytes).sum(),
+        }
+    }
+}
+
+/// Compute and bytes added up, with the window that was used.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UsagePage {
+    /// principal, warehouse or day.
+    by: String,
+    /// The window that was added up, epoch milliseconds.
+    from: i64,
+    to: i64,
+    items: Vec<UsageRow>,
+    /// Every item added together; its `key` is `total`.
+    total: UsageRow,
+}
+
+impl UsagePage {
+    fn empty(by: By, from_ms: i64, to_ms: i64) -> Self {
+        Self {
+            by: by.as_str().into(),
+            from: from_ms,
+            to: to_ms,
+            items: vec![],
+            total: UsageRow::total(&[]),
+        }
+    }
+}
+
+/// `GET /api/query-log/usage?scope=&by=&warehouse=&from=&to=` — compute and bytes added up.
+#[utoipa::path(
+    get,
+    operation_id = "query_log_usage",
+    path = "/api/query-log/usage",
+    tag = "public",
+    description = "Compute and bytes added up per person, warehouse or day, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. The window defaults to the last 7 days.",
+    params(
+        ("scope" = Option<String>, Query, description = "mine (default), team or all. team is the service principals owned by the caller's groups; all is for administrators"),
+        ("by" = Option<String>, Query, description = "principal (default), warehouse or day (UTC)"),
+        ("warehouse" = Option<String>, Query, description = "Only usage of this warehouse"),
+        ("from" = Option<i64>, Query, description = "Created at or after this time; the last 7 days by default"),
+        ("to" = Option<i64>, Query, description = "Created at or before this time; now by default"),
+    ),
+    responses(
+        (status = 200, description = "The rows of the window and their total", body = UsagePage),
+        (status = 400, description = "A parameter is not valid; the message names it", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "scope=all by somebody who is not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn usage(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Query(raw): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let who = Caller::of(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    let params = match parse_usage_params(&raw, now_ms()) {
+        Ok(p) => p,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    if params.scope == Scope::All && !who.is_admin {
+        return error(StatusCode::FORBIDDEN, "the all scope is for administrators");
+    }
+    let owners = if params.scope == Scope::Team {
+        principal_owners(&s).await
+    } else {
+        HashMap::new()
+    };
+    if params.scope == Scope::Team && owners.is_empty() {
+        return Json(UsagePage::empty(params.by, params.from_ms, params.to_ms)).into_response();
+    }
+
+    let key = match params.by {
+        By::Principal => "principal",
+        By::Warehouse => "warehouse",
+        By::Day => "to_char(date_trunc('day', created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')",
+    };
+    // As in `list`, the engine user is the sub once authz 8/8 is live; rows written before it
+    // still carry the sign-in name.
+    let mut q: QueryBuilder<Postgres> = QueryBuilder::new(format!(
+        "SELECT {key} AS key, count(*) AS queries, \
+         count(*) FILTER (WHERE state = 'FAILED') AS failed, \
+         COALESCE(sum(cpu_ms), 0)::bigint AS cpu_ms, \
+         COALESCE(sum(wall_ms), 0)::bigint AS wall_ms, \
+         COALESCE(sum(input_bytes), 0)::bigint AS input_bytes, \
+         COALESCE(sum(written_bytes), 0)::bigint AS written_bytes \
+         FROM query_log WHERE true"
+    ));
+    if params.scope == Scope::Mine {
+        q.push(" AND (principal = ")
+            .push_bind(who.username.clone())
+            .push(" OR principal = ")
+            .push_bind(who.sub.clone())
+            .push(")");
+    }
+    if params.scope == Scope::Team {
+        let subjects: Vec<String> = owners.keys().cloned().collect();
+        q.push(" AND principal = ANY(")
+            .push_bind(subjects)
+            .push(")");
+    }
+    if let Some(w) = &params.warehouse {
+        q.push(" AND warehouse = ").push_bind(w.clone());
+    }
+    q.push(" AND created_at >= 'epoch'::timestamptz + (")
+        .push_bind(params.from_ms)
+        .push("::bigint * interval '1 millisecond')");
+    q.push(" AND created_at <= 'epoch'::timestamptz + (")
+        .push_bind(params.to_ms)
+        .push("::bigint * interval '1 millisecond')");
+    q.push(match params.by {
+        By::Principal | By::Warehouse => " GROUP BY 1 ORDER BY cpu_ms DESC, key ASC LIMIT ",
+        By::Day => " GROUP BY 1 ORDER BY key ASC LIMIT ",
+    })
+    .push_bind(USAGE_LIMIT);
+
+    // No second check per row here: a warehouse or a day is not a principal, so the scope can
+    // only narrow the rows in the WHERE above (for `by=principal`, it already is the rule).
+    let items: Vec<UsageRow> = match q.build_query_as().fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) => return store_failed(e),
+    };
+    let total = UsageRow::total(&items);
+    Json(UsagePage {
+        by: params.by.as_str().into(),
+        from: params.from_ms,
+        to: params.to_ms,
+        items,
+        total,
+    })
+    .into_response()
+}
+
 /// The profile row's own fields the hints need: who ran it and how long it waited.
 #[derive(FromRow)]
 struct ProfileRow {

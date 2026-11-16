@@ -38,6 +38,7 @@ Browser
          ├─ PUT  /api/settings/:key    set one (body = any JSON value, at most 16 KiB)
          ├─ DELETE /api/settings/:key  remove one
          ├─ GET  /api/query-log        the caller's queries (admins: everyone's), keyset-paged, one query per row
+         ├─ GET  /api/query-log/usage  compute and bytes added up per person, warehouse or day (last 7 days by default)
          ├─ GET  /api/query-log/:id    one query's detail: timing, tables read, error code
          ├─ GET  /api/query-log/:id/profile  one finished query's plan and per-operator statistics
          ├─ GET  /api/apps             installed apps: live status + images
