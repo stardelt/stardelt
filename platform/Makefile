@@ -1194,6 +1194,9 @@ openbao: deps _context _helm-repos ## Install the sandbox secret store (OpenBao,
 	@# The bootstrap execs into the pod, so it must exist — not be Ready.
 	@kubectl -n $(NAMESPACE) wait --for=create --timeout=120s pod/openbao-0
 	@NAMESPACE=$(NAMESPACE) bash scripts/openbao-bootstrap.sh
+	@# The connections step port-forwards into the pod, and the upgrade just replaced it: wait for
+	@# the new pod to be Ready, or the port-forward dies with connection refused (platform#1613).
+	@kubectl -n $(NAMESPACE) wait --for=condition=Ready --timeout=180s pod/openbao-0
 	@NAMESPACE=$(NAMESPACE) OWNER_GROUPS="$(OWNER_GROUPS)" bash scripts/openbao-connections.sh
 	@$(MAKE) openbao-group-policies-config
 	@kubectl -n $(NAMESPACE) apply -f manifests/openbao-group-policies.yaml >/dev/null || true
