@@ -104,8 +104,8 @@ if ! cm_json="$(kubectl -n "$NS" get configmap "$CATALOGUE" -o json 2>&1)"; then
   problems=$((problems + 1))
 else
   catalogue_ok=1
-  if ! diff <(printf '%s' "$cm_json" | jq -S '.data') \
-       <(jq -S 'with_entries(.value |= tojson)' chart/files/spark-runtimes.json) >/dev/null 2>&1; then
+  if ! diff <(printf '%s' "$cm_json" | jq -S '.data | with_entries(.value |= fromjson)') \
+       <(jq -S . chart/files/spark-runtimes.json) >/dev/null 2>&1; then
     echo "✗ catalogue $CATALOGUE differs from chart/files/spark-runtimes.json"
     diff <(printf '%s' "$cm_json" | jq -S '.data' | jq -r 'keys[]' 2>/dev/null) \
          <(jq -S 'with_entries(.value |= tojson)' chart/files/spark-runtimes.json | jq -r 'keys[]' 2>/dev/null) \
