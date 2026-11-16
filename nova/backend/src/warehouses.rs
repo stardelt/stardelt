@@ -97,6 +97,26 @@ pub struct SqlWarehouse {
     pub can_use: bool,
     /// The row this caller will land in: the largest usable class, or the default one.
     pub yours: bool,
+    /// The scaler's verdict on the engine (`status.scale`); `None` before it has one.
+    pub scale: Option<WarehouseScale>,
+}
+
+/// What the engine is doing for one class: `status.scale`, which the platform's access-sync job
+/// writes (`patch_scale_status`) and Nova only reads. `None` until the scaler has reached the
+/// object, or without a cluster.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WarehouseScale {
+    /// `Stopped`, `Starting` or `Running` — the scaler's words.
+    pub phase: String,
+    /// Worker replicas the scaler last set for the one engine every class shares, so every row of
+    /// one answer carries the same number.
+    pub workers: u32,
+    /// Queries the class reported as running at its last report (`stardelt.io/queries-in-flight`).
+    pub queries_in_flight: u32,
+    /// The last completed query's end, RFC 3339 (`stardelt.io/last-query-at`); `null` while the
+    /// class has no measurement.
+    pub last_query_at: Option<String>,
 }
 
 /// The `SqlWarehouse` resources of the platform namespace, through the cluster client.
@@ -133,6 +153,29 @@ fn size_of(spec: &Value) -> &str {
     spec.get("size")
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_SIZE)
+}
+
+/// `object.status.scale`, or `None` when the scaler has not written one (or wrote something this
+/// code cannot read — the row then renders without a scale instead of failing the whole list).
+fn scale_of(object: &Value) -> Option<WarehouseScale> {
+    let scale = object.pointer("/status/scale")?.as_object()?;
+    let phase = scale.get("phase")?.as_str()?.to_string();
+    let number = |key: &str| {
+        scale
+            .get(key)
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(0)
+    };
+    Some(WarehouseScale {
+        phase,
+        workers: number("workers"),
+        queries_in_flight: number("queriesInFlight"),
+        last_query_at: scale
+            .get("lastQueryAt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 /// A positive whole number from the object, or the class default: a field that is absent,
@@ -205,6 +248,7 @@ fn row(object: &Value, identity: &Identity) -> SqlWarehouse {
             .unwrap_or(false),
         can_use: can_use(&identity.groups, spec),
         yours: false,
+        scale: scale_of(object),
     }
 }
 
@@ -222,6 +266,7 @@ fn admin_row() -> SqlWarehouse {
         default: false,
         can_use: true,
         yours: true,
+        scale: None,
     }
 }
 
@@ -271,6 +316,7 @@ fn demo_rows() -> Vec<SqlWarehouse> {
         default: true,
         can_use: true,
         yours: true,
+        scale: None,
     }]
 }
 
@@ -299,7 +345,7 @@ fn actor(principal: Option<Extension<Principal>>, state: &AppState) -> Identity 
     operation_id = "warehouses_list",
     path = "/api/warehouses",
     tag = "public",
-    description = "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
+    description = "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. `scale` is the scaler's verdict on the one engine the classes share (`phase`, `workers`, `queriesInFlight`, `lastQueryAt`), read from `status.scale`; `null` until the scaler has written one. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per class, largest first, the administrator's row first of all", body = [SqlWarehouse]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -452,6 +498,15 @@ mod tests {
     /// A `SqlWarehouse` object as the API server holds it: `metadata.name` plus a `spec`.
     fn object(name: &str, spec: Value) -> Value {
         json!({ "metadata": { "name": name, "namespace": "stardelt" }, "spec": spec })
+    }
+
+    /// The same object with the `status` the platform's scaler writes on it.
+    fn object_with_status(name: &str, spec: Value, status: Value) -> Value {
+        json!({
+            "metadata": { "name": name, "namespace": "stardelt" },
+            "spec": spec,
+            "status": status,
+        })
     }
 
     /// A caller with these groups; never an administrator unless a test says so.
@@ -649,6 +704,7 @@ mod tests {
                 "default": false,
                 "canUse": true,
                 "yours": true,
+                "scale": null,
             })
         );
         // The synthetic row: `size` is present and null, never omitted.
@@ -664,6 +720,7 @@ mod tests {
                 "default": false,
                 "canUse": true,
                 "yours": true,
+                "scale": null,
             })
         );
         // An object without a display name: null, never an invented label.
@@ -705,8 +762,70 @@ mod tests {
                 "default": true,
                 "canUse": true,
                 "yours": true,
+                "scale": null,
             }])
         );
+    }
+
+    #[test]
+    fn a_row_carries_the_scalers_verdict() {
+        let value = object_with_status(
+            "demo",
+            json!({ "size": "small", "grants": [{"group": "stardelt-users"}] }),
+            json!({"scale": {
+                "phase": "Stopped", "workers": 0, "queriesInFlight": 2,
+                "lastQueryAt": "2026-11-16T04:09:45Z",
+            }}),
+        );
+        let answer = rows(&[value], &person(&[]));
+        assert_eq!(
+            answer[0].scale,
+            Some(WarehouseScale {
+                phase: "Stopped".into(),
+                workers: 0,
+                queries_in_flight: 2,
+                last_query_at: Some("2026-11-16T04:09:45Z".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_class_the_scaler_has_not_reached_has_no_scale() {
+        let value = object(
+            "demo",
+            json!({ "size": "small", "grants": [{"group": "stardelt-users"}] }),
+        );
+        assert_eq!(rows(&[value], &person(&[]))[0].scale, None);
+    }
+
+    #[test]
+    fn a_malformed_scale_is_no_scale() {
+        // No `phase` at all: the scaler's words are the one thing this reader requires.
+        for status in [
+            json!({"scale": {"workers": 1}}),
+            json!({"scale": "Stopped"}),
+        ] {
+            let value = object_with_status(
+                "demo",
+                json!({ "size": "small", "grants": [{"group": "stardelt-users"}] }),
+                status,
+            );
+            let answer = rows(&[value], &person(&[]));
+            assert_eq!(answer[0].scale, None);
+            // The rest of the row is still built.
+            assert_eq!(answer[0].name, "demo");
+            assert_eq!(answer[0].size.as_deref(), Some("small"));
+            assert_eq!((answer[0].running, answer[0].queued), (10, 100));
+        }
+    }
+
+    #[test]
+    fn the_administrators_row_has_no_scale() {
+        let answer = rows(&seeded(), &administrator());
+        assert_eq!(answer[0].name, "admin");
+        assert!(answer[0].scale.is_none());
+        // This fixture carries no statuses: no warehouse row has a scale either.
+        assert!(answer.iter().all(|row| row.scale.is_none()));
     }
 
     /// `GET /api/warehouses` answers the demo row and `Cache-Control: no-store` without a
