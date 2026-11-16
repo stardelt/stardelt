@@ -9,7 +9,9 @@ CronJobs still ran the bare tags while `make verify-pins` answered PASS. Nothing
 manifests, so a pin that was never applied stayed invisible to every check.
 """
 
+import base64
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -19,6 +21,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "verify-pins.sh"
+
+# The real values file: the hub image (4.4.5@…) comes before the spawn image (dev@…), which
+# is exactly the order that made the unanchored `hub` regex read the wrong digest (#1605).
+JUPYTER_VALUES = (REPO / "helm-values" / "jupyterhub.yaml").read_text()
+SPAWN_DIGEST = re.search(r'tag:\s*"dev@(sha256:[0-9a-f]{64})"', JUPYTER_VALUES).group(1)
+HUB_DIGEST = re.search(r'tag:\s*"4\.4\.5@(sha256:[0-9a-f]{64})"', JUPYTER_VALUES).group(1)
 
 AWS_CLI = "amazon/aws-cli:2.17.0"
 AWS_CLI_PINNED = (
@@ -98,6 +106,10 @@ if [ "${args[0]-}" = get ] && [ "${args[1]-}" = deploy ]; then
   printf '%s\\n' "$value"
   exit 0
 fi
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = secret ]; then
+  printf '%s' "${FAKE_SECRET_HUB-}"
+  exit 0
+fi
 exit 0
 """
 
@@ -112,10 +124,11 @@ class VerifyPins(unittest.TestCase):
         self.log = self.dir / "kubectl.log"
         self.log.write_text("")
 
-    def run_script(self, images, deploys=None, rows: str = ROWS):
+    def run_script(self, images, deploys=None, rows: str = ROWS, secret_hub: str | None = None):
         """images maps CronJob name -> list of image strings the cluster reports.
 
         deploys maps Deployment name -> the single image string the cluster reports.
+        secret_hub is the plain values.yaml the Secret `hub` carries; the shim base64-encodes it.
         """
         env = dict(
             os.environ,
@@ -128,6 +141,8 @@ class VerifyPins(unittest.TestCase):
             env["FAKE_IMAGES_" + name.upper().replace("-", "_")] = "\n".join(values)
         for name, value in (deploys or {}).items():
             env["FAKE_DEPLOY_" + name.upper().replace("-", "_")] = value
+        if secret_hub is not None:
+            env["FAKE_SECRET_HUB"] = base64.b64encode(secret_hub.encode()).decode()
         return subprocess.run(
             ["bash", str(SCRIPT)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
         )
@@ -206,6 +221,26 @@ class VerifyPins(unittest.TestCase):
         self.assertIn("FAIL", done.stdout + done.stderr)
         self.assertIn("kubectl apply -f manifests/keycloak.yaml", done.stdout)
         self.assert_read_only()
+
+    def test_notebook_row_reads_the_spawn_image_not_the_hub_image(self):
+        """#1605/#1608 pinned the chart's own hub image above the singleuser tag; the unanchored
+        `hub` regex then read the hub digest and the row could never pass."""
+        done = self.run_script(
+            {}, rows="notebook", secret_hub=f"singleuser:\n  image:\n    tag: dev@{SPAWN_DIGEST}\n"
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("✓ notebook", done.stdout)
+        self.assertIn(SPAWN_DIGEST[:19], done.stdout)
+        self.assertNotIn(HUB_DIGEST[:19], done.stdout)
+
+    def test_a_spawn_image_that_is_not_the_pin_fails(self):
+        other = "sha256:" + "0" * 64
+        done = self.run_script(
+            {}, rows="notebook", secret_hub=f"singleuser:\n  image:\n    tag: dev@{other}\n"
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("FAIL", done.stdout + done.stderr)
+        self.assertIn("make install-notebooks", done.stdout)
 
     def _core_deploys(self):
         return {

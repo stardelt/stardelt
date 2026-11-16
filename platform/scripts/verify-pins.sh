@@ -69,7 +69,10 @@ for row in sys.argv[1:]:
     app, deploy, path, kind = row.split("|")
     text = open(path, encoding="utf-8").read()
     if kind == "hub":
-        m = re.search(r"^\s*tag:\s*[\"']?\S+@(sha256:[0-9a-f]{64})", text, re.M)
+        # The spawn image is the only `dev@` tag in the file. The chart's own images
+        # (#1605) are `4.4.5@…` and the hub image comes first, so an unanchored `tag:`
+        # regex read the hub image and the spawn row could never pass (#1608 regression).
+        m = re.search(r"^\s*tag:\s*[\"']?dev@(sha256:[0-9a-f]{64})", text, re.M)
     elif kind == "env":
         m = re.search(r"name:\s*PIPELINE_NOTEBOOK_IMAGE\s*\n\s*value:\s*\S+@(sha256:[0-9a-f]{64})", text, re.M)
     elif kind == "cronjob":
