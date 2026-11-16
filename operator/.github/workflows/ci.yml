@@ -45,5 +45,8 @@ jobs:
       - name: Access-sync job matches stardelt-platform
         run: bash scripts/check-access-sync-script.sh
 
+      - name: Maintenance CLI image matches the published build
+        run: bash scripts/check-cli-image.sh
+
       - name: Every platform install step has a parity row
         run: bash scripts/check-parity.sh
