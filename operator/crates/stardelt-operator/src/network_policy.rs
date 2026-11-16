@@ -106,6 +106,11 @@ fn label_segment(value: &str) -> bool {
 /// Port the Spark Connect server serves gRPC on.
 pub const SPARK_CONNECT_PORT: i32 = 15002;
 
+/// Port the Spark driver serves its executors' RPC on (`spark.driver.port`).
+pub const SPARK_DRIVER_RPC_PORT: i32 = 7078;
+/// Port the driver's block manager serves on (`spark.driver.port` + 1).
+pub const SPARK_BLOCK_MANAGER_PORT: i32 = 7079;
+
 /// Port the shared Spark Connect driver serves Prometheus text on (its UI port).
 pub const SPARK_CONNECT_METRICS_PORT: i32 = 4040;
 
@@ -152,14 +157,28 @@ pub fn spark_connect_ingress(
                 match_expressions: None,
             }),
             policy_types: Some(vec!["Ingress".to_string()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![
-                    owner_peer,
-                    peer(&[("app.kubernetes.io/name", "nova")]),
-                    peer(&[("release", "airflow"), ("component", "worker")]),
-                ]),
-                ports: Some(vec![port(SPARK_CONNECT_PORT)]),
-            }]),
+            ingress: Some(vec![
+                NetworkPolicyIngressRule {
+                    from: Some(vec![
+                        owner_peer,
+                        peer(&[("app.kubernetes.io/name", "nova")]),
+                        peer(&[("release", "airflow"), ("component", "worker")]),
+                    ]),
+                    ports: Some(vec![port(SPARK_CONNECT_PORT)]),
+                },
+                // The cluster's own executors: Spark labels every executor pod
+                // `spark-role=executor`, and they must reach the driver's RPC and
+                // block-manager ports (platform#1511). The peer has no namespace selector,
+                // so it matches this namespace only — the Spark operator creates the
+                // executors there.
+                NetworkPolicyIngressRule {
+                    from: Some(vec![peer(&[("spark-role", "executor")])]),
+                    ports: Some(vec![
+                        port(SPARK_DRIVER_RPC_PORT),
+                        port(SPARK_BLOCK_MANAGER_PORT),
+                    ]),
+                },
+            ]),
             egress: None,
         }),
     })
@@ -957,7 +976,7 @@ mod tests {
             &vec!["Ingress".to_string()]
         );
         let ingress = spec.ingress.as_ref().unwrap();
-        assert_eq!(ingress.len(), 1);
+        assert_eq!(ingress.len(), 2);
         assert_eq!(ingress[0].ports.as_ref().unwrap(), &vec![port(15002)]);
         let from = ingress[0].from.as_ref().unwrap();
         assert_eq!(from.len(), 3, "{from:?}");
@@ -978,6 +997,17 @@ mod tests {
                 ("release".to_string(), "airflow".to_string()),
                 ("component".to_string(), "worker".to_string()),
             ])
+        );
+        // The cluster's own executors reach the driver's RPC and block-manager ports.
+        let executor_from = ingress[1].from.as_ref().unwrap();
+        assert_eq!(executor_from.len(), 1, "{executor_from:?}");
+        assert_eq!(
+            owner_labels(&executor_from[0]),
+            BTreeMap::from([("spark-role".to_string(), "executor".to_string())])
+        );
+        assert_eq!(
+            ingress[1].ports.as_ref().unwrap(),
+            &vec![port(SPARK_DRIVER_RPC_PORT), port(SPARK_BLOCK_MANAGER_PORT)]
         );
     }
 
