@@ -115,6 +115,10 @@ test('the usage view answers who used the most compute, and the row is there', a
   await expect(page.getByRole('columnheader', { name: 'Data read' })).toBeVisible()
   await expect(page.getByRole('columnheader', { name: 'Data written' })).toBeHidden()
   await expect(page.getByRole('columnheader', { name: 'Failed' })).toBeHidden()
+  // The card must not be a scroll container at 390 px (#1064): the CPU bar is hidden below sm.
+  const card = page.locator('div.card', { has: page.getByRole('table') })
+  const overflow = await card.evaluate((el) => el.scrollWidth - el.clientWidth)
+  expect(overflow, 'the usage table card must not scroll at 390 px').toBeLessThanOrEqual(1)
   await page.screenshot({ path: here('screenshots/query-usage-390-dark.png') })
   copyFileSync(here('screenshots/query-usage-390-dark.png'), here('../../docs/screenshots/1060/query-usage-390-dark.png'))
 })

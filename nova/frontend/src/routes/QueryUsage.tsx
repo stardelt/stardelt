@@ -99,7 +99,7 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
                 <td className="td px-3 whitespace-nowrap">
                   <div
                     aria-hidden
-                    className="inline-block h-2 rounded bg-accent/60 mr-2 align-middle"
+                    className="hidden sm:inline-block h-2 rounded bg-accent/60 mr-2 align-middle"
                     style={{ width: `${Math.max(2, Math.round(80 * row.cpuMs / maxCpu))}px` }}
                   />
                   <span className="text-text-dim">{cpuText(row.cpuMs)}</span>
