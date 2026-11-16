@@ -610,6 +610,19 @@
       "query_params": [],
       "body": false
     },
+    "query_log_usage": {
+      "method": "GET",
+      "path": "/api/query-log/usage",
+      "path_params": [],
+      "query_params": [
+        "scope",
+        "by",
+        "warehouse",
+        "from",
+        "to"
+      ],
+      "body": false
+    },
     "query_run": {
       "method": "POST",
       "path": "/api/query",
