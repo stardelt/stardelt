@@ -103,10 +103,11 @@ rules:
     resources: ["catalogs"]
     # create: the administrator's "New team space" in Nova (internal#106 decision 3).
     verbs: ["get", "list", "patch", "create"]
-  # `SqlWarehouse` resources: which compute class a person uses (nova#236, platform#473).
+  # `SqlWarehouse` resources: which compute class a person uses (nova#236, platform#473);
+  # `patch` is the activity annotations the engine's scaler reads (platform#131 step A).
   - apiGroups: ["stardelt.io"]
     resources: ["sqlwarehouses"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "patch"]
   # Model endpoints (operator#609 slice b): Nova reads them and writes its probe into status.
   - apiGroups: ["stardelt.io"]
     resources: ["modelendpoints"]

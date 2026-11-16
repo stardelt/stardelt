@@ -73,7 +73,10 @@ rules:
     verbs: ["get", "list", "patch", "create"]
   - apiGroups: ["stardelt.io"]
     resources: ["sqlwarehouses"]
-    verbs: ["get", "list"]
+    # patch: the activity annotations (`stardelt.io/queries-in-flight`,
+    # `stardelt.io/last-query-at`) the engine's scaler reads (platform#131 step A).
+    # Metadata only — Nova never writes a SqlWarehouse spec or status.
+    verbs: ["get", "list", "patch"]
   # Model endpoints (operator#609 slice b): Nova reads them and writes its probe into status.
   - apiGroups: ["stardelt.io"]
     resources: ["modelendpoints"]
