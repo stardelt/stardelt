@@ -686,6 +686,9 @@ fn api_router() -> Router<Arc<AppState>> {
         // The SQL compute classes and the one this caller lands in (stardelt-nova#236): read
         // from the `SqlWarehouse` objects, non-authoritative — the engine selects by identity.
         .route("/warehouses", get(warehouses::list))
+        // Keep one class warm (platform#131 step A): Nova writes the activity annotation the
+        // engine's scaler reads; the replica count stays the scaler's.
+        .route("/warehouses/{name}/start", post(warehouses::start))
         // The model endpoints an administrator connected (operator#609 slice c): Ask reads
         // whether one exists, where prompts go and what the probe last found.
         .route("/model-endpoints", get(model_endpoints::list))

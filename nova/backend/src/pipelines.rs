@@ -5305,7 +5305,7 @@ pub(crate) fn answer<T: Serialize>(result: Result<T, Fail>) -> Response {
     answer_with(StatusCode::OK, result)
 }
 
-fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fail>) -> Response {
+pub(crate) fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fail>) -> Response {
     match result {
         Ok(value) => (status, Json(value)).into_response(),
         Err(e) => e.into_response(),

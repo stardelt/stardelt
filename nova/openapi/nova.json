@@ -8916,6 +8916,89 @@
         }
       }
     },
+    "/api/warehouses/{name}/start": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/warehouses/{name}/start`: keep a class warm.",
+        "description": "Wake the engine for one SQL compute class by writing the class's `stardelt.io/last-query-at` annotation (the scaler reads it on its two-minute tick; the replica count is the scaler's, not Nova's). The answer is `202` with `phase: \"Starting\"` — `status.scale.phase` is written by the scaler, not by Nova. An administrator may start any class; a person needs one of their groups in `spec.grants`. Without a cluster connection the answer is `503`; a class that does not exist is `404`.",
+        "operationId": "warehouses_start",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The `SqlWarehouse` (class) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The annotation is written; the scaler wakes the engine on its next tick",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WarehouseStart"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "None of the caller's groups is granted this class",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection (demo mode, a local run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/workloads": {
       "get": {
         "tags": [
@@ -15331,6 +15414,22 @@
           "name": {
             "type": "string",
             "description": "The configured warehouse name (`NOVA_WAREHOUSE_NAME`)."
+          }
+        }
+      },
+      "WarehouseStart": {
+        "type": "object",
+        "description": "The answer to `POST /api/warehouses/{name}/start`: the class, and the phase the scaler will\nreport once it has woken the engine. Nova never writes `status` — 202 is the whole promise.",
+        "required": [
+          "name",
+          "phase"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
           }
         }
       },

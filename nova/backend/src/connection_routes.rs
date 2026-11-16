@@ -491,7 +491,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// RFC 3339 in UTC, second precision: `2026-10-20T08:15:00Z`.
-fn rfc3339_utc(time: SystemTime) -> String {
+pub(crate) fn rfc3339_utc(time: SystemTime) -> String {
     let secs = time
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

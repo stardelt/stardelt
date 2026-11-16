@@ -37,11 +37,11 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
+use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams};
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -49,6 +49,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::auth::{Identity, Principal};
 use crate::connection_routes::Fail;
+use crate::pipelines::{answer_with, no_cluster};
 
 /// The class defaults, the table the access-sync job renders resource groups from
 /// (`scripts/access-sync-job.py`, `CLASS_DEFAULTS`): `(size, running, queued, memoryShare)`.
@@ -353,6 +354,96 @@ pub(crate) async fn list(
         .into_response()
 }
 
+/// The answer to `POST /api/warehouses/{name}/start`: the class, and the phase the scaler will
+/// report once it has woken the engine. Nova never writes `status` — 202 is the whole promise.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WarehouseStart {
+    pub name: String,
+    pub phase: String,
+}
+
+/// `POST /api/warehouses/{name}/start`: keep a class warm.
+///
+/// The one write Nova is allowed on a `SqlWarehouse` is `metadata.annotations`; the scaler
+/// (`scripts/access-sync-job.py`, `scale_decision`) reads `stardelt.io/last-query-at` and treats a
+/// class that queried within its own `spec.autoStop` as active. Writing "now" therefore wakes the
+/// one engine shared by every class on the next tick (at most two minutes). A person who may not
+/// use the class may not start it: an administrator, or one of the caller's groups in
+/// `spec.grants`.
+#[utoipa::path(
+    post,
+    operation_id = "warehouses_start",
+    path = "/api/warehouses/{name}/start",
+    tag = "public",
+    description = "Wake the engine for one SQL compute class by writing the class's `stardelt.io/last-query-at` annotation (the scaler reads it on its two-minute tick; the replica count is the scaler's, not Nova's). The answer is `202` with `phase: \"Starting\"` — `status.scale.phase` is written by the scaler, not by Nova. An administrator may start any class; a person needs one of their groups in `spec.grants`. Without a cluster connection the answer is `503`; a class that does not exist is `404`.",
+    params(("name" = String, Path, description = "The `SqlWarehouse` (class) name")),
+    responses(
+        (status = 202, description = "The annotation is written; the scaler wakes the engine on its next tick", body = WarehouseStart),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "None of the caller's groups is granted this class", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such warehouse", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection (demo mode, a local run)", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn start(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path(name): Path<String>,
+) -> Response {
+    let identity = actor(principal, &state);
+    let Some(client) = state.kube.clone() else {
+        return no_cluster().into_response();
+    };
+    let api = warehouses_api(client);
+    let object = match api.get(&name).await {
+        Ok(object) => object,
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            return Fail::new(StatusCode::NOT_FOUND, "no such warehouse").into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, warehouse = %name, "sqlwarehouse read failed");
+            return Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer")
+                .into_response();
+        }
+    };
+    let value = match serde_json::to_value(&object) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(error = %e, warehouse = %name, "sqlwarehouse object is not JSON");
+            return Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer")
+                .into_response();
+        }
+    };
+    let spec = value.get("spec").unwrap_or(&Value::Null);
+    if !(identity.is_admin || can_use(&identity.groups, spec)) {
+        return Fail::new(
+            StatusCode::FORBIDDEN,
+            "only a group the class grants may start it",
+        )
+        .into_response();
+    }
+    let stamp = crate::connection_routes::rfc3339_utc(std::time::SystemTime::now());
+    let patch = serde_json::json!({
+        "metadata": { "annotations": { "stardelt.io/last-query-at": stamp } }
+    });
+    if let Err(e) = api
+        .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        tracing::warn!(error = %e, warehouse = %name, "sqlwarehouse annotation patch failed");
+        return Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer").into_response();
+    }
+    answer_with(
+        StatusCode::ACCEPTED,
+        Ok(WarehouseStart {
+            name,
+            phase: "Starting".to_string(),
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +743,192 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).expect("JSON");
         assert_eq!(body[0]["name"], "small");
         assert_eq!(body[0]["yours"], true);
+    }
+
+    mod fake_kube {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            Json, Router,
+            extract::{Path, State},
+            http::StatusCode,
+            routing::get,
+        };
+        use serde_json::{Value, json};
+
+        pub struct Fake {
+            pub items: Vec<Value>,
+            pub patches: Vec<Value>,
+        }
+
+        pub type Shared = Arc<Mutex<Fake>>;
+
+        fn failure(code: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+            (
+                code,
+                Json(json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "message": message,
+                    "code": code.as_u16()
+                })),
+            )
+        }
+
+        /// `GET …/sqlwarehouses/{name}`: the object, or the API server's 404 `Status`.
+        async fn one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let state = state.lock().unwrap();
+            state
+                .items
+                .iter()
+                .find(|item| item["metadata"]["name"] == name)
+                .cloned()
+                .map(Json)
+                .ok_or_else(|| failure(StatusCode::NOT_FOUND, "not found"))
+        }
+
+        /// `PATCH …/sqlwarehouses/{name}`: the body is recorded before it is accepted.
+        async fn patch_one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+            body: String,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let body: Value = serde_json::from_str(&body)
+                .map_err(|_| failure(StatusCode::BAD_REQUEST, "not json"))?;
+            let mut state = state.lock().unwrap();
+            if !state
+                .items
+                .iter()
+                .any(|item| item["metadata"]["name"] == name)
+            {
+                return Err(failure(StatusCode::NOT_FOUND, "not found"));
+            }
+            state.patches.push(body.clone());
+            Ok(Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "SqlWarehouse",
+                "metadata": { "name": name, "namespace": "stardelt" },
+                "spec": {},
+            })))
+        }
+
+        pub async fn start(items: Vec<Value>) -> (kube::Client, Shared) {
+            let shared = Arc::new(Mutex::new(Fake {
+                items,
+                patches: Vec::new(),
+            }));
+            let app = Router::new()
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/sqlwarehouses/{name}",
+                    get(one).patch(patch_one),
+                )
+                .with_state(shared.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let url = format!("http://{addr}").parse().unwrap();
+            let client = kube::Client::try_from(kube::Config::new(url)).expect("client");
+            (client, shared)
+        }
+    }
+
+    /// The start route on a test state with a fake API server, `who` signed in.
+    async fn app_with(items: Vec<Value>, who: Identity) -> (axum::Router, fake_kube::Shared) {
+        use axum::routing::post;
+
+        let (client, shared) = fake_kube::start(items).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let router = axum::Router::new()
+            .route("/warehouses/{name}/start", post(super::start))
+            .layer(axum::Extension(crate::auth::Principal {
+                identity: who,
+                via: "session",
+                access_token: None,
+            }))
+            .with_state(state);
+        (router, shared)
+    }
+
+    async fn call_start(app: axum::Router, name: &str) -> (StatusCode, Value) {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/warehouses/{name}/start"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// One object `demo`, granted to one group.
+    fn granted(group: &str) -> Vec<Value> {
+        vec![object(
+            "demo",
+            json!({ "size": "small", "grants": [{ "group": group }] }),
+        )]
+    }
+
+    #[tokio::test]
+    async fn start_writes_the_annotation_for_a_granted_group() {
+        let (app, shared) = app_with(granted("analytics"), person(&["analytics"])).await;
+        let (status, body) = call_start(app, "demo").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body, json!({ "name": "demo", "phase": "Starting" }));
+
+        let patches = shared.lock().unwrap().patches.clone();
+        assert_eq!(patches.len(), 1, "exactly one patch");
+        let stamp = patches[0]
+            .pointer("/metadata/annotations/stardelt.io~1last-query-at")
+            .and_then(Value::as_str)
+            .expect("the annotation is a string");
+        assert!(stamp.ends_with('Z'), "UTC stamp: {stamp}");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(stamp).is_ok(),
+            "RFC 3339: {stamp}"
+        );
+        assert!(patches[0].get("spec").is_none(), "the patch writes no spec");
+        assert!(
+            patches[0].get("status").is_none(),
+            "the patch writes no status"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_is_403_and_writes_nothing_for_a_group_the_class_does_not_grant() {
+        let (app, shared) = app_with(granted("analytics"), person(&["other"])).await;
+        let (status, _) = call_start(app, "demo").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(shared.lock().unwrap().patches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_administrator_may_start_any_class() {
+        let (app, shared) = app_with(granted("analytics"), administrator()).await;
+        let (status, body) = call_start(app, "demo").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["phase"], "Starting");
+        assert_eq!(shared.lock().unwrap().patches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn start_of_an_unknown_class_is_404_and_writes_nothing() {
+        let (app, shared) = app_with(Vec::new(), person(&["analytics"])).await;
+        let (status, body) = call_start(app, "demo").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, json!({ "error": "no such warehouse" }));
+        assert!(shared.lock().unwrap().patches.is_empty());
     }
 }
