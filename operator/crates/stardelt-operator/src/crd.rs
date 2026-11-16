@@ -815,6 +815,14 @@ fn default_namespace() -> String {
     "stardelt".into()
 }
 
+fn default_min_workers() -> i32 {
+    1
+}
+
+fn default_max_workers() -> i32 {
+    1
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
 pub struct LakehouseStatus {
     #[serde(default)]
@@ -2861,6 +2869,18 @@ pub struct WarehouseGrant {
     {
         "rule": "self.grants.all(g, self.grants.exists_one(h, h.group == g.group))",
         "message": "each group may appear once in grants"
+    },
+    {
+        "rule": "!has(self.autoStop) || duration(self.autoStop) <= duration('24h')",
+        "message": "autoStop must be at most 24h"
+    },
+    {
+        "rule": "self.minWorkers != 0 || has(self.autoStop)",
+        "message": "minWorkers: 0 needs autoStop — a warehouse that never stops cannot ask for no workers"
+    },
+    {
+        "rule": "self.maxWorkers >= self.minWorkers",
+        "message": "maxWorkers must be at least minWorkers"
     }
 ]))]
 pub struct SqlWarehouseSpec {
@@ -2877,6 +2897,20 @@ pub struct SqlWarehouseSpec {
     pub size: WarehouseSize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<WarehouseConcurrency>,
+    /// How long the engine may sit idle before its workers scale to zero, for example
+    /// `15m` or `2h` (platform#131 step A). Absent: the warehouse is always on.
+    #[serde(default, rename = "autoStop", skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^([1-9][0-9]*)(m|h)$"))]
+    pub auto_stop: Option<String>,
+    /// The workers the engine keeps ready while this class may be used. `0` is only legal
+    /// with `autoStop` (a class that never stops cannot ask for no workers).
+    #[serde(default = "default_min_workers", rename = "minWorkers")]
+    #[schemars(range(min = 0, max = 10))]
+    pub min_workers: i32,
+    /// The most workers the engine may run for this class.
+    #[serde(default = "default_max_workers", rename = "maxWorkers")]
+    #[schemars(range(min = 1, max = 10))]
+    pub max_workers: i32,
     #[serde(default)]
     #[schemars(length(max = 50))]
     pub grants: Vec<WarehouseGrant>,
@@ -2920,14 +2954,79 @@ impl SqlWarehouseSpec {
                 return Err("concurrency.queued must be between 0 and 10000".to_string());
             }
         }
+        if !(0..=10).contains(&self.min_workers) {
+            return Err("minWorkers must be between 0 and 10".to_string());
+        }
+        if !(1..=10).contains(&self.max_workers) {
+            return Err("maxWorkers must be between 1 and 10".to_string());
+        }
+        if self.min_workers == 0 && self.auto_stop.is_none() {
+            return Err(
+                "minWorkers: 0 needs autoStop — a warehouse that never stops cannot ask for no workers"
+                    .to_string(),
+            );
+        }
+        if self.max_workers < self.min_workers {
+            return Err("maxWorkers must be at least minWorkers".to_string());
+        }
+        if let Some(text) = &self.auto_stop
+            && idle_minutes(text).is_none()
+        {
+            return Err(
+                "autoStop must be a whole number of minutes or hours between 1m and 24h, for example `15m` or `2h`"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
+}
+
+/// Minutes of idle time a duration like `15m` or `2h` means; `None` for anything else.
+pub fn idle_minutes(text: &str) -> Option<u64> {
+    let (digits, unit) = text.split_at(text.len().checked_sub(1)?);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.starts_with('0') {
+        return None;
+    }
+    let value: u64 = digits.parse().ok()?;
+    let minutes = match unit {
+        "m" => value,
+        "h" => value.checked_mul(60)?,
+        _ => return None,
+    };
+    if !(1..=1440).contains(&minutes) {
+        return None;
+    }
+    Some(minutes)
+}
+
+/// The engine's worker scaling, written by the access-sync job (platform#131 step A).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+pub struct WarehouseScale {
+    /// `Running`, `Starting` or `Stopped`.
+    #[serde(default)]
+    pub phase: String,
+    /// Worker replicas the engine currently asks for.
+    #[serde(default)]
+    pub workers: i32,
+    /// Queries in flight, as Nova last reported them.
+    #[serde(default, rename = "queriesInFlight")]
+    pub queries_in_flight: i32,
+    /// The last query the engine saw, RFC 3339.
+    #[serde(
+        default,
+        rename = "lastQueryAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_query_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
 pub struct SqlWarehouseStatus {
     #[serde(default)]
     pub phase: String,
+    /// The worker scaling of the engine that serves this class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<WarehouseScale>,
     /// The resource group actually written.
     #[serde(
         default,
@@ -5614,7 +5713,67 @@ mod tests {
         assert_eq!(w.spec.size, WarehouseSize::Small);
         assert!(!w.spec.default);
         assert!(w.spec.grants.is_empty() && w.spec.concurrency.is_none());
+        assert_eq!((w.spec.min_workers, w.spec.max_workers), (1, 1));
+        assert!(w.spec.auto_stop.is_none());
         assert!(w.spec.validate("big").is_ok());
+    }
+
+    #[test]
+    fn a_warehouse_scales_only_when_its_contract_allows_it() {
+        let scale = |fields: serde_json::Value| {
+            let mut spec = serde_json::json!({ "lakehouseRef": { "name": "default" } });
+            let object = spec.as_object_mut().expect("an object");
+            for (key, value) in fields.as_object().expect("an object") {
+                object.insert(key.clone(), value.clone());
+            }
+            warehouse(spec)
+        };
+        let zero = scale(serde_json::json!({ "minWorkers": 0 }));
+        assert!(
+            zero.spec
+                .validate("big")
+                .unwrap_err()
+                .contains("needs autoStop")
+        );
+        let idle = scale(serde_json::json!({
+            "autoStop": "15m", "minWorkers": 0, "maxWorkers": 2
+        }));
+        assert_eq!((idle.spec.min_workers, idle.spec.max_workers), (0, 2));
+        assert!(idle.spec.validate("big").is_ok());
+        for spec in [
+            serde_json::json!({ "minWorkers": 5, "maxWorkers": 2 }),
+            serde_json::json!({ "minWorkers": 11 }),
+            serde_json::json!({ "maxWorkers": 0 }),
+            serde_json::json!({ "autoStop": "15s" }),
+            serde_json::json!({ "autoStop": "0m" }),
+            serde_json::json!({ "autoStop": "25h" }),
+            serde_json::json!({ "autoStop": "soon" }),
+        ] {
+            assert!(scale(spec.clone()).spec.validate("big").is_err(), "{spec}");
+        }
+        assert_eq!(idle_minutes("15m"), Some(15));
+        assert_eq!(idle_minutes("2h"), Some(120));
+        assert_eq!(idle_minutes("24h"), Some(1440));
+        assert_eq!(idle_minutes("25h"), None);
+    }
+
+    #[test]
+    fn the_sqlwarehouse_crd_carries_the_scale_contract() {
+        let yaml = serde_yaml::to_string(&SqlWarehouse::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"];
+        assert_eq!(spec["autoStop"]["pattern"], "^([1-9][0-9]*)(m|h)$");
+        assert_eq!(spec["minWorkers"]["default"], 1.0);
+        assert_eq!(spec["minWorkers"]["minimum"], 0.0);
+        assert_eq!(spec["maxWorkers"]["default"], 1.0);
+        assert_eq!(spec["maxWorkers"]["minimum"], 1.0);
+        let status = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+            ["properties"];
+        assert_eq!(status["scale"]["properties"]["phase"]["type"], "string");
+        assert_eq!(
+            status["scale"]["properties"]["queriesInFlight"]["type"],
+            "integer"
+        );
     }
 
     #[test]
