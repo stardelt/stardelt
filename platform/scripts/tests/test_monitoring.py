@@ -148,6 +148,12 @@ class MonitoringChartTest(unittest.TestCase):
         self.assertEqual([group["name"] for group in groups], ["stardelt"])
         alerts = {alert["alert"] for group in groups for alert in group["rules"]}
         self.assertEqual(alerts, ALERTS, f"rendered alerts: {sorted(alerts)}")
+        by_name = {alert["alert"]: alert for group in groups for alert in group["rules"]}
+        self.assertIn(
+            'or absent(stardelt_operator_leader{namespace="stardelt"})',
+            by_name["StardeltOperatorNoLeader"]["expr"],
+            "the rule cannot fire when no replica exports the metric",
+        )
         for group in groups:
             for alert in group["rules"]:
                 self.assertIn('namespace="stardelt"', alert["expr"],

@@ -67,7 +67,7 @@ spec:
             description: Prometheus has failed to scrape a stardelt target for 10 minutes.
             runbook_url: https://stardelt.io/docs/operations/monitoring/
         - alert: StardeltOperatorNoLeader
-          expr: max by (namespace) (stardelt_operator_leader{namespace="{{ .Release.Namespace }}"}) == 0
+          expr: max by (namespace) (stardelt_operator_leader{namespace="{{ .Release.Namespace }}"}) == 0 or absent(stardelt_operator_leader{namespace="{{ .Release.Namespace }}"})
           for: 10m
           labels:
             severity: critical
