@@ -5,8 +5,8 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
-const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/pipelines', '/runs', '/deployments', '/queries',
-  '/platform', '/admin/catalogs', '/admin/agent-calls', '/admin/models', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
+const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/destinations', '/pipelines', '/runs', '/deployments', '/queries',
+  '/streams', '/platform', '/admin/catalogs', '/admin/agent-calls', '/admin/models', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -85,6 +85,58 @@ test.describe('every page, every variant', () => {
                   endpoint: 'frontier', model: 'frontier-1', tokensIn: 1200, tokensOut: 180,
                   tokensEstimated: false, latencyMs: 900, outcome: 'ok',
                 },
+              ],
+            }))
+        }
+        // Likewise the two lists whose colours only render with rows: the destination kinds
+        // and test results, and the four stream phases.
+        if (route === '/destinations') {
+          await page.route('**/api/destinations', (r) =>
+            json(r, [
+              {
+                id: 1, owner_group: 'shop', name: 'on-call-webhook', kind: 'webhook',
+                config: { url: 'https://hooks.example.com/services/on-call' },
+                created_at: 1_700_000_000, updated_at: 1_700_000_000,
+              },
+              {
+                id: 2, owner_group: 'shop', name: 'data-team-mail', kind: 'email',
+                config: { recipients: ['data@example.com', 'on-call@example.com'] },
+                created_at: 1_700_000_100, updated_at: 1_700_000_100,
+              },
+              {
+                id: 3, owner_group: 'shop',
+                name: 'nightly-settlement-export-to-finance-controller',
+                kind: 'webhook',
+                config: { url: 'https://hooks.example.com/services/finance-settlement-export' },
+                created_at: 1_700_000_200, updated_at: 1_700_000_200,
+              },
+            ]))
+        }
+        if (route === '/streams') {
+          const stream = (row: Record<string, unknown>) => ({
+            namespace: 'shop', owner_group: 'shop', reason: null, last_error: null,
+            last_checkpoint_at: null, attempts: null, last_submitted_at: null, stopped: false,
+            source_connection: 'events-kafka', source_topic: 'shop.orders',
+            sink_catalog: 'lakehouse', sink_table: 'orders', sink_mode: 'append',
+            run_as: null, ...row,
+          })
+          await page.route('**/api/streams', (r) =>
+            json(r, {
+              streams: [
+                stream({
+                  name: 'orders-live', phase: 'Running',
+                  last_checkpoint_at: '2026-11-16T09:12:00Z', attempts: 1,
+                  last_submitted_at: '2026-11-16T08:00:00Z',
+                }),
+                stream({
+                  name: 'returns-live', phase: 'Pending', reason: 'Restarting', attempts: 2,
+                  last_submitted_at: '2026-11-16T09:10:00Z',
+                }),
+                stream({ name: 'prices-live', phase: 'Stopped', stopped: true }),
+                stream({
+                  name: 'clicks-live', phase: 'Failed', attempts: 2,
+                  last_error: 'org.apache.spark.SparkException: Job aborted due to stage failure: the sink table is not writable',
+                }),
               ],
             }))
         }
