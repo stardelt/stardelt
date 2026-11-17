@@ -42,9 +42,13 @@ test('the Platform page shows each class its scale state', async ({ page }) => {
   await page.goto('/platform')
   const main = page.locator('main')
   await expect(main.getByRole('heading', { name: 'Platform' })).toBeVisible()
-  await expect(main.getByText('Stopped', { exact: true })).toBeVisible()
-  await expect(main.getByText('Starting', { exact: true })).toBeVisible()
-  await expect(main.getByText('2026-11-16T06:00:00Z')).toBeVisible()
+  // The Query engine card also renders a `Starting` definition, so each scale word is read from
+  // its own class row (#1070).
+  const small = main.getByRole('row', { name: /^small/ })
+  await expect(small.getByText('Stopped', { exact: true })).toBeVisible()
+  await expect(small.getByText('2026-11-16T06:00:00Z')).toBeVisible()
+  const large = main.getByRole('row', { name: /Large/ })
+  await expect(large.getByText('Starting', { exact: true })).toBeVisible()
   await expect(main.getByRole('cell', { name: 'Large' })).toBeVisible()
   // The shell scrolls `main` itself, so `fullPage` still shows one viewport: bring the
   // Query engine card into it before the shot.
