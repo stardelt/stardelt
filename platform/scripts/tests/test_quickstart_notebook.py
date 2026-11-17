@@ -59,6 +59,25 @@ class QuickstartNotebookTest(unittest.TestCase):
         self.assertIn("SELECT current_user AS signed_in_as", sources[2])
         self.assertIn("IDENTITIES", sources[2])
 
+    def test_it_uses_the_native_names(self):
+        everything = "\n".join(_sources())
+        for old in (
+            "stardelt.sql(",
+            "stardelt.write_df(",
+            "stardelt.spark(",
+            "stardelt.spark_tips(",
+        ):
+            with self.subTest(name=old):
+                self.assertNotIn(old, everything)
+        self.assertTrue(
+            [source for source in _sources() if "spark.createDataFrame" in source],
+            "no cell writes a table natively with spark",
+        )
+        self.assertTrue(
+            [source for source in _sources() if "display(" in source],
+            "no cell uses the native display",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
