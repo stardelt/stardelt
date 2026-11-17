@@ -11,6 +11,9 @@
 //!   pipeline's owner group may record one, and the row says which person did.
 //! - `GET /api/deployments` lists the caller's rows, newest first, at most 50, optionally
 //!   narrowed to one `bundle` and one `target`.
+//! - A deployment row is kept for ten days even when it is beyond the newest 50 of its bundle
+//!   and target; older rows beyond that window are deleted when the next row of that bundle and
+//!   target is recorded (design nova#357).
 //!
 //! Without a state store (`NOVA_DATABASE_URL` unset) both routes answer
 //! `503 {"error":"this needs Nova's database, …"}`, and a caller whose identity is missing
@@ -47,6 +50,10 @@ const STATUSES: &[&str] = &["applied", "failed"];
 const ACTIONS: &[&str] = &["created", "updated", "deleted", "unchanged"];
 /// The answer when a caller has no identity.
 const SIGN_IN: &str = "sign in to record or read deployments";
+/// Rows one bundle, target and owner group keeps, however old they are.
+const KEEP_PER_TARGET: i64 = 50;
+/// Days a deployment row is kept even when it is beyond [`KEEP_PER_TARGET`].
+const KEEP_DAYS: i32 = 10;
 
 /// `POST /api/deployments` body: one deploy.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -164,6 +171,31 @@ pub fn validate(new: &NewDeployment) -> Result<(), String> {
     Ok(())
 }
 
+/// Delete the rows of one bundle, target and owner group that are older than [`KEEP_DAYS`] days
+/// and not among the newest [`KEEP_PER_TARGET`]. Answers the number of rows removed. A database
+/// error answers `0`: a recorded deploy must not fail because its retention did.
+async fn prune(pool: &sqlx::PgPool, owner_group: &str, bundle: &str, target: &str) -> u64 {
+    sqlx::query(
+        "DELETE FROM deployment \
+         WHERE owner_group = $1 AND bundle = $2 AND target = $3 \
+           AND created_at < now() - make_interval(days => $4) \
+           AND id NOT IN ( \
+               SELECT id FROM deployment \
+               WHERE owner_group = $1 AND bundle = $2 AND target = $3 \
+               ORDER BY created_at DESC, id DESC LIMIT $5 \
+           )",
+    )
+    .bind(owner_group)
+    .bind(bundle)
+    .bind(target)
+    .bind(KEEP_DAYS)
+    .bind(KEEP_PER_TARGET)
+    .execute(pool)
+    .await
+    .map(|done| done.rows_affected())
+    .unwrap_or(0)
+}
+
 /// `GET /api/deployments` — the caller's rows, newest first, at most 50.
 #[utoipa::path(
     get,
@@ -268,12 +300,14 @@ pub async fn record(
         .await
     {
         Ok(row) => {
+            let pruned = prune(pool, &row.owner_group, &row.bundle, &row.target).await;
             tracing::info!(
                 target: "audit",
                 sub = %caller.identity.sub,
                 id = row.id,
                 bundle = %row.bundle,
                 target = %row.target,
+                pruned,
                 "deployment recorded",
             );
             (StatusCode::CREATED, Json(row)).into_response()
@@ -387,6 +421,50 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert a deployment");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn prune_keeps_the_newest_fifty_and_never_deletes_a_row_younger_than_ten_days() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let old = -20.0 * 86_400.0;
+        for _ in 0..55 {
+            insert(&pool, "analytics", "sales", "prod", old).await;
+        }
+        for _ in 0..3 {
+            insert(&pool, "analytics", "sales", "prod", -60.0).await;
+        }
+        insert(&pool, "finance", "sales", "prod", old).await;
+
+        assert_eq!(
+            prune(&pool, "analytics", "sales", "prod").await,
+            8,
+            "58 rows, the newest 50 stay"
+        );
+
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM deployment WHERE owner_group = 'analytics'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the analytics rows");
+        assert_eq!(left, 50);
+        let young: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM deployment \
+             WHERE owner_group = 'analytics' AND created_at > now() - INTERVAL '10 days'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count the young rows");
+        assert_eq!(young, 3, "a row younger than ten days is never deleted");
+        let other: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM deployment WHERE owner_group = 'finance'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the finance rows");
+        assert_eq!(
+            other, 1,
+            "another group's rows of the same bundle and target are untouched"
+        );
     }
 
     #[tokio::test]
