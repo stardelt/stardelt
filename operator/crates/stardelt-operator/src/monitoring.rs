@@ -174,7 +174,7 @@ pub fn prometheus_rule(namespace: &str, labels: &BTreeMap<String, String>) -> Dy
                     "labels": {"severity": "critical"},
                     "annotations": annotation(
                         "The operator has no leader",
-                        "Every operator replica reports stardelt_operator_leader 0, so nothing reconciles."
+                        "No operator replica reports a leader: every replica says stardelt_operator_leader 0, or none reports at all, so nothing reconciles."
                     ),
                 },
                 {
