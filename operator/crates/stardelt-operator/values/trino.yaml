@@ -267,3 +267,9 @@ eventListenerProperties:
   - http-event-listener.connect-ingest-uri=http://nova:8081/internal/trino-events
   - http-event-listener.connect-http-headers=Authorization:Bearer ${ENV:NOVA_EVENTS_TOKEN},X-Stardelt-Warehouse:default
   - http-event-listener.connect-retry-count=2
+
+# Pinned by digest (the operator-path twin of stardelt-platform#1587): the chart version pins the
+# chart, not the image, so without this key the chart's appVersion tag — `484`, a moving tag —
+# is what a PlatformInstance runs. The string is stardelt-platform/helm-values/trino.yaml:28.
+image:
+  tag: "484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f"

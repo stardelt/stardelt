@@ -339,6 +339,37 @@ mod tests {
         assert_eq!(v["resources"]["limits"]["memory"], "384Mi");
     }
 
+    /// The operator installs the same charts as `stardelt-platform` at the same versions, so every
+    /// image the platform pins by digest must be pinned here too (platform#1576). Without these
+    /// keys a `PlatformInstance` renders the chart's appVersion tag, which moves on an upgrade.
+    #[test]
+    fn the_core_service_images_are_pinned_by_digest() {
+        assert_eq!(
+            golden_values("trino")["image"]["tag"],
+            serde_json::json!(
+                "484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f"
+            )
+        );
+        assert_eq!(
+            golden_values("lakekeeper")["catalog"]["image"]["tag"],
+            serde_json::json!(
+                "v0.15.0@sha256:b02a882df48042020c473a79b980a643fcc883a6f9c21b74c5b7cc8eabeec9fe"
+            )
+        );
+        assert_eq!(
+            golden_values("seaweedfs")["image"]["tag"],
+            serde_json::json!(
+                "4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+            )
+        );
+        assert_eq!(
+            golden_values("openbao")["server"]["image"]["tag"],
+            serde_json::json!(
+                "2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f"
+            )
+        );
+    }
+
     #[test]
     fn the_chart_default_images_are_pinned_by_digest() {
         // The operator installs the same three charts as stardelt-platform (planner.rs names the

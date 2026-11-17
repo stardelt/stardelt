@@ -12,6 +12,11 @@ injector:
 csi:
   enabled: false
 server:
+  # Pinned by digest (the twin of stardelt-platform#1604). The chart defaults the tag to its
+  # appVersion `2.7.2`, a moving tag. The string is
+  # stardelt-platform/helm-values/openbao.yaml:18.
+  image:
+    tag: "2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f"
   # Pod Security `restricted` (platform#1096 question 5, twin of platform#1191): the chart's pod
   # block is already correct (`runAsNonRoot`, uid 100, seccomp); the container declares the two
   # missing fields. stardelt-platform/helm-values/openbao.yaml carries the same block.

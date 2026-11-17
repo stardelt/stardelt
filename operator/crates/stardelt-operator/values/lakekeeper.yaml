@@ -19,6 +19,11 @@ authz:
   backend: allowall
 internalOpenFGA: false
 catalog:
+  # Pinned by digest (the twin of stardelt-platform#1587 and #972). The chart version pins the
+  # chart; `catalog.image.tag` is the catalog image. The string is
+  # stardelt-platform/helm-values/lakekeeper.yaml:426.
+  image:
+    tag: "v0.15.0@sha256:b02a882df48042020c473a79b980a643fcc883a6f9c21b74c5b7cc8eabeec9fe"
   # Pod Security `restricted` (platform#1096 question 5, twin of platform#1196). Both keys are the
   # chart's camelCase catalog keys; each REPLACES the chart's block for the catalog Deployment, its
   # `check-db` init container and the `lakekeeper-db-migration-<revision>` Job. The chart keeps
