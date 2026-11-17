@@ -61,11 +61,16 @@ class QuickstartNotebookTest(unittest.TestCase):
 
     def test_it_uses_the_native_names(self):
         everything = "\n".join(_sources())
+        # Markdown counts too: the closing bullet taught `import stardelt` / `write_df` /
+        # `spark()` while every code cell was already native (platform#1678).
         for old in (
             "stardelt.sql(",
             "stardelt.write_df(",
             "stardelt.spark(",
             "stardelt.spark_tips(",
+            "import stardelt",
+            "write_df",
+            "spark()",
         ):
             with self.subTest(name=old):
                 self.assertNotIn(old, everything)
