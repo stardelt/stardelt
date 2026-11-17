@@ -253,6 +253,10 @@ verify-cronjobs: _context ## The newest Job of every CronJob succeeded or is run
 verify-airflow-actions: _context ## Prove Nova's Airflow service user can run, pause and resume a pipeline
 	@bash scripts/verify-airflow-actions.sh
 
+.PHONY: verify-airflow-runs
+verify-airflow-runs: _context ## Every unpaused DAG's newest run: state, age, and a failure names the DAG
+	@NS=$(NAMESPACE) bash scripts/verify-airflow-runs.sh
+
 # The operator's image carries its API and Helm applies chart/crds/ on `helm install` only.
 # `pin-image.sh` and `install-operator` apply the CRDs; this proves the live schema is the
 # checkout's, so a merge that moved the binary but not the schema cannot pass silently
