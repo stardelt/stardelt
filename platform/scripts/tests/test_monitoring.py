@@ -162,6 +162,18 @@ class MonitoringChartTest(unittest.TestCase):
                 self.assertEqual(alert["annotations"]["runbook_url"],
                                  "https://stardelt.io/docs/operations/monitoring/")
 
+    def test_a_vanished_target_alerts_both_ways(self):
+        docs = render("--set", "monitoring.enabled=true")[1]
+        alerts = {rule["alert"]: rule["expr"] for rule in rules(docs)[0]["spec"]["groups"][0]["rules"]}
+        self.assertEqual(
+            alerts["StardeltMetricsTargetDown"],
+            'up{namespace="stardelt"} == 0 or absent(up{namespace="stardelt"})',
+        )
+        self.assertIn(
+            'or absent(stardelt_operator_leader{namespace="stardelt"})',
+            alerts["StardeltOperatorNoLeader"],
+        )
+
     def test_the_labels_reach_every_object(self):
         out, docs = render("--set", "monitoring.enabled=true",
                            "--set", "monitoring.labels.release=kube-prometheus-stack")

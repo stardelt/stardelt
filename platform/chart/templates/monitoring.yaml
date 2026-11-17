@@ -58,7 +58,7 @@ spec:
     - name: stardelt
       rules:
         - alert: StardeltMetricsTargetDown
-          expr: up{namespace="{{ .Release.Namespace }}"} == 0
+          expr: up{namespace="{{ .Release.Namespace }}"} == 0 or absent(up{namespace="{{ .Release.Namespace }}"})
           for: 10m
           labels:
             severity: warning
