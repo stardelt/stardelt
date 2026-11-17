@@ -1,7 +1,7 @@
 """The shop bundle (examples/shop-bundle) stays valid and stays the same shop as the dbt example (examples/shop).
 
 No cluster and no stardelt package: the files are read and compared. `stardelt bundle validate` is the other half
-of the check and runs in the README's loop.
+of the check and runs in CI (`.github/workflows/ci.yml`, job `bundle-validate`).
 """
 
 import csv
