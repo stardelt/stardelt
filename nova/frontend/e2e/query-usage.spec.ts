@@ -31,6 +31,17 @@ const BY_PRINCIPAL = {
   total: row('total', 1113, 5, 2 * 3_600_000 + 60_000 + 58 * 60_000, 12_000_000_000, 5_600_000_000),
 }
 
+/** Two catalogs with numbers, one still being read — the storage section leaves the last out. */
+const METRICS = {
+  catalogs: [
+    { name: 'bronze', layer: 'bronze', schemas: 1, tables: 2, records: 601_200, sizeBytes: 9_000_000_000, lastCommitMs: NOW - 3_600_000, truncated: false, updatedAt: NOW - 60_000, pending: false },
+    { name: 'gold', layer: 'gold', schemas: 1, tables: 4, records: 300_000, sizeBytes: 3_000_000_000, lastCommitMs: NOW - 7_200_000, truncated: false, updatedAt: NOW - 60_000, pending: false },
+    { name: 'silver', layer: 'silver', schemas: 0, tables: 0, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, updatedAt: null, pending: true },
+  ],
+  totals: { catalogs: 2, schemas: 2, tables: 6, records: 901_200, sizeBytes: 12_000_000_000 },
+  generatedAt: NOW,
+}
+
 /** Three UTC days; the middle one used the most CPU. */
 const BY_DAY = {
   by: 'day',
@@ -53,9 +64,13 @@ const EMPTY = {
 }
 
 /** The administrator's Everyone view; `usage` replaces either the principal or the day answer. */
-async function stub(page: import('@playwright/test').Page, usage: { principal?: unknown; day?: unknown } = {}) {
+async function stub(
+  page: import('@playwright/test').Page,
+  usage: { principal?: unknown; day?: unknown; metricsStatus?: number } = {},
+) {
   const principal = usage.principal ?? BY_PRINCIPAL
   const day = usage.day ?? BY_DAY
+  const metricsStatus = usage.metricsStatus ?? 200
   await page.route('**/api/**', async (r) => {
     const url = new URL(r.request().url())
     if (url.pathname === '/api/me') {
@@ -64,6 +79,7 @@ async function stub(page: import('@playwright/test').Page, usage: { principal?: 
     if (url.pathname === '/api/query-log/usage') {
       return json(r, url.searchParams.get('by') === 'day' ? day : principal)
     }
+    if (url.pathname === '/api/catalog/metrics') return json(r, METRICS, metricsStatus)
     if (url.pathname === '/api/query-log') return json(r, { items: [], nextCursor: null })
     return json(r, {})
   })
@@ -116,11 +132,40 @@ test('the usage view answers who used the most compute, and the row is there', a
   await expect(page.getByRole('columnheader', { name: 'Data written' })).toBeHidden()
   await expect(page.getByRole('columnheader', { name: 'Failed' })).toBeHidden()
   // The card must not be a scroll container at 390 px (#1064): the CPU bar is hidden below sm.
-  const card = page.locator('div.card', { has: page.getByRole('table') })
+  // Two cards hold a table on this view (compute, then storage): the compute one comes first.
+  const card = page.locator('div.card', { has: page.getByRole('table') }).first()
   const overflow = await card.evaluate((el) => el.scrollWidth - el.clientWidth)
   expect(overflow, 'the usage table card must not scroll at 390 px').toBeLessThanOrEqual(1)
   await page.screenshot({ path: here('screenshots/query-usage-390-dark.png') })
   copyFileSync(here('screenshots/query-usage-390-dark.png'), here('../../docs/screenshots/1060/query-usage-390-dark.png'))
+})
+
+test('the usage view shows storage per catalog, largest first', async ({ page }) => {
+  await dark(page, 1280)
+  await stub(page)
+  await page.goto('/queries?view=usage')
+
+  await expect(page.getByRole('heading', { name: 'Storage by catalog' })).toBeVisible()
+  // The caption sums the catalogs that answered: 12 GB in two catalogs.
+  await expect(page.getByText('11 GiB in 2 catalogs')).toBeVisible()
+  const section = page.locator('section', { has: page.getByRole('heading', { name: 'Storage by catalog' }) })
+  const rows = section.locator('tbody tr')
+  await expect(rows).toHaveCount(2)
+  await expect(rows.nth(0)).toContainText('bronze')
+  await expect(rows.nth(1)).toContainText('gold')
+  // A pending catalog is not a zero-sized one.
+  await expect(page.getByText('silver')).toHaveCount(0)
+
+  await page.screenshot({ path: here('screenshots/query-usage-storage.png') })
+})
+
+test('a caller without catalogs sees the usage view and no storage section', async ({ page }) => {
+  await stub(page, { metricsStatus: 403 })
+  await page.goto('/queries?view=usage')
+
+  await page.getByRole('button', { name: 'Everyone' }).click()
+  await expect(page.getByRole('heading', { name: 'Who used the most compute' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Storage by catalog' })).toHaveCount(0)
 })
 
 test('Queries takes the view out of the address', async ({ page }) => {
@@ -139,5 +184,6 @@ test('an empty window says so', async ({ page }) => {
   await page.goto('/queries?view=usage')
 
   await expect(page.getByText('No queries in this window.')).toBeVisible()
-  await expect(page.getByRole('table')).toHaveCount(0)
+  // The compute table is gone; the storage table below it is not the window's business.
+  await expect(page.getByRole('table', { name: /heaviest first/ })).toHaveCount(0)
 })

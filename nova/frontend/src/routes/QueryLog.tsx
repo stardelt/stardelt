@@ -6,6 +6,7 @@ import { EmptyState } from '../components/EmptyState'
 import { formatBytes, formatCount, formatDurationMs, formatTime, relativeTime, rowsLabel, sourceLabel } from '../format'
 import { isAdmin } from '../roles'
 import { QueryUsage } from './QueryUsage'
+import { StorageByCatalog } from '../components/StorageByCatalog'
 
 /** Query log: the queries a person ran, simple by default, every metric one click away. */
 
@@ -276,7 +277,10 @@ export default function QueryLog() {
       </div>
 
       {view === 'usage' ? (
-        <QueryUsage scope={effectiveScope} fromMs={range.ms == null ? 0 : Date.now() - range.ms} />
+        <>
+          <QueryUsage scope={effectiveScope} fromMs={range.ms == null ? 0 : Date.now() - range.ms} />
+          <StorageByCatalog />
+        </>
       ) : (
         <>
           {/* The container makes `cqw` below the visible width of the card, however wide the table is. */}
