@@ -46,13 +46,16 @@ def test_deploy_publishes_the_notebook_first_and_pins_the_version(tmp_path):
     code, out, _, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
         ME, NEW, STORED, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
+        FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8"},
         {"action": "created", "name": "explore"},
+        {"action": "recorded", "id": 7},
     ]
-    assert [method for method, _ in urls(session)] == ["GET", "PUT", "PUT", "POST", "GET", "POST"]
+    assert [method for method, _ in urls(session)] == ["GET", "PUT", "PUT", "POST", "GET", "POST", "GET", "POST"]
     assert "params" not in session.calls[2][2], "the second publish is a real one"
     assert session.calls[5][2]["json"]["notebook"] == PINNED
 
@@ -61,10 +64,15 @@ def test_deploy_of_an_unchanged_notebook_publishes_nothing(tmp_path):
     make(tmp_path, resources=RESOURCES, files=FILES)
     listing = FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt", "ownerGroup": "sales"}]})
     code, out, _, session = run(
-        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update()), listing, FakeResponse(payload={})
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update()), listing, FakeResponse(payload={}),
+        FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert code == 0
-    assert [json.loads(line) for line in out.splitlines()] == [{"action": "updated", "name": "explore"}]
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "updated", "name": "explore"},
+        {"action": "recorded", "id": 7},
+    ]
     assert sum(1 for method, url in urls(session) if (method, url) == ("PUT", "/api/notebooks/sales/explore.ipynb")) == 1
 
 

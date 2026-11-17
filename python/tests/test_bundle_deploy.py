@@ -100,16 +100,20 @@ def test_deploy_creates_or_updates_after_every_pipeline_passed(tmp_path):
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "created", "name": "load"},
         {"action": "updated", "name": "nightly"},
+        {"action": "recorded", "id": 7},
     ]
     assert calls(session) == [
         ("GET", "/api/me"), ("POST", "/api/pipelines/validate"), ("POST", "/api/pipelines/validate"),
         ("GET", "/api/pipelines"), ("POST", "/api/pipelines"),
         ("GET", "/api/pipelines"), ("PUT", "/api/pipelines/stardelt/nightly"),
+        ("GET", "/api/pipelines"), ("POST", "/api/deployments"),
     ]
 
 
@@ -210,14 +214,17 @@ def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(204),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "created", "name": "load"},
         {"action": "updated", "name": "nightly"},
         {"action": "deleted", "name": "old"},
+        {"action": "recorded", "id": 7},
     ]
-    assert calls(session)[-1] == ("DELETE", "/api/pipelines/stardelt/old")
+    assert calls(session)[-3] == ("DELETE", "/api/pipelines/stardelt/old")
     assert [method for method, _ in calls(session)].count("DELETE") == 1
 
 
@@ -323,13 +330,16 @@ def test_deploy_puts_the_stream_with_its_stamp(tmp_path):
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=NO_STREAMS), FakeResponse(payload=STREAM_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload={"name": "measurements"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "created", "name": "load"},
         {"action": "created", "name": "measurements"},
+        {"action": "recorded", "id": 7},
     ]
-    method, path, kwargs = session.calls[-1]
+    method, path, kwargs = session.calls[-3]
     assert (method, path) == ("PUT", "https://nova.example/api/streams/stardelt/measurements")
     assert kwargs["json"]["name"] == "measurements"
     assert kwargs["json"]["provenance"] == {"bundle": "sales-etl", "target": "prod"}, "no commit outside a checkout"
@@ -351,7 +361,27 @@ def test_a_hand_changed_stream_is_refused_by_a_drift_block_target_unless_accepte
         FakeResponse(payload=MODIFIED), FakeResponse(payload=STREAM_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload={"name": "measurements"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert (code, err) == (0, "")
-    assert calls(session)[-1] == ("PUT", "/api/streams/stardelt/measurements")
+    assert calls(session)[-3] == ("PUT", "/api/streams/stardelt/measurements")
     assert {"action": "updated", "name": "measurements"} in [json.loads(line) for line in out.splitlines()]
+
+
+def test_a_deploy_that_cannot_be_recorded_still_succeeds_and_says_so(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, _ = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(503, {"error": "this needs Nova's database, and this installation has none; ask your administrator"}),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()][-1] == {
+        "action": "not-recorded",
+        "reason": "this needs Nova's database, and this installation has none; ask your administrator (HTTP 503)",
+    }

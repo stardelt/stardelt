@@ -58,11 +58,14 @@ def test_deploy_still_overwrites_and_keeps_the_fact_in_its_answer(tmp_path):
         ME, FakeResponse(payload=UPDATE), FakeResponse(payload=BY_HAND),
         FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "load"}),
         FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "updated", "name": "load"},
         {"action": "updated", "name": "nightly", "modified": True},
+        {"action": "recorded", "id": 7},
     ]
     assert err == WARNING
     assert [(m, u) for m, u in calls(session) if m == "PUT"] == [

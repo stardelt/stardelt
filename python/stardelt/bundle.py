@@ -684,8 +684,10 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     ``updated`` for a deploy. With ``prune`` a pipeline an earlier deploy of this bundle target stamped and the bundle no
     longer names is listed as ``would-delete`` and, in a real deploy, removed (``deleted``) after everything else
     succeeded. Every pipeline carries the bundle's name, the target and the Git commit of the bundle
-    directory (``provenance``), which Nova stamps on it. There is no deployment record yet, and only ``--prune`` removes a pipeline the bundle
-    no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
+    directory (``provenance``), which Nova stamps on it. Every deploy is recorded once in Nova's deployment record
+    (``deployments_record``: the bundle, the target, the commit, the caller and the pipelines it wrote); a deploy whose
+    record cannot be written still succeeds and prints ``{"action": "not-recorded", "reason": …}``. Only ``--prune``
+    removes a pipeline the bundle no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
     uncommitted changes (``-dirty``); a ``development`` target still records it. A target with ``drift: block``
     refuses, for a plan and a deploy alike, a pipeline someone changed
     after its last deploy (``modified``) unless ``accept_drift``; the default ``warn`` only reports it. With ``diff`` each
@@ -815,6 +817,29 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     for namespace, name in stale:
         nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
         done.append({"action": "deleted", "name": name})
+    spaces = {p["name"]: p["namespace"] for p in nova.call("pipelines_list")["pipelines"]} if specs else {}
+    touched = []
+    for spec in specs:
+        row = next((r for r in done if r["name"] == spec["name"] and r["action"] in ("created", "updated")), None)
+        if row is not None and spec["name"] in spaces:
+            touched.append({"namespace": spaces[spec["name"]], "name": spec["name"], "action": row["action"]})
+    for space, name in stale:
+        touched.append({"namespace": space, "name": name, "action": "deleted"})
+    owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
+    try:
+        answer = nova.call("deployments_record", body={
+            "bundle": stamp["bundle"],
+            "ownerGroup": owner,
+            "target": target,
+            "revision": stamp.get("revision"),
+            "repository": stamp.get("repository"),
+            "status": "applied",
+            "pipelines": touched,
+        })
+    except api.StardeltApiError as err:
+        done.append({"action": "not-recorded", "reason": str(err)})
+    else:
+        done.append({"action": "recorded", "id": answer["id"]})
     return [], done
 
 

@@ -102,8 +102,10 @@ def test_deploy_shows_the_difference_and_writes_as_before(tmp_path):
         FakeResponse(payload=LISTING), deployed(sql="select 0"),
         FakeResponse(payload=LISTING), FakeResponse(payload={"name": "load"}),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert code == 0
-    assert [json.loads(line)["action"] for line in out.splitlines()] == ["updated", "created"]
+    assert [json.loads(line)["action"] for line in out.splitlines()] == ["updated", "created", "recorded"]
     assert "-select 0\n+select 1\n" in err
-    assert methods(session).count("PUT") == 1 and methods(session).count("POST") == 3
+    assert methods(session).count("PUT") == 1 and methods(session).count("POST") == 4

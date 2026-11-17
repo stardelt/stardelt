@@ -112,14 +112,17 @@ def test_deploy_applies_migrations_before_the_pipelines(tmp_path):
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
         ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "migration-in-ledger", "name": "001_init.sql"},
         {"action": "migration-applied", "name": "002_add.sql"},
         {"action": "created", "name": "load"},
+        {"action": "recorded", "id": 7},
     ]
-    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "POST", "GET", "POST"]
+    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "POST", "GET", "POST", "GET", "POST"]
     apply_call = [call for call in session.calls if call[1].endswith("/api/migrations/apply")][0]
     assert apply_call[2]["json"]["allowBreaking"] is False
 
@@ -152,6 +155,8 @@ def test_a_production_deploy_sends_the_mode_and_the_plan_id(tmp_path):
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
         ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "load"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert (code, err) == (0, "")
     apply_call = [call for call in session.calls if call[1].endswith("/api/migrations/apply")][0]
@@ -165,6 +170,8 @@ def test_a_development_deploy_sends_development_and_no_approval(tmp_path):
         ["bundle", "deploy", str(tmp_path), "-t", "dev"],
         ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "dev-alice-load"}),
+        FakeResponse(payload={"pipelines": [{"name": "dev-alice-load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "dev", "status": "applied"}),
     )
     assert (code, err) == (0, "")
     apply_call = [call for call in session.calls if call[1].endswith("/api/migrations/apply")][0]
