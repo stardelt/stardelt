@@ -1351,11 +1351,6 @@ install-operator: _context ## Install the stardelt Operator (needs ../stardelt-o
 	@echo "Operator installed. CRDs: PlatformInstance, Lakehouse, Catalog, SqlWarehouse, IngestionSource, Pipeline, Connection, ServicePrincipal, Volume."
 
 # ---------------------------------------------------------------------------
-# Upgrade (helm upgrade is idempotent — same as install)
-# ---------------------------------------------------------------------------
-upgrade: install ## Upgrade all components (same as install)
-
-# ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
 uninstall: _context ## Uninstall all stardelt components (reverse order)
