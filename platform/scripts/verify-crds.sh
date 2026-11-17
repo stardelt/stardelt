@@ -12,6 +12,14 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 OPERATOR_DIR="${OPERATOR_DIR:-../stardelt-operator}"
+# A platform checkout does not contain the operator's CRDs. `make step-verify` is the last thing an
+# upgrade runs, and a missing second checkout must not report a finished upgrade as failed; the
+# sibling check that reads the same checkout skips too (check-operator-pins.sh). A checkout that
+# exists without chart/crds stays a failure below.
+if [ ! -d "$OPERATOR_DIR" ]; then
+  echo "verify-crds: SKIP (no operator checkout at $OPERATOR_DIR; set OPERATOR_DIR)"
+  exit 0
+fi
 crds="$OPERATOR_DIR/chart/crds"
 revision="working tree"
 if git -C "$OPERATOR_DIR" rev-parse --git-dir >/dev/null 2>&1; then
