@@ -2077,7 +2077,7 @@ pub struct ServicePrincipalSpec {
     #[serde(default)]
     pub purpose: PrincipalPurpose,
     /// What the principal's tokens are valid for; at least one, both engines by default
-    /// (`trino` for SQL, `lakekeeper` for `stardelt.spark()` in a notebook).
+    /// (`trino` for SQL, `lakekeeper` for the `spark` session in a notebook).
     #[serde(default = "default_principal_audiences")]
     #[schemars(length(min = 1, max = 2))]
     pub audiences: Vec<PrincipalAudience>,
@@ -2092,7 +2092,7 @@ pub struct ServicePrincipalSpec {
 
 fn default_principal_audiences() -> Vec<PrincipalAudience> {
     // Both, because a principal is created before its tasks are known: a SQL task calls Trino,
-    // while `stardelt.spark()` in a notebook calls Lakekeeper's REST catalog. An extra audience is
+    // while the `spark` session in a notebook calls Lakekeeper's REST catalog. An extra audience is
     // harmless to the engine that does not use it; a missing `lakekeeper` is an opaque Iceberg
     // `NotAuthorizedException` after the pod has already started (operator#168).
     vec![PrincipalAudience::Trino, PrincipalAudience::Lakekeeper]
