@@ -10,6 +10,7 @@ manifests, so a pin that was never applied stayed invisible to every check.
 """
 
 import base64
+import json
 import os
 import re
 import shutil
@@ -132,6 +133,10 @@ if [ "${args[0]-}" = get ] && [ "${args[1]-}" = cronjob ]; then
   printf '%s\\n' "$value"
   exit 0
 fi
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = deploy ] && [ "${args[2]-}" = -o ] && [ "${args[3]-}" = json ]; then
+  if [ -n "${FAKE_DEPLOY_JSON-}" ]; then printf '%s\\n' "$FAKE_DEPLOY_JSON"; else printf '%s\\n' '{"items":[]}'; fi
+  exit 0
+fi
 if [ "${args[0]-}" = get ] && [ "${args[1]-}" = deploy ]; then
   name="$(printf '%s' "${args[2]-}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
   var="FAKE_DEPLOY_${name}"
@@ -199,6 +204,7 @@ class VerifyPins(unittest.TestCase):
         statefulsets=None,
         daemonsets=None,
         pods=None,
+        deploys_json: str | None = None,
     ):
         """images maps CronJob name -> list of image strings the cluster reports.
 
@@ -226,6 +232,8 @@ class VerifyPins(unittest.TestCase):
             env["FAKE_DS_" + name.upper().replace("-", "_")] = value
         for name, value in (pods or {}).items():
             env["FAKE_POD_" + name.upper().replace("-", "_")] = value
+        if deploys_json is not None:
+            env["FAKE_DEPLOY_JSON"] = deploys_json
         return subprocess.run(
             ["bash", str(SCRIPT)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
         )
@@ -268,6 +276,84 @@ class VerifyPins(unittest.TestCase):
         self.assertIn("matches manifests/keycloak.yaml", done.stdout)
         self.assertNotIn("✗", done.stdout)
         self.assert_read_only()
+
+    def _airflow_worker_json(self, tag: str) -> str:
+        """One airflow Deployment whose containers carry `tag`; the groomer carries it too."""
+        pinned = re.search(
+            r'value:\s*"demo@(sha256:[0-9a-f]{64})"',
+            (REPO / "helm-values" / "airflow.yaml").read_text(),
+        ).group(1)
+        stale = "sha256:e22ab4e381a17d9b01504b324d5fbd91482f90ef2894bb11a6d5528fdf3faeaf"
+        value = {"pinned": f"demo@{pinned}", "stale": f"demo@{stale}"}[tag]
+        return json.dumps(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": "airflow-scheduler"},
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [
+                                        {
+                                            "name": "scheduler",
+                                            "env": [
+                                                {
+                                                    "name": "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG",
+                                                    "value": f"demo@{pinned}",
+                                                }
+                                            ],
+                                        },
+                                        {
+                                            "name": "scheduler-log-groomer",
+                                            "env": [
+                                                {
+                                                    "name": "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG",
+                                                    "value": value,
+                                                }
+                                            ],
+                                        },
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+
+    def test_the_airflow_worker_tag_passes_when_every_container_carries_it(self):
+        done = self.run_script(
+            {
+                "access-sync": [PYTHON_PINNED, PYTHON_PINNED],
+                "demo-reset": [PYTHON_PINNED],
+                "lakehouse-backup": [AWS_CLI_PINNED],
+                "openbao-group-policies": [ALPINE_PINNED],
+                "spark-confmap-janitor": [ALPINE_PINNED],
+            },
+            deploys={"keycloak": KEYCLOAK_PINNED},
+            deploys_json=self._airflow_worker_json("pinned"),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("✓ airflow-worker-tag every container carries sha256:", done.stdout)
+
+    def test_the_airflow_worker_tag_catches_a_groomer_with_an_old_digest(self):
+        done = self.run_script(
+            {
+                "access-sync": [PYTHON_PINNED, PYTHON_PINNED],
+                "demo-reset": [PYTHON_PINNED],
+                "lakehouse-backup": [AWS_CLI_PINNED],
+                "openbao-group-policies": [ALPINE_PINNED],
+                "spark-confmap-janitor": [ALPINE_PINNED],
+            },
+            deploys={"keycloak": KEYCLOAK_PINNED},
+            deploys_json=self._airflow_worker_json("stale"),
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn(
+            "✗ airflow-worker-tag other worker tag: airflow-scheduler/scheduler-log-groomer "
+            "e22ab4e381a17d9b01504b324d5fbd91482f90ef2894bb11a6d5528fdf3faeaf",
+            done.stdout,
+        )
 
     def test_a_manifest_pin_that_was_never_applied_fails(self):
         done = self.run_script(
@@ -382,8 +468,8 @@ class VerifyPins(unittest.TestCase):
         self.assertIn("matches helm-values/airflow.yaml", done.stdout)
         self.assertIn("matches helm-values/openbao.yaml", done.stdout)
         self.assertIn("matches helm-values/jupyterhub.yaml", done.stdout)
-        # One ✓ per row: four files, nine rows.
-        self.assertEqual(done.stdout.count("✓"), 9, done.stdout)
+        # One ✓ per row: four files, nine rows, plus the ungated airflow-worker-tag row.
+        self.assertEqual(done.stdout.count("✓"), 10, done.stdout)
         self.assertNotIn("✗", done.stdout)
         self.assert_read_only()
 

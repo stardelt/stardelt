@@ -262,8 +262,39 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
   fi
 done <<< "$pins"
 
+# Every container that carries the Airflow worker tag must carry the pinned digest. The main
+# containers get it from helm-values/airflow.yaml; the chart's log-groomer sidecars once got a
+# direct `kubectl set env` that Helm's three-way merge keeps, because the sidecar's env is in
+# neither the old nor the new manifest (platform#1687).
+airflow_worker_digest="$(grep -A1 '^  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG$' \
+  helm-values/airflow.yaml | sed -n 's/.*demo@\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -1)"
+if [ -z "$airflow_worker_digest" ]; then
+  echo "? airflow-worker-tag no pinned worker tag in helm-values/airflow.yaml"; status=3
+else
+  stray="$(kubectl -n "$NAMESPACE" get deploy -o json 2>/dev/null | python3 -c '
+import json, sys
+want = "@" + sys.argv[1]
+for item in json.load(sys.stdin)["items"]:
+    name = item["metadata"]["name"]
+    if not name.startswith("airflow-"):
+        continue
+    for c in item["spec"]["template"]["spec"]["containers"]:
+        for e in c.get("env") or []:
+            if e.get("name") == "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG":
+                value = e.get("value") or ""
+                if not value.endswith(want):
+                    print(name + "/" + c["name"] + " " + value[-64:])
+' "$airflow_worker_digest")"
+  if [ -n "$stray" ]; then
+    printf '✗ %-18s other worker tag: %s\n' airflow-worker-tag "$(printf '%s' "$stray" | tr '\n' ';')"
+    status=1
+  else
+    printf '✓ %-18s every container carries %s…\n' airflow-worker-tag "${airflow_worker_digest:0:19}"
+  fi
+fi
+
 case "$status" in
-  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment, the CNPG operator, the barman-cloud plugin, Reloader, the two alpine CronJobs and the Kafka broker and entity operator carry the checked-in pins)" ;;
+  0) echo "verify-pins: PASS (live Deployments, StatefulSets and DaemonSets, both group-roles CronJobs, the spawned-notebook pins, the three helper CronJobs, the Keycloak Deployment, the CNPG operator, the barman-cloud plugin, Reloader, the two alpine CronJobs, the Kafka broker and entity operator carry the checked-in pins, and every Airflow container carries the pinned worker tag)" ;;
   1) echo "verify-pins: FAIL (a pin does not match the live configuration)" >&2 ;;
   *) echo "verify-pins: UNVERIFIED (a pin or Deployment could not be read)" >&2 ;;
 esac
