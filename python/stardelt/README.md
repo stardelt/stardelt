@@ -1,10 +1,25 @@
 # stardelt notebook helper
 
-The small package the notebook image ships: `stardelt.sql` (query as the
-signed-in hub user), `stardelt.write_df` (governed DataFrame writes),
-`stardelt.spark` (Spark Connect session), `stardelt.connection` (a named
-connection to an outside system: your own or your group's; values are read from the secret store when you ask,
-never kept or printed).
+The small package the notebook image ships. A notebook has the native names already —
+`spark`, `display` and `%sql` — so this package carries what the platform adds: secrets
+(`stardelt.connection`), `publish`, `compute`, `browse`, and the command line and login.
+
+```python
+df = spark.table("warehouse.demo.trips")            # spark is already there, as you
+df.groupBy("day").count().show()
+spark.createDataFrame(pdf).writeTo("warehouse.demo.trips_sample").createOrReplace()
+```
+
+```text
+%sql SELECT * FROM warehouse.demo.trips LIMIT 10
+```
+
+```python
+import stardelt
+key = stardelt.connection("weather-api")          # what the platform adds: secrets, publish, compute
+```
+
+`stardelt.sql`, `stardelt.spark` and `stardelt.write_df` are deprecated in 0.4 and removed in 0.5.
 
 Pure Python, MIT. This repository is the library's home: the platform's
 notebook image installs a **pinned release** of it, and both this repository's
@@ -157,7 +172,7 @@ to start it.
 
 ## SQL in notebooks (JupySQL)
 
-`pip install "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@v0.3.0"`, then `%load_ext stardelt.sqlmagic` (the platform's notebook
+`pip install "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@v0.4.0"`, then `%load_ext stardelt.sqlmagic` (the platform's notebook
 image does this when the kernel starts). It registers the default JupySQL connection
 `warehouse`, as the signed-in person:
 

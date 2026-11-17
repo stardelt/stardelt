@@ -352,7 +352,8 @@ def test_spark_reads_remote_from_env(fake_spark, monkeypatch):
 
 
 def test_spark_docstring_states_credential_limitation():
-    assert "shared storage credential" in stardelt.spark.__doc__
+    # `stardelt.spark` is the deprecated wrapper since 0.4; the session is `_session`.
+    assert "shared storage credential" in stardelt._session.__doc__
 
 
 def _view(phase, endpoint="sc://trial.stardelt.svc.cluster.local:15002"):
@@ -410,7 +411,7 @@ def test_spark_tips_prints_every_row(capsys):
 
 
 def test_spark_docstring_mentions_tips():
-    assert "stardelt.spark_tips()" in stardelt.spark.__doc__
+    assert "stardelt.spark_tips()" in stardelt._session.__doc__
 
 
 # Token source and renewal --------------------------------------------------------

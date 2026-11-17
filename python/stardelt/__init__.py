@@ -54,7 +54,7 @@ try:
 except Exception:
     browse = None
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "sql",
@@ -348,6 +348,12 @@ def sql(query, params=None):
     Failures raise a one-line ``RuntimeError`` (chained to the original, so the full
     trace is one ``__cause__`` away).
     """
+    if _on_platform():
+        warnings.warn(
+            "stardelt.sql() is deprecated in notebooks: use %sql or spark.sql(...)",
+            FutureWarning,
+            stacklevel=2,
+        )
     if not _on_platform():
         from stardelt import api, statements
 
@@ -488,6 +494,11 @@ def write_df(df, table, mode="append", batch_rows=DEFAULT_BATCH_ROWS, bronze=Fal
     ``_batch_id`` (a fresh UUID per call) — and nothing else is added
     implicitly: without ``bronze`` the frame lands exactly as given.
     """
+    warnings.warn(
+        'stardelt.write_df() is deprecated: use spark.createDataFrame(df).writeTo("catalog.schema.table").createOrReplace() (or .append())',
+        FutureWarning,
+        stacklevel=2,
+    )
     _platform_only("stardelt.write_df")
     if mode not in ("append", "overwrite", "create"):
         raise ValueError(
@@ -665,6 +676,11 @@ def spark_tips() -> None:
     line per row. Nothing runs and no session is opened, so it is safe as the
     first cell of a notebook.
     """
+    warnings.warn(
+        "stardelt.spark_tips() is deprecated: see the notebook guide",
+        FutureWarning,
+        stacklevel=2,
+    )
     for line in SPARK_TIPS:
         print(line)
 
@@ -811,7 +827,7 @@ def _remote_for_cluster(cluster):
     return endpoint
 
 
-def spark(app_name="stardelt-notebook", cluster=None):
+def _session(app_name="stardelt-notebook", cluster=None):
     """Open a Spark Connect session for bulk work, as the signed-in person.
 
     Spark now sees the catalogs you may see and the catalog checks your token;
@@ -871,6 +887,8 @@ def spark(app_name="stardelt-notebook", cluster=None):
         # session, so a second person's call would reuse the first person's
         # catalogs and token. A fresh Connect session is isolated server-side.
         session = SparkSession.builder.remote(remote).appName(app_name).create()
+        # A DataFrame renders as a table in a notebook instead of printing its rows (D47).
+        session.conf.set("spark.sql.repl.eagerEval.enabled", "true")
         for name in names:
             session.conf.set(
                 f"spark.sql.catalog.{name}", "org.apache.iceberg.spark.SparkCatalog"
@@ -947,6 +965,14 @@ def spark(app_name="stardelt-notebook", cluster=None):
         except Exception:  # noqa: BLE001 - an already-gone client is not an error
             pass
     return session
+
+
+def spark(app_name="stardelt-notebook", cluster=None):
+    """Deprecated: every notebook already has `spark`. Kept for one release."""
+    warnings.warn("stardelt.spark() is deprecated: use the `spark` every notebook already has "
+                  "(a named cluster: set STARDELT_CLUSTER, or call stardelt.compute)",
+                  FutureWarning, stacklevel=2)
+    return _session(app_name=app_name, cluster=cluster)
 
 
 # At the end of the module: `compute.py` imports `stardelt.api`, so importing it earlier

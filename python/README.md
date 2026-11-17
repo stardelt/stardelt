@@ -1,16 +1,24 @@
 # stardelt — the notebook library
 
-The helper that sits between a notebook and the platform's warehouse:
+The helper that sits between a notebook and the platform's warehouse. A notebook has the
+native names already: `spark`, `display` and `%sql`.
+
+```python
+df = spark.table("warehouse.demo.trips")            # spark is already there, as you
+df.groupBy("day").count().show()
+spark.createDataFrame(pdf).writeTo("warehouse.demo.trips_sample").createOrReplace()
+```
+
+```text
+%sql SELECT * FROM warehouse.demo.trips LIMIT 10
+```
 
 ```python
 import stardelt
-
-stardelt.sql("select count(*) from warehouse.covid.covid_summary")
-stardelt.write_df(df, "bronze.raw.events")
-stardelt.publish("my.ipynb")   # a versioned copy of this notebook, for scheduling
-session = stardelt.spark()
-stardelt.spark_tips()          # how to keep the shared driver healthy
+key = stardelt.connection("weather-api")          # what the platform adds: secrets, publish, compute
 ```
+
+`stardelt.sql`, `stardelt.spark` and `stardelt.write_df` are deprecated in 0.4 and removed in 0.5.
 
 The API reference is in [`stardelt/README.md`](stardelt/README.md) — it ships with the
 package, so `help(stardelt.spark)` points at the same text.
@@ -32,7 +40,7 @@ The platform's notebook image installs a **pinned** release of this library; a p
 notebook can install the same pin:
 
 ```bash
-pip install "stardelt @ git+https://github.com/stardelt/stardelt-python@v0.3.0"
+pip install "stardelt @ git+https://github.com/stardelt/stardelt-python@v0.4.0"
 ```
 
 ## Container image
