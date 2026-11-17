@@ -39,12 +39,23 @@ pub fn is_shared(accounts: &[String], display_name: &str) -> bool {
         .any(|account| account.eq_ignore_ascii_case(display_name))
 }
 
-/// Remove the shared accounts' saved queries (with their `query_share` rows), personal
-/// settings and query-log rows in one transaction; returns how many rows that removed.
+/// Remove the shared accounts' saved queries (with their `query_share` rows), Ask history,
+/// personal settings and query-log rows in one transaction; returns how many rows that removed.
 pub async fn purge(pool: &PgPool, accounts: &[String]) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
     let saved = sqlx::query(
         "DELETE FROM saved_query WHERE owner_sub IN \
+            (SELECT sub FROM person WHERE lower(username) = ANY($1))",
+    )
+    .bind(accounts)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    // Ask history (nova#891 slice c, migration 0023): the question, the SQL and the sentence a
+    // visitor typed. This table names the person in `sub`, not `owner_sub`, so it needs its own
+    // statement — a copy of the `saved_query` one matches no rows and would pass unnoticed.
+    let asked = sqlx::query(
+        "DELETE FROM ask_conversation WHERE sub IN \
             (SELECT sub FROM person WHERE lower(username) = ANY($1))",
     )
     .bind(accounts)
@@ -65,7 +76,7 @@ pub async fn purge(pool: &PgPool, accounts: &[String]) -> sqlx::Result<u64> {
         .await?
         .rows_affected();
     tx.commit().await?;
-    Ok(saved + settings + history)
+    Ok(saved + asked + settings + history)
 }
 
 /// Reset the shared accounts once a night for as long as Nova runs. Without a configured
@@ -158,6 +169,15 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO ask_conversation (sub, question, endpoint, sentence, explain) \
+             VALUES ($1, $2, 'default', 'Checked: EXPLAIN passed as you', 'EXPLAIN passed')",
+        )
+        .bind(sub)
+        .bind(format!("{name} question"))
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -168,7 +188,7 @@ mod tests {
         seed(&pool, "sub-ada", "ada").await;
         // The person is named `demo` in the directory, whatever case `NOVA_SHARED_ACCOUNTS`
         // carries; the comparison is lower on both sides.
-        assert_eq!(purge(&pool, &parse(" Demo ")).await.unwrap(), 3);
+        assert_eq!(purge(&pool, &parse(" Demo ")).await.unwrap(), 4);
 
         let owners: Vec<String> = sqlx::query_scalar("SELECT owner_sub FROM saved_query")
             .fetch_all(&pool)
@@ -185,6 +205,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(principals, ["ada"]);
+        let asked: Vec<String> = sqlx::query_scalar("SELECT sub FROM ask_conversation")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(asked, ["sub-ada"]);
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM person")
                 .fetch_one(&pool)
@@ -192,6 +217,38 @@ mod tests {
                 .unwrap(),
             2,
             "the directory keeps both people: only their data goes"
+        );
+    }
+
+    /// Every table keyed by a person is purged here or exempt with a stated reason. Migration
+    /// 0023 added `ask_conversation` and `purge` did not change; this test is what would have
+    /// failed.
+    ///
+    /// Exempt: `person` is the directory itself; `mcp_call` and `model_call` keep ids, sizes and
+    /// hashes only (migrations 0018/0019) and are pruned by their own retention windows;
+    /// `break_glass_read` is an administrator audit record, not a visitor's text.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn every_table_keyed_by_a_person_is_purged_or_exempt() {
+        let pool = migrated_pool().await;
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT table_name FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND column_name IN ('owner_sub', 'sub') \
+             ORDER BY table_name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            tables,
+            [
+                "ask_conversation",
+                "mcp_call",
+                "model_call",
+                "person",
+                "saved_query",
+                "user_setting"
+            ]
         );
     }
 }
