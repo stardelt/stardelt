@@ -686,7 +686,9 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     succeeded. Every pipeline carries the bundle's name, the target and the Git commit of the bundle
     directory (``provenance``), which Nova stamps on it. Every deploy is recorded once in Nova's deployment record
     (``deployments_record``: the bundle, the target, the commit, the caller and the pipelines it wrote); a deploy whose
-    record cannot be written still succeeds and prints ``{"action": "not-recorded", "reason": …}``. Only ``--prune``
+    record cannot be written still succeeds and prints ``{"action": "not-recorded", "reason": …}``. A write that fails
+    after an earlier one returns the rows already written and the sentence, and records nothing — a deploy that did
+    not finish is not recorded as applied. Only ``--prune``
     removes a pipeline the bundle no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
     uncommitted changes (``-dirty``); a ``development`` target still records it. A target with ``drift: block``
     refuses, for a plan and a deploy alike, a pipeline someone changed
@@ -799,14 +801,18 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             if row["action"] == "would-apply-migration" and row["name"] in applied:
                 row["action"] = "migration-applied"
                 row.pop("class", None)
-    done += [
-        {
-            **apply.apply(nova, spec),
+    for spec in specs:
+        try:
+            answer = apply.apply(nova, spec)
+        except apply.ApplyError as err:
+            return [(target, str(err))], done
+        except api.StardeltApiError as err:
+            return [(target, f"{spec['name']}: {err}")], done
+        done.append({
+            **answer,
             **({"modified": True} if spec["name"] in changed_by_hand else {}),
             **({"diff": diffs[spec["name"]]} if diffs.get(spec["name"]) else {}),
-        }
-        for spec in specs
-    ]
+        })
     for row in stream_rows:
         spec = stream_specs[row["position"]]
         try:
@@ -815,7 +821,10 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             return [(target, f"{spec['name']}: {err}")], done
         done.append({"action": "created" if row["action"] == "would-create" else "updated", "name": spec["name"]})
     for namespace, name in stale:
-        nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
+        try:
+            nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
+        except api.StardeltApiError as err:
+            return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name})
     spaces = {p["name"]: p["namespace"] for p in nova.call("pipelines_list")["pipelines"]} if specs else {}
     touched = []

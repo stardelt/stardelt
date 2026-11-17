@@ -117,6 +117,23 @@ def test_deploy_creates_or_updates_after_every_pipeline_passed(tmp_path):
     ]
 
 
+def test_a_write_that_fails_reports_the_sentence_and_what_was_already_written(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(503, {"error": "the scheduler is not reachable"}),
+    )
+    assert code == 2
+    assert err == "stardelt: prod: nightly: the scheduler is not reachable (HTTP 503)\n"
+    assert "Traceback" not in err
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "load"},
+    ]
+
+
 def test_one_refusal_means_nothing_is_written_and_the_sentence_is_shown(tmp_path):
     make(tmp_path)
     refused = {"ok": False, "errors": [{"message": "you are not a member of the group sales"}], "changes": [], "nextRuns": []}
@@ -226,6 +243,25 @@ def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path
     ]
     assert calls(session)[-3] == ("DELETE", "/api/pipelines/stardelt/old")
     assert [method for method, _ in calls(session)].count("DELETE") == 1
+
+
+def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=LISTING),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(503, {"error": "the scheduler is not reachable"}),
+    )
+    assert code == 2
+    assert err == "stardelt: prod: old: the scheduler is not reachable (HTTP 503)\n"
+    assert "Traceback" not in err
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "load"},
+        {"action": "updated", "name": "nightly"},
+    ]
 
 
 def test_a_development_target_prunes_only_the_callers_own_pipelines(tmp_path):
