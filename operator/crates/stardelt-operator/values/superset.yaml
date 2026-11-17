@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/stardelt/superset
-  tag: "dev@sha256:7a2b78c269da785ff3c1633ae664527c7943740923d3fb3e56b07c0066e4beea"
+  tag: "dev@sha256:507c59ef3231d699d76d1bdcb5fdcecc4364a3107f074ab99208b458b52508e0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets:
