@@ -422,7 +422,12 @@ mod tests {
             o["image"]["repository"],
             serde_json::json!("openfga/openfga")
         );
-        assert_eq!(o["image"]["tag"], serde_json::json!("v1.22.1"));
+        assert_eq!(
+            o["image"]["tag"],
+            serde_json::json!(
+                "v1.22.1@sha256:b852071314f1fda1194d341a6ebac0a4f619b3cd87a6626d2ccc7048af4ec671"
+            )
+        );
         assert_eq!(
             o["telemetry"]["metrics"]["enabled"],
             serde_json::json!(true),
@@ -823,6 +828,34 @@ mod tests {
                 "seccompProfile": {"type": "RuntimeDefault"}
             })
         );
+    }
+
+    /// The Superset chart's three helper containers and its two bundled dependencies, and the Trino
+    /// identity gate, all ran the chart's bare tags until this test existed (platform#1594, #1605).
+    #[test]
+    fn superset_and_the_trino_gate_are_pinned_by_digest() {
+        let s = golden_values("superset");
+        assert_eq!(
+            s["init"]["initContainers"][0]["image"],
+            serde_json::json!(
+                "apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057"
+            )
+        );
+        assert_eq!(
+            s["postgresql"]["image"]["tag"],
+            serde_json::json!(
+                "14.17.0-debian-12-r3@sha256:769d9d755a41e845d00c8eda9bd2c0945ee9c437d64cc215db7a4bd05cd17f17"
+            )
+        );
+        assert_eq!(
+            s["redis"]["image"]["tag"],
+            serde_json::json!(
+                "7.0.10-debian-11-r4@sha256:224a79826b42869bdc72a70933efd840c5a5f10a70caafca68e57be6901e36fb"
+            )
+        );
+        // The one-shot `wait-for-postgres-redis` container is a second entry under a different
+        // section; the rendered document must carry no bare `dockerize` tag at all.
+        assert!(!s.to_string().contains("apache/superset:dockerize\""));
     }
 
     #[test]
@@ -1771,7 +1804,12 @@ mod tests {
         let values = identity_values("trino");
         let init = &values["initContainers"]["coordinator"][0];
         assert_eq!(init["name"], serde_json::json!("wait-for-idp"));
-        assert_eq!(init["image"], serde_json::json!("trinodb/trino:484"));
+        assert_eq!(
+            init["image"],
+            serde_json::json!(
+                "trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f"
+            )
+        );
         assert_eq!(
             init["env"][0]["valueFrom"]["configMapKeyRef"]["name"],
             serde_json::json!("stardelt-identity")

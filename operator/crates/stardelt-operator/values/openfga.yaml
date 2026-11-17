@@ -29,7 +29,8 @@ image:
   repository: openfga/openfga
   # Explicit, so a chart bump cannot silently move the application: Lakekeeper 0.12.2
   # requires OpenFGA >= 1.11; #972 moves the store to the pair Lakekeeper 0.15 ships with.
-  tag: v1.22.1
+  # Pinned by digest (the twin of stardelt-platform#1587): a tag alone moves on an upgrade.
+  tag: v1.22.1@sha256:b852071314f1fda1194d341a6ebac0a4f619b3cd87a6626d2ccc7048af4ec671
 
 replicaCount: 1
 

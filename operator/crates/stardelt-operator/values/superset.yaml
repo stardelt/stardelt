@@ -110,7 +110,7 @@ init:
     seccompProfile: {type: RuntimeDefault}
   initContainers:
     - name: wait-for-postgres
-      image: apache/superset:dockerize
+      image: apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
       imagePullPolicy: IfNotPresent
       envFrom:
         - secretRef:
@@ -173,7 +173,7 @@ supersetNode:
     seccompProfile: {type: RuntimeDefault}
   initContainers:
     - name: wait-for-postgres
-      image: apache/superset:dockerize
+      image: apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
       imagePullPolicy: IfNotPresent
       envFrom:
         - secretRef:
@@ -206,7 +206,7 @@ supersetWorker:
     seccompProfile: {type: RuntimeDefault}
   initContainers:
     - name: wait-for-postgres-redis
-      image: apache/superset:dockerize
+      image: apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
       imagePullPolicy: IfNotPresent
       envFrom:
         - secretRef:
@@ -241,6 +241,9 @@ supersetWebsockets:
 
 postgresql:
   enabled: true
+  # Pinned by digest (the twin of stardelt-platform#1594). stardelt-platform/helm-values/superset.yaml:549.
+  image:
+    tag: 14.17.0-debian-12-r3@sha256:769d9d755a41e845d00c8eda9bd2c0945ee9c437d64cc215db7a4bd05cd17f17
   primary:
     persistence:
       size: 2Gi
@@ -250,6 +253,9 @@ postgresql:
 
 redis:
   enabled: true
+  # Pinned by digest (platform#1594). stardelt-platform/helm-values/superset.yaml:560.
+  image:
+    tag: 7.0.10-debian-11-r4@sha256:224a79826b42869bdc72a70933efd840c5a5f10a70caafca68e57be6901e36fb
   master:
     podSecurityContext:
       fsGroup: 1001
