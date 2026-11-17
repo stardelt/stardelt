@@ -4091,7 +4091,9 @@ test.describe('schedule notebook', () => {
     const dialog = await openFromPipelines(page)
     const version = dialog.getByRole('combobox', { name: 'Version', exact: true })
     // Newest first; each choice names the short id, when it was published and by whom.
-    expect(await version.locator('option').allTextContents()).toEqual([
+    // Poll: the dialog renders "Reading the versions…" with no combobox until the object's
+    // versions arrive, and allTextContents() does not retry (CI on f06c544, 2026-11-17).
+    await expect.poll(() => version.locator('option').allTextContents()).toEqual([
       `${V3.slice(0, 8)} · ${formatTime(AT3, 'UTC')} · alice`,
       `${V2.slice(0, 8)} · ${formatTime(AT2, 'UTC')} · bob`,
     ])
