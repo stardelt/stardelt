@@ -720,6 +720,55 @@ mod tests {
         );
     }
 
+    /// platform#1605 pinned the JupyterHub chart's own images; the operator installs the same chart
+    /// version (4.4.5), so it must not fall back to the chart's appVersion tags.
+    #[test]
+    fn the_jupyterhub_chart_images_are_pinned_by_digest() {
+        let j = golden_values("jupyterhub");
+        assert_eq!(
+            j["hub"]["image"]["tag"],
+            serde_json::json!(
+                "4.4.5@sha256:6ce210488f5598e2dd5130d82e84d9f74b72538b66895861240bd84926ec50bd"
+            )
+        );
+        assert_eq!(
+            j["proxy"]["chp"]["image"]["tag"],
+            serde_json::json!(
+                "5.4.0@sha256:7977d796d372642aa9eb962ff36590b3019f8f24493fcf9f1d07d2c81e8e6080"
+            )
+        );
+        assert_eq!(
+            j["singleuser"]["networkTools"]["image"]["tag"],
+            serde_json::json!(
+                "4.4.5@sha256:58d5d96d850b103d0acd8576b1e5ff9f5f4c19aefbdc889f415db0830774e420"
+            )
+        );
+        assert_eq!(
+            j["scheduling"]["userScheduler"]["image"]["tag"],
+            serde_json::json!(
+                "v1.30.14@sha256:74a5cf9cfa9fcc2246f68c650f1f5c7add20da2145f13800fd97ba1d69fc06c8"
+            )
+        );
+        assert_eq!(
+            j["scheduling"]["userPlaceholder"]["image"]["tag"],
+            serde_json::json!(
+                "3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+            )
+        );
+        assert_eq!(
+            j["prePuller"]["pause"]["image"]["tag"],
+            serde_json::json!(
+                "3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+            )
+        );
+        assert_eq!(
+            j["prePuller"]["hook"]["image"]["tag"],
+            serde_json::json!(
+                "4.4.5@sha256:29de1a6dc23305505d81bf96172aa20889925e42723be24751b0824e35ed73a0"
+            )
+        );
+    }
+
     #[test]
     fn jupyterhub_golden_values_round_trip_through_yaml() {
         let values = golden_values("jupyterhub");

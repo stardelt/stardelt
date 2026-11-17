@@ -1,4 +1,10 @@
 hub:
+  # Pinned by digest (the twin of stardelt-platform#1605): the chart defaults this to its
+  # appVersion tag, which moves on an upgrade. The string is
+  # stardelt-platform/helm-values/jupyterhub.yaml:27.
+  image:
+    name: quay.io/jupyterhub/k8s-hub
+    tag: "4.4.5@sha256:6ce210488f5598e2dd5130d82e84d9f74b72538b66895861240bd84926ec50bd"
   config:
     GenericOAuthenticator:
       admin_groups:
@@ -97,6 +103,10 @@ cull:
   timeout: 3600
 proxy:
   chp:
+    # Pinned by digest (platform#1605). The string is helm-values/jupyterhub.yaml:390.
+    image:
+      name: quay.io/jupyterhub/configurable-http-proxy
+      tag: "5.4.0@sha256:7977d796d372642aa9eb962ff36590b3019f8f24493fcf9f1d07d2c81e8e6080"
     resources:
       limits:
         cpu: 500m
@@ -115,6 +125,11 @@ proxy:
         cpu: 50m
         memory: 128Mi
 singleuser:
+  # Pinned by digest (platform#1605): the chart's network-tools image.
+  networkTools:
+    image:
+      name: quay.io/jupyterhub/k8s-network-tools
+      tag: "4.4.5@sha256:58d5d96d850b103d0acd8576b1e5ff9f5f4c19aefbdc889f415db0830774e420"
   # z2jh appends a privileged `block-cloud-metadata` init container (runAsUser 0, NET_ADMIN)
   # unless this is false, and a `restricted` Pod Security namespace refuses the whole notebook
   # pod over it. The single-user NetworkPolicy below is deny-by-default and excludes
@@ -212,3 +227,24 @@ singleuser:
         ports:
           - port: 8080
             protocol: TCP
+# The scheduler that places a notebook pod and the pause containers the puller and the
+# placeholder use are chart images too: pin them by digest (platform#1605), not at the chart's
+# default tag. The strings are stardelt-platform/helm-values/jupyterhub.yaml:602-615.
+scheduling:
+  userScheduler:
+    image:
+      name: registry.k8s.io/kube-scheduler
+      tag: "v1.30.14@sha256:74a5cf9cfa9fcc2246f68c650f1f5c7add20da2145f13800fd97ba1d69fc06c8"
+  userPlaceholder:
+    image:
+      name: registry.k8s.io/pause
+      tag: "3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+prePuller:
+  pause:
+    image:
+      name: registry.k8s.io/pause
+      tag: "3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+  hook:
+    image:
+      name: quay.io/jupyterhub/k8s-image-awaiter
+      tag: "4.4.5@sha256:29de1a6dc23305505d81bf96172aa20889925e42723be24751b0824e35ed73a0"
