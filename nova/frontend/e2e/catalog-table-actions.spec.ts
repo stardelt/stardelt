@@ -62,7 +62,7 @@ test('the header copies a query for a notebook and for the CLI', async ({ page }
   await notebook.click()
   await expect(page.getByText('Copied')).toBeVisible()
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
-    'import stardelt\nstardelt.sql("SELECT * FROM warehouse.sales.orders LIMIT 100")',
+    '%sql SELECT * FROM warehouse.sales.orders LIMIT 100',
   )
 
   await cli.click()

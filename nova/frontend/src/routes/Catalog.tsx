@@ -234,7 +234,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
           )}
           <CopyAction
             label="Use in a notebook"
-            text={`import stardelt\nstardelt.sql("SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100")`}
+            text={`%sql SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100`}
           />
           <CopyAction
             label="Copy for the CLI"
