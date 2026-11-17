@@ -87,7 +87,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-restarts verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -264,6 +264,10 @@ verify-crds: _context ## The live CRD schemas match the operator checkout (needs
 .PHONY: verify-pins
 verify-pins: _context ## The live Deployment images match the checked-in pins
 	@bash scripts/verify-pins.sh
+
+.PHONY: verify-restarts
+verify-restarts: _context ## Restart counts of the restart-prone Deployments (read-only; a not-Ready pod fails)
+	@NS=$(NAMESPACE) bash scripts/verify-restarts.sh
 
 .PHONY: check-spark-runtimes-live
 check-spark-runtimes-live: _context ## The live Spark runtime catalogue matches chart/files/spark-runtimes.json
@@ -541,7 +545,7 @@ step-pins: ## The image digests this cluster runs
 	fi
 
 step-verify: ## The verify targets the upgrade path runs after it converged the cluster
-	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins check-spark-runtimes-live verify-operator-values verify-connections verify-maintenance
+	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins verify-restarts check-spark-runtimes-live verify-operator-values verify-connections verify-maintenance
 
 install-core: deps _context _helm-repos ## Install the core only (storage+catalog+query+Nova)
 	@echo "› Reloader (restarts workloads when a credential they read changes)"
