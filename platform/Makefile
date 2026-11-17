@@ -49,15 +49,13 @@ JUPYTER_IMAGE  := ghcr.io/stardelt/jupyter-singleuser:dev
 # Pinned by commit SHA, not by tag: a moving tag is not an upgrade path, the
 # same rule the image pins follow (scripts/pin-image.sh). The tag names the
 # release the SHA belongs to, for humans — the SHA is what is installed. The
-# commit is the 0.4.0 version bump after the v0.3.0 release and carries
-# `stardelt.notebook`; no v0.4.0 tag exists yet, so the tag names the release
-# it follows.
+# commit is the v0.4.0 release and carries `stardelt.notebook`.
 #
 # A bump changes the ARG default in images/jupyter/Dockerfile as well (the
 # check script wants both), and that file is what makes CI rebuild the
 # notebook image.
 STARDELT_LIB_REF := 681e873441db08519437df72fa352c6f07216727
-STARDELT_LIB_TAG := v0.3.0
+STARDELT_LIB_TAG := v0.4.0
 
 # The image tag the dev channel follows. `dev` moves on every merge; every merged
 # commit also carries an immutable `sha-<short>`, which is what you deploy when you

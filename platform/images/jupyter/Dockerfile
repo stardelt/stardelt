@@ -123,10 +123,10 @@ COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
 #
 # Pinned by commit SHA, not by tag: a moving tag is not an upgrade path — the
 # same rule the image pins follow (scripts/pin-image.sh). The SHA below is the
-# commit after the v0.3.0 release
-# (https://github.com/stardelt/stardelt-python/releases/tag/v0.3.0): it carries
+# v0.4.0 release
+# (https://github.com/stardelt/stardelt-python/releases/tag/v0.4.0): it carries
 # `stardelt.notebook` (the native `spark` and `display`) and reports version
-# 0.4.0. No v0.4.0 tag exists yet, so this names the release the commit follows.
+# 0.4.0.
 #
 # The Makefile holds the pin (STARDELT_LIB_REF) and passes it as a build arg;
 # scripts/check-stardelt-pin.sh fails the build when this default and the
