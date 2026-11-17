@@ -19,7 +19,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams};
 use serde::Serialize;
-use sqlx::{FromRow, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -95,6 +95,28 @@ async fn principal_owners(s: &AppState) -> HashMap<String, String> {
         .lock()
         .expect("principal owners poisoned") = Some((std::time::Instant::now(), map.clone()));
     map
+}
+
+/// Subject → name, for the `by=principal` usage rows. `query_log.principal` holds the OIDC
+/// subject for every signed-in query (measured on the lab 2026-11-17: 1211 demo rows under its
+/// sub, 0 under `demo`), and rows written before that still carry the sign-in name.
+async fn person_names(pool: &PgPool) -> Result<HashMap<String, String>, sqlx::Error> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT sub, COALESCE(NULLIF(display_name, ''), username) FROM person")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Replace each key that names a person's subject with that person's name. A key that matches no
+/// person stays exactly as the log wrote it — the `superset` engine user, or someone the
+/// directory no longer has; an honest literal beats a blank cell.
+fn name_principals(items: &mut [UsageRow], names: &HashMap<String, String>) {
+    for item in items {
+        if let Some(name) = names.get(&item.key) {
+            item.key = name.clone();
+        }
+    }
 }
 
 /// The person asking, with owned data (a [`Viewer`] borrows it).
@@ -662,10 +684,16 @@ pub async fn usage(
 
     // No second check per row here: a warehouse or a day is not a principal, so the scope can
     // only narrow the rows in the WHERE above (for `by=principal`, it already is the rule).
-    let items: Vec<UsageRow> = match q.build_query_as().fetch_all(pool).await {
+    let mut items: Vec<UsageRow> = match q.build_query_as().fetch_all(pool).await {
         Ok(rows) => rows,
         Err(e) => return store_failed(e),
     };
+    if matches!(params.by, By::Principal) {
+        match person_names(pool).await {
+            Ok(names) => name_principals(&mut items, &names),
+            Err(e) => return store_failed(e),
+        }
+    }
     let total = UsageRow::total(&items);
     Json(UsagePage {
         by: params.by.as_str().into(),
@@ -1369,5 +1397,26 @@ mod tests {
             is_admin: false,
         };
         assert!(!in_scope(Scope::Team, &row, &outsider));
+    }
+
+    #[test]
+    fn a_principal_key_is_named_and_an_unknown_one_is_left_alone() {
+        let row = |key: &str| UsageRow {
+            key: key.into(),
+            queries: 1,
+            failed: 0,
+            cpu_ms: 1,
+            wall_ms: 1,
+            input_bytes: 1,
+            written_bytes: 1,
+        };
+        let mut items = [row("5549059e-d41f-4706-ba9b-d1b4c5948492"), row("superset")];
+        let names = HashMap::from([(
+            "5549059e-d41f-4706-ba9b-d1b4c5948492".to_string(),
+            "demo".to_string(),
+        )]);
+        name_principals(&mut items, &names);
+        assert_eq!(items[0].key, "demo");
+        assert_eq!(items[1].key, "superset");
     }
 }
