@@ -7,7 +7,7 @@ permissions:
   issues: write
 jobs:
   pins:
-    name: The checked-in pins and the operator's golden values
+    name: The checked-in pins and the operator's two golden-value checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -22,7 +22,7 @@ jobs:
           set +e
           # `$?` after a pipeline is tee's status, not the check's: that is why the
           # issue was never filed (found 2026-11-09; `false | tee` answers 0). Redirect,
-          # read the code, print. Both checks feed one issue: an operator whose golden
+          # read the code, print. All three checks feed one issue: an operator whose golden
           # values disagree is the same class of drift as an image pin that is behind.
           python3 scripts/check_pin_freshness.py > "$RUNNER_TEMP/pins.txt" 2>&1
           freshness=$?
@@ -52,9 +52,9 @@ jobs:
             gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pins.txt"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
-              --label bug --label P2 --body-file "$RUNNER_TEMP/pins.txt"
+              --label bug --label P2 --label ops --milestone "v0.4" --body-file "$RUNNER_TEMP/pins.txt"
           fi
-      - name: Close the issue when both checks pass
+      - name: Close the issue when all three checks pass
         if: steps.check.outputs.code == '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,5 +65,5 @@ jobs:
             echo "no open pin issue"
             exit 0
           fi
-          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "Both checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\` and \`check-operator-pins.sh\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
+          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "All three checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\`, \`check-operator-pins.sh\` and \`check_golden_image.py\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
           gh issue close "$number" --repo "$GITHUB_REPOSITORY"
