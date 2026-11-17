@@ -51,9 +51,17 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile: { type: RuntimeDefault }
   containers:
     - name: s3
       image: $S3_CHECK_IMAGE
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       command: ["sh", "-ec"]
       args:
         - |
@@ -72,6 +80,8 @@ spec:
           s3 s3api head-bucket --bucket "$BUCKET"
           echo "› bucket $BUCKET: present (no versioning: the archive is append-only)"
       env:
+        - name: HOME
+          value: /tmp
         - name: AWS_ACCESS_KEY_ID
           valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: access-key } }
         - name: AWS_SECRET_ACCESS_KEY

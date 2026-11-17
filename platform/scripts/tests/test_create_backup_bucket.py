@@ -71,7 +71,10 @@ class CreateBackupBucket(unittest.TestCase):
         self.run_script()
         pod = self.applied.read_text()
         self.assertEqual(pod.count("secretKeyRef"), 4)
-        self.assertEqual(re.findall(r"^\s+value:", pod, flags=re.M), [], "no literal value in the Pod")
+        # `HOME` is the one literal (platform#1657): uid 65534 cannot write the `/root` the
+        # aws-cli image resolves `$HOME` to. A credential is never a literal.
+        self.assertEqual(re.findall(r"^\s+- name: (\S+)\n\s+value: (.+)$", pod, flags=re.M),
+                         [("HOME", "/tmp")], "only HOME may be a literal; credentials come from the Secret")
 
     def test_a_missing_secret_stops_before_any_pod(self):
         done = self.run_script(FAKE_SECRET_PRESENT="0")

@@ -42,7 +42,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
 BRIDGE="${BRIDGE:-http://lakekeeper-opa:8282}"
-PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.10.1}"
+PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b}"
 RUNS="${RUNS:-5}"
 # The ticket's gate (platform#359): `SHOW CATALOGS` under 0.2 s median, and one
 # single-resource question under 0.05 s.
@@ -239,8 +239,9 @@ sed -i -e "s|@BATCH@|$BRIDGE_BATCH_PATH|g" \
 #    `SHOW CATALOGS` (or a query) waits for.
 pod="qa-bridge-latency-$RANDOM"
 kubectl -n "$NAMESPACE" run "$pod" --image="$PROBE_IMAGE" --restart=Never \
-  --labels='app.kubernetes.io/name=trino,app.kubernetes.io/component=coordinator' \
-  --command -- sleep 600 >/dev/null || fail "cannot start the probe pod"
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$pod" --image "$PROBE_IMAGE" \
+    --label app.kubernetes.io/name=trino --label app.kubernetes.io/component=coordinator \
+    --command 'sleep 600')" >/dev/null || fail "cannot start the probe pod"
 kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=90s >/dev/null \
   || fail "the probe pod never became ready"
 

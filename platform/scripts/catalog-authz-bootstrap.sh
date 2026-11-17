@@ -19,6 +19,8 @@ NAMESPACE=${NAMESPACE:-stardelt}
 LAKEKEEPER_VERSION=${LAKEKEEPER_VERSION:-0.11.0}
 HELM_FLAGS=${HELM_FLAGS:---namespace "$NAMESPACE" --create-namespace --wait --timeout 10m}
 BASE=http://127.0.0.1:18181
+# The probe image is pinned by digest: a check that runs different code tomorrow is not a check.
+PROBE_IMAGE=${PROBE_IMAGE:-curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b}
 PASS=0
 FAIL=0
 
@@ -239,11 +241,13 @@ NAMESPACE="$NAMESPACE" KIND=service NAME=catalog-verify YES=1 \
 # 5. the bridge answers to the coordinator's labels only
 body='{"input":{"context":{"identity":{"user":"nobody","groups":[]},"action":{"operation":"SelectFromColumns","resource":{"table":{"catalogName":"warehouse","schemaName":"demo","tableName":"trips","columns":["x"]}}}}}}'
 pod="authz-bridge-allowed-$RANDOM"
-kubectl -n "$NAMESPACE" run "$pod" --image=curlimages/curl:8.10.1 --restart=Never \
-  --labels='app.kubernetes.io/name=trino,app.kubernetes.io/component=coordinator' \
-  --command -- curl -sS --retry 6 --retry-connrefused --retry-delay 1 --max-time 10 \
-  -X POST "http://lakekeeper-opa:8282/v1/data/trino/allow" \
-  -H 'Content-Type: application/json' -d "$body" >/dev/null
+probe_cmd="curl -sS --retry 6 --retry-connrefused --retry-delay 1 --max-time 10 \
+-X POST http://lakekeeper-opa:8282/v1/data/trino/allow \
+-H 'Content-Type: application/json' -d '$body'"
+kubectl -n "$NAMESPACE" run "$pod" --image="$PROBE_IMAGE" --restart=Never \
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$pod" --image "$PROBE_IMAGE" \
+    --label app.kubernetes.io/name=trino --label app.kubernetes.io/component=coordinator \
+    --command "$probe_cmd")" >/dev/null
 kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$pod" --timeout=40s >/dev/null 2>&1 || true
 out=$(kubectl -n "$NAMESPACE" logs "pod/$pod" 2>/dev/null || true)
 kubectl -n "$NAMESPACE" delete pod "$pod" --wait=false >/dev/null 2>&1 || true
@@ -251,9 +255,13 @@ if printf '%s' "$out" | grep -q '"result":false'; then r=0; else r=1; fi
 check "bridge answers {\"result\":false} to a coordinator-labelled pod" $r
 
 pod="authz-bridge-denied-$RANDOM"
-kubectl -n "$NAMESPACE" run "$pod" --image=curlimages/curl:8.10.1 --restart=Never \
-  --command -- curl -sS --max-time 3 -o /dev/null -w '%{http_code}' -X POST "http://lakekeeper-opa:8282/v1/data/trino/allow" \
-  -H 'Content-Type: application/json' -d "$body" >/dev/null
+# Deliberately unlabelled: this pod is the negative case, and the bridge must not answer it.
+probe_cmd="curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+-X POST http://lakekeeper-opa:8282/v1/data/trino/allow \
+-H 'Content-Type: application/json' -d '$body'"
+kubectl -n "$NAMESPACE" run "$pod" --image="$PROBE_IMAGE" --restart=Never \
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$pod" --image "$PROBE_IMAGE" \
+    --command "$probe_cmd")" >/dev/null
 kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$pod" --timeout=40s >/dev/null 2>&1 || true
 out=$(kubectl -n "$NAMESPACE" logs "pod/$pod" 2>/dev/null || true)
 kubectl -n "$NAMESPACE" delete pod "$pod" --wait=false >/dev/null 2>&1 || true

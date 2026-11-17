@@ -14,6 +14,8 @@ import subprocess
 import sys
 import unittest
 
+import yaml
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HELPER = os.path.join(ROOT, "scripts", "probe-pod-spec.py")
 PINNED = "curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
@@ -26,6 +28,16 @@ REWIRED = (
     "scripts/verify-trino-tls.sh",
     "scripts/verify-spark-cluster.sh",
     "scripts/verify-backups.sh",
+    "scripts/bridge-latency.sh",
+    "scripts/bridge-replay.sh",
+    "scripts/catalog-authz-bootstrap.sh",
+)
+
+# The two bucket scripts write their pod as a heredoc, so they cannot use
+# `kubectl run --overrides`; test_bucket_pods_declare_the_floor pins their spec.
+BUCKETS = (
+    "scripts/create-backup-bucket.sh",
+    "scripts/create-notebooks-bucket.sh",
 )
 
 
@@ -107,6 +119,30 @@ class ProbePodSpecTest(unittest.TestCase):
                     if flag not in line:
                         problems.append("%s:%d %s is missing %s" % (relative, number, line.strip(), flag))
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_bucket_pods_declare_the_floor(self):
+        for relative in BUCKETS:
+            with open(os.path.join(ROOT, relative), encoding="utf-8") as handle:
+                text = handle.read()
+            match = re.search(r"<<YAML\n(.*?)\nYAML\n", text, re.S)
+            self.assertIsNotNone(match, "%s: no Pod heredoc found" % relative)
+            pod = yaml.safe_load(match.group(1))
+            spec = pod["spec"]
+            self.assertEqual(spec.get("restartPolicy"), "Never", relative)
+            self.assertIs(spec.get("automountServiceAccountToken"), False, relative)
+            self.assertEqual(spec.get("securityContext"), {
+                "runAsNonRoot": True,
+                "runAsUser": 65534,
+                "runAsGroup": 65534,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            }, relative)
+            self.assertEqual(spec["containers"][0].get("securityContext"), {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            }, relative)
+            home = [env for env in spec["containers"][0].get("env") or []
+                    if env.get("name") == "HOME"]
+            self.assertEqual(home, [{"name": "HOME", "value": "/tmp"}], relative)
 
 
 if __name__ == "__main__":
