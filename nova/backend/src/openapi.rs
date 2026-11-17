@@ -104,6 +104,7 @@ pub struct ErrorResponse {
         crate::streams::patch,
         crate::streams::validate,
         crate::streams::put,
+        crate::streams::remove,
         crate::migrations::plan_handler,
         crate::migrations::apply_handler,
         crate::migrations::approve_handler,

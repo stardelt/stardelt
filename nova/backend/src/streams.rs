@@ -593,6 +593,38 @@ async fn patch_stream(
     Ok(stream_view(&patched, who))
 }
 
+/// Remove one `StreamApp`. A stream that is already gone is success: a `404` from the
+/// API server is not an error (the same rule as `PipelineResources::delete`).
+async fn remove_stream(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(), Fail> {
+    if namespace != crate::cluster::namespace() {
+        return Err(not_found());
+    }
+    let api = stream_api(state)?;
+    let app = match api.get(name).await {
+        Ok(app) => app,
+        // Already gone is success: a `404` is not an error (the same rule as
+        // `PipelineResources::delete`); there is no ownership left to check.
+        Err(kube::Error::Api(er)) if er.code == 404 => return Ok(()),
+        Err(other) => return Err(resource_fail(ResourceError::Unavailable(other.to_string()))),
+    };
+    let app_value = serde_json::to_value(&app)
+        .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+    let spec = app_value.get("spec").unwrap_or(&app_value);
+    if !may_act(who, spec) {
+        return Err(not_found());
+    }
+    match api.delete(name, &kube::api::DeleteParams::default()).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
+        Err(other) => Err(resource_fail(ResourceError::Unavailable(other.to_string()))),
+    }
+}
+
 /// The principal check: `Ok(Ok(()))` when the group's `ServicePrincipal` is ready,
 /// `Ok(Err(sentence))` when it is not, `Err` when the cluster did not answer.
 async fn principal_ready(state: &AppState, group: &str) -> Result<Result<(), String>, Fail> {
@@ -830,12 +862,42 @@ pub(crate) async fn put(
     answer(put_stream(signed.state(), signed.identity(), &namespace, &name, body).await)
 }
 
+#[utoipa::path(
+    delete,
+    operation_id = "streams_delete",
+    path = "/api/streams/{namespace}/{name}",
+    tag = "public",
+    description = "Delete one StreamApp that the caller's group owns. The stream's Kafka topic is not deleted; what a deletion does to it is the operator's decision. Answers 204 when the object is gone, including when it was already gone.",
+    params(
+        ("namespace" = String, Path, description = "Namespace (must be the platform namespace)"),
+        ("name" = String, Path, description = "StreamApp name"),
+    ),
+    responses(
+        (status = 204, description = "The StreamApp is gone"),
+        (status = 404, description = "No such stream, another namespace, or the caller may not act on it", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn remove(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    match remove_stream(signed.state(), signed.identity(), &namespace, &name).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(fail) => fail.into_response(),
+    }
+}
+
 /// The stream routes, uncacheable like the pipelines ones.
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/streams", get(list))
         .route("/streams/validate", post(validate))
-        .route("/streams/{namespace}/{name}", patch_route(patch).put(put))
+        .route(
+            "/streams/{namespace}/{name}",
+            patch_route(patch).put(put).delete(remove),
+        )
         .route_layer(axum::middleware::from_fn(crate::pipelines::no_store))
 }
 
@@ -846,7 +908,7 @@ mod tests {
 
     use super::{
         StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, put_stream,
-        router, stream_resource, stream_spec_digest, stream_view, streams_response,
+        remove_stream, router, stream_resource, stream_spec_digest, stream_view, streams_response,
         visible_streams,
     };
     use crate::auth::Identity;
@@ -1265,6 +1327,7 @@ mod tests {
         pub struct Fake {
             pub items: Vec<Value>,
             pub patches: Vec<Value>,
+            pub deletes: Vec<String>,
         }
 
         type Shared = Arc<Mutex<Fake>>;
@@ -1316,10 +1379,26 @@ mod tests {
             Ok(Json(item.clone()))
         }
 
+        async fn delete_one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            let mut state = state.lock().unwrap();
+            state.deletes.push(name.clone());
+            let index = state
+                .items
+                .iter()
+                .position(|item| item["metadata"]["name"] == name)
+                .ok_or_else(|| failure(StatusCode::NOT_FOUND, "not found"))?;
+            let item = state.items.remove(index);
+            Ok((StatusCode::OK, Json(item)))
+        }
+
         pub async fn start_with_patch(items: Vec<Value>) -> (kube::Client, Shared) {
             let shared = Arc::new(Mutex::new(Fake {
                 items,
                 patches: Vec::new(),
+                deletes: Vec::new(),
             }));
             let app = Router::new()
                 .route(
@@ -1330,7 +1409,7 @@ mod tests {
                 )
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/streamapps/{name}",
-                    get(one).patch(patch_one),
+                    get(one).patch(patch_one).delete(delete_one),
                 )
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/serviceprincipals",
@@ -1389,6 +1468,46 @@ mod tests {
             .await
             .expect_err("outsider gets 404");
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_owner_may_delete_a_stream_and_it_is_recorded() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        remove_stream(&state, &who("u", &["sales"], false), &ns, "demo")
+            .await
+            .expect("the owner may delete the stream");
+        assert_eq!(shared.lock().unwrap().deletes, vec!["demo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_member_of_another_group_may_not_delete_a_stream() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        let err = remove_stream(&state, &who("u", &["marketing"], false), &ns, "demo")
+            .await
+            .expect_err("an outsider gets 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert!(
+            shared.lock().unwrap().deletes.is_empty(),
+            "nothing may be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_stream_that_is_already_gone_is_success() {
+        let (client, shared) = fake_kube::start_with_patch(vec![]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        remove_stream(&state, &who("u", &["sales"], false), &ns, "vanished")
+            .await
+            .expect("already gone is success");
+        assert!(
+            shared.lock().unwrap().deletes.is_empty(),
+            "nothing may be deleted"
+        );
     }
 
     #[tokio::test]

@@ -8517,6 +8517,68 @@
           }
         }
       },
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "description": "Delete one StreamApp that the caller's group owns. The stream's Kafka topic is not deleted; what a deletion does to it is the operator's decision. Answers 204 when the object is gone, including when it was already gone.",
+        "operationId": "streams_delete",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace (must be the platform namespace)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "StreamApp name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The StreamApp is gone"
+          },
+          "404": {
+            "description": "No such stream, another namespace, or the caller may not act on it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "public"
