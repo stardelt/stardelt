@@ -24,7 +24,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
-IMAGE="curlimages/curl:8.11.1"
+IMAGE="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 POD=metrics-scrape-probe
 problems=0
 checks=0
@@ -35,8 +35,11 @@ command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; e
 cleanup() { kubectl -n "$NS" delete pod "$POD" --ignore-not-found --grace-period=1 >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 # The label the NetworkPolicies admit: monitoring.coreos.com's own pod label (operator#607).
+# The Pod document carries the restricted Pod Security floor (platform#1656), so the probe is
+# not refused in a namespace that enforces it.
 kubectl -n "$NS" run "$POD" --image="$IMAGE" --restart=Never \
-  --labels='app.kubernetes.io/name=prometheus' --command -- sleep 600 >/dev/null
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$POD" --image "$IMAGE" \
+    --command 'sleep 600' --label app.kubernetes.io/name=prometheus)" >/dev/null
 kubectl -n "$NS" wait --for=condition=Ready pod/"$POD" --timeout=120s >/dev/null
 
 targets=(

@@ -189,7 +189,9 @@ reachable=no
 driver_ip="$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.podIP}' 2>/dev/null || true)"
 if [ -n "$driver_ip" ] \
    && kubectl -n "$NS" delete pod "$EXEC" --ignore-not-found >/dev/null 2>&1 \
-   && kubectl -n "$NS" run "$EXEC" --image "$IMAGE" --labels='spark-role=executor' --restart=Never --command -- sleep 300 >/dev/null 2>&1 \
+   && kubectl -n "$NS" run "$EXEC" --image "$IMAGE" --restart=Never \
+        --overrides="$(python3 scripts/probe-pod-spec.py --name "$EXEC" --image "$IMAGE" \
+          --command 'sleep 300' --label spark-role=executor)" >/dev/null 2>&1 \
    && kubectl -n "$NS" wait --for=condition=Ready pod/"$EXEC" --timeout=120s >/dev/null 2>&1 \
    && kubectl -n "$NS" exec "$EXEC" -- timeout 10 bash -c "</dev/tcp/${driver_ip}/7078" >/dev/null 2>&1; then
   reachable=yes

@@ -53,7 +53,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
 BRIDGE_URL="${BRIDGE_URL:-http://lakekeeper-opa:8282/v1/data/trino/allow}"
-PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.10.1}"
+PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b}"
 
 USERS=(dev-finops dev-analytics dev-outsider)
 ADMIN_GROUP=stardelt-admins
@@ -132,8 +132,9 @@ skipped_catalogs="$(jq -r '[.skipped[] | "\(.name) (\(.phase))"] | join(", ")' "
 #    the bridge. It stays for the whole table and is deleted by the trap.
 pod="qa-catalog-permissions-$RANDOM"
 kubectl -n "$NAMESPACE" run "$pod" --image="$PROBE_IMAGE" --restart=Never \
-  --labels='app.kubernetes.io/name=trino,app.kubernetes.io/component=coordinator' \
-  --command -- sleep 600 >/dev/null \
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$pod" --image "$PROBE_IMAGE" \
+    --command 'sleep 600' --label app.kubernetes.io/name=trino \
+    --label app.kubernetes.io/component=coordinator)" >/dev/null \
   || fail "cannot start the probe pod"
 kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=90s >/dev/null \
   || fail "the probe pod never became ready"

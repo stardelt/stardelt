@@ -28,7 +28,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NAMESPACE="${NAMESPACE:-stardelt}"
 TRINO_VERIFY_USER="${TRINO_VERIFY_USER:-analyst}"
 USER_PASSWORD="${TRINO_VERIFY_USER_PASSWORD:-}"
-PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.10.1}"
+PROBE_IMAGE="${PROBE_IMAGE:-curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b}"
 
 TOKEN_SECRET=trino-tls-verify-token
 HTTP_URL="http://trino.${NAMESPACE}.svc.cluster.local:8080"
@@ -78,7 +78,10 @@ print(json.dumps({
 }))
 PY
 )"
-  kubectl -n "$NAMESPACE" run "$name" --restart=Never --image="$PROBE_IMAGE" --overrides="$overrides" >/dev/null
+  # The merge adds the restricted Pod Security floor (platform#1656); the probe's command,
+  # volumes and mounts pass through unchanged.
+  kubectl -n "$NAMESPACE" run "$name" --restart=Never --image="$PROBE_IMAGE" \
+    --overrides="$(printf '%s' "$overrides" | python3 scripts/probe-pod-spec.py --merge)" >/dev/null
   kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$name" --timeout=180s >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" logs "$name" 2>/dev/null || true
   kubectl -n "$NAMESPACE" delete pod "$name" --wait=false >/dev/null 2>&1 || true

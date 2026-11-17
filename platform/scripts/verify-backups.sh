@@ -247,6 +247,10 @@ if ! command -v jq >/dev/null 2>&1; then
   err "jq is required for the bucket checks (SKIP_OBJECTS=1 skips them deliberately)."
   exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  err "python3 is required for the bucket checks (SKIP_OBJECTS=1 skips them deliberately)."
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Read the database *before* listing the bucket: everything Postgres reports as
@@ -328,6 +332,9 @@ aws s3 ls --recursive "$S3_WAL_URI" "$@"
 POD_SCRIPT
 )"
 
+# The Pod document goes through scripts/probe-pod-spec.py --merge: it adds the restricted
+# Pod Security floor (platform#1656) — the listing pod runs as uid 65534, so `HOME` points at
+# /tmp, where the aws-cli image can write its config; its default /root is not writable.
 pod_spec="$(jq -n \
   --arg name "$pod_name" \
   --arg ns "$NAMESPACE" \
@@ -350,6 +357,7 @@ pod_spec="$(jq -n \
         env: (
           [
             { name: "S3_WAL_URI", value: $wal_uri },
+            { name: "HOME", value: "/tmp" },
             { name: "AWS_ACCESS_KEY_ID", valueFrom: { secretKeyRef: { name: $a_name, key: $a_key } } },
             { name: "AWS_SECRET_ACCESS_KEY", valueFrom: { secretKeyRef: { name: $s_name, key: $s_key } } }
           ]
@@ -371,7 +379,7 @@ if ! probe_out="$(kubectl -n "$NAMESPACE" run "$pod_name" \
   --rm --attach --quiet --restart=Never \
   --image "$S3_CHECK_IMAGE" \
   --pod-running-timeout=3m \
-  --overrides "$pod_spec" 2>&1)"; then
+  --overrides "$(printf '%s' "$pod_spec" | python3 scripts/probe-pod-spec.py --merge)" 2>&1)"; then
   err "the in-cluster listing pod failed — bucket state unknown:"
   printf '%s\n' "$probe_out" >&2
   err "  (SKIP_OBJECTS=1 skips the bucket checks deliberately; fix the pod error if it is not expected.)"

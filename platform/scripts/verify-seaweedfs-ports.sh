@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
-IMAGE="busybox:1.36"
+IMAGE="busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 plain=seaweedfs-port-probe
 peer=seaweedfs-port-probe-peer
 hook=seaweedfs-port-probe-hook
@@ -21,9 +21,19 @@ kubectl get networkpolicy seaweedfs-internal -n "$NS" >/dev/null 2>&1 || {
   echo "UNVERIFIED (NetworkPolicy seaweedfs-internal is not installed — run make step-storage)"; exit 3; }
 cleanup() { kubectl -n "$NS" delete pod "$plain" "$peer" "$hook" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-kubectl -n "$NS" run "$plain" --image="$IMAGE" --restart=Never --labels='app.kubernetes.io/part-of=stardelt' --command -- sleep 300 >/dev/null
-kubectl -n "$NS" run "$peer" --image="$IMAGE" --restart=Never --labels='app.kubernetes.io/part-of=stardelt,app.kubernetes.io/name=seaweedfs,app.kubernetes.io/component=filer' --command -- sleep 300 >/dev/null
-kubectl -n "$NS" run "$hook" --image="$IMAGE" --restart=Never --labels='app.kubernetes.io/part-of=stardelt,job-name=seaweedfs-bucket-hook' --command -- sleep 300 >/dev/null
+# Each probe carries the restricted Pod Security floor (platform#1656) and the labels the
+# NetworkPolicies select on; a complete Pod document replaces the one `kubectl run` generates.
+kubectl -n "$NS" run "$plain" --image="$IMAGE" --restart=Never \
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$plain" --image "$IMAGE" \
+    --command 'sleep 300' --label app.kubernetes.io/part-of=stardelt)" >/dev/null
+kubectl -n "$NS" run "$peer" --image="$IMAGE" --restart=Never \
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$peer" --image "$IMAGE" \
+    --command 'sleep 300' --label app.kubernetes.io/part-of=stardelt \
+    --label app.kubernetes.io/name=seaweedfs --label app.kubernetes.io/component=filer)" >/dev/null
+kubectl -n "$NS" run "$hook" --image="$IMAGE" --restart=Never \
+  --overrides="$(python3 scripts/probe-pod-spec.py --name "$hook" --image "$IMAGE" \
+    --command 'sleep 300' --label app.kubernetes.io/part-of=stardelt \
+    --label job-name=seaweedfs-bucket-hook)" >/dev/null
 kubectl -n "$NS" wait --for=condition=Ready pod/"$plain" pod/"$peer" pod/"$hook" --timeout=120s >/dev/null
 
 must_fail() {  # pod, host, port, label
