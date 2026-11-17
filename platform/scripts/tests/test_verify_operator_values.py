@@ -1,4 +1,6 @@
-"""Tests for scripts/verify-operator-values.sh re-reading a component once (platform#781).
+"""Tests for scripts/verify-operator-values.sh re-reading a component once (platform#781) and for its
+digest loop, which compares every digest of the shared values files with the running operator
+(platform#1641).
 
 Standard library only, like the other tests here: `python3 -m unittest discover -s scripts/tests -v`
 runs them in CI. `kubectl` is replaced by a shell shim that is first on PATH: `get deploy` succeeds
@@ -74,6 +76,35 @@ ESO = digest_of("helm-values/external-secrets.yaml")
 SPARK_OPERATOR = digest_of("helm-values/spark-operator.yaml")
 STRIMZI = digest_of("helm-values/strimzi.yaml")
 
+# Mirrors `shared_digests` in scripts/verify-operator-values.sh: component, values file, and the line
+# pattern when a file carries an image the operator path does not render (lakekeeper's OPA bridge
+# belongs to the platform install only, platform#1641).
+SHARED = [
+    ("trino", "helm-values/trino.yaml", None),
+    ("lakekeeper", "helm-values/lakekeeper.yaml", r"v0\.15\.0@sha256:"),
+    ("seaweedfs", "helm-values/seaweedfs.yaml", None),
+    ("openbao", "helm-values/openbao.yaml", None),
+    ("openfga", "helm-values/openfga.yaml", None),
+    ("airflow", "helm-values/airflow.yaml", None),
+    ("jupyterhub", "helm-values/jupyterhub.yaml", None),
+    ("superset", "helm-values/superset.yaml", None),
+    ("external-secrets", "helm-values/external-secrets.yaml", None),
+    ("spark-operator", "helm-values/spark-operator.yaml", None),
+    ("kafka", "helm-values/strimzi.yaml", None),
+    ("cnpg", "helm-values/cnpg.yaml", None),
+    ("barman-cloud", "helm-values/barman-cloud.yaml", None),
+]
+
+IDP_GATE = digest_of("helm-values/trino-identity.yaml")
+
+
+def script_digests(path, pattern=None):
+    """Every digest the script's loop expects from `path`, sorted, exactly as it reads them."""
+    text = (REPO / path).read_text()
+    if pattern:
+        text = "\n".join(line for line in text.splitlines() if re.search(pattern, line))
+    return sorted(set(re.findall(r"sha256:[0-9a-f]{64}", text)))
+
 
 def fixtures():
     loader = digest_of("helm-values/airflow.yaml")
@@ -99,9 +130,13 @@ def fixtures():
             '    "original_user": "superset"',
         ]
         + [f"    catalog.probe.{i}: value" for i in range(25)]
-        + ["  password: trino-password-db", "    passwordAuthSecret: trino-password-db"]
+        + [
+            "  password: trino-password-db",
+            "    passwordAuthSecret: trino-password-db",
+            f"  IdP gate image: trinodb/trino:484@{IDP_GATE}",
+        ]
     )
-    return {
+    docs = {
         "airflow-plain.yaml": "\n".join(
             [
                 "apiVersion: v1",
@@ -146,6 +181,14 @@ def fixtures():
         "kafka-plain.yaml": f'image:\n  tag: "1.3.1@{strimzi}"\n'
         f'topicOperator:\n  image:\n    tag: "1.3.1@{strimzi}"\n',
     }
+    # Every digest the loop probes, in the document `values <component> full` prints for it.
+    for component, path, pattern in SHARED:
+        name = f"{component}-plain.yaml"
+        docs[name] = docs.get(name, "") + "".join(
+            f"  image: ghcr.io/example/{component}@{digest}\n"
+            for digest in script_digests(path, pattern)
+        )
+    return docs
 
 
 class TestVerifyOperatorValues(unittest.TestCase):
@@ -179,21 +222,23 @@ class TestVerifyOperatorValues(unittest.TestCase):
     def test_a_full_document_passes_every_probe_without_a_retry(self):
         done = self.run_script()
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (17 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (44 probes)", done.stdout)
         self.assertNotIn("re-reading values once", done.stderr)
-        self.assertEqual(len(self.calls()), 11, "seven plain reads and four with --identity")
+        self.assertEqual(
+            len(self.calls()), 24, "seven plain reads, four with --identity, thirteen digest reads"
+        )
 
     def test_a_first_read_that_misses_the_tail_is_re_read_and_passes(self):
         done = self.run_script("first")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (17 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (44 probes)", done.stdout)
         self.assertIn("re-reading values once", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
 
     def test_a_second_read_that_also_misses_fails_once(self):
         done = self.run_script("always")
         self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertIn("verify-operator-values: FAIL (1 of 17 probes)", done.stdout)
+        self.assertIn("verify-operator-values: FAIL (2 of 44 probes)", done.stdout)
         self.assertEqual((done.stdout + done.stderr).count("trino identity: password file"), 1)
         self.assertIn("is not in the running operator", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
@@ -206,6 +251,15 @@ class TestVerifyOperatorValues(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("verify-operator-values: FAIL", done.stdout)
         self.assertIn("kafka: cluster operator image", done.stderr)
+
+    def test_a_shared_digest_the_operator_does_not_carry_fails_and_names_it(self):
+        """The loop of platform#1641: one absent digest of cnpg's values file fails on its own row."""
+        absent = script_digests("helm-values/cnpg.yaml")[0]
+        (self.dir / "cnpg-plain.yaml").write_text("image:\n  name: nothing\n")
+        done = self.run_script()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn(f"✗ cnpg {absent[7:22]}…: `{absent}` is not in the running operator", done.stderr)
+        self.assertIn("verify-operator-values: FAIL (1 of 44 probes)", done.stdout)
 
 
 if __name__ == "__main__":

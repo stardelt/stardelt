@@ -6,7 +6,9 @@
 # identity overlays (values/<component>-identity.yaml) are compiled in too, which the plain output
 # cannot show because it never contains them. The digests it compares against the running binary
 # are the loader, notebook and Superset digests — and, since platform#1632, the External Secrets,
-# Spark operator and Strimzi cluster operator digests.
+# Spark operator and Strimzi cluster operator digests. Since platform#1641 a third loop reads every
+# digest the platform pins in a values file both install paths share (26 of them), so a Deployment
+# that is several values merges behind cannot print PASS.
 #
 # Exit codes: 0 every probe passes, 1 a value differs or the binary cannot answer, 3 the check
 # proved nothing (no kubectl, no Deployment). Needs: kubectl, grep.
@@ -100,6 +102,7 @@ attempt() { # component [extra args...] -> one read; 0 when every probe of it pa
         check_contains "trino identity: PASSWORD,OAUTH2" "$out" "authenticationType: PASSWORD,OAUTH2"
         check_contains "trino identity: password file" "$out" "passwordAuthSecret: trino-password-db"
         check_contains "trino identity: impersonation rule" "$out" '"original_user": "superset"'
+        check_contains "trino identity: IdP gate image" "$out" "$(digest_of helm-values/trino-identity.yaml)"
         ;;
       superset)
         check_contains "superset identity: impersonated Trino host" "$out" "trino.$BASE_DOMAIN:443"
@@ -171,6 +174,50 @@ done
 
 for component in trino superset jupyterhub airflow; do
   probe "$component" --identity "$BASE_DOMAIN"
+done
+
+# Every digest the platform pins in a values file both install paths share, asserted against the
+# document the RUNNING operator prints. The six image probes above read one image per component;
+# these read all thirty-three, because a values merge reaches the cluster only through a new
+# operator image and a Deployment four merges behind kept printing PASS (platform#1641).
+shared_digests=(
+  "trino|helm-values/trino.yaml|"
+  "lakekeeper|helm-values/lakekeeper.yaml|v0\\.15\\.0@sha256:"
+  "seaweedfs|helm-values/seaweedfs.yaml|"
+  "openbao|helm-values/openbao.yaml|"
+  "openfga|helm-values/openfga.yaml|"
+  "airflow|helm-values/airflow.yaml|"
+  "jupyterhub|helm-values/jupyterhub.yaml|"
+  "superset|helm-values/superset.yaml|"
+  "external-secrets|helm-values/external-secrets.yaml|"
+  "spark-operator|helm-values/spark-operator.yaml|"
+  "kafka|helm-values/strimzi.yaml|"
+  "cnpg|helm-values/cnpg.yaml|"
+  "barman-cloud|helm-values/barman-cloud.yaml|"
+)
+
+for row in "${shared_digests[@]}"; do
+  IFS='|' read -r component file pattern <<<"$row"
+  PASS_LINES=()
+  FAIL_LINES=()
+  pass=0
+  fail=0
+  if ! out="$(kubectl -n "$NS" exec deploy/stardelt-operator -- \
+      stardelt-operator values "$component" full 2>&1)"; then
+    FAIL_LINES+=("✗ $component: \`values $component full\` failed: $out")
+    fail=$((fail + 1))
+  else
+    while IFS= read -r digest; do
+      [ -n "$digest" ] || continue
+      check_contains "$component ${digest:7:15}…" "$out" "$digest"
+    done < <(
+      if [ -n "$pattern" ]; then grep -E -- "$pattern" "$file"; else cat "$file"; fi \
+        | grep -oE 'sha256:[0-9a-f]{64}' | sort -u
+    )
+  fi
+  print_attempt
+  total_pass=$((total_pass + pass))
+  total_fail=$((total_fail + fail))
 done
 
 if [ "$total_fail" -ne 0 ]; then
