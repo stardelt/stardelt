@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Roll the five image pins to the digests their tags resolve to right now, in one PR.
+# Roll the six image pins to the digests their tags resolve to right now, in one PR.
 # The fourth is the pipeline loader, `ghcr.io/stardelt/airflow:demo` (tag `demo`, not `dev`);
-# the fifth is the BI image, `ghcr.io/stardelt/superset:dev` (two files).
+# the fifth is the BI image, `ghcr.io/stardelt/superset:dev` (two files); the sixth is the
+# notebook image, `ghcr.io/stardelt/jupyter-singleuser:dev`, pinned in three files
+# (helm-values/jupyterhub.yaml, helm-values/airflow.yaml, chart/values.yaml).
 #   bash scripts/pin-rollup.sh            # local: rewrite the files, no git
 #   OPEN_PR=1 bash scripts/pin-rollup.sh  # CI: commit, force-push branch, open/refresh the PR
 #                                          # (a repository that forbids Actions from opening PRs
@@ -26,6 +28,12 @@ elif kind == 'airflow':
     m = re.search(r'^\s*digest:\s*(sha256:[0-9a-f]{64})\s*$', text, re.M)
 elif kind == 'superset':
     m = re.search(r'^\s+tag:\s*"dev@(sha256:[0-9a-f]{64})"\s*$', text, re.M)
+elif kind == 'jupyter':
+    # The notebook marker, then the `tag:` line under it — comments sit between the two
+    # in helm-values/jupyterhub.yaml, so this skips over them (the same rule
+    # scripts/check-notebook-image-pin.sh's digest_after applies).
+    m = re.search(r'name: ghcr\.io/stardelt/jupyter-singleuser\n'
+                  r'(?:\s*#[^\n]*\n)*\s+tag: "dev@(sha256:[0-9a-f]{64})"', text)
 else:
     sys.exit(f'unknown kind {kind}')
 if not m:
@@ -80,18 +88,21 @@ AIRFLOW_FILE="helm-values/airflow.yaml"
 AIRFLOW_GROUP_FILE="manifests/airflow-group-roles.yaml"
 SUPERSET_FILE="helm-values/superset.yaml"
 SUPERSET_GROUP_FILE="manifests/superset-group-roles.yaml"
+JUPYTER_FILE="helm-values/jupyterhub.yaml"
 
 old_operator="$(extract_digest "$OP_FILE" operator)"
 old_nova="$(extract_digest "$NOVA_FILE" nova)"
 old_spark="$(extract_digest "$SPARK_FILE" spark)"
 old_airflow="$(extract_digest "$AIRFLOW_FILE" airflow)"
 old_superset="$(extract_digest "$SUPERSET_FILE" superset)"
+old_jupyter="$(extract_digest "$JUPYTER_FILE" jupyter)"
 
 operator_digest="$(pin stardelt-operator)"
 nova_digest="$(pin nova)"
 spark_digest="$(pin spark)"
 airflow_digest="$(pin airflow)"
 superset_digest="$(pin superset)"
+jupyter_digest="$(pin jupyter)"
 
 # Normalize: pin-image.sh may print whitespace
 operator_digest="$(printf '%s' "$operator_digest" | tr -d '[:space:]')"
@@ -99,6 +110,7 @@ nova_digest="$(printf '%s' "$nova_digest" | tr -d '[:space:]')"
 spark_digest="$(printf '%s' "$spark_digest" | tr -d '[:space:]')"
 airflow_digest="$(printf '%s' "$airflow_digest" | tr -d '[:space:]')"
 superset_digest="$(printf '%s' "$superset_digest" | tr -d '[:space:]')"
+jupyter_digest="$(printf '%s' "$jupyter_digest" | tr -d '[:space:]')"
 
 changes=()
 [ "$old_operator" != "$operator_digest" ] && changes+=("operator $(short "$old_operator") → $(short "$operator_digest")")
@@ -106,9 +118,10 @@ changes=()
 [ "$old_spark" != "$spark_digest" ] && changes+=("spark $(short "$old_spark") → $(short "$spark_digest")")
 [ "$old_airflow" != "$airflow_digest" ] && changes+=("airflow $(short "$old_airflow") → $(short "$airflow_digest")")
 [ "$old_superset" != "$superset_digest" ] && changes+=("superset $(short "$old_superset") → $(short "$superset_digest")")
+[ "$old_jupyter" != "$jupyter_digest" ] && changes+=("jupyter $(short "$old_jupyter") → $(short "$jupyter_digest")")
 
 if [ "${#changes[@]}" -eq 0 ]; then
-  echo "pins current (operator $(short "$operator_digest"), nova $(short "$nova_digest"), spark $(short "$spark_digest"), superset $(short "$superset_digest"), airflow $(short "$airflow_digest"))"
+  echo "pins current (operator $(short "$operator_digest"), nova $(short "$nova_digest"), spark $(short "$spark_digest"), superset $(short "$superset_digest"), airflow $(short "$airflow_digest"), jupyter $(short "$jupyter_digest"))"
   exit 0
 fi
 
@@ -131,6 +144,13 @@ fi
 # the rollup path cannot drift.
 if [ "$old_superset" != "$superset_digest" ]; then
   APP=superset WRITE_MANIFEST_ONLY=1 ./scripts/pin-image.sh >/dev/null
+fi
+
+# The notebook image is pinned three times (helm-values/jupyterhub.yaml,
+# helm-values/airflow.yaml, chart/values.yaml); its writer stays in pin-image.sh so the
+# manual and the rollup path cannot drift.
+if [ "$old_jupyter" != "$jupyter_digest" ]; then
+  APP=jupyter WRITE_MANIFEST_ONLY=1 ./scripts/pin-image.sh >/dev/null
 fi
 
 for c in "${changes[@]}"; do echo "$c"; done
@@ -205,7 +225,7 @@ git config user.email "41898282+github-actions[bot]@users.noreply.github.com" 2>
 branch="chore/pin-rollup"
 git switch -C "$branch"
 git add "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" "$AIRFLOW_FILE" "$AIRFLOW_GROUP_FILE" "$SUPERSET_FILE" "$SUPERSET_GROUP_FILE" \
-  chart/files/spark-runtimes.json
+  "$JUPYTER_FILE" chart/values.yaml chart/files/spark-runtimes.json
 git commit -m "chore(pins): rollup image digests
 
 $(for c in "${changes[@]}"; do echo "- $c"; done)"
