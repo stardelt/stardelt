@@ -16,6 +16,8 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "check-operator-pins.sh"
 
 # The operator's file as operator main has it: only the notebook image (values/jupyterhub.yaml:149).
+# platform#1640's set rows need every digest of the file, so `fake_operator` overwrites this entry
+# with the platform file below; the notebook row's pattern is what still picks the right line.
 OPERATOR_FILES = {
     "crates/stardelt-operator/src/provision.rs": None,  # copied from the platform row below
     "crates/stardelt-operator/values/airflow.yaml": None,
@@ -52,6 +54,29 @@ OPERATOR_MIRROR = {
 }
 
 
+# The set rows (platform#1640) read every digest of these files, so the fake checkout needs each one;
+# they are the operator's copies of the same values, so the platform file is what it holds.
+SHARED_FILES = {
+    "crates/stardelt-operator/values/airflow.yaml": "helm-values/airflow.yaml",
+    "crates/stardelt-operator/values/barman-cloud.yaml": "helm-values/barman-cloud.yaml",
+    "crates/stardelt-operator/values/cnpg.yaml": "helm-values/cnpg.yaml",
+    "crates/stardelt-operator/values/external-secrets.yaml": "helm-values/external-secrets.yaml",
+    "crates/stardelt-operator/values/jupyterhub.yaml": "helm-values/jupyterhub.yaml",
+    "crates/stardelt-operator/values/kafka.yaml": "helm-values/strimzi.yaml",
+    "crates/stardelt-operator/values/openbao.yaml": "helm-values/openbao.yaml",
+    "crates/stardelt-operator/values/openfga.yaml": "helm-values/openfga.yaml",
+    "crates/stardelt-operator/values/seaweedfs.yaml": "helm-values/seaweedfs.yaml",
+    "crates/stardelt-operator/values/spark-operator.yaml": "helm-values/spark-operator.yaml",
+    "crates/stardelt-operator/values/superset.yaml": "helm-values/superset.yaml",
+    "crates/stardelt-operator/values/trino.yaml": "helm-values/trino.yaml",
+    "crates/stardelt-operator/values/trino-identity.yaml": "helm-values/trino-identity.yaml",
+}
+
+# The operator's lakekeeper values run `authz.backend: allowall`, so only the catalog is pinned
+# there; the platform file's OPA bridge and IdP digests are not part of that row.
+LAKEKEEPER_TAG = re.compile(r'tag: "?(v0\.15\.0@sha256:[0-9a-f]{64})"?', re.M)
+
+
 def fake_operator(root):
     """A plain directory operator checkout: no `origin/main`, so the script reads its files."""
     op = Path(root)
@@ -59,10 +84,6 @@ def fake_operator(root):
         target = op / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((REPO / platform).read_text())
-    (op / "crates/stardelt-operator/values/jupyterhub.yaml").write_text(
-        "singleuser:\n  image:\n    name: ghcr.io/stardelt/jupyter-singleuser\n"
-        f'    tag: "dev@{notebook_digest()}"\n'
-    )
     for rel, platform in OPERATOR_MIRROR.items():
         target = op / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +93,15 @@ def fake_operator(root):
         f'"quay.io/strimzi/kafka:1.3.1-kafka-4.3.2@{first_digest("manifests/kafka.yaml")}";\n'
         "pub const OPERATOR_IMAGE: &str = "
         f'"quay.io/strimzi/operator:1.3.1@{first_digest("helm-values/strimzi.yaml")}";\n'
+    )
+    for rel, platform in SHARED_FILES.items():
+        target = op / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((REPO / platform).read_text())
+    lakekeeper = op / "crates/stardelt-operator/values/lakekeeper.yaml"
+    lakekeeper.write_text(
+        "catalog:\n  image:\n"
+        f'    tag: "{LAKEKEEPER_TAG.search((REPO / "helm-values/lakekeeper.yaml").read_text()).group(1)}"\n'
     )
     return op
 

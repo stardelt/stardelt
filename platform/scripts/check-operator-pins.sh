@@ -28,6 +28,7 @@ images=(
   "spark-operator|helm-values/spark-operator.yaml|crates/stardelt-operator/values/spark-operator.yaml"
   "strimzi|helm-values/strimzi.yaml|crates/stardelt-operator/values/kafka.yaml"
   "kafka-broker|manifests/kafka.yaml|crates/stardelt-operator/src/kafka.rs"
+  "lakekeeper|helm-values/lakekeeper.yaml|crates/stardelt-operator/values/lakekeeper.yaml|v0\\.15\\.0@sha256:"
 )
 
 if [ ! -d "$OPERATOR_DIR" ]; then
@@ -89,6 +90,46 @@ for image in "${images[@]}"; do
       "$name" "${platform:0:15}" "${operator:0:15}" "$operator_path" "$note" >&2
     echo "  fix: bump $operator_path in the operator repository" >&2
     fail=1
+  fi
+done
+
+# The rows above compare ONE image per file. A values file carries up to seven (jupyterhub), and a
+# pin that exists on one path and not the other after the first image was invisible to them, so
+# compare the whole unique digest set of every shared file (platform#1640).
+shared_files=(
+  "airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml"
+  "barman-cloud|helm-values/barman-cloud.yaml|crates/stardelt-operator/values/barman-cloud.yaml"
+  "cnpg|helm-values/cnpg.yaml|crates/stardelt-operator/values/cnpg.yaml"
+  "external-secrets|helm-values/external-secrets.yaml|crates/stardelt-operator/values/external-secrets.yaml"
+  "jupyterhub|helm-values/jupyterhub.yaml|crates/stardelt-operator/values/jupyterhub.yaml"
+  "kafka|helm-values/strimzi.yaml|crates/stardelt-operator/values/kafka.yaml"
+  "openbao|helm-values/openbao.yaml|crates/stardelt-operator/values/openbao.yaml"
+  "openfga|helm-values/openfga.yaml|crates/stardelt-operator/values/openfga.yaml"
+  "seaweedfs|helm-values/seaweedfs.yaml|crates/stardelt-operator/values/seaweedfs.yaml"
+  "spark-operator|helm-values/spark-operator.yaml|crates/stardelt-operator/values/spark-operator.yaml"
+  "superset|helm-values/superset.yaml|crates/stardelt-operator/values/superset.yaml"
+  "trino|helm-values/trino.yaml|crates/stardelt-operator/values/trino.yaml"
+  "trino-identity|helm-values/trino-identity.yaml|crates/stardelt-operator/values/trino-identity.yaml"
+)
+
+for row in "${shared_files[@]}"; do
+  IFS='|' read -r name platform_file operator_path <<<"$row"
+  operator_file="$tmpdir/set-$name.yaml"
+  if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:$operator_path" >"$operator_file"; then
+    cp "$OPERATOR_DIR/$operator_path" "$operator_file"
+  fi
+  platform_set="$tmpdir/$name.platform"
+  operator_set="$tmpdir/$name.operator"
+  grep -oE 'sha256:[0-9a-f]{64}' "$platform_file" | sort -u >"$platform_set" || true
+  grep -oE 'sha256:[0-9a-f]{64}' "$operator_file" | sort -u >"$operator_set" || true
+  if ! diff -q "$platform_set" "$operator_set" >/dev/null; then
+    printf '✗ %-14s the two files do not carry the same digests (%s)%s\n' \
+      "$name" "$operator_path" "$note" >&2
+    diff "$platform_set" "$operator_set" \
+      | sed -n 's/^< /  platform only: /p; s/^> /  operator only: /p' >&2
+    fail=1
+  else
+    printf '✓ %-14s %s digests, both paths%s\n' "$name" "$(wc -l <"$platform_set")" "$note"
   fi
 done
 
