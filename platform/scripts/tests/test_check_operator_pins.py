@@ -135,3 +135,29 @@ class CheckOperatorPins(unittest.TestCase):
         ):
             self.assertIn(f"✓ {name:<7} both install paths run {first_digest(rel)[:15]}…", done.stdout)
         self.assertIn("check-operator-pins: PASS", done.stdout)
+
+    def test_the_run_names_the_operator_revision_it_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            op = fake_operator(tmp)
+            subprocess.run(["git", "init", "-q", str(op)], check=True)
+            subprocess.run(["git", "-C", str(op), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(op), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                            "commit", "-qm", "operator main"], check=True)
+            subprocess.run(["git", "-C", str(op), "update-ref", "refs/remotes/origin/main", "HEAD"],
+                           check=True)
+            sha = subprocess.run(["git", "-C", str(op), "rev-parse", "--short=7", "HEAD"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            done = self.run_script(op)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"check-operator-pins: reading {op} origin/main {sha} (", done.stdout)
+
+    def test_a_failure_names_the_revision_and_the_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            op = fake_operator(tmp)
+            # One operator file with a different digest: at least one row must fail.
+            path = op / "crates/stardelt-operator/values/superset.yaml"
+            path.write_text(path.read_text().replace("sha256:", "sha256:0", 1))
+            done = self.run_script(op)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("check-operator-pins: FAIL (read", done.stderr)
+        self.assertIn(f"git -C {op} fetch", done.stderr)

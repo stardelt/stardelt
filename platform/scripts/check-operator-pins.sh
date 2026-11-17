@@ -63,10 +63,14 @@ trap 'rm -rf "$tmpdir"' EXIT
 note=""
 if git -C "$OPERATOR_DIR" rev-parse --git-dir >/dev/null 2>&1 &&
    git -C "$OPERATOR_DIR" rev-parse --verify --quiet origin/main >/dev/null; then
-  :
+  # Name the revision the rows read: on a checkout that is behind, every ✗ below is about the
+  # sibling checkout, not about this repository (platform#1640, #1641).
+  operator_source="$OPERATOR_DIR origin/main $(git -C "$OPERATOR_DIR" rev-parse --short=7 origin/main) ($(git -C "$OPERATOR_DIR" log -1 --format=%cI origin/main))"
 else
   note=" (working tree; no origin/main)"
+  operator_source="$OPERATOR_DIR (working tree; no origin/main)"
 fi
+printf 'check-operator-pins: reading %s\n' "$operator_source"
 
 fail=0
 for image in "${images[@]}"; do
@@ -126,7 +130,7 @@ for row in "${shared_files[@]}"; do
     printf '✗ %-14s the two files do not carry the same digests (%s)%s\n' \
       "$name" "$operator_path" "$note" >&2
     diff "$platform_set" "$operator_set" \
-      | sed -n 's/^< /  platform only: /p; s/^> /  operator only: /p' >&2
+      | sed -n 's/^< /  platform only: /p; s/^> /  operator only: /p' >&2 || true
     fail=1
   else
     printf '✓ %-14s %s digests, both paths%s\n' "$name" "$(wc -l <"$platform_set")" "$note"
@@ -134,6 +138,7 @@ for row in "${shared_files[@]}"; do
 done
 
 if [ "$fail" -ne 0 ]; then
+  echo "check-operator-pins: FAIL (read $operator_source; if that is not the operator's newest main, run: git -C $OPERATOR_DIR fetch)" >&2
   exit 1
 fi
 echo "check-operator-pins: PASS (the operator's golden values agree with this repository's pins)"
