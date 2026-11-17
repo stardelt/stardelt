@@ -28,8 +28,14 @@ jobs:
           freshness=$?
           OPERATOR_DIR=operator bash scripts/check-operator-pins.sh >> "$RUNNER_TEMP/pins.txt" 2>&1
           operator=$?
+          # The operator image the platform pins is a build of one commit; that commit's
+          # NOVA_IMAGE is what an operator install renders. The check above reads the operator's
+          # origin/main instead, so both were green while an install rendered Nova one build
+          # behind (stardelt-operator#545).
+          OPERATOR_DIR=operator python3 scripts/check_golden_image.py >> "$RUNNER_TEMP/pins.txt" 2>&1
+          golden=$?
           cat "$RUNNER_TEMP/pins.txt"
-          if [ "$freshness" -ne 0 ] || [ "$operator" -ne 0 ]; then
+          if [ "$freshness" -ne 0 ] || [ "$operator" -ne 0 ] || [ "$golden" -ne 0 ]; then
             echo "code=1" >> "$GITHUB_OUTPUT"
           else
             echo "code=0" >> "$GITHUB_OUTPUT"

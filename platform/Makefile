@@ -1501,6 +1501,7 @@ check-cnpg-pin: ## Fail when the CloudNativePG chart pin leaves 0.28.x before th
 check-pins: ## Fail when the registry's `dev`/`demo` digest moved ahead of a checked-in pin, or the operator's loader pin differs
 	@python3 scripts/check_pin_freshness.py
 	@OPERATOR_DIR=$(OPERATOR_DIR) bash scripts/check-operator-pins.sh
+	@OPERATOR_DIR=$(OPERATOR_DIR) python3 scripts/check_golden_image.py
 
 check-hub-config: ## Fail when the notebook config disagrees with itself: the two values files, the culler, Nova's countdown
 	@python3 scripts/check-hub-config.py
