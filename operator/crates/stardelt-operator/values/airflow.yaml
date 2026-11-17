@@ -51,6 +51,11 @@ images:
     tag: demo
     digest: sha256:d7acc4cac82330c1b67236eaa782eab60480f1d8cd556e2940bfce58bc05189c
     pullPolicy: IfNotPresent
+  # The chart's statsd exporter pod, which the scheduler and the workers push metrics to
+  # (the twin of stardelt-platform#1594). Left at the chart default it is the bare tag `v0.30.0`.
+  statsd:
+    repository: quay.io/prometheus/statsd-exporter
+    tag: v0.30.0@sha256:378cb79c4ac7d6941e5ed71b1f3cd6f4707cf42c72c104ffe81fa4d9026ef659
 
 # No secrets in this file: scripts/app-secrets.sh generates them per cluster
 # (the install targets run it before this chart) and keeps them across installs
@@ -94,6 +99,9 @@ workers:
 # Bundled Postgres — single instance, small storage
 postgresql:
   enabled: true
+  # Pinned by digest (platform#1594). stardelt-platform/helm-values/airflow.yaml:104.
+  image:
+    tag: 16.1.0-debian-11-r15@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64
   primary:
     persistence:
       size: 2Gi

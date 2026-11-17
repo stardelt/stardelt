@@ -1599,6 +1599,26 @@ mod tests {
         assert!(import.contains("trino://superset@trino:8080/shared"));
     }
 
+    /// platform#1594 pinned the chart's statsd exporter and the bundled PostgreSQL. The operator
+    /// installs the same chart version, so it must not fall back to `v0.30.0` and
+    /// `16.1.0-debian-11-r15`.
+    #[test]
+    fn the_airflow_dependency_images_are_pinned_by_digest() {
+        let a = golden_values("airflow");
+        assert_eq!(
+            a["images"]["statsd"]["tag"],
+            serde_json::json!(
+                "v0.30.0@sha256:378cb79c4ac7d6941e5ed71b1f3cd6f4707cf42c72c104ffe81fa4d9026ef659"
+            )
+        );
+        assert_eq!(
+            a["postgresql"]["image"]["tag"],
+            serde_json::json!(
+                "16.1.0-debian-11-r15@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64"
+            )
+        );
+    }
+
     #[test]
     fn the_golden_airflow_values_pin_one_image_in_both_places_and_name_no_namespace() {
         let text = include_str!("../values/airflow.yaml");
