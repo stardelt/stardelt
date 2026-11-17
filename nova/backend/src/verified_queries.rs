@@ -35,6 +35,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
 use crate::AppState;
 use crate::api_json::ApiJson;
@@ -203,6 +204,39 @@ fn validate(req: NewVerifiedQuery) -> Result<NewVerifiedQuery, String> {
         sql,
         expected,
     })
+}
+
+/// Delete the rows of tables the catalog no longer lists. `present` is the complete
+/// `(namespace, table_name)` list of one successful scan; a row for anything else in
+/// this catalog is stale. Best effort: a scan must not fail because the cleanup did.
+pub async fn prune_missing(
+    pool: Option<&PgPool>,
+    catalog: &str,
+    present: &[(String, String)],
+) -> u64 {
+    let Some(pool) = pool else { return 0 };
+    let namespaces: Vec<String> = present.iter().map(|(ns, _)| ns.clone()).collect();
+    let tables: Vec<String> = present.iter().map(|(_, table)| table.clone()).collect();
+    let result = sqlx::query(
+        "DELETE FROM verified_query v \
+         WHERE v.catalog = $1 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM unnest($2::text[], $3::text[]) AS t(ns, tbl) \
+             WHERE t.ns = v.namespace AND t.tbl = v.table_name \
+           )",
+    )
+    .bind(catalog)
+    .bind(&namespaces)
+    .bind(&tables)
+    .execute(pool)
+    .await;
+    match result {
+        Ok(done) => done.rows_affected(),
+        Err(e) => {
+            tracing::warn!("verified queries not pruned for {catalog}: {e}");
+            0
+        }
+    }
 }
 
 /// `GET /api/catalog/tables/{ns}/{tbl}/verified-queries` — the table's, newest first.
@@ -720,6 +754,76 @@ mod tests {
             sql: sql.into(),
             expected: None,
         }
+    }
+
+    #[tokio::test]
+    async fn prune_missing_without_a_pool_is_a_no_op() {
+        assert_eq!(prune_missing(None, "gold", &[]).await, 0);
+    }
+
+    /// One verified query per table, written straight into the store (the route needs a
+    /// catalog and a caller).
+    async fn insert_query(pool: &PgPool, catalog: &str, namespace: &str, table: &str) {
+        sqlx::query(
+            "INSERT INTO verified_query \
+             (catalog, namespace, table_name, question, sql, verified_by) \
+             VALUES ($1, $2, $3, 'How many rows?', 'SELECT count(*) FROM t', 'test')",
+        )
+        .bind(catalog)
+        .bind(namespace)
+        .bind(table)
+        .execute(pool)
+        .await
+        .expect("insert a verified query");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn prune_missing_deletes_rows_for_vanished_tables_only() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        insert_query(&pool, "gold", "shop", "daily_revenue").await;
+        insert_query(&pool, "gold", "shop", "orders").await;
+        insert_query(&pool, "silver", "shop", "daily_revenue").await;
+
+        let deleted = prune_missing(
+            Some(&pool),
+            "gold",
+            &[("shop".to_string(), "daily_revenue".to_string())],
+        )
+        .await;
+        assert_eq!(deleted, 1, "only the vanished table's row");
+        let (gold, survivor): (i64, String) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM verified_query WHERE catalog = 'gold'), table_name \
+             FROM verified_query WHERE catalog = 'gold'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(gold, 1);
+        assert_eq!(survivor, "daily_revenue");
+        let (silver,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM verified_query WHERE catalog = 'silver'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(silver, 1, "another catalog is never touched");
+
+        // An empty listing deletes every row of that catalog and none of another.
+        let deleted = prune_missing(Some(&pool), "gold", &[]).await;
+        assert_eq!(deleted, 1);
+        let (gold, silver): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM verified_query WHERE catalog = 'gold'), \
+                    (SELECT count(*) FROM verified_query WHERE catalog = 'silver')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((gold, silver), (0, 1));
+
+        sqlx::query("DELETE FROM verified_query")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     /// A result as the engine returns it: one array per row.

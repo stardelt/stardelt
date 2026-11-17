@@ -59,6 +59,40 @@ pub async fn record(
     }
 }
 
+/// Delete the rows of tables the catalog no longer lists. `present` is the complete
+/// `(namespace, table_name)` list of one successful scan; a row for anything else in
+/// this catalog is stale. Best effort, like `record`: a scan must not fail because the
+/// cleanup did.
+pub async fn prune_missing(
+    pool: Option<&PgPool>,
+    catalog: &str,
+    present: &[(String, String)],
+) -> u64 {
+    let Some(pool) = pool else { return 0 };
+    let namespaces: Vec<String> = present.iter().map(|(ns, _)| ns.clone()).collect();
+    let tables: Vec<String> = present.iter().map(|(_, table)| table.clone()).collect();
+    let result = sqlx::query(
+        "DELETE FROM catalog_doc d \
+         WHERE d.catalog = $1 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM unnest($2::text[], $3::text[]) AS t(ns, tbl) \
+             WHERE t.ns = d.namespace AND t.tbl = d.table_name \
+           )",
+    )
+    .bind(catalog)
+    .bind(&namespaces)
+    .bind(&tables)
+    .execute(pool)
+    .await;
+    match result {
+        Ok(done) => done.rows_affected(),
+        Err(e) => {
+            tracing::warn!("catalog documentation index not pruned for {catalog}: {e}");
+            0
+        }
+    }
+}
+
 /// One row of the index, as the search reads it.
 #[derive(Debug, Clone)]
 pub struct IndexedDoc {
@@ -263,6 +297,60 @@ mod tests {
     #[tokio::test]
     async fn record_without_a_pool_is_a_no_op() {
         record(None, "gold", "shop", "daily_revenue", &doc()).await;
+    }
+
+    #[tokio::test]
+    async fn prune_missing_without_a_pool_is_a_no_op() {
+        assert_eq!(prune_missing(None, "gold", &[]).await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn prune_missing_deletes_rows_for_vanished_tables_only() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        record(Some(&pool), "gold", "shop", "daily_revenue", &doc()).await;
+        record(Some(&pool), "gold", "shop", "orders", &doc()).await;
+        record(Some(&pool), "silver", "shop", "daily_revenue", &doc()).await;
+
+        let deleted = prune_missing(
+            Some(&pool),
+            "gold",
+            &[("shop".to_string(), "daily_revenue".to_string())],
+        )
+        .await;
+        assert_eq!(deleted, 1, "only the vanished table's row");
+        let (gold, survivor): (i64, String) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM catalog_doc WHERE catalog = 'gold'), table_name \
+             FROM catalog_doc WHERE catalog = 'gold'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(gold, 1);
+        assert_eq!(survivor, "daily_revenue");
+        let (silver,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM catalog_doc WHERE catalog = 'silver'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(silver, 1, "another catalog is never touched");
+
+        // An empty listing deletes every row of that catalog and none of another.
+        let deleted = prune_missing(Some(&pool), "gold", &[]).await;
+        assert_eq!(deleted, 1);
+        let (gold, silver): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM catalog_doc WHERE catalog = 'gold'), \
+                    (SELECT count(*) FROM catalog_doc WHERE catalog = 'silver')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((gold, silver), (0, 1));
+
+        sqlx::query("DELETE FROM catalog_doc")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

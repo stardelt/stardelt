@@ -273,6 +273,12 @@ fn namespace_path(levels: &[String]) -> Option<String> {
     path_segment(&levels.join("\u{1f}"))
 }
 
+/// The key the table routes write for one table: the namespace levels joined by `.`
+/// (a catalog's namespaces are single-level today) and the table name.
+fn present_key(levels: &[String], table: &str) -> (String, String) {
+    (levels.join("."), table.to_string())
+}
+
 /// Read one catalog's numbers: namespaces, tables, then up to
 /// [`MAX_TABLES_PER_CATALOG`] table metadata documents at [`CONCURRENCY`] in flight.
 ///
@@ -321,6 +327,17 @@ pub async fn scan_catalog(state: &AppState, name: &str) -> Result<CatalogStats, 
     }
     stats.tables = u32::try_from(tables.len()).unwrap_or(u32::MAX);
     stats.truncated = tables.len() > MAX_TABLES_PER_CATALOG;
+
+    // The list is complete here (every namespace's table list was read, or this function
+    // returned earlier). Prune before the truncation: the 200-table cap limits the metadata
+    // loads, not what the catalog holds.
+    let present: Vec<(String, String)> = tables
+        .iter()
+        .map(|(levels, table)| present_key(levels, table))
+        .collect();
+    crate::catalog_doc_store::prune_missing(state.db.as_ref(), name, &present).await;
+    crate::verified_queries::prune_missing(state.db.as_ref(), name, &present).await;
+
     tables.truncate(MAX_TABLES_PER_CATALOG);
 
     let mut loads = stream::iter(tables)
@@ -879,6 +896,23 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The key `scan_catalog` builds for the two stores is the one the table routes write:
+    /// the namespace levels joined by `.`, and the table name unchanged.
+    #[test]
+    fn the_pruned_key_is_the_namespace_levels_joined_by_a_dot() {
+        let listed = [(vec!["a".to_string()], "t".to_string())];
+        let present: Vec<(String, String)> = listed
+            .iter()
+            .map(|(levels, table)| present_key(levels, table))
+            .collect();
+        assert_eq!(present, vec![("a".to_string(), "t".to_string())]);
+        assert_eq!(
+            present_key(&["a".to_string(), "b".to_string()], "t"),
+            ("a.b".to_string(), "t".to_string()),
+            "a multi-level namespace is one dotted string, as the table routes write it"
+        );
+    }
     use crate::auth::Identity;
 
     // -----------------------------------------------------------------------
