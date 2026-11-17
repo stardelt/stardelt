@@ -11073,6 +11073,13 @@
             "type": "string",
             "description": "The `sub` of the person who recorded the deploy."
           },
+          "actorName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name the caller's sign-in provided; `None` for rows recorded before migration 0025."
+          },
           "bundle": {
             "type": "string"
           },

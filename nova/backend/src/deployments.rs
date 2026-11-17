@@ -11,6 +11,9 @@
 //!   pipeline's owner group may record one, and the row says which person did.
 //! - `GET /api/deployments` lists the caller's rows, newest first, at most 50, optionally
 //!   narrowed to one `bundle` and one `target`.
+//! - `actor` is the caller's subject (`sub`, the stable key) and `actor_name` the name the
+//!   sign-in provided (`preferred_username` → `email` → `upn` → `name` → `sub`); the page
+//!   shows the name.
 //! - A deployment row is kept for ten days even when it is beyond the newest 50 of its bundle
 //!   and target; older rows beyond that window are deleted when the next row of that bundle and
 //!   target is recorded (design nova#357).
@@ -103,6 +106,8 @@ pub struct Deployment {
     pub pipelines: serde_json::Value,
     /// The `sub` of the person who recorded the deploy.
     pub actor: String,
+    /// The name the caller's sign-in provided; `None` for rows recorded before migration 0025.
+    pub actor_name: Option<String>,
     /// When it was recorded, RFC 3339.
     pub created_at: String,
 }
@@ -116,7 +121,7 @@ pub struct ListParams {
 
 /// The columns [`Deployment`] reads; the timestamp as RFC 3339 in UTC.
 const ROW_COLUMNS: &str = "id, bundle, owner_group, target, revision, repository, status, \
-    pipelines, actor, \
+    pipelines, actor, actor_name, \
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
 /// Whether `identity` may record a deployment of `owner_group`: an administrator, or a
@@ -284,8 +289,8 @@ pub async fn record(
         .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
     let sql = format!(
         "INSERT INTO deployment \
-         (bundle, owner_group, target, revision, repository, status, pipelines, actor) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {ROW_COLUMNS}"
+         (bundle, owner_group, target, revision, repository, status, pipelines, actor, actor_name) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING {ROW_COLUMNS}"
     );
     match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
         .bind(&new.bundle)
@@ -296,6 +301,7 @@ pub async fn record(
         .bind(&new.status)
         .bind(&pipelines)
         .bind(&caller.identity.sub)
+        .bind(&caller.identity.display_name)
         .fetch_one(pool)
         .await
     {
@@ -411,8 +417,8 @@ mod tests {
     async fn insert(pool: &sqlx::PgPool, owner: &str, bundle: &str, target: &str, seconds: f64) {
         sqlx::query(
             "INSERT INTO deployment \
-             (bundle, owner_group, target, status, pipelines, actor, created_at) \
-             VALUES ($1, $2, $3, 'applied', '[]'::jsonb, 'test', now() + make_interval(secs => $4))",
+             (bundle, owner_group, target, status, pipelines, actor, actor_name, created_at) \
+             VALUES ($1, $2, $3, 'applied', '[]'::jsonb, 'test', 'test', now() + make_interval(secs => $4))",
         )
         .bind(bundle)
         .bind(owner)
@@ -465,6 +471,34 @@ mod tests {
             other, 1,
             "another group's rows of the same bundle and target are untouched"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn record_stores_the_callers_name_next_to_the_subject() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let state = crate::router_tests::test_state_with_db(Some(pool));
+        let caller = Principal {
+            identity: Identity {
+                display_name: "Ada Lovelace".into(),
+                ..identity("ada", &["analytics"], false)
+            },
+            via: "session",
+            access_token: None,
+        };
+        let response = record(
+            State(state),
+            Some(Extension(caller)),
+            ApiJson(deployment("applied")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the row is a body");
+        let row: serde_json::Value = serde_json::from_slice(&body).expect("one row");
+        assert_eq!(row["actor"], "ada");
+        assert_eq!(row["actorName"], "Ada Lovelace");
     }
 
     #[tokio::test]
