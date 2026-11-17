@@ -1,7 +1,7 @@
 //! Shared accounts (stardelt-nova#725, the public demo): one sign-in that many visitors use.
 //! The state store cannot tell one visitor from the next, so Nova says on `/api/me` that the
 //! account is shared — the UI warns that others see what is typed and saved — and forgets the
-//! account's saved queries, personal settings and query-log rows every night.
+//! account's saved queries, Ask history, personal settings and query-log rows every night.
 
 use std::time::Duration;
 
@@ -70,11 +70,17 @@ pub async fn purge(pool: &PgPool, accounts: &[String]) -> sqlx::Result<u64> {
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    let history = sqlx::query("DELETE FROM query_log WHERE lower(principal) = ANY($1)")
-        .bind(accounts)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    // `query_log.principal` holds the OIDC subject, not the sign-in name (measured on the lab:
+    // 1211 rows under demo's sub, 0 under `demo`). The old statement compared the name and
+    // matched nothing, so the nightly reset kept every query a visitor ran.
+    let history = sqlx::query(
+        "DELETE FROM query_log WHERE principal IN \
+            (SELECT sub FROM person WHERE lower(username) = ANY($1))",
+    )
+    .bind(accounts)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     tx.commit().await?;
     Ok(saved + asked + settings + history)
 }
@@ -138,7 +144,7 @@ mod tests {
         assert!(!is_shared(&[], "demo"));
     }
 
-    /// One person, one saved query, one setting and one logged query for `name`.
+    /// One person, one saved query, one setting, one logged query and one Ask answer for `name`.
     async fn seed(pool: &PgPool, sub: &str, name: &str) {
         sqlx::query("INSERT INTO person (sub, username, display_name) VALUES ($1, $2, $2)")
             .bind(sub)
@@ -165,7 +171,7 @@ mod tests {
              VALUES ($1, 'FINISHED', $2, 'select 1', 'hash', now())",
         )
         .bind(format!("{sub}_q"))
-        .bind(name)
+        .bind(sub)
         .execute(pool)
         .await
         .unwrap();
@@ -204,7 +210,7 @@ mod tests {
             .fetch_all(&pool)
             .await
             .unwrap();
-        assert_eq!(principals, ["ada"]);
+        assert_eq!(principals, ["sub-ada"]);
         let asked: Vec<String> = sqlx::query_scalar("SELECT sub FROM ask_conversation")
             .fetch_all(&pool)
             .await
