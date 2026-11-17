@@ -63,7 +63,9 @@ class HeavyToggleTest(unittest.TestCase):
     def test_both_enabled_refuses_with_the_key(self):
         out = render("--set", "superset.enabled=true", "--set", "airflow.enabled=true")
         self.assertEqual(out.returncode, 1, out.stderr[-2000:])
-        self.assertIn("airflow.enabled", out.stderr)
+        # Helm <= 3.18 spells the refused key `airflow.enabled`; 3.19 and newer
+        # use the JSON pointer `/airflow/enabled`. Both must name the key.
+        self.assertRegex(out.stderr, r"airflow[./]enabled")
         self.assertNotIn(COLLISION, out.stderr,
                          "the values schema must refuse the pair before anything renders")
 

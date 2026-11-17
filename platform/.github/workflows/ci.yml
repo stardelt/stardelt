@@ -439,6 +439,8 @@ jobs:
         run: python3 -m unittest scripts.tests.test_ingress_allowlist -v
       - name: Notebook pod egress policy renders with Airflow (platform#1166)
         run: python3 -m unittest scripts.tests.test_pipeline_notebook_egress -v
+      - name: Superset and Airflow cannot both be enabled (platform#1645)
+        run: python3 -m unittest scripts.tests.test_chart_heavy_toggle -v
 
   # ---------------------------------------------------------------------------
   # Notebook helper (stardelt/stardelt-python): the library has its own
