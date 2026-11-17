@@ -451,11 +451,13 @@ step-openfga: ## The catalog's permission store (OpenFGA), only where there is a
 	  echo "› OpenFGA: the catalog's permission store"; \
 	  kubectl apply -f manifests/openfga-pg.yaml; \
 	  kubectl -n $(NAMESPACE) wait --for=condition=Ready --timeout=300s cluster/openfga-pg; \
-	  $(MAKE) --no-print-directory verify-backup-config PG_CLUSTER=openfga-pg; \
+	fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then $(MAKE) --no-print-directory verify-backup-config PG_CLUSTER=openfga-pg; fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
 	  echo "› OpenFGA ingress: only the Lakekeeper catalog and migration pods"; \
 	  kubectl apply -f manifests/openfga-network-policy.yaml; \
-	  $(MAKE) --no-print-directory openfga; \
 	fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then $(MAKE) --no-print-directory openfga; fi
 
 # Catalog service clients (platform#282): svc-catalog-* for every caller of the
 # catalog. Before Lakekeeper, because authentication is on (platform#285): the
@@ -742,10 +744,12 @@ trino: deps _context ## Install/upgrade Trino, with OAuth2+TLS when a platform I
 	    echo "    ('make install-identity'), or Nova keeps its plain-HTTP default and cannot" >&2; \
 	    echo "    reach the TLS listener." >&2; \
 	  fi; \
-	  echo "› Trino warehouses and group file: ensure ConfigMaps trino-warehouses (resource-groups.json) and trino-group-file (groups.txt), then one access-sync (platform#312)"; \
-	  $(MAKE) --no-print-directory trino-warehouse-configmaps || exit 1; \
-	  $(MAKE) --no-print-directory access-sync || exit 1; \
-	  $(MAKE) --no-print-directory access-sync-now || exit 1; \
+	fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then echo "› Trino warehouses and group file: ensure ConfigMaps trino-warehouses (resource-groups.json) and trino-group-file (groups.txt), then one access-sync (platform#312)"; fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then $(MAKE) --no-print-directory trino-warehouse-configmaps || exit 1; fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then $(MAKE) --no-print-directory access-sync || exit 1; fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then $(MAKE) --no-print-directory access-sync-now || exit 1; fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
 	  helm upgrade --install trino trino/trino \
 	    --version $(TRINO_VERSION) \
 	    $(HELM_FLAGS) \
@@ -1431,13 +1435,13 @@ chart-install: _context ## Install/upgrade the umbrella chart as release `starde
 	@# the chart path, so re-apply the Secret afterwards too — the realm admin
 	@# (#81) and the OIDC client secrets (#85) — then the user-management roles
 	@# and brute-force settings.
+	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-realm-admin; fi
+	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then $(MAKE) --no-print-directory verify-realm-admin; fi
+	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-realm-user-management; fi
+	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-oidc-clients; fi
+	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then $(MAKE) --no-print-directory verify-oidc-clients; fi
+	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-catalog-clients; fi
 	@if kubectl -n $(NAMESPACE) get deploy keycloak >/dev/null 2>&1; then \
-	  $(MAKE) --no-print-directory sync-realm-admin; \
-	  $(MAKE) --no-print-directory verify-realm-admin; \
-	  $(MAKE) --no-print-directory sync-realm-user-management; \
-	  $(MAKE) --no-print-directory sync-oidc-clients; \
-	  $(MAKE) --no-print-directory verify-oidc-clients; \
-	  $(MAKE) --no-print-directory sync-catalog-clients; \
 	  if kubectl -n $(NAMESPACE) get deploy nova >/dev/null 2>&1; then \
 	    echo "› Nova: restart so it reads the catalog client the sync just created"; \
 	    kubectl -n $(NAMESPACE) rollout restart deploy/nova; \
