@@ -207,6 +207,23 @@
       "query_params": [],
       "body": true
     },
+    "deployments_list": {
+      "method": "GET",
+      "path": "/api/deployments",
+      "path_params": [],
+      "query_params": [
+        "bundle",
+        "target"
+      ],
+      "body": false
+    },
+    "deployments_record": {
+      "method": "POST",
+      "path": "/api/deployments",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
     "health": {
       "method": "GET",
       "path": "/api/health",
@@ -745,6 +762,16 @@
       "path_params": [],
       "query_params": [],
       "body": true
+    },
+    "streams_delete": {
+      "method": "DELETE",
+      "path": "/api/streams/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
     },
     "streams_list": {
       "method": "GET",

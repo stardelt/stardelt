@@ -82,6 +82,17 @@ def test_the_ask_history_is_offered_by_default():
     assert ask["annotations"]["readOnlyHint"] is True
 
 
+def test_the_deployment_history_is_offered_by_default():
+    # The set test derives from DEFAULT_TOOLS, so it cannot notice an omission; the record is a read
+    # a person asks for ("what did we deploy, from which commit"), so it is offered by default.
+    srv, _ = server()
+    tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
+    deployments = tools["deployments_list"]
+    assert deployments["description"] == "GET /api/deployments: the Stardelt API operation deployments_list"
+    assert set(deployments["inputSchema"]["properties"]) == {"bundle", "target"}
+    assert deployments["annotations"]["readOnlyHint"] is True
+
+
 def test_allow_adds_one_operation_and_a_write_is_marked_destructive():
     srv, _ = server(allowed=list(mcp.DEFAULT_TOOLS) + ["query_run"])
     tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
