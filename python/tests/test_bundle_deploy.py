@@ -144,7 +144,7 @@ def git(path, *args):
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
-def test_a_bundle_in_a_git_checkout_sends_its_commit_and_marks_uncommitted_changes(tmp_path):
+def test_a_production_target_refuses_a_dirty_tree_and_a_development_target_records_it(tmp_path):
     make(tmp_path)
     git(tmp_path, "init", "-q")
     git(tmp_path, "add", "-A")
@@ -156,8 +156,14 @@ def test_a_bundle_in_a_git_checkout_sends_its_commit_and_marks_uncommitted_chang
     assert session.calls[1][2]["json"]["provenance"] == {"bundle": "sales-etl", "target": "prod", "revision": commit}
 
     (tmp_path / "sql" / "load.sql").write_text("select 2")
-    _, _, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], *answers)
-    assert session.calls[1][2]["json"]["provenance"]["revision"] == commit + "-dirty"
+    code, out, err, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], *answers)
+    assert (code, out) == (2, "")
+    assert "uncommitted changes" in err
+    assert len(session.calls) == 1, "only me(); no pipeline is checked"
+
+    code, out, err, session = run(["bundle", "plan", str(tmp_path), "-t", "dev"], *answers)
+    assert (code, err) == (0, "")
+    assert session.calls[1][2]["json"]["provenance"] == {"bundle": "sales-etl", "target": "dev", "revision": commit + "-dirty"}
     assert len(commit) == 40 and set(commit) <= set("0123456789abcdef")
 
 

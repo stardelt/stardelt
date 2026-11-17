@@ -685,7 +685,9 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     longer names is listed as ``would-delete`` and, in a real deploy, removed (``deleted``) after everything else
     succeeded. Every pipeline carries the bundle's name, the target and the Git commit of the bundle
     directory (``provenance``), which Nova stamps on it. There is no deployment record and nothing is removed that
-    the bundle no longer names. A target with ``drift: block`` refuses, for a plan and a deploy alike, a pipeline someone changed
+    the bundle no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
+    uncommitted changes (``-dirty``); a ``development`` target still records it. A target with ``drift: block``
+    refuses, for a plan and a deploy alike, a pipeline someone changed
     after its last deploy (``modified``) unless ``accept_drift``; the default ``warn`` only reports it. With ``diff`` each
     ``would-update`` (and ``updated``) result carries a ``diff`` text: what Nova would change, field by field.
     ``--prune`` removes pipelines; stream apps are not removed yet (Nova has no delete for a StreamApp).
@@ -698,6 +700,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     if migration_problems:
         return migration_problems, []
     stamp = provenance(directory, target)
+    if mode == "production" and str(stamp.get("revision") or "").endswith("-dirty"):
+        return [(target, f"a production target cannot deploy from a tree with uncommitted changes (the revision would read {stamp['revision']}): commit or stash them, or deploy a development target")], []
     specs = [{**spec, "provenance": stamp} for spec in specs]
     stream_problems, _, stream_specs = render_streams(directory, target, user)
     if stream_problems:
