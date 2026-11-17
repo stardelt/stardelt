@@ -684,13 +684,14 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     ``updated`` for a deploy. With ``prune`` a pipeline an earlier deploy of this bundle target stamped and the bundle no
     longer names is listed as ``would-delete`` and, in a real deploy, removed (``deleted``) after everything else
     succeeded. Every pipeline carries the bundle's name, the target and the Git commit of the bundle
-    directory (``provenance``), which Nova stamps on it. There is no deployment record and nothing is removed that
-    the bundle no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
+    directory (``provenance``), which Nova stamps on it. There is no deployment record yet, and only ``--prune`` removes a pipeline the bundle
+    no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
     uncommitted changes (``-dirty``); a ``development`` target still records it. A target with ``drift: block``
     refuses, for a plan and a deploy alike, a pipeline someone changed
     after its last deploy (``modified``) unless ``accept_drift``; the default ``warn`` only reports it. With ``diff`` each
     ``would-update`` (and ``updated``) result carries a ``diff`` text: what Nova would change, field by field.
-    ``--prune`` removes pipelines; stream apps are not removed yet (Nova has no delete for a StreamApp).
+    ``--prune`` removes pipelines only; stream apps are not pruned yet, although Nova can delete one
+    since the ``streams_delete`` operation exists (``DELETE /api/streams/{namespace}/{name}``).
     """
     user = nova.me().get("user")
     problems, mode, specs = render(directory, target, user)
@@ -911,8 +912,8 @@ def destroy(nova, directory, target, confirm=False):
     bundle's name and this target (in a ``development`` target only the caller's own ``dev-<user>-`` ones). A pipeline made by
     hand, or stamped by another bundle or target, is never touched. Without ``confirm`` nothing is removed and the results
     are ``would-delete`` lines; with it each pipeline is deleted and the results are ``deleted`` lines. The files of the
-    bundle are not touched. ``--prune`` removes pipelines; stream apps are not removed yet (Nova has no delete for a
-    StreamApp).
+    bundle are not touched. Only pipelines are removed: stream apps are not removed yet, although Nova
+    can delete one since the ``streams_delete`` operation exists.
     """
     problems, _, resolved = validate(directory, target)
     if problems:
