@@ -35,7 +35,7 @@
 # The single-user image's Python minor. `scripts/check-python-parity.sh` compares it with the
 # Spark image's worker Python on every `make lint`; both move together or not at all.
 ARG STARDELL_PYTHON_MINOR=3.11
-FROM quay.io/jupyter/scipy-notebook:2024-10-07
+FROM quay.io/jupyter/scipy-notebook:2024-10-07@sha256:21dadfd1d23dcd66f685a95633afaca9cfbe42683987325ccc8c7cd062e45184
 
 USER ${NB_UID}
 

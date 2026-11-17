@@ -10,7 +10,7 @@
 #
 # Built with the user-managed image so we don't pay a `pip install` cost on
 # every pod startup, and so the chart's bootstrapScript can stay minimal.
-FROM apachesuperset.docker.scarf.sh/apache/superset:5.0.0
+FROM apachesuperset.docker.scarf.sh/apache/superset:5.0.0@sha256:09735adaae3945c5a8fabbeca31a7954c8c74de195702ba61622aee8604d5c55
 
 USER root
 ENV UV_CACHE_DIR=/tmp/uv-cache
