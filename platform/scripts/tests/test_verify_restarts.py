@@ -162,6 +162,14 @@ class VerifyRestarts(unittest.TestCase):
         self.assertIn("1 pod(s) ready, 0 restart(s) in total", done.stdout)
         self.assertNotIn("nova-pg", done.stdout)
 
+    def test_the_default_rows_include_the_deployments_that_restart(self):
+        done = self.run_script(deployment_pods("nova", replicas=1))
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertIn("– cnpg-cloudnative-pg", done.stdout)
+        self.assertIn("– barman-cloud-plugin-barman-cloud", done.stdout)
+        self.assertIn("– lakekeeper", done.stdout)
+        self.assertIn("verify-restarts: PASS (1 of 11 Deployment(s)", done.stdout)
+
     def test_the_script_only_reads(self):
         self.run_script(deployment_pods("nova", replicas=1), ROWS="nova")
         calls = [line for line in self.calls.read_text().splitlines() if line.strip()]

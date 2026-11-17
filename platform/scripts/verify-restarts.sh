@@ -2,7 +2,8 @@
 # Print the restartCount nobody reads (stardelt-platform#1700, option A of #1597).
 #
 # Why: every pod in the lab reads `Running 1/1` while the restart counts climbed
-# unobserved (user-scheduler 9, spark-operator 13, operator 2 on 2026-11-17).
+# unobserved (user-scheduler 9, spark-operator 13, operator 2 and, measured 2026-11-17,
+# CloudNativePG 6, the barman plugin 5, Lakekeeper 2).
 # verify-pins reads the image, verify-pod-security the security context, and nothing read
 # `status.containerStatuses[].restartCount`; platform#554 is the reason the numbers are not
 # zero. Same shape as platform#1458: healthy most of the time, and the one number that says
@@ -41,6 +42,9 @@ rows=(
   spark-operator-controller
   spark-operator-webhook
   strimzi-cluster-operator
+  cnpg-cloudnative-pg
+  barman-cloud-plugin-barman-cloud
+  lakekeeper
 )
 
 selected=""
