@@ -133,6 +133,18 @@ class StardeltPinTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("commit SHAs", proc.stderr)
 
+    def test_a_pinned_base_image_is_not_a_commit_pin(self):
+        # platform#1658: a FROM line's index digest is a 64-hex string and contains a
+        # 40-hex window. It is not a commit pin and must not fail the count.
+        base = "a" * 64
+        self.dockerfile.write_text(
+            "FROM quay.io/jupyter/scipy-notebook:2024-10-07@sha256:" + base + "\n"
+            + self.dockerfile.read_text()
+        )
+        proc = self.run_check()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(SHA, proc.stdout)
+
     def test_a_hardcoded_demos_commit_in_the_url_fails(self):
         text = self.dockerfile.read_text().replace("${STARDELT_DEMOS_REF}", OTHER_SHA)
         self.dockerfile.write_text(text)

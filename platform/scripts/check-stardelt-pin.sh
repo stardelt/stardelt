@@ -94,7 +94,10 @@ fi
 
 # Two pins in the Dockerfile, each named exactly once: the STARDELT_LIB_REF default and
 # the STARDELT_DEMOS_REF default. A third SHA, or a second copy of either, still fails.
-sha_count=$(grep -oE '[0-9a-f]{40}' "$dockerfile" | wc -l)
+# A base image's digest (`@sha256:<64 hex>`) is not a commit pin: the pin policy wants it
+# (images/spark/Dockerfile:19 pins its base the same way, platform#1658), and its 40-hex
+# window would otherwise count as a third commit pin.
+sha_count=$(sed -E 's/sha256:[0-9a-f]{64}//g' "$dockerfile" | grep -oE '[0-9a-f]{40}' | wc -l)
 if [ "$sha_count" -ne 2 ]; then
   echo "check-stardelt-pin: $dockerfile names ${sha_count} commit SHAs — exactly two (the STARDELT_LIB_REF and STARDELT_DEMOS_REF defaults) are expected." >&2
   exit 1
