@@ -138,6 +138,7 @@ mod pipelines;
 #[allow(dead_code)]
 mod query_log;
 // Maps the engine's event payloads to log records; wired up by the collector ticket.
+mod deployments;
 mod query_hints;
 mod query_log_api;
 mod query_log_collector;
@@ -846,6 +847,9 @@ fn api_router() -> Router<Arc<AppState>> {
         .merge(pipelines::router())
         // Stage comparison (nova#660 slice a): this stage's deployments against a peer's.
         .merge(stages::router())
+        // The deployment record (design nova#357 slice 1): what one bundle deploy put on a
+        // stage, from which commit, by whom. Uncacheable like every API route.
+        .merge(deployments::router())
         // Streams: the caller's StreamApps, read-only. Uncacheable like pipelines.
         .merge(streams::router())
         // Bundle migrations: the plan half (stardelt-nova#617). Uncacheable.
