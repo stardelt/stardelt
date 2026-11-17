@@ -157,7 +157,7 @@ to start it.
 
 ## SQL in notebooks (JupySQL)
 
-`pip install "stardelt[jupyter]"`, then `%load_ext stardelt.sqlmagic` (the platform's notebook
+`pip install "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@v0.3.0"`, then `%load_ext stardelt.sqlmagic` (the platform's notebook
 image does this when the kernel starts). It registers the default JupySQL connection
 `warehouse`, as the signed-in person:
 

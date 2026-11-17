@@ -32,7 +32,7 @@ The platform's notebook image installs a **pinned** release of this library; a p
 notebook can install the same pin:
 
 ```bash
-pip install "stardelt @ git+https://github.com/stardelt/stardelt-python@v0.2.0"
+pip install "stardelt @ git+https://github.com/stardelt/stardelt-python@v0.3.0"
 ```
 
 ## Container image
