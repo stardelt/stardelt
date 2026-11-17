@@ -19,7 +19,9 @@
 # The run pauses the DAG once and restores the state it found, so it needs write access
 # to the one DAG it names. Read-only otherwise: no other object is changed.
 #
-# Exit 0 = PASS, 1 = FAIL, 3 = UNVERIFIED (could not see the subject).
+# Exit 0 = PASS, 1 = FAIL, 3 = UNVERIFIED (could not see the subject: no
+# kubectl/curl/python3, no Secret, the port already in use, no port-forward, an
+# answer that is not the Airflow API).
 set -euo pipefail
 
 NS="${NS:-stardelt}"
@@ -33,6 +35,17 @@ fail() { echo "FAIL ($*)"; exit 1; }
 for cmd in kubectl curl python3; do
   command -v "$cmd" >/dev/null 2>&1 || unverified "$cmd not found"
 done
+
+# ---------------------------------------------------------------------------
+# 0. The port must be free. `kubectl port-forward` prints `address already in
+#    use` and dies while anything else holds the port, and the sign-in below
+#    then talks to that other service — on 2026-11-17 a stale Nova forward on
+#    18081 answered `405 Method Not Allowed` and the check called a healthy
+#    Airflow broken. The busy-port path runs before any cluster call.
+# ---------------------------------------------------------------------------
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  unverified "port $PORT is already in use — stop the other forward or set PORT"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. The service user's credential. A missing Secret is not a failure of the
@@ -53,20 +66,28 @@ unset secret
 
 # ---------------------------------------------------------------------------
 # 2. Port-forward the API server. The API is only reachable in-cluster; the
-#    forward is killed on every exit path.
+#    forward is killed on every exit path, and its stderr is kept so a forward
+#    that died says why instead of leaving the sign-in to whatever answers.
 # ---------------------------------------------------------------------------
-kubectl -n "$NS" port-forward svc/airflow-api-server "$PORT":8080 >/dev/null 2>&1 &
+pf_log="$(mktemp)"
+kubectl -n "$NS" port-forward svc/airflow-api-server "$PORT":8080 >/dev/null 2>"$pf_log" &
 PF_PID=$!
-cleanup() { kill "$PF_PID" 2>/dev/null || true; }
+cleanup() { kill "$PF_PID" 2>/dev/null || true; rm -f "$pf_log"; }
 trap cleanup EXIT
 
+# /api/v2/version is both liveness and identity: a 200 says this is the Airflow
+# API, not another service that happens to hold the port (`/health` answers 404
+# here, so it only proved that something accepted the TCP connection).
 base="http://127.0.0.1:$PORT"
 up=0
+version_code=""
 for _ in $(seq 1 20); do
-  if curl -s -o /dev/null "$base/health"; then up=1; break; fi
+  kill -0 "$PF_PID" 2>/dev/null || unverified "port-forward exited: $(tail -n 1 "$pf_log")"
+  version_code="$(curl -s -o /dev/null -w '%{http_code}' "$base/api/v2/version" || true)"
+  if [ "$version_code" = "200" ]; then up=1; break; fi
   sleep 0.5
 done
-[ "$up" -eq 1 ] || unverified "port-forward did not come up"
+[ "$up" -eq 1 ] || unverified "$base is not the Airflow API (GET /api/v2/version answered $version_code)"
 
 # ---------------------------------------------------------------------------
 # 3. Sign in as the service user. 401/403 is the #476/#680 shape: the user does
