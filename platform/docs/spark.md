@@ -8,7 +8,7 @@ written by one engine is a table of the other — no copy, no second catalog, no
 second credential store for table data.
 
 Since platform#317 the catalog is **per person**, not the shared service client:
-`stardelt.spark()` asks Trino which catalogs the signed-in person may see, then
+the notebook's `spark` asks Trino which catalogs the signed-in person may see, then
 creates a session with one Iceberg REST catalog per name and that person's token.
 Lakekeeper decides, so Spark sees the same catalogs and the same grants as the
 person's Trino session — and a catalog they may not see is refused by the catalog,
@@ -24,13 +24,11 @@ Endpoint (ClusterIP only — there is deliberately no Ingress):
 sc://spark-connect.stardelt.svc.cluster.local:15002
 ```
 
-From a notebook, use the helper the single-user image ships (the pinned release of
-`stardelt/stardelt-python`). It sets the catalogs and the token for you:
+From a notebook, `spark` is already there: the single-user image loads the pinned release of
+`stardelt/stardelt-python` into every kernel, and its `spark` opens the session on first use with
+every catalog Trino lists for you and your token (a named cluster: set `STARDELT_CLUSTER`):
 
 ```python
-import stardelt
-
-spark = stardelt.spark()          # every catalog Trino lists for you, with your token
 spark.sql("SHOW CATALOGS").show()
 spark.sql("SELECT current_user()").show()   # the person, not the platform
 ```
@@ -60,7 +58,7 @@ for key, value in {
 spark = builder.create()          # create(), not getOrCreate(): a fresh session per token
 ```
 
-The quickstart notebook's Spark cell uses `stardelt.spark()` and reads back the
+The quickstart notebook's Spark cell uses that `spark` and reads back the
 `<catalog>.<schema>.quickstart_smoke` table the Trino cells above wrote, so one run in
 Nova's Notebooks page proves the second engine as well as the first. Members' notebooks reach
 the endpoint; the public demo's visitor pod is refused on 15002 by `manifests/spark.yaml`
@@ -90,7 +88,6 @@ A notebook can read a **public** S3 bucket directly — no catalog, no Iceberg t
 with either URI form:
 
 ```python
-spark = stardelt.spark()
 spark.read.csv("s3a://noaa-ghcn-pds/csv.gz/by_year/1763.csv.gz").count()
 spark.read.parquet("s3://ookla-open-data/parquet/performance/type=fixed/year=2023/quarter=1/").limit(5).show()
 ```

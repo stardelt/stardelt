@@ -24,7 +24,7 @@ consumer already use — no new identity) and `NOVA_S3_NOTEBOOK_BUCKET=notebooks
 call Nova with the token it already holds: the hub token carries audience `nova` through the
 `aud-nova` mapper on the `jupyterhub` and `stardelt-dev` clients (`make sync-nova-audience`, run by
 `make install-identity`). The same tokens carry audience `lakekeeper` through `aud-lakekeeper`
-(`make sync-catalog-audience`), which is what `stardelt.spark()` needs for the catalog. The publish,
+(`make sync-catalog-audience`), which is what the notebook's `spark` session needs for the catalog. The publish,
 list and version routes themselves are in stardelt-nova#225; this repository creates the bucket and
 wires the identity.
 

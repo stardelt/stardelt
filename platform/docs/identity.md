@@ -63,12 +63,12 @@ and, with it, a way to query the warehouse **as themselves**.
   deliberately absent — its last release predates JupyterLab 4 and it cannot carry the per-user
   token. The package is private, like Superset, so
   the pod pulls with the `ghcr-creds` secret.
-* **The helper (`import stardelt`).** The notebook helper lives in its own repository,
-  [`stardelt/stardelt-python`](https://github.com/stardelt/stardelt-python) (MIT): the `stardelt`
-  package (`sql`, `write_df`, `spark`, `spark_tips`, `connection`), its tests and its releases.
+* **The notebook library.** The `stardelt` package lives in its own repository,
+  [`stardelt/stardelt-python`](https://github.com/stardelt/stardelt-python) (MIT): the `%sql` magic,
+  the `spark`/`display` names every kernel gets, its tests and its releases.
   The image installs **one pinned release** of it, not a vendored copy. The pin lives in the
   `Makefile` — `STARDELT_LIB_REF` (the commit) and `STARDELT_LIB_TAG` (the release it belongs to,
-  `v0.1.0`) — and the Dockerfile installs that commit as a build arg. It is pinned by **commit
+  `v0.3.0`) — and the Dockerfile installs that commit as a build arg. It is pinned by **commit
   SHA, not by tag**: a moving tag is not an upgrade path, the same rule the image pins follow
   (`scripts/pin-image.sh`). `scripts/check-stardelt-pin.sh` (run by `make lint`, and therefore by
   CI) fails the build when the Dockerfile's pin and the Makefile's disagree, when the pin is not a
@@ -348,7 +348,7 @@ the `install-core` path, which has no IdP). Coordinator and workers read `client
 `client-secret` from Secret `svc-catalog-trino` through their environment, so each JVM does its own
 exchange, and Reloader restarts them when that Secret rotates. The Spark Connect driver does not
 sign in as a service client any more: since platform#317 each session carries the person's token
-(`stardelt.spark()`), and `svc-catalog-spark` remains a realm client for a future platform-side
+(the notebook's `spark` session), and `svc-catalog-spark` remains a realm client for a future platform-side
 path. The bootstrap Job mounts Secret `svc-catalog-bootstrap` as files and sends
 the token on every management call (`--data-urlencode client_secret@file`, `-H @file`), so neither
 the secret nor the token appears in argv or a log line. **The requested scope is

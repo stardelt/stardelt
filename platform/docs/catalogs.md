@@ -479,7 +479,7 @@ before every catalog, schema, table and column operation (`make catalog-enforce`
 - Every client goes through the same check, because every client goes through the same
   engine with the person's own token: **Nova** (the SQL editor and every catalog call),
   **Superset** (which impersonates the signed-in person from its service account,
-  `platform#310`), a **notebook** (`stardelt.sql()`, `stardelt.write_df()`), a `trino`
+  `platform#310`), a **notebook** (`%sql` and a Spark `writeTo(...)`), a `trino`
   CLI with a Keycloak token, and **Airflow** pipelines (which run as their own service
   account, a member of a group like any other principal — `STATIC_ASSIGNEES` covers
   accounts that have no Keycloak user, like Superset's `superset`).
@@ -542,7 +542,7 @@ still sees `tpch`.
   of every table in the catalog.
 - **Spark Connect has no authentication of its own.** The endpoint is ClusterIP-only,
   the single-user pods are its clients (the egress rule in `helm-values/jupyterhub.yaml`,
-  `manifests/spark.yaml`), and `stardelt.spark()` hands the person's token to the catalog,
+  `manifests/spark.yaml`), and the notebook's `spark` session hands the person's token to the catalog,
   so the *catalog* decides what a Spark session may read (`platform#317`). The Connect
   endpoint itself does not verify who is calling, though: do not expose it beyond the
   namespace, and do not treat a Spark read as an audited read of the same standing as a
