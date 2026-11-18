@@ -46,6 +46,9 @@ if [ -f "$CF_ENV" ] && [ -x "$HERE/../cloudflare-dns.sh" ]; then do_dns=1; fi
 # took the name over (a home node, a replacement cluster) owns those records now,
 # and `make dev-down` on the retired node must not point DNS at nothing.
 remove_dns="${REMOVE_DNS:-0}"
+# A throwaway run has a domain of its own, not the dev one: `fresh-node.sh` passes
+# DNS_NOTE=0 so a delete does not claim it kept or left alpha.dev's records alone.
+dns_note="${DNS_NOTE:-1}"
 
 echo "About to delete:"
 if [ -n "$cluster" ]; then
@@ -55,7 +58,7 @@ else
 fi
 if [ "$do_dns" = 1 ] && [ "$remove_dns" = 1 ]; then
   echo "  - DNS A records ${INGRESS_HOST} and *.${INGRESS_HOST}"
-elif [ "$do_dns" = 1 ]; then
+elif [ "$do_dns" = 1 ] && [ "$dns_note" = 1 ]; then
   echo "  - DNS records for ${INGRESS_HOST}: KEPT (REMOVE_DNS=1 to delete them)"
 fi
 
@@ -91,6 +94,6 @@ if [ "$do_dns" = 1 ] && [ "$remove_dns" = 1 ]; then
   fi
 fi
 
-if [ "$do_dns" = 1 ] && [ "$remove_dns" != 1 ]; then
+if [ "$do_dns" = 1 ] && [ "$remove_dns" != 1 ] && [ "$dns_note" = 1 ]; then
   echo "› DNS records for ${INGRESS_HOST} left in place (REMOVE_DNS=1 to delete them)"
 fi
