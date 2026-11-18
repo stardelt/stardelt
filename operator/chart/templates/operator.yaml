@@ -38,23 +38,28 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create"]
-  # A Role the operator creates may not grant a verb the operator itself lacks: RBAC
-  # escalation control refuses the create with 403. The `spark-cluster-driver` Role
-  # carries `deletecollection` on pods (spark.rs `pod_and_config_map_rules`, the Spark
-  # driver's own cleanup), which the catch-all rule below stops short of — measured on
-  # the lab 2026-11-15: every `SparkCluster` failed with
-  # `roles.rbac.authorization.k8s.io "spark-cluster-driver" is forbidden ... attempting to
-  # grant RBAC permissions not currently held: {Resources:["pods"], Verbs:["deletecollection"]}`.
-  # The same verbs the shared Connect Role gets from the platform's manifest (platform#628).
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["deletecollection"]
   # The operator installs upstream charts with Helm, so it applies whatever the
   # charts contain, cluster-wide. This is the documentation-worthy part of the
   # RBAC: an installer operator is a privileged component by nature.
+  #
+  # A Role or ClusterRole the operator creates may not grant a verb the operator itself
+  # lacks: RBAC escalation control refuses the create with 403. `deletecollection` is
+  # `delete` applied to a list, so it adds no power this rule does not already give, and
+  # it is needed because the operator hands out roles of its own and installs charts
+  # that ship such roles:
+  # - the `spark-cluster-driver` Role carries `deletecollection` on pods (spark.rs
+  #   `pod_and_config_map_rules`, the Spark driver's own cleanup) — measured on the lab
+  #   2026-11-15: every `SparkCluster` failed with
+  #   `roles.rbac.authorization.k8s.io "spark-cluster-driver" is forbidden ... attempting
+  #   to grant RBAC permissions not currently held: {Resources:["pods"],
+  #   Verbs:["deletecollection"]}`. The same verbs the shared Connect Role gets from the
+  #   platform's manifest (platform#628).
+  # deletecollection too: upstream charts ship aggregated -edit/-admin ClusterRoles that
+  # grant it, and RBAC refuses to let the operator create a role with a verb it lacks
+  # (CNPG on a fresh node, stardelt-platform#293 run, 2026-11-18).
   - apiGroups: ["*"]
     resources: ["*"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
