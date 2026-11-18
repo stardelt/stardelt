@@ -276,9 +276,12 @@ catalog token, compares `count(*)` and a `GROUP BY` on
 round trip — Trino writes a table Spark reads, Spark writes a table Trino reads —
 in a scratch namespace it drops again. Run it from any pod that can reach both
 services with a token that carries `aud=lakekeeper` and `aud=trino`:
+The client's Python minor must be the workers' — `scripts/check-python-parity.sh` keeps both images
+on one minor, and both are 3.13 since platform#1772 — or every UDF fails with
+`[PYTHON_VERSION_MISMATCH]`.
 
 ```sh
-kubectl -n stardelt run spark-verify --image=python:3.11-slim --restart=Never --command -- sleep infinity
+kubectl -n stardelt run spark-verify --image=python:3.13-slim --restart=Never --command -- sleep infinity
 kubectl -n stardelt exec spark-verify -- pip install pyspark-client==4.1.4
 kubectl -n stardelt cp scripts/verify-spark-iceberg.py spark-verify:/tmp/verify.py
 # Put the person's token in the pod without printing it, then:
