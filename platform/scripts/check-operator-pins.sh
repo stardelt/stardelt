@@ -61,7 +61,16 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 note=""
-if git -C "$OPERATOR_DIR" rev-parse --git-dir >/dev/null 2>&1 &&
+platform_toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$platform_toplevel" ] &&
+   [ "$(git -C "$OPERATOR_DIR" rev-parse --show-toplevel 2>/dev/null || true)" = "$platform_toplevel" ]; then
+  # Both folders are in one work tree: since D49 the operator and the platform are one repository,
+  # so the pin and the golden value are one commit and that commit is this tree. Reading
+  # `origin/main` here would judge the base branch while the platform side reads the new tree
+  # (platform#175).
+  note=" (working tree; one repository since D49)"
+  operator_source="$OPERATOR_DIR (working tree; one repository since D49)"
+elif git -C "$OPERATOR_DIR" rev-parse --git-dir >/dev/null 2>&1 &&
    git -C "$OPERATOR_DIR" rev-parse --verify --quiet origin/main >/dev/null; then
   # Name the revision the rows read: on a checkout that is behind, every ✗ below is about the
   # sibling checkout, not about this repository (platform#1640, #1641).
@@ -78,7 +87,7 @@ for image in "${images[@]}"; do
   operator_file="$tmpdir/$name.yaml"
   if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:./$operator_path" >"$operator_file"; then
     cp "$OPERATOR_DIR/$operator_path" "$operator_file"
-    note=" (working tree; no origin/main)"
+    note="${note:- (working tree; no origin/main)}"
   fi
 
   platform="$(digest_of "$platform_file" "${pattern-}")"
