@@ -276,7 +276,10 @@ asks Nova what publishing it would do (`notebooks_publish` with `dryRun`, nothin
 notebook changed: Nova can check that pipeline only once the new version exists. `bundle deploy` publishes the changed notebooks first (a
 `published` line with the `objectVersion`; publishing the same bytes again stores nothing), pins that version in the pipeline and then
 creates or updates it; a refusal after the publish keeps the published version. `prune` and `destroy` never delete a notebook: its versions are immutable.
-Not yet: a deployment record.
+Every `bundle deploy` is also recorded once in Nova's deployment record: the bundle, the target, the commit, who ran it,
+the status (`applied` or `failed`) and the pipelines it wrote. A deploy that stops while writing records a `failed` row
+with the pipelines it wrote before it stopped. The row carries no error text; the problems are printed as they happen,
+and a deploy whose row cannot be written still succeeds and prints `not-recorded`.
 
 `stardelt login` signs you in with a code you approve in a browser (the device flow). It asks Nova
 (`GET /api/auth/config`, no sign-in needed) which identity provider to use and which public client to sign in with;
