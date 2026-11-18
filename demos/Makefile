@@ -9,7 +9,7 @@ PLATFORM_DIR ?= $${STARDELT_PLATFORM_DIR:-../platform}
 help:
 	@echo "stardelt demos — helpers for a running stardelt cluster"
 	@echo
-	@echo "The platform is installed from stardelt-platform on a real node;"
+	@echo "The platform is installed from platform/ on a real node;"
 	@echo "see https://stardelt.io/getting-started/hetzner-k3s"
 	@echo
 	@echo "Targets:"
@@ -23,7 +23,7 @@ help:
 	@echo
 	@echo "Env vars:"
 	@echo "  NAMESPACE              — namespace to target (default: stardelt)"
-	@echo "  STARDELT_PLATFORM_DIR  — path to the stardelt-platform repo (default: ../platform)"
+	@echo "  STARDELT_PLATFORM_DIR  — path to the platform folder (default: ../platform)"
 
 deps:
 	@$(PLATFORM_DIR)/scripts/check-deps.sh

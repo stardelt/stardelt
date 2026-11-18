@@ -1,6 +1,6 @@
 <img src="https://raw.githubusercontent.com/stardelt/.github/main/profile/logo-wordmark.svg" alt="stardelt" height="56" />
 
-# stardelt-platform
+# stardelt — platform
 
 **Install the open-source data platform you actually own, on any Kubernetes cluster, with one command.**
 

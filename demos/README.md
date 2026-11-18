@@ -31,11 +31,11 @@ the platform's chart needs (Postgres, FAB, Kubernetes, Amazon), the Iceberg/Parq
 NYC-taxi DAG imports, and `dags/` baked in at `/opt/airflow/dags/`.
 
 CI publishes the image as `ghcr.io/stardelt/airflow:demo` on every push to `main`; a pull request
-builds it without pushing. `stardelt-platform` pins the digest it deploys in
+builds it without pushing. `platform/` pins the digest it deploys in
 `helm-values/airflow.yaml` — the tag moves on every merge here, the digest is what runs.
 
 `AIRFLOW_VERSION` must match the `appVersion` of the apache-airflow/airflow chart pinned in
-`stardelt-platform`'s Makefile: the chart's migration and init containers run this image against
+`platform/`'s Makefile: the chart's migration and init containers run this image against
 that version's metadata schema. The build fails if the installed Airflow version drifts from the
 base image, or if any import the DAGs need is missing.
 
@@ -98,10 +98,10 @@ make pf              # port-forwards: Nova :8080, Trino :8081, Lakekeeper :8181,
 make logs            # tail logs across the stardelt namespace
 make airflow-ui      # Airflow API server on http://localhost:8088
 make superset-ui     # Superset on http://localhost:8089
-make deps            # check docker/kubectl/helm (stardelt-platform's script)
+make deps            # check docker/kubectl/helm (the script in platform/)
 ```
 
-`NAMESPACE` (default `stardelt`) and `STARDELT_PLATFORM_DIR` (default `../stardelt-platform`) are
+`NAMESPACE` (default `stardelt`) and `STARDELT_PLATFORM_DIR` (default `../platform`) are
 overridable.
 
 ## Documentation
