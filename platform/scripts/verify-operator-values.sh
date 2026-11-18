@@ -10,8 +10,14 @@
 # digest the platform pins in a values file both install paths share (26 of them), so a Deployment
 # that is several values merges behind cannot print PASS.
 #
+# It probes the pod that runs the operator image pinned in helm-values/operator.yaml, not
+# `deploy/…`: during a rolling update the Deployment's label also matches the old ReplicaSet's
+# pods while they terminate, so `kubectl exec deploy/…` could land in the previous binary and
+# report a converged rollout as FAIL (measured 2026-11-18T15:2xZ: FAIL (1 of 44 probes)).
+#
 # Exit codes: 0 every probe passes, 1 a value differs or the binary cannot answer, 3 the check
-# proved nothing (no kubectl, no Deployment). Needs: kubectl, grep.
+# proved nothing (no kubectl, no Deployment, no pod runs the pinned digest — "not proved yet",
+# never a failure). Needs: kubectl, grep.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -25,6 +31,51 @@ BASE_DOMAIN="${BASE_DOMAIN:-example.test}"
 command -v kubectl >/dev/null || { echo "verify-operator-values: UNVERIFIED (kubectl not found)" >&2; exit 3; }
 kubectl -n "$NS" get deploy stardelt-operator >/dev/null 2>&1 \
   || { echo "verify-operator-values: UNVERIFIED (no Deployment stardelt-operator in $NS)" >&2; exit 3; }
+
+# The digest the Deployment must run: the `tag: dev@sha256:…` line of helm-values/operator.yaml,
+# the same line scripts/check_golden_image.py reads (OPERATOR_PIN_RE, :39) and pin-image.sh writes.
+OPERATOR_VALUES="${OPERATOR_VALUES:-helm-values/operator.yaml}"
+pinned_digest() {
+  [ -r "$OPERATOR_VALUES" ] || return 0
+  grep -m1 -E '^[[:space:]]*tag:[[:space:]]*"?dev@sha256:' "$OPERATOR_VALUES" \
+    | grep -oE 'sha256:[0-9a-f]{64}' || true
+}
+
+# The pod that carries that digest: the Deployment's selector, then its pods, then the container
+# image of each. Any such pod is equivalent once every pod carries the digest. No output when none
+# does — an old pod in `Terminating` is still Ready and still matches the label, so its presence is
+# not proof that the new binary is serving.
+select_pod() { # digest -> pod name, or nothing
+  local digest="$1" labels pods name images
+  # shellcheck disable=SC2016  # {{…}} is a go-template for kubectl, not a shell expansion
+  if ! labels="$(kubectl -n "$NS" get deploy stardelt-operator \
+      -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')"; then
+    echo "verify-operator-values: UNVERIFIED (cannot read the Deployment's selector)" >&2
+    exit 3
+  fi
+  labels="${labels%,}"
+  [ -n "$labels" ] || return 0
+  if ! pods="$(kubectl -n "$NS" get pods -l "$labels" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.containers[*].image}{"\n"}{end}')"; then
+    echo "verify-operator-values: UNVERIFIED (cannot list the pods of $NS)" >&2
+    exit 3
+  fi
+  while read -r name images; do
+    [ -n "$name" ] || continue
+    case "$images" in
+      *"$digest"*) printf '%s\n' "$name"; return 0 ;;
+    esac
+  done <<<"$pods"
+  return 0
+}
+
+PINNED="$(pinned_digest)"
+[ -n "$PINNED" ] \
+  || { echo "verify-operator-values: UNVERIFIED (no pinned digest in $OPERATOR_VALUES)" >&2; exit 3; }
+POD="$(select_pod "$PINNED")"
+[ -n "$POD" ] \
+  || { echo "verify-operator-values: UNVERIFIED (no pod runs the pinned digest $PINNED)" >&2; exit 3; }
+printf '✓ values             probed %s (%s…)\n' "$POD" "${PINNED:0:15}"
 
 # Read the digest each row means. The loader pins with `digest: sha256:`
 # (helm-values/airflow.yaml:58, under the statsd exporter's `tag:` at :51); the notebook pin is
@@ -89,7 +140,7 @@ attempt() { # component [extra args...] -> one read; 0 when every probe of it pa
   if [ "${1-}" = "--identity" ]; then
     identity=1
   fi
-  if ! out="$(kubectl -n "$NS" exec deploy/stardelt-operator -- \
+  if ! out="$(kubectl -n "$NS" exec "$POD" -- \
       stardelt-operator values "$component" full "$@" 2>&1)"; then
     FAIL_LINES+=("✗ $component: \`values $component full\` failed: $out")
     fail=$((fail + 1))
@@ -202,7 +253,7 @@ for row in "${shared_digests[@]}"; do
   FAIL_LINES=()
   pass=0
   fail=0
-  if ! out="$(kubectl -n "$NS" exec deploy/stardelt-operator -- \
+  if ! out="$(kubectl -n "$NS" exec "$POD" -- \
       stardelt-operator values "$component" full 2>&1)"; then
     FAIL_LINES+=("✗ $component: \`values $component full\` failed: $out")
     fail=$((fail + 1))

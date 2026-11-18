@@ -1,12 +1,13 @@
-"""Tests for scripts/verify-operator-values.sh re-reading a component once (platform#781) and for its
+"""Tests for scripts/verify-operator-values.sh re-reading a component once (platform#781), for its
 digest loop, which compares every digest of the shared values files with the running operator
-(platform#1641).
+(platform#1641), and for the pod it probes — the one that carries the pinned digest (platform#192).
 
 Standard library only, like the other tests here: `python3 -m unittest discover -s scripts/tests -v`
 runs them in CI. `kubectl` is replaced by a shell shim that is first on PATH: `get deploy` succeeds
-and `exec … stardelt-operator values <component> full …` prints a fixture document, so no cluster is
-touched. The fixture documents are built here and carry the same image digests the script reads from
-`helm-values/`, so a pin bump does not break the test.
+and `exec … values <component> full …` prints a fixture document, so no cluster is touched. The
+fixture documents are built here and carry the same image digests the script reads from
+`helm-values/`, so a pin bump does not break the test. The pods the shim lists come from
+`$FAKE_DIR/pods`: one line per pod, `<name> <image…>`.
 """
 import os
 import re
@@ -22,20 +23,27 @@ SCRIPT = REPO / "scripts" / "verify-operator-values.sh"
 
 SHIM = """#!/usr/bin/env bash
 set -u
-# Fake kubectl: `-n NS get deploy stardelt-operator` succeeds; `-n NS exec deploy/stardelt-operator --
-# stardelt-operator values <component> full [--identity DOMAIN]` prints $FAKE_DIR/<component>-<mode>.yaml
-# and logs the call. When FAKE_TRUNCATE asks for it, the trino identity document is cut short: a
-# `kubectl exec` stream can lose its tail, and the script must re-read before it reports a miss.
+# Fake kubectl: `-n NS get deploy stardelt-operator` succeeds and the pods it selects come from
+# $FAKE_DIR/pods (one `<name> <image…>` line each); `-n NS exec POD -- stardelt-operator values
+# <component> full [--identity DOMAIN]` prints $FAKE_DIR/<component>-<mode>.yaml and logs the call.
+# When FAKE_TRUNCATE asks for it, the trino identity document is cut short: a `kubectl exec` stream
+# can lose its tail, and the script must re-read before it reports a miss.
 case "${3-}" in
   get)
+    case "${*}" in
+      *" get pods "*) cat "$FAKE_DIR/pods" ;;
+      *" -o go-template="*) printf 'app=stardelt-operator,' ;;
+    esac
     exit 0
     ;;
   exec)
+    pod="${4-}"
     component="${8-}"
     mode=plain
     if [ "${10-}" = "--identity" ]; then
       mode=identity
     fi
+    printf '%s\\n' "$pod" >> "$FAKE_DIR/exec-pods.log"
     printf '%s %s\\n' "$component" "$mode" >> "$FAKE_KUBECTL_LOG"
     file="$FAKE_DIR/$component-$mode.yaml"
     truncate=0
@@ -96,6 +104,21 @@ SHARED = [
 ]
 
 IDP_GATE = digest_of("helm-values/trino-identity.yaml")
+
+# The operator pin the script compares a pod's image against: helm-values/operator.yaml's
+# `tag: dev@sha256:…` line, the one scripts/check_golden_image.py reads.
+OPERATOR_PIN_RE = re.compile(r'^\s*tag:\s*"?dev@(sha256:[0-9a-f]{64})"?\s*$', re.M)
+
+
+def operator_pin():
+    match = OPERATOR_PIN_RE.search((REPO / "helm-values" / "operator.yaml").read_text())
+    assert match, "no operator pin in helm-values/operator.yaml"
+    return match.group(1)
+
+
+def pod_line(name, digest):
+    """One line of the shim's pod listing: the name, then the container images."""
+    return f"{name} ghcr.io/stardelt/stardelt-operator:dev@{digest}\n"
 
 
 def script_digests(path, pattern=None):
@@ -200,6 +223,7 @@ class TestVerifyOperatorValues(unittest.TestCase):
         shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
         for name, text in fixtures().items():
             (self.dir / name).write_text(text)
+        (self.dir / "pods").write_text(pod_line("stardelt-operator-7d9c-new", operator_pin()))
         self.log = self.dir / "kubectl.log"
 
     def run_script(self, truncate="none"):
@@ -218,6 +242,10 @@ class TestVerifyOperatorValues(unittest.TestCase):
 
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def probed_pods(self):
+        path = self.dir / "exec-pods.log"
+        return path.read_text().splitlines() if path.exists() else []
 
     def test_a_full_document_passes_every_probe_without_a_retry(self):
         done = self.run_script()
@@ -260,6 +288,43 @@ class TestVerifyOperatorValues(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn(f"✗ cnpg {absent[7:22]}…: `{absent}` is not in the running operator", done.stderr)
         self.assertIn("verify-operator-values: FAIL (1 of 44 probes)", done.stdout)
+
+    def test_the_pod_running_the_pinned_digest_is_the_one_probed(self):
+        """platform#192: two old pods stay Ready while they terminate; the pinned one answers."""
+        old = "sha256:" + "a" * 64
+        pin = operator_pin()
+        (self.dir / "pods").write_text(
+            pod_line("stardelt-operator-old-1", old)
+            + pod_line("stardelt-operator-old-2", old)
+            + pod_line("stardelt-operator-pinned", pin)
+        )
+        done = self.run_script()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("verify-operator-values: PASS (44 probes)", done.stdout)
+        self.assertIn(
+            f"✓ values             probed stardelt-operator-pinned ({pin[:15]}…)", done.stdout
+        )
+        self.assertEqual(set(self.probed_pods()), {"stardelt-operator-pinned"})
+        self.assertEqual(len(self.calls()), 24)
+
+    def test_no_pod_runs_the_pinned_digest_proves_nothing_and_exits_3(self):
+        """A not-yet-rolled-out pin is UNVERIFIED, never FAIL: nothing has been disproved."""
+        (self.dir / "pods").write_text(pod_line("stardelt-operator-old-1", "sha256:" + "b" * 64))
+        done = self.run_script()
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertIn(
+            f"UNVERIFIED (no pod runs the pinned digest {operator_pin()})", done.stderr
+        )
+        self.assertNotIn("FAIL", done.stdout + done.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.probed_pods(), [])
+
+    def test_an_empty_pod_list_proves_nothing_and_exits_3(self):
+        (self.dir / "pods").write_text("")
+        done = self.run_script()
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertIn("UNVERIFIED (no pod runs the pinned digest", done.stderr)
+        self.assertNotIn("FAIL", done.stdout + done.stderr)
 
 
 if __name__ == "__main__":
