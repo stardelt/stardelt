@@ -24,6 +24,21 @@ master:
   # volume to one (stardelt-platform#1096 question 5). Logs are disposable, not data.
   logs:
     type: emptyDir
+  # Pod Security `restricted` (stardelt-platform#1095): the chart renders these two blocks
+  # only when `enabled: true`, and drops the key itself. uid 65534 is the probe user that
+  # wrote an emptyDir as fsGroup 65534 on the lab (stardelt-platform#1758).
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 volume:
   dataDirs:
   - name: data
@@ -35,6 +50,21 @@ volume:
     # the client sees a hang, the master log says "failed to find writable volumes
     # … Not enough data nodes found", and buckets created earlier keep working.
     maxVolumes: 100
+  # Pod Security `restricted` (stardelt-platform#1095): the chart renders these two blocks
+  # only when `enabled: true`, and drops the key itself. uid 65534 is the probe user that
+  # wrote an emptyDir as fsGroup 65534 on the lab (stardelt-platform#1758).
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 filer:
   data:
     type: persistentVolumeClaim
@@ -43,6 +73,21 @@ filer:
   # volume to one (stardelt-platform#1096 question 5). Logs are disposable, not data.
   logs:
     type: emptyDir
+  # Pod Security `restricted` (stardelt-platform#1095): the chart renders these two blocks
+  # only when `enabled: true`, and drops the key itself. uid 65534 is the probe user that
+  # wrote an emptyDir as fsGroup 65534 on the lab (stardelt-platform#1758).
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 # The S3 identities come from Secret `seaweedfs-s3-config`, written by the
 # operator from the same key pair as `stardelt-s3-creds`; no key in values.
 s3:
@@ -59,6 +104,21 @@ s3:
   resources:
     requests: { cpu: "100m", memory: "256Mi" }
     limits:   { cpu: "2",    memory: "5.5Gi" }
+  # Pod Security `restricted` (stardelt-platform#1095): the chart renders these two blocks
+  # only when `enabled: true`, and drops the key itself. uid 65534 is the probe user that
+  # wrote an emptyDir as fsGroup 65534 on the lab (stardelt-platform#1758).
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
   createBuckets:
   - name: lakehouse
     anonymousRead: false
