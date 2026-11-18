@@ -36,7 +36,7 @@ pub const JOB_PREFIX: &str = "maint-";
 /// `org.opencontainers.image.revision`:
 /// `_fetch_token` posts with `verify=certifi.where()`, so the identity endpoint's public
 /// certificate verifies while the Trino connection keeps `REQUESTS_CA_BUNDLE` (operator#653).
-pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:dev@sha256:343b6f81b6d7013e92cee28fff4f2f58761b72e318c5dbf7bca858b8a759d347";
+pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:dev@sha256:f7d7f587c1caa4267e15dd595b0f12f9089203d505a3357819b50d98af08b11a";
 
 pub fn job_name(catalog: &str) -> String {
     format!("{JOB_PREFIX}{catalog}")
