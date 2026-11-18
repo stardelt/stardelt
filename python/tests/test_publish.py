@@ -18,6 +18,7 @@ import pytest
 import requests
 
 import stardelt
+from stardelt import bundle
 from stardelt.publish import MAX_PUBLISH_BYTES
 
 CANARY = "canary-token-291"
@@ -76,6 +77,7 @@ class FakeNova:
                         "path": self.path,
                         "authorization": self.headers.get("Authorization"),
                         "content_type": self.headers.get("Content-Type"),
+                        "source": self.headers.get("X-Stardelt-Source"),
                         "body": self.rfile.read(length),
                     }
                 )
@@ -127,6 +129,21 @@ def test_publish_sends_bearer_and_body(nova, notebook, capsys):
     assert request["authorization"] == f"Bearer {_jwt()}"
     assert request["content_type"] == "application/json"
     assert request["body"] == NOTEBOOK
+
+
+def test_publish_sends_the_source_of_a_git_file(nova, notebook, monkeypatch):
+    source = {"repository": "https://github.com/acme/repo", "commit": "0" * 40, "path": "demo.ipynb", "clean": True}
+    monkeypatch.setattr(bundle, "source_of", lambda path: source)
+
+    stardelt.publish(notebook, group="analytics")
+
+    assert nova.requests[0]["source"] == json.dumps(source, separators=(",", ":"))
+
+
+def test_publish_outside_git_sends_no_source_header(nova, notebook):
+    stardelt.publish(notebook, group="analytics")
+
+    assert nova.requests[0]["source"] is None
 
 
 def test_publish_uses_the_api_url_when_set(nova, notebook, monkeypatch):

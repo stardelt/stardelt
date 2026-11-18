@@ -117,7 +117,8 @@ def publish(path, group=None, name=None):
     The returned dict has ``name``, ``group``, ``version`` (the immutable
     object version a schedule pins), ``sha256`` (of the stored bytes) and the
     parsed ``parameters``; it is printed too. Every failure is one line, with
-    Nova's own sentence when the server answered. On the platform Nova is
+    Nova's own sentence when the server answered. In a Git checkout the publish
+    also reports the commit it came from, so the version knows it. On the platform Nova is
     reached through ``STARDELT_NOVA_API_URL`` when the pod sets it (the
     in-cluster Service) and ``STARDELT_NOVA_URL`` otherwise; off the platform
     it uses the host and sign-in of ``stardelt login``, or ``STARDELT_TOKEN``.
@@ -155,14 +156,20 @@ def publish(path, group=None, name=None):
         )
 
     url = f"{base}/api/notebooks/{quote(group, safe='')}/{quote(name, safe='')}"
+    from stardelt import bundle  # deferred, as login and _token are
+
+    source = bundle.source_of(path)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    if source is not None:
+        headers["X-Stardelt-Source"] = json.dumps(source, separators=(",", ":"))
     try:
         response = requests.put(
             url,
             data=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             timeout=TIMEOUT_SECONDS,
             # The pod's REQUESTS_CA_BUNDLE is the warehouse's internal CA, which
             # did not sign Nova's public certificate: use the public roots.

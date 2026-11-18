@@ -60,6 +60,20 @@ def test_deploy_publishes_the_notebook_first_and_pins_the_version(tmp_path):
     assert session.calls[5][2]["json"]["notebook"] == PINNED
 
 
+def test_a_deploy_sends_the_source_of_the_notebook_file(tmp_path, monkeypatch):
+    source = {"repository": "https://github.com/acme/repo", "commit": "0" * 40, "path": "notebooks/explore.ipynb", "clean": True}
+    monkeypatch.setattr(bundle, "source_of", lambda path: source)
+    make(tmp_path, resources=RESOURCES, files=FILES)
+    code, _, _, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, NEW, STORED, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
+        FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert code == 0
+    assert session.calls[1][2]["headers"]["X-Stardelt-Source"] == json.dumps(source)
+
+
 def test_deploy_of_an_unchanged_notebook_publishes_nothing(tmp_path):
     make(tmp_path, resources=RESOURCES, files=FILES)
     listing = FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt", "ownerGroup": "sales"}]})

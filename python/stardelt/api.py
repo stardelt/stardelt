@@ -166,10 +166,11 @@ class Client:
         return token() if callable(token) else token
 
     def _request(self, method, path, **kwargs):
+        headers = {"Authorization": f"Bearer {self._bearer()}", **(kwargs.pop("headers", None) or {})}
         response = self._session.request(
             method,
             self.base_url + path,
-            headers={"Authorization": f"Bearer {self._bearer()}"},
+            headers=headers,
             timeout=self._timeout,
             **kwargs,
         )
@@ -204,11 +205,12 @@ class Client:
 
         return statements.run(self, sql, max_seconds)
 
-    def call(self, operation_id, path=None, query=None, body=None):
+    def call(self, operation_id, path=None, query=None, body=None, headers=None):
         """Any public operation by its ``operationId`` (see ``operations()``).
 
         ``path`` fills the ``{name}`` parts of the URL (each value is URL-quoted), ``query`` is
-        the query string, ``body`` a JSON-able request body. Returns the decoded JSON answer,
+        the query string, ``body`` a JSON-able request body. ``headers`` are added to the
+        ``Authorization`` header. Returns the decoded JSON answer,
         or ``None`` for an empty (204) one.
         """
         op = operations().get(operation_id)
@@ -229,5 +231,7 @@ class Client:
             kwargs["params"] = {name: _query_value(value) for name, value in query.items()}
         if body is not None:
             kwargs["json"] = body
+        if headers is not None:
+            kwargs["headers"] = headers
         response = self._request(op["method"], url_path, **kwargs)
         return None if response.status_code == 204 else response.json()

@@ -454,6 +454,36 @@ def _revision(root):
         return None
 
 
+def source_of(path):
+    """Where ``path`` came from in Git: ``{repository, commit, path, clean}``, or ``None`` when
+    it is not inside a Git checkout or git is not installed. ``commit`` is HEAD (40 to 64 hex),
+    ``clean`` says this file has no uncommitted change, and ``path`` is relative to the
+    repository root with ``/`` separators."""
+    target = Path(path).resolve()
+
+    def git(root, *args):
+        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=30, check=False)
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    try:
+        root = git(target.parent, "rev-parse", "--show-toplevel")
+        if not root:
+            return None
+        commit = git(root, "rev-parse", "HEAD")
+        if not commit or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+            return None
+        repository = _repository(target.parent)
+        if repository is None:
+            return None
+        relative = PurePosixPath(target.relative_to(root))
+        status = git(root, "status", "--porcelain", "--", str(relative))
+        if status is None:
+            return None
+        return {"repository": repository, "commit": commit, "path": str(relative), "clean": not status}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
 def _repository(root):
     """The web address of ``origin`` (``https://host/org/repo``), without user, token, port or ``.git``;
     ``None`` when there is no Git checkout, no ``origin``, or a URL this cannot read."""
@@ -647,12 +677,15 @@ def _publish(nova, directory, spec, dry_run):
         document = json.loads((Path(directory) / file).read_text(encoding="utf-8"))
     except ValueError as err:
         raise apply.ApplyError(f"{spec['name']}: {file} is not a notebook: {err}") from err
+    source = source_of(Path(directory) / file)
+    headers = {"X-Stardelt-Source": json.dumps(source)} if source is not None else None
     try:
         return nova.call(
             "notebooks_publish",
             path={"group": spec["ownerGroup"], "name": PurePosixPath(file).name},
             query={"dryRun": True} if dry_run else None,
             body=document,
+            headers=headers,
         )
     except api.StardeltApiError as err:
         raise apply.ApplyError(f"{spec['name']}: {file}: {err}") from err

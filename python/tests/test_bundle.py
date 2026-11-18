@@ -2,6 +2,10 @@
 
 import io
 import os
+import shutil
+import subprocess
+
+import pytest
 
 from stardelt import bundle, cli
 
@@ -271,3 +275,39 @@ def test_task_rules_are_reported(tmp_path):
 def test_a_pipeline_cannot_give_both_tasks_and_one_source(tmp_path):
     task_bundle(tmp_path, ["{name: x, sql: select 1}"], extra="sql: select 1\n")
     assert "give tasks, or one of sql, sqlFile or notebook — not both" in said(bundle.validate(tmp_path)[0])
+
+
+def _git(directory, *args):
+    subprocess.run(["git", "-C", str(directory), *args], check=True, capture_output=True, text=True)
+
+
+def test_source_of_a_committed_file(tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("git is not installed")
+    _git(tmp_path, "init")
+    notebook = tmp_path / "notes" / "a.ipynb"
+    notebook.parent.mkdir()
+    notebook.write_text("{}")
+    _git(tmp_path, "remote", "add", "origin", "git@github.com:acme/repo.git")
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "one")
+    commit = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+
+    assert bundle.source_of(notebook) == {
+        "repository": "https://github.com/acme/repo",
+        "commit": commit,
+        "path": "notes/a.ipynb",
+        "clean": True,
+    }
+
+    notebook.write_text("{} ")
+    assert bundle.source_of(notebook)["clean"] is False
+
+
+def test_source_of_outside_a_repository_is_none(tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("git is not installed")
+    directory = tmp_path / "plain"
+    directory.mkdir()
+    (directory / "a.ipynb").write_text("{}")
+    assert bundle.source_of(directory / "a.ipynb") is None
