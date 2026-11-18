@@ -160,6 +160,23 @@ class PinTextTest(unittest.TestCase):
         self.assertNotIn("b" * 64, text)
         self.assertTrue(any("differs in the working tree; judging HEAD" in n for n in notes), notes)
 
+    def test_a_file_in_a_subdirectory_is_read_from_the_commit(self):
+        # An un-prefixed `git show origin/main:pins.yaml` finds the root file; the pin under
+        # platform/ must come from its own commit, and the dirty root file must not be judged.
+        (self.dir / "platform").mkdir()
+        (self.dir / "platform/pins.yaml").write_text(f"tag: dev@sha256:{'d' * 64}\n")
+        self.git("add", "platform/pins.yaml")
+        self.git(
+            "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "in a folder"
+        )
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.write("e")
+        text, notes = pin_text(self.dir / "platform", "pins.yaml")
+        self.assertIn("d" * 64, text)
+        self.assertNotIn("a" * 64, text)
+        self.assertNotIn("e" * 64, text)
+        self.assertEqual(notes, [])
+
     def test_origin_main_wins_over_a_different_head(self):
         first = self.git("rev-parse", "HEAD")
         self.write("c")

@@ -184,8 +184,14 @@ def pin_text(repo: Path, manifest: str) -> tuple[str, list[str]]:
     if not rev:
         notes.append(f"! {manifest}: no git revision to read, judging the working tree")
         return path.read_text(), notes
+    prefix = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--show-prefix"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()  # "platform/" in stardelt/stardelt, "" when platform/ is the repository root
     proc = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{rev}:{manifest}"], capture_output=True, text=True
+        ["git", "-C", str(repo), "show", f"{rev}:{prefix}{manifest}"], capture_output=True, text=True
     )
     if proc.returncode != 0:
         notes.append(f"! {manifest}: not in {rev}, judging the working tree")
