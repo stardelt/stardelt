@@ -197,8 +197,8 @@ A *skill* is a short instruction file that tells an AI assistant how a kind of w
 skills are for **building** stardelt. To **use** a stardelt platform from an assistant, see
 [Python](https://stardelt.io/docs/guides/python) instead.
 
-They live in [`skills/`](https://github.com/stardelt/stardelt-docs/tree/main/skills) in this repository.
-Each is plain Markdown, so any assistant or any person can read it.
+They live in [`skills/`](https://github.com/stardelt/stardelt-docs/tree/main/skills), in the
+`stardelt-docs` repository. Each is plain Markdown, so any assistant or any person can read it.
 
 | Skill | Use it to |
 |---|---|
@@ -216,8 +216,8 @@ Check out the repositories side by side, then:
 
 - **Claude Code** finds them from a `stardelt-docs` checkout through `.claude/skills`. From another
   repository, link them: `ln -s ../../stardelt-docs/skills .claude/skills` (keep the link out of commits).
-- **Other assistants** that read `AGENTS.md` are pointed to `skills/` by the file in this repository's
-  root. You can also paste a skill into the conversation.
+- **Other assistants** that read `AGENTS.md` are pointed to `skills/` by the documentation
+  repository's `AGENTS.md`. You can also paste a skill into the conversation.
 
 Skills do not replace your judgment: you stay [the author](https://stardelt.io/docs/developer#using-an-ai-assistant) of what
 you submit.
