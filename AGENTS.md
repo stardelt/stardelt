@@ -43,8 +43,10 @@ Outside this repository, next to it in the workspace: `stardelt-docs/` (public d
   `python/jupyterlab-v*`. Image tags drop the prefix (`stardelt-cli:v0.4.1`).
 - **The notebook library installs from here:** `stardelt @ git+https://github.com/stardelt/stardelt@<commit or python/vX.Y.Z>#subdirectory=python`
   (#128). Nothing builds from the archived repositories; they are private.
-- **Pin rollup.** `platform-pin-rollup.yml` refreshes the pins in one PR (`chore/pin-rollup`) after each
-  `platform / Image` run, with auto-merge.
+- **Pin rollup.** `platform-pin-rollup.yml` refreshes the pins in one branch (`chore/pin-rollup`) after each
+  push to main that rebuilds a pinned image — `platform / Image`, `operator / Image`, `nova / Image` and
+  `demos / CI`. Without `PIN_TOKEN` the branch gets no PR checks and still needs a person to merge it
+  (stardelt/stardelt#72).
 
 ## Licence
 
