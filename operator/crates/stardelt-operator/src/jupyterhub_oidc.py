@@ -1,0 +1,98 @@
+import json
+import os
+import urllib.request
+
+# The endpoints come from the provider's discovery document
+# (<issuer>/.well-known/openid-configuration), never written into this
+# file. The fallback below is the realm layout, used only while the provider is
+# down — the hub must still start.
+_issuer = os.environ.get("STARDELT_OIDC_ISSUER_URL", "").rstrip("/")
+if _issuer:
+    _endpoints = {
+        "authorize_url": _issuer + "/protocol/openid-connect/auth",
+        "token_url": _issuer + "/protocol/openid-connect/token",
+        "userdata_url": _issuer + "/protocol/openid-connect/userinfo",
+    }
+    try:
+        _url = _issuer + "/.well-known/openid-configuration"
+        with urllib.request.urlopen(_url, timeout=10) as _response:
+            _document = json.load(_response)
+        _endpoints = {
+            "authorize_url": _document["authorization_endpoint"],
+            "token_url": _document["token_endpoint"],
+            "userdata_url": _document["userinfo_endpoint"],
+        }
+    except Exception as _error:  # the hub must still start when the provider is down
+        print(f"stardelt: OIDC discovery at {_issuer} failed, keeping the realm-style endpoints: {_error}")
+    c.GenericOAuthenticator.authorize_url = _endpoints["authorize_url"]
+    c.GenericOAuthenticator.token_url = _endpoints["token_url"]
+    c.GenericOAuthenticator.userdata_url = _endpoints["userdata_url"]
+
+# The callback Keycloak must be told is the *public* one. Left to itself the
+# hub advertises http://proxy-public/hub/oauth_callback — its internal service
+# name, which Keycloak does not have registered, so the login dies as
+# invalid_redirect_uri before a code is ever issued. The hub host follows the
+# platform convention jupyter.<base>, and the base is the issuer's host minus
+# the leading "id." label.
+_host = _issuer.split("://", 1)[-1].split("/", 1)[0] if _issuer else ""
+_base = _host.split(".", 1)[1] if "." in _host else ""
+_callback = os.environ.get("STARDELT_HUB_OAUTH_CALLBACK_URL", "")
+if not _callback and _base:
+    _callback = "https://jupyter." + _base + "/hub/oauth_callback"
+if _callback:
+    c.GenericOAuthenticator.oauth_callback_url = _callback
+
+_secret = os.environ.get("STARDELT_OIDC_CLIENT_SECRET", "").strip()
+if _secret:
+    c.GenericOAuthenticator.client_secret = _secret
+
+
+# The signed-in user's own token inside the spawned notebook (the platform's
+# 20-notebook-identity): JupyterHub keeps the OAuth token only with auth_state on.
+if _issuer:
+    def _trino_token(spawner, auth_state):
+        token = (auth_state or {}).get("access_token")
+        if token:
+            spawner.environment["TRINO_TOKEN"] = token
+
+    c.Authenticator.enable_auth_state = True
+    c.Spawner.auth_state_hook = _trino_token
+    c.OAuthenticator.refresh_pre_spawn = True
+    c.Authenticator.delete_invalid_users = True
+
+    # The warehouse endpoint: Trino serves TLS on the in-cluster Service and refuses a
+    # plain-HTTP statement, so the pod gets that endpoint and the CA that signs it —
+    # never the public host and never a disabled certificate check.
+    c.KubeSpawner.environment = {
+        **(c.KubeSpawner.environment or {}),
+        "TRINO_URL": os.environ.get(
+            "STARDELT_TRINO_URL", "https://trino.stardelt.svc.cluster.local:8443"
+        ),
+        "REQUESTS_CA_BUNDLE": "/etc/stardelt/trino-ca/ca.crt",
+    }
+
+
+# The platform's 15-framing: Nova may frame the hub and every spawned server.
+_nova = os.environ.get("STARDELT_NOVA_URL", "").rstrip("/")
+if _nova:
+    c.JupyterHub.tornado_settings = {
+        **c.JupyterHub.tornado_settings,
+        "headers": {
+            **c.JupyterHub.tornado_settings.get("headers", {}),
+            "Content-Security-Policy": (
+                f"frame-ancestors 'self' {_nova}; "
+                "report-uri /hub/security/csp-report"
+            ),
+        },
+    }
+
+    # The single-user server, told at spawn what it may be framed by. Merge into
+    # the environment `20-notebook-identity` may already have set.
+    c.KubeSpawner.environment = {
+        **(c.KubeSpawner.environment or {}),
+        "STARDELT_NOVA_ORIGIN": _nova,
+    }
+
+    _cookies = {"SameSite": "None", "Secure": True}
+    c.JupyterHub.tornado_settings["cookie_options"] = _cookies
+    c.Spawner.cookie_options = _cookies

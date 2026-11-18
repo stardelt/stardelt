@@ -1,0 +1,184 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stardelt-operator
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stardelt-operator
+rules:
+  - apiGroups: ["stardelt.io"]
+    resources:
+      - "platforminstances"
+      - "lakehouses"
+      - "ingestionsources"
+      - "pipelines"
+      - "connections"
+      - "serviceprincipals"
+      - "sparkclusters"
+      - "catalogs"
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["stardelt.io"]
+    resources:
+      - "platforminstances/status"
+      - "lakehouses/status"
+      - "ingestionsources/status"
+      - "pipelines/status"
+      - "connections/status"
+      - "serviceprincipals/status"
+      - "sparkclusters/status"
+      - "catalogs/status"
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Helm creates the target namespace (--create-namespace).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  # The operator installs upstream charts with Helm, so it applies whatever the
+  # charts contain, cluster-wide. This is the documentation-worthy part of the
+  # RBAC: an installer operator is a privileged component by nature.
+  #
+  # A Role or ClusterRole the operator creates may not grant a verb the operator itself
+  # lacks: RBAC escalation control refuses the create with 403. `deletecollection` is
+  # `delete` applied to a list, so it adds no power this rule does not already give, and
+  # it is needed because the operator hands out roles of its own and installs charts
+  # that ship such roles:
+  # - the `spark-cluster-driver` Role carries `deletecollection` on pods (spark.rs
+  #   `pod_and_config_map_rules`, the Spark driver's own cleanup) — measured on the lab
+  #   2026-11-15: every `SparkCluster` failed with
+  #   `roles.rbac.authorization.k8s.io "spark-cluster-driver" is forbidden ... attempting
+  #   to grant RBAC permissions not currently held: {Resources:["pods"],
+  #   Verbs:["deletecollection"]}`. The same verbs the shared Connect Role gets from the
+  #   platform's manifest (platform#628).
+  # deletecollection too: upstream charts ship aggregated -edit/-admin ClusterRoles that
+  # grant it, and RBAC refuses to let the operator create a role with a verb it lacks
+  # (CNPG on a fresh node, stardelt-platform#293 run, 2026-11-18).
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stardelt-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stardelt-operator
+subjects:
+  - kind: ServiceAccount
+    name: stardelt-operator
+    namespace: {{ .Release.Namespace }}
+---
+# The ServicePrincipal controller reads the credentials Secret of each principal. That right is
+# namespaced on purpose: reading every Secret in the cluster is more than the check needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stardelt-operator-principals
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stardelt-operator-principals
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stardelt-operator-principals
+subjects:
+  - kind: ServiceAccount
+    name: stardelt-operator
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stardelt-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: stardelt-operator
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: stardelt-operator
+  template:
+    metadata:
+      labels:
+        app: stardelt-operator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8082"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: stardelt-operator
+      # Pod Security `restricted` (platform#1096 question 5): the image's Dockerfile
+      # ends in `USER 65532:65532`; these four fields are what the level requires and
+      # what the pod asserts. `readOnlyRootFilesystem` is deliberately not set: Helm
+      # needs its cache/config/data directories under /home/operator.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 8082
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            # Leader election (#75): the Lease stardelt-operator-leader names this pod.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+# The operator's Prometheus endpoint (stardelt-operator#607): a stable name to select,
+# ClusterIP only — no ingress exposes it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stardelt-operator-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: stardelt-operator
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8082"
+    prometheus.io/path: /metrics
+spec:
+  type: ClusterIP
+  selector:
+    app: stardelt-operator
+  ports:
+    - name: metrics
+      port: 8082
+      targetPort: metrics

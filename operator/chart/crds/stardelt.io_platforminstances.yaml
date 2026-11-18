@@ -1,0 +1,587 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: platforminstances.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: PlatformInstance
+    plural: platforminstances
+    shortNames:
+    - platform
+    singular: platforminstance
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A stardelt platform instance.
+        properties:
+          spec:
+            description: 'Cluster-scoped root resource: declares which pillars and profile are installed.'
+            properties:
+              baseDomain:
+                description: |-
+                  Public DNS name the platform is served under, for example `data.example.com`: Nova answers
+                  on the name itself and every other application on a subdomain (`id`, `trino`, `superset`...).
+                maxLength: 253
+                minLength: 3
+                nullable: true
+                pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$
+                type: string
+              clusterOperation:
+                default:
+                  reconciliationPaused: false
+                  stopped: false
+                description: 'Freeze this resource: no cluster changes, status phase `Paused` (operator#64).'
+                properties:
+                  reconciliationPaused:
+                    default: false
+                    description: 'Stop reconciling: the operator writes `Paused` and applies nothing.'
+                    type: boolean
+                  stopped:
+                    default: false
+                    description: |-
+                      Stop the workloads: scale every rendered Deployment and StatefulSet to zero, hibernate the
+                      namespace's CNPG databases, and report `Stopped`. Data, PVCs and Secrets stay.
+                    type: boolean
+                type: object
+              dryRun:
+                default: true
+                description: Plan only (no cluster changes) until explicitly disabled. Safe default.
+                type: boolean
+              identity:
+                default:
+                  adminGroup: stardelt-admins
+                  mode: none
+                  provider: oidc
+                description: How users sign in; see [`IdentitySpec`].
+                properties:
+                  adminGroup:
+                    default: stardelt-admins
+                    description: Members of this group are platform administrators.
+                    type: string
+                  apiAudience:
+                    description: '`external` only: the audience the engine and the catalog accept.'
+                    maxLength: 256
+                    minLength: 1
+                    nullable: true
+                    pattern: ^\S+$
+                    type: string
+                  clients:
+                    additionalProperties:
+                      description: One app registration made by the customer in their provider.
+                      properties:
+                        clientId:
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^\S+$
+                          type: string
+                        clientSecretRef:
+                          description: Required for every client except the public `lakekeeper` one. Never the value itself.
+                          nullable: true
+                          properties:
+                            key:
+                              default: client-secret
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - clientId
+                      type: object
+                    description: '`external` only: the app registrations the customer made, one entry per client.'
+                    type: object
+                  groupClaim:
+                    description: |-
+                      Name of the token claim that carries group (or role) names. Defaults to `roles` for
+                      `entra` and `groups` otherwise.
+                    nullable: true
+                    type: string
+                  issuerUrl:
+                    description: |-
+                      OIDC issuer URL, `https://` only. Required for `external`; for `platform` it is derived
+                      from `baseDomain` and must be left out.
+                    nullable: true
+                    type: string
+                  mode:
+                    default: none
+                    description: |-
+                      Where users sign in (decision D20). Two modes besides none: an identity provider the
+                      organization already runs (`external`, for example Entra or Okta), or one the platform runs
+                      itself (`platform`, Keycloak). An organization often runs the platform several times against
+                      one external provider; each instance then has its own app registrations and group mapping.
+                    enum:
+                    - none
+                    - platform
+                    - external
+                    type: string
+                  provider:
+                    default: oidc
+                    description: '`external` only: which kind of provider this instance talks to.'
+                    enum:
+                    - oidc
+                    - entra
+                    type: string
+                  tokenEndpoint:
+                    description: |-
+                      `external` only: the provider's OAuth2 token endpoint — `token_endpoint` in
+                      `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: neither the
+                      operator (API-server proxy only) nor Helm can fetch an external discovery document.
+                      A `platform` instance derives it from the Keycloak it deploys and must leave it out.
+                    maxLength: 512
+                    minLength: 1
+                    nullable: true
+                    pattern: ^https://\S+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'platform mode creates its own clients: leave provider, apiAudience and clients out'
+                  rule: self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && (!has(self.clients) || size(self.clients) == 0))
+                - message: external mode needs issuerUrl
+                  rule: self.mode != 'external' || has(self.issuerUrl)
+                - message: external mode needs tokenEndpoint
+                  rule: self.mode != 'external' || has(self.tokenEndpoint)
+                - message: external mode needs apiAudience
+                  rule: self.mode != 'external' || has(self.apiAudience)
+                - message: external mode needs a nova client
+                  rule: self.mode != 'external' || (has(self.clients) && 'nova' in self.clients)
+                - message: client names are nova, trino, lakekeeper, superset, airflow, jupyterhub and trino-group-sync
+                  rule: '!has(self.clients) || self.clients.all(k, k in [''nova'',''trino'',''lakekeeper'',''superset'',''airflow'',''jupyterhub'',''trino-group-sync''])'
+                - message: every client except lakekeeper needs a clientSecretRef
+                  rule: '!has(self.clients) || self.clients.all(k, k == ''lakekeeper'' || has(self.clients[k].clientSecretRef))'
+              ingress:
+                default:
+                  allowedCidrs: []
+                  enabled: false
+                  tls:
+                    enabled: false
+                    secretNameTemplate: '{host}-tls'
+                description: How the applications are reached from outside the cluster; see [`IngressSettings`].
+                properties:
+                  allowedCidrs:
+                    default: []
+                    description: |-
+                      Source ranges that may open a connection to the public endpoints
+                      (`stardelt-platform#427`). Empty = open to everyone. A non-empty list renders
+                      `nginx.ingress.kubernetes.io/whitelist-source-range` on every Ingress this operator
+                      applies (ingress-nginx; other controllers ignore it). Entries are CIDRs, at most 64.
+                      Always include the cluster's own egress address: pods that call the public names
+                      arrive through it.
+
+                      The bounds are not cosmetic: the API server's CEL cost estimator treats an
+                      unbounded array under a `matches()` rule as unbounded, and refuses the whole
+                      CRD ("estimated rule cost exceeds budget by factor of more than 100x",
+                      operator#536). `maxItems`/`maxLength` are what make the rule affordable.
+                    items:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    type: array
+                  className:
+                    description: 'IngressClass name, for example `nginx` or `traefik`. Absent: the cluster default.'
+                    maxLength: 253
+                    minLength: 1
+                    nullable: true
+                    type: string
+                  enabled:
+                    default: false
+                    description: |-
+                      Create an Ingress for Nova (on `baseDomain` itself); the identity provider
+                      on `id.` with `identity.mode: platform`; Airflow on `airflow.` with the `pipelines` pillar;
+                      JupyterHub on `jupyter.` with `notebooks`.
+                    type: boolean
+                  tls:
+                    default:
+                      enabled: false
+                      secretNameTemplate: '{host}-tls'
+                    description: TLS through cert-manager.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Requires cert-manager. Leave off when TLS ends elsewhere (a cloud load balancer, an edge proxy).
+                        type: boolean
+                      issuer:
+                        description: |-
+                          Name of a cert-manager ClusterIssuer; written as the `cert-manager.io/cluster-issuer`
+                          annotation of every Ingress.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        type: string
+                      secretNameTemplate:
+                        default: '{host}-tls'
+                        description: |-
+                          Name of the Secret that holds the certificate; `{host}` becomes the host name with the
+                          dots turned into dashes.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: ingress.tls.enabled needs ingress.tls.issuer, the name of a cert-manager ClusterIssuer
+                  rule: '!has(self.tls) || !has(self.tls.enabled) || !self.tls.enabled || (has(self.tls.issuer) && size(self.tls.issuer) > 0)'
+                - message: 'ingress.allowedCidrs: at most 64 entries'
+                  rule: size(self.allowedCidrs) <= 64
+                - message: 'ingress.allowedCidrs: each entry is a CIDR such as 203.0.113.0/24'
+                  rule: self.allowedCidrs.all(c, c.matches('^[0-9a-fA-F:.]+/[0-9]{1,3}$'))
+              mcp:
+                default:
+                  enabled: false
+                description: |-
+                  The hosted MCP endpoint on Nova: whether it answers, the audience its tokens carry, the
+                  row cap and timeout of `sql_read`, and the client ids allowed to call it. Off by default.
+                properties:
+                  allowedClients:
+                    description: |-
+                      Client ids (`azp`) allowed to call `/mcp`, comma separated in the Deployment.
+                      Empty = every client the audience accepts. Nova refuses a token without an `azp`
+                      while this list is set.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  allowedGroups:
+                    description: |-
+                      Groups (`groups` claim) whose members may call `/mcp`, comma separated in the
+                      Deployment. Empty = every group the audience accepts. Nova refuses a caller whose
+                      token names none of them while this list is set.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  audience:
+                    description: |-
+                      The resource identifier tokens must carry. Empty = `https://<baseDomain>/mcp`, the
+                      value the realm client `stardelt-mcp`'s `aud-mcp` mapper mints.
+                    nullable: true
+                    type: string
+                  auditRetentionDays:
+                    description: |-
+                      Days the `mcp_call` audit rows are kept (`NOVA_MCP_AUDIT_RETENTION_DAYS`); 0–3650.
+                      Empty = Nova's own default (30); `0` keeps the rows and switches the purge off.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  callsPerMinute:
+                    description: '`tools/call`s one person may make per minute on `/mcp`; 1–600. Empty = Nova''s own default (60).'
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  enabled:
+                    default: false
+                    description: Render `NOVA_MCP_ENABLED`/`NOVA_MCP_AUDIENCE` into Nova. Off by default.
+                    type: boolean
+                  maxRows:
+                    description: Rows one `sql_read` call may return; 1–1000. Empty = Nova's own default (200).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  queryTimeoutSeconds:
+                    description: Seconds one `sql_read` call may run before it is cancelled; 1–300. Empty = Nova's own default (60).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  writesPerHour:
+                    description: |-
+                      `tools/call`s of a write tool one person may make per hour on `/mcp`
+                      (`NOVA_MCP_WRITES_PER_HOUR`); 1–600. Empty = Nova's own default (20).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              monitoring:
+                default:
+                  enabled: false
+                  labels: {}
+                description: 'The customer''s Prometheus: the scrape objects, or a condition that says why not.'
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      Render a ServiceMonitor for every component that exposes Prometheus metrics.
+                      Needs the monitoring.coreos.com/v1 CRDs; without them the operator renders
+                      nothing and reports MonitoringCRDsMissing.
+                    type: boolean
+                  labels:
+                    additionalProperties:
+                      type: string
+                    default: {}
+                    description: |-
+                      Labels added to every rendered object, so the customer's Prometheus selects them
+                      (for example `release: kube-prometheus-stack`).
+                    type: object
+                type: object
+              namespace:
+                default: stardelt
+                description: Namespace the platform's own components are installed into.
+                type: string
+              pillars:
+                default:
+                  batch: false
+                  dashboards: false
+                  lakehouse: true
+                  ml: false
+                  notebooks: false
+                  pipelines: false
+                  streaming: false
+                description: Which pillars a platform instance enables.
+                properties:
+                  batch:
+                    default: false
+                    type: boolean
+                  dashboards:
+                    default: false
+                    description: |-
+                      BI dashboards (Superset). Off by default: it brings a metadata database, Redis and
+                      three long-running pods. People sign in through the platform IdP, with the local
+                      administrator kept as break-glass; each group sees the dashboards its catalog role allows.
+                    type: boolean
+                  lakehouse:
+                    default: true
+                    type: boolean
+                  ml:
+                    default: false
+                    type: boolean
+                  notebooks:
+                    default: false
+                    description: |-
+                      Multi-user notebooks (JupyterHub). Off by default: a notebook stack is
+                      heavy, and a cluster that only serves queries should not carry it.
+                    type: boolean
+                  pipelines:
+                    default: false
+                    description: |-
+                      Scheduled pipelines and jobs (Airflow, run as `KubernetesExecutor`). Off by default: it
+                      brings a metadata database and four long-running pods, and a cluster that only serves
+                      queries does not need them. Nova's Pipelines page and `stardelt bundle run` need it.
+                    type: boolean
+                  streaming:
+                    default: false
+                    type: boolean
+                type: object
+              profile:
+                default: demo
+                description: Deployment size / capability profile.
+                enum:
+                - demo
+                - full
+                - airgap
+                type: string
+              secrets:
+                default:
+                  mode: none
+                description: Where the credentials of `Connection` objects come from; see [`SecretsSpec`].
+                properties:
+                  external:
+                    description: The enterprise's store; required for `external`, refused for the other modes.
+                    nullable: true
+                    properties:
+                      provider:
+                        description: |-
+                          The `provider` block of the `ClusterSecretStore` (`vault`, `aws`, `azurekv`, …), passed to
+                          External Secrets verbatim. Exactly one provider key; credentials are referenced by Secret
+                          name inside the block, never inline.
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    required:
+                    - provider
+                    type: object
+                  groups:
+                    description: |-
+                      Owner groups that get their own store entry in `secrets.mode: platform` (decision D27):
+                      each one may read only its own path. Mirrors the platform's `STORE_GROUPS`.
+                    items:
+                      maxLength: 40
+                      type: string
+                    maxItems: 20
+                    type: array
+                  mode:
+                    default: none
+                    description: Which secret store the platform uses for user credentials (decision D23).
+                    enum:
+                    - none
+                    - platform
+                    - external
+                    type: string
+                type: object
+              set:
+                additionalProperties:
+                  additionalProperties:
+                    type: string
+                  type: object
+                description: |-
+                  `--set` overrides per component: `set.<component>.<helm.key>: "value"`.
+                  Highest precedence — Helm applies `--set` after any values document.
+                type: object
+              values:
+                additionalProperties:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                description: |-
+                  Free-form Helm values per component, e.g. `values.trino.worker.resources`.
+                  Deep-merged over the golden defaults, so one key can be pinned without
+                  restating the rest.
+                type: object
+              valuesFrom:
+                additionalProperties:
+                  description: |-
+                    External source of one component's Helm values: set exactly one of
+                    `configMapRef` or `secretRef`.
+                  properties:
+                    configMapRef:
+                      description: Read the values document from this ConfigMap key.
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key holding the YAML values document.
+                          type: string
+                        name:
+                          description: Name of the ConfigMap or Secret.
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the referenced object. Defaults to the resource's own
+                            namespace; required for cluster-scoped resources (`PlatformInstance`).
+                          nullable: true
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    secretRef:
+                      description: Read the values document from this Secret key (decoded, then parsed as YAML).
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key holding the YAML values document.
+                          type: string
+                        name:
+                          description: Name of the ConfigMap or Secret.
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the referenced object. Defaults to the resource's own
+                            namespace; required for cluster-scoped resources (`PlatformInstance`).
+                          nullable: true
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                  type: object
+                description: External values documents per component, read from a ConfigMap or Secret key.
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: identity.mode external needs identity.issuerUrl, an https:// URL
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode != ''external'' || (has(self.identity.issuerUrl) && self.identity.issuerUrl.startsWith(''https://''))'
+            - message: identity.mode platform derives the issuer from baseDomain; leave identity.issuerUrl out
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode != ''platform'' || !has(self.identity.issuerUrl)'
+            - message: identity.mode platform derives the token endpoint from the issuer; leave identity.tokenEndpoint out
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode != ''platform'' || !has(self.identity.tokenEndpoint)'
+            - message: identity needs baseDomain (the application hosts and redirect addresses are built from it)
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode == ''none'' || has(self.baseDomain)'
+            - message: ingress needs baseDomain (the hosts are built from it)
+              rule: '!has(self.ingress) || !has(self.ingress.enabled) || !self.ingress.enabled || has(self.baseDomain)'
+            - message: secrets.mode external needs secrets.external.provider (the ClusterSecretStore provider block)
+              rule: '!has(self.secrets) || !has(self.secrets.mode) || self.secrets.mode != ''external'' || (has(self.secrets.external) && has(self.secrets.external.provider))'
+            - message: secrets.external is only allowed with secrets.mode external
+              rule: '!has(self.secrets) || !has(self.secrets.external) || (has(self.secrets.mode) && self.secrets.mode == ''external'')'
+            - message: secrets.groups entries are lower-case letters, digits and dashes (at most 40 characters)
+              rule: '!has(self.secrets) || !has(self.secrets.groups) || self.secrets.groups.all(g, g.matches(''^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$''))'
+            - message: secrets.groups is only allowed with secrets.mode platform
+              rule: '!has(self.secrets) || !has(self.secrets.groups) || size(self.secrets.groups) == 0 || (has(self.secrets.mode) && self.secrets.mode == ''platform'')'
+            - message: mcp.enabled needs baseDomain (the default audience is https://<baseDomain>/mcp) or an explicit mcp.audience
+              rule: '!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || has(self.baseDomain) || (has(self.mcp.audience) && self.mcp.audience.size() > 0)'
+            - message: mcp.maxRows is from 1 to 1000
+              rule: '!has(self.mcp) || !has(self.mcp.maxRows) || (self.mcp.maxRows >= 1 && self.mcp.maxRows <= 1000)'
+            - message: mcp.queryTimeoutSeconds is from 1 to 300
+              rule: '!has(self.mcp) || !has(self.mcp.queryTimeoutSeconds) || (self.mcp.queryTimeoutSeconds >= 1 && self.mcp.queryTimeoutSeconds <= 300)'
+            - message: mcp.callsPerMinute is from 1 to 600
+              rule: '!has(self.mcp) || !has(self.mcp.callsPerMinute) || (self.mcp.callsPerMinute >= 1 && self.mcp.callsPerMinute <= 600)'
+            - message: mcp.writesPerHour is from 1 to 600
+              rule: '!has(self.mcp) || !has(self.mcp.writesPerHour) || (self.mcp.writesPerHour >= 1 && self.mcp.writesPerHour <= 600)'
+            - message: mcp.auditRetentionDays is from 0 to 3650 (0 keeps the rows)
+              rule: '!has(self.mcp) || !has(self.mcp.auditRetentionDays) || (self.mcp.auditRetentionDays >= 0 && self.mcp.auditRetentionDays <= 3650)'
+          status:
+            nullable: true
+            properties:
+              components:
+                default: []
+                items:
+                  properties:
+                    appliedHash:
+                      description: |-
+                        Fingerprint (args + values) of the release that was applied last time a
+                        hash was recorded; lets the next reconcile skip an unchanged component.
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                    ready:
+                      type: boolean
+                  required:
+                  - name
+                  - ready
+                  type: object
+                type: array
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+            type: object
+        required:
+        - spec
+        title: PlatformInstance
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,87 @@
+# OpenBao (MPL-2.0, the one documented non-permissive component) as the sandbox secret store
+# (decision D23, platform#160). Opt-in: `make openbao`. Production installs use the customer's own
+# store through External Secrets and never run this.
+#
+# Standalone, embedded `pebbledb` storage on one volume. The chart's default volume request is
+# 10 GiB, the minimum of the dev cluster's volume class. Auto-unseal with a static key mounted from
+# Secret `openbao-seal-key` (scripts/openbao-seal-key.sh): after a restart or a pod replacement the
+# store opens itself, which was verified by deleting the pod. That key protects the data at rest
+# only as well as the cluster protects its Secrets: fine for a sandbox, not for anything else.
+injector:
+  enabled: false
+csi:
+  enabled: false
+server:
+  # Pinned by digest (the twin of stardelt-platform#1604). The chart defaults the tag to its
+  # appVersion `2.7.2`, a moving tag. The string is
+  # stardelt-platform/helm-values/openbao.yaml:18.
+  image:
+    tag: "2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f"
+  # Pod Security `restricted` (platform#1096 question 5, twin of platform#1191): the chart's pod
+  # block is already correct (`runAsNonRoot`, uid 100, seccomp); the container declares the two
+  # missing fields. stardelt-platform/helm-values/openbao.yaml carries the same block.
+  statefulSet:
+    securityContext:
+      container:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+  # The chart puts a checksum of the server config on the pod template only with this flag; without
+  # it a changed config (the audit device of D27) would wait for the next restart before taking
+  # effect. With it, `make openbao` rolls the pod and the static seal opens it again by itself.
+  configAnnotation: true
+  # The chart defaults to OnDelete, so a changed pod template (the config checksum above) would not
+  # replace the pod. One sandbox store can roll normally, and the static seal opens it again.
+  updateStrategyType: RollingUpdate
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  dataStorage:
+    enabled: true
+    size: 10Gi
+  extraVolumes:
+    # The chart mounts a Secret at <path>/<name>: /openbao/seal/openbao-seal-key/key
+    - { type: secret, name: openbao-seal-key, path: /openbao/seal }
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+        # The scrape source (#607): a Prometheus may read /v1/sys/metrics without a
+        # token. Nothing here is secret — process, request and storage counters — and
+        # the route stays on the Service port, never an Ingress.
+        telemetry {
+          unauthenticated_metrics_access = true
+        }
+      }
+
+      storage "pebbledb" {
+        path = "/openbao/data/pebbledb"
+      }
+
+      # Without a retention window the /v1/sys/metrics route refuses the prometheus
+      # format (`prometheus_retention_time` defaults to 0 = off, #607).
+      telemetry {
+        prometheus_retention_time = "30s"
+        disable_hostname          = true
+      }
+
+      seal "static" {
+        current_key_id = "key1"
+        current_key    = "file:///openbao/seal/openbao-seal-key/key"
+      }
+
+      # OpenBao 2.7 refuses to enable an audit device through the API ("use declarative, config-based audit
+      # device management instead"), so it is declared here. Every request and response is written to the pod's
+      # standard output as one JSON line; values are salted hashes, never plain text. Decision D27: sign-ins
+      # to the break-glass role and every read of a group value are recorded with the person.
+      audit "file" "to-stdout" {
+        description = "Write audit information to standard output."
+        options {
+          file_path = "stdout"
+        }
+      }

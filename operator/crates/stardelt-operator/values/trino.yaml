@@ -1,0 +1,275 @@
+# Trino sits behind ingress-nginx, which sets X-Forwarded-For; without
+# this it answers 406 "Server configuration does not allow processing
+# of the X-Forwarded-For header".
+#
+# The service names in the catalog are the namespace-local short names
+# of the releases `planner.rs::plan_lakehouse` installs for the
+# Lakehouse: `lakekeeper` is its catalog release, and `seaweedfs-s3` is
+# the S3 service of its `seaweedfs` release. They must not be FQDNs —
+# a Lakehouse may live in any namespace.
+additionalConfigProperties:
+- http-server.process-forwarded=true
+# Node-level file-system cache (Trino 483+, stardelt-platform#1002). The chart renders
+# this into the coordinator AND worker config.properties; the file it names is the
+# `additionalConfigFiles` entry on both roles below.
+- cache-manager.config-files=etc/cache-manager-alluxio.properties
+# Pod Security `restricted` (platform#1096 question 5, twin of platform#1190). Both keys are the
+# chart's own and each REPLACES the chart's block, so the pod repeats the ids the image runs with
+# (`uid=1000(trino)`, measured on the platform path) and the container repeats the two fields the
+# chart already declared. `restricted` then needs only runAsNonRoot and seccomp.
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile: {type: RuntimeDefault}
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities: {drop: ["ALL"]}
+  seccompProfile: {type: RuntimeDefault}
+env:
+- name: S3_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: stardelt-s3-creds
+      key: access-key
+- name: S3_SECRET_KEY
+  valueFrom:
+    secretKeyRef:
+      name: stardelt-s3-creds
+      key: secret-key
+- name: NOVA_EVENTS_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: nova-events
+      key: token
+      optional: true
+# Authentication (values/trino-identity.yaml, identity mode `platform`): the OIDC
+# client `trino` of Secret stardelt-oidc-clients, the IdP issuer from the identity
+# contract, the shared secret Trino requires as soon as an authenticator is on, and
+# the PKCS12 keystore password cert-manager writes. Optional, like the query-log
+# token: without an IdP neither the Secret nor the ConfigMap exists, the overlay is
+# never applied, and Trino keeps the anonymous development default.
+- name: TRINO_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: stardelt-oidc-clients
+      key: trino
+      optional: true
+- name: TRINO_INTERNAL_SHARED_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: trino-internal-secret
+      key: shared-secret
+      optional: true
+- name: TRINO_OIDC_ISSUER
+  valueFrom:
+    configMapKeyRef:
+      name: stardelt-identity
+      key: issuerUrl
+      optional: true
+# The Iceberg catalog's own client (Secret sp-catalog-trino, written by the
+# ServicePrincipal of the same name in identity mode `platform`).
+- name: CATALOG_CLIENT_ID
+  valueFrom:
+    secretKeyRef:
+      name: sp-catalog-trino
+      key: client-id
+      optional: true
+- name: CATALOG_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: sp-catalog-trino
+      key: client-secret
+      optional: true
+# The catalog's client-credentials token endpoint, from ConfigMap `stardelt-identity` key
+# `tokenEndpoint` (#611) — never built from the issuer, whose path is Keycloak's alone.
+- name: CATALOG_TOKEN_URL
+  valueFrom:
+    configMapKeyRef:
+      name: stardelt-identity
+      key: tokenEndpoint
+      optional: true
+- name: TRINO_TLS_KEYSTORE_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: trino-tls-keystore
+      key: password
+      optional: true
+# TODO(polaris): under `spec.catalog.implementation: polaris` this
+# URI is wrong; Polaris has no adapter yet, so the Lakekeeper URI
+# stays until one lands.
+# The `warehouse` Trino catalog, verbatim from
+# `stardelt-platform/chart/values.yaml` (`trino.catalogs.warehouse`).
+#
+# Trino substitutes ${ENV:S3_ACCESS_KEY} / ${ENV:S3_SECRET_KEY} from the
+# process environment, which the `env` block above feeds from the
+# `stardelt-s3-creds` Secret. That Secret and the `warehouse` Iceberg
+# warehouse are install-time prerequisites; the operator creates neither.
+catalogs:
+  warehouse: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://lakekeeper:8181/catalog
+    iceberg.rest-catalog.warehouse=warehouse
+    iceberg.rest-catalog.vended-credentials-enabled=false
+    fs.s3.enabled=true
+    s3.endpoint=http://seaweedfs-s3:8333
+    s3.region=us-east-1
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:S3_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:S3_SECRET_KEY}
+    # Single-replica SeaweedFS volume server can't sustain Trino's default
+    # parallel HTTP range requests (broken pipe / connection reset). Throttle
+    # both connection pool and the Iceberg metadata enumeration threads.
+    s3.max-connections=16
+    iceberg.split-manager-threads=4
+    iceberg.metadata.parallelism=2
+    # Worker-local file-system cache for object-store reads (platform#134).
+    # Trino 483+ (stardelt-platform#1002): the directories, size and TTL moved
+    # out of the catalog into the node-level cache manager
+    # (cache-manager-alluxio.properties, loaded through cache-manager.config-files
+    # in config.properties); a catalog only turns caching on. Measured on the dev
+    # cluster 2026-10-19 against a 38M-row / 0.66 GB full scan of
+    # nyc_taxi.yellow_trips: repeat scans drop from 154 S3 GETs + 660 MB to
+    # 1 GET + 0 MB, wall time 1.5-1.9s -> 1.2-1.7s. The win is S3 offload (the
+    # single-replica SeaweedFS volume server is the bottleneck the throttles
+    # above protect), not latency — Parquet decode dominates on one node.
+    # Best-effort local cache only: a pod restart or scale-to-zero (M-02)
+    # discards it with the emptyDir, and the next scan repopulates.
+    fs.cache.enabled=true
+# Query memory guards (stardelt-platform#54, operator#73): the per-node limit
+# plus the heap headroom must stay well below the JVM heap, so one oversized
+# join fails with EXCEEDED_LOCAL_MEMORY_LIMIT instead of OOM-killing the worker.
+# 800MB + 600MB headroom = 1400MB <= 2G heap. The `demo` profile restates the
+# slim numbers in `profile_values`.
+#
+# `coordinatorExtraConfig` is coordinator-only on purpose: the chart renders
+# `additionalConfigProperties` into the worker ConfigMap too, and a worker
+# rejects keys it does not bind. It is a string, so a CR that sets it replaces
+# both lines (Helm replaces strings, it does not merge them).
+server:
+  config:
+    query:
+      maxMemory: 800MB
+  coordinatorExtraConfig: |
+    query.max-execution-time=10m
+    query.max-run-time=15m
+# The `coordinator:` / `worker:` block of the Trino golden values (the platform BASE,
+# `stardelt-platform/helm-values/trino.yaml`). Both roles get the same block.
+#
+# The three lists (`additionalJVMConfig`, `additionalVolumes`, `additionalVolumeMounts`)
+# are replaced, not merged, by a profile or CR that sets them: an override must restate
+# the whole list. `-XX:HeapDumpPath` complements `+HeapDumpOnOutOfMemoryError`, which the
+# chart already enables; it sends the dump to the 2Gi `trino-dumps` emptyDir so a dump
+# never fills the node.
+#
+# Coordinator and workers get the same block: the file-system cache volume
+# (stardelt-platform#134; the node-level cache manager — additionalConfigFiles
+# below plus cache-manager.config-files in additionalConfigProperties — points at
+# /var/trino/cache, and without the mount the coordinator CrashLoops), a bounded
+# heap-dump volume, the 2G heap and the kubelet limits that hold it.
+coordinator:
+  jvm:
+    maxHeapSize: 2G
+  config:
+    query:
+      maxMemoryPerNode: 800MB
+    memory:
+      heapHeadroomPerNode: 600MB
+  additionalJVMConfig:
+  - -Xms1G
+  - -XX:HeapDumpPath=/dumps
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2300Mi
+    limits:
+      memory: 3000Mi
+  additionalVolumes:
+  - name: trino-fscache
+    emptyDir:
+      sizeLimit: 12Gi
+  - name: trino-dumps
+    emptyDir:
+      sizeLimit: 2Gi
+  additionalVolumeMounts:
+  - name: trino-fscache
+    mountPath: /var/trino/cache
+  - name: trino-dumps
+    mountPath: /dumps
+  # Trino 483+ (stardelt-platform#1002): every node loads this file through
+  # cache-manager.config-files; the directory is the mounted emptyDir above.
+  additionalConfigFiles:
+    cache-manager-alluxio.properties: |
+      cache-manager.name=alluxio
+      fs.cache.directories=/var/trino/cache
+      fs.cache.max-sizes=10GB
+      fs.cache.ttl=7d
+worker:
+  # Graceful shutdown (platform#131 step A1): a worker stops taking new splits and finishes
+  # the queries it is already running before it exits, so a scale-down or a rollout never
+  # kills one. The chart renders `shutdown.grace-period=120s` into the worker's config, adds
+  # the preStop hook that sends the shutdown request as `user: admin`, and merges the
+  # `write system information` permission for that user into the worker's file rules
+  # (`trino` chart 1.45.0, `trino.workerAccessControlRules`). The chart refuses a
+  # `terminationGracePeriodSeconds` below 2x the grace period.
+  # The twin of stardelt-platform helm-values/trino.yaml.
+  gracefulShutdown:
+    enabled: true
+    gracePeriodSeconds: 120
+    user: admin
+  terminationGracePeriodSeconds: 240
+  jvm:
+    maxHeapSize: 2G
+  config:
+    query:
+      maxMemoryPerNode: 800MB
+    memory:
+      heapHeadroomPerNode: 600MB
+  additionalJVMConfig:
+  - -Xms1G
+  - -XX:HeapDumpPath=/dumps
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2300Mi
+    limits:
+      memory: 3000Mi
+  additionalVolumes:
+  - name: trino-fscache
+    emptyDir:
+      sizeLimit: 12Gi
+  - name: trino-dumps
+    emptyDir:
+      sizeLimit: 2Gi
+  additionalVolumeMounts:
+  - name: trino-fscache
+    mountPath: /var/trino/cache
+  - name: trino-dumps
+    mountPath: /dumps
+  # Trino 483+ (stardelt-platform#1002): every node loads this file through
+  # cache-manager.config-files; the directory is the mounted emptyDir above.
+  additionalConfigFiles:
+    cache-manager-alluxio.properties: |
+      cache-manager.name=alluxio
+      fs.cache.directories=/var/trino/cache
+      fs.cache.max-sizes=10GB
+      fs.cache.ttl=7d
+
+# Query log feed (stardelt-nova#116, decision D25): Trino's HTTP event listener posts every
+# query-created and query-completed event to Nova's internal port, where the collector turns
+# them into rows of the user-facing query log. The token comes from Secret `nova-events`
+# through `NOVA_EVENTS_TOKEN`, so it never appears in a ConfigMap.
+eventListenerProperties:
+  - event-listener.name=http
+  - http-event-listener.log-created=true
+  - http-event-listener.log-completed=true
+  - http-event-listener.connect-ingest-uri=http://nova:8081/internal/trino-events
+  - http-event-listener.connect-http-headers=Authorization:Bearer ${ENV:NOVA_EVENTS_TOKEN},X-Stardelt-Warehouse:default
+  - http-event-listener.connect-retry-count=2
+
+# Pinned by digest (the operator-path twin of stardelt-platform#1587): the chart version pins the
+# chart, not the image, so without this key the chart's appVersion tag — `484`, a moving tag —
+# is what a PlatformInstance runs. The string is stardelt-platform/helm-values/trino.yaml:28.
+image:
+  tag: "484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f"

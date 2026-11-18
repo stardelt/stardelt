@@ -1,0 +1,279 @@
+# Apache Superset — BI / dashboards.
+# Chart: superset/superset 0.15.5, appVersion 5.0.0.
+#
+# Curated by the operator for the dashboards pillar: the local administrator stays as
+# break-glass; people sign in through the platform IdP (O7b). Group roles come from
+# `src/superset.rs` (O7b, part 2). The pod reads credentials from Secrets via extraEnvRaw.
+
+image:
+  repository: ghcr.io/stardelt/superset
+  tag: "dev@sha256:507c59ef3231d699d76d1bdcb5fdcecc4364a3107f074ab99208b458b52508e0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-creds
+
+# The pods and the chart's init Job run as the operator-created ServiceAccount (src/superset.rs
+# `SERVICE_ACCOUNT`), which may also list Catalogs for the group-roles CronJob. The chart
+# 0.15.5 does not create a ServiceAccount of its own.
+serviceAccountName: superset
+
+# Pod Security `restricted` (platform#1096 question 5, twin of platform#1183). The chart
+# defaults `runAsUser` to 0 and writes it into every pod template; the image's own user is
+# 1000 and /app/superset_home is writable for it (measured 2026-11-13). The pod and container
+# fields are under supersetNode, supersetWorker, init and redis below.
+runAsUser: 1000
+
+bootstrapScript: |
+  #!/bin/bash
+  if [ ! -f ~/bootstrap ]; then echo "Running Superset" > ~/bootstrap; fi
+
+configOverrides:
+  iframe_embedding: |
+    TALISMAN_ENABLED = False
+    import os
+    # Only Superset itself and Nova may frame Superset (Nova's Dashboards page).
+    _nova_origin = os.environ.get("STARDELT_PUBLIC_URL", "").rstrip("/")
+    HTTP_HEADERS = {"Content-Security-Policy": ("frame-ancestors 'self' " + _nova_origin).strip()}
+    # Secure when the platform is served over HTTPS (a local http:// install keeps working).
+    SESSION_COOKIE_SECURE = _nova_origin.startswith("https://")
+    SESSION_COOKIE_SAMESITE = "Lax"
+    ENABLE_PROXY_FIX = True
+
+
+
+extraEnvRaw:
+  - name: SUPERSET_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: superset-secret-key
+        key: secret-key
+  - name: SUPERSET_ADMIN_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: superset-admin
+        key: password
+  - name: TRINO_SUPERSET_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: trino-password-db
+        key: password
+        optional: true
+  - name: STARDELT_PUBLIC_URL
+    valueFrom:
+      configMapKeyRef:
+        name: stardelt-identity
+        key: publicUrl
+        optional: true
+  - name: STARDELT_OIDC_ISSUER
+    valueFrom:
+      configMapKeyRef:
+        name: stardelt-identity
+        key: issuerUrl
+        optional: true
+  - name: STARDELT_ADMIN_GROUP
+    valueFrom:
+      configMapKeyRef:
+        name: stardelt-identity
+        key: adminGroup
+        optional: true
+  - name: STARDELT_SUPERSET_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-oidc-clients
+        key: superset
+        optional: true
+
+extraConfigs:
+  import_datasources.yaml: |
+    databases:
+    - database_name: Trino Warehouse
+      sqlalchemy_uri: trino://superset@trino:8080/warehouse
+      allow_multi_catalog: true
+      impersonate_user: true
+    - database_name: Trino Shared
+      sqlalchemy_uri: trino://superset@trino:8080/shared
+      allow_multi_catalog: true
+      impersonate_user: true
+      extra: >-
+        {"allow_multi_catalog": true, "metadata_params": {}, "engine_params": {},
+         "metadata_cache_timeout": {}, "schemas_allowed_for_csv_upload": []}
+      tables: []
+
+init:
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+  initContainers:
+    - name: wait-for-postgres
+      image: apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
+      imagePullPolicy: IfNotPresent
+      envFrom:
+        - secretRef:
+            name: superset-env
+      command:
+        - /bin/sh
+        - -c
+        - dockerize -wait "tcp://$DB_HOST:$DB_PORT" -timeout 120s
+      resources:
+        limits: {memory: "256Mi"}
+        requests: {cpu: "250m", memory: "128Mi"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+  adminUser:
+    username: admin
+    firstname: stardelt
+    lastname: Admin
+    email: admin@stardelt.local
+  initscript: |
+    #!/bin/sh
+    set -eu
+    echo "Upgrading DB schema..."
+    superset db upgrade
+    echo "Initializing roles..."
+    superset init
+    {{ if .Values.init.createAdmin }}
+    echo "Creating admin user..."
+    superset fab create-admin \
+                    --username {{ .Values.init.adminUser.username }} \
+                    --firstname {{ .Values.init.adminUser.firstname }} \
+                    --lastname {{ .Values.init.adminUser.lastname }} \
+                    --email {{ .Values.init.adminUser.email }} \
+                    --password "$SUPERSET_ADMIN_PASSWORD" \
+                    || true
+    {{- end }}
+    {{ if .Values.init.loadExamples }}
+    echo "Loading examples..."
+    superset load_examples
+    {{- end }}
+    if [ -f "{{ .Values.extraConfigMountPath }}/import_datasources.yaml" ]; then
+      echo "Importing database connections.... "
+      superset import_datasources -p {{ .Values.extraConfigMountPath }}/import_datasources.yaml
+    fi
+    # The role the IdP mapping gives every member of stardelt-users ("Gamma", "stardelt-analyst");
+    # it must exist before the first sign-in. Needs the "Trino Shared" database that
+    # import_datasources.yaml above created. Idempotent: converges the exact permission set.
+    echo "Converging the analyst role..."
+    python "{{ .Values.extraConfigMountPath }}/superset-analyst-role.py"
+  loadExamples: false
+
+supersetNode:
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+  initContainers:
+    - name: wait-for-postgres
+      image: apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
+      imagePullPolicy: IfNotPresent
+      envFrom:
+        - secretRef:
+            name: superset-env
+      command:
+        - /bin/sh
+        - -c
+        - dockerize -wait "tcp://$DB_HOST:$DB_PORT" -timeout 120s
+      resources:
+        limits: {memory: "256Mi"}
+        requests: {cpu: "250m", memory: "128Mi"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+  replicas:
+    enabled: true
+    replicaCount: 1
+  resources:
+    requests: { cpu: "100m", memory: "512Mi" }
+    limits:   { cpu: "2",    memory: "1Gi"  }
+
+supersetWorker:
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+  initContainers:
+    - name: wait-for-postgres-redis
+      image: apache/superset:dockerize@sha256:afe59523a6c8774c3b16d0f44146b2e52f327a7d26a47b4cc63b904fcdedf057
+      imagePullPolicy: IfNotPresent
+      envFrom:
+        - secretRef:
+            name: superset-env
+      command:
+        - /bin/sh
+        - -c
+        - dockerize -wait "tcp://$DB_HOST:$DB_PORT" -wait "tcp://$REDIS_HOST:$REDIS_PORT" -timeout 120s
+      resources:
+        limits: {memory: "256Mi"}
+        requests: {cpu: "250m", memory: "128Mi"}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+  replicas:
+    enabled: true
+    replicaCount: 1
+  command:
+    - "/bin/sh"
+    - "-c"
+    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; celery --app=superset.tasks.celery_app:app worker --concurrency=2"
+  resources:
+    requests: { cpu: "100m", memory: "512Mi" }
+    limits:   { cpu: "2",    memory: "1Gi"  }
+
+supersetCeleryBeat:
+  enabled: false
+
+supersetWebsockets:
+  enabled: false
+
+postgresql:
+  enabled: true
+  # Pinned by digest (the twin of stardelt-platform#1594). stardelt-platform/helm-values/superset.yaml:549.
+  image:
+    tag: 14.17.0-debian-12-r3@sha256:769d9d755a41e845d00c8eda9bd2c0945ee9c437d64cc215db7a4bd05cd17f17
+  primary:
+    persistence:
+      size: 2Gi
+    resources:
+      requests: { cpu: "50m", memory: "256Mi" }
+      limits:   { cpu: "1",   memory: "512Mi" }
+
+redis:
+  enabled: true
+  # Pinned by digest (platform#1594). stardelt-platform/helm-values/superset.yaml:560.
+  image:
+    tag: 7.0.10-debian-11-r4@sha256:224a79826b42869bdc72a70933efd840c5a5f10a70caafca68e57be6901e36fb
+  master:
+    podSecurityContext:
+      fsGroup: 1001
+      runAsNonRoot: true
+      seccompProfile: {type: RuntimeDefault}
+    containerSecurityContext:
+      runAsUser: 1001
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+    persistence:
+      size: 1Gi
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits:   { cpu: "1",   memory: "256Mi" }
+  replica:
+    replicaCount: 0
+
+service:
+  type: ClusterIP
+  port: 8088

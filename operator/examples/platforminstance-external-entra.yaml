@@ -1,0 +1,34 @@
+# One platform instance against a customer's Microsoft Entra tenant
+# (identity.mode: external, decision D31). All ids are fake.
+#
+# The operator does not create anything in the provider (no app registrations, no Secrets):
+# it validates what is given here. The rollout checklist (operator#121) prints exactly what
+# to register per client. Client secrets stay in Secrets in the platform namespace; only the
+# Secret name and key appear in this resource.
+apiVersion: stardelt.io/v1alpha1
+kind: PlatformInstance
+metadata:
+  name: cluster
+spec:
+  profile: demo
+  namespace: stardelt
+  baseDomain: data.example.com
+  identity:
+    mode: external
+    provider: entra
+    issuerUrl: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0
+    # the provider's OAuth2 token endpoint: `token_endpoint` in
+    # <issuerUrl>/.well-known/openid-configuration. Required for `external`; components
+    # exchange client credentials here instead of building the realm path themselves.
+    tokenEndpoint: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/oauth2/v2.0/token
+    groupClaim: roles                # optional; `roles` is the entra default
+    adminGroup: stardelt.admin       # a group name, or an app-role value on Entra
+    apiAudience: 11111111-1111-4111-8111-111111111111  # the API app's client id on Entra
+    clients:                         # one entry per client this instance uses; nova is mandatory
+      nova:       { clientId: 22222222-2222-4222-8222-222222222222, clientSecretRef: { name: idp-nova } }
+      trino:      { clientId: 33333333-3333-4333-8333-333333333333, clientSecretRef: { name: idp-trino } }
+      lakekeeper: { clientId: 44444444-4444-4444-8444-444444444444 }  # public (PKCE), no secret
+      superset:   { clientId: 55555555-5555-4555-8555-555555555555, clientSecretRef: { name: idp-superset, key: client-secret } }
+      airflow:    { clientId: 66666666-6666-4666-8666-666666666666, clientSecretRef: { name: idp-airflow } }
+      jupyterhub: { clientId: 77777777-7777-4777-8777-777777777777, clientSecretRef: { name: idp-jupyterhub } }
+      # trino-group-sync is a service client; add it only when Trino reads groups from the provider.

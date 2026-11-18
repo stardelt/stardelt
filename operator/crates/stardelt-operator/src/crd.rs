@@ -1,0 +1,6191 @@
+//! stardelt CRDs — the plug specification.
+//!
+//! These types are the contract between a user's declarative intent and the
+//! upstream charts/operators the reconciler applies. See the master spec §5.
+
+use std::collections::BTreeMap;
+
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use kube::CustomResource;
+use kube::CustomResourceExt;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// Deployment size / capability profile.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    #[default]
+    Demo,
+    Full,
+    Airgap,
+}
+
+fn default_profile() -> Profile {
+    Profile::Demo
+}
+
+/// Which pillars a platform instance enables.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct Pillars {
+    #[serde(default = "yes")]
+    pub lakehouse: bool,
+    #[serde(default)]
+    pub batch: bool,
+    /// Multi-user notebooks (JupyterHub). Off by default: a notebook stack is
+    /// heavy, and a cluster that only serves queries should not carry it.
+    #[serde(default)]
+    pub notebooks: bool,
+    /// Scheduled pipelines and jobs (Airflow, run as `KubernetesExecutor`). Off by default: it
+    /// brings a metadata database and four long-running pods, and a cluster that only serves
+    /// queries does not need them. Nova's Pipelines page and `stardelt bundle run` need it.
+    #[serde(default)]
+    pub pipelines: bool,
+    /// BI dashboards (Superset). Off by default: it brings a metadata database, Redis and
+    /// three long-running pods. People sign in through the platform IdP, with the local
+    /// administrator kept as break-glass; each group sees the dashboards its catalog role allows.
+    #[serde(default)]
+    pub dashboards: bool,
+    #[serde(default)]
+    pub streaming: bool,
+    #[serde(default)]
+    pub ml: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Pillars {
+    fn default() -> Self {
+        Self {
+            lakehouse: true,
+            batch: false,
+            notebooks: false,
+            pipelines: false,
+            dashboards: false,
+            streaming: false,
+            ml: false,
+        }
+    }
+}
+
+/// A reference to one key of a ConfigMap or Secret.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ValuesKeyRef {
+    /// Name of the ConfigMap or Secret.
+    pub name: String,
+    /// Key holding the YAML values document.
+    pub key: String,
+    /// Namespace of the referenced object. Defaults to the resource's own
+    /// namespace; required for cluster-scoped resources (`PlatformInstance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+/// External source of one component's Helm values: set exactly one of
+/// `configMapRef` or `secretRef`.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct ValuesSource {
+    /// Read the values document from this ConfigMap key.
+    #[serde(
+        default,
+        rename = "configMapRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub config_map_ref: Option<ValuesKeyRef>,
+    /// Read the values document from this Secret key (decoded, then parsed as YAML).
+    #[serde(default, rename = "secretRef", skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<ValuesKeyRef>,
+}
+
+/// Per-component Helm value overrides, shared by the root CRDs.
+///
+/// Administrators configure each plug (chart values, sizing, storage class,
+/// ingress, image registry) here. The operator ships golden defaults per
+/// component — the curated settings that make the stack work — and these
+/// fields layer on top. Merge order per component, later wins:
+///
+/// 1. the operator's golden defaults,
+/// 2. `valuesFrom` (external YAML document),
+/// 3. `values` (free-form YAML inline in the CR),
+/// 4. `set` (passed to Helm as `--set`, which Helm always applies last).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct ComponentValues {
+    /// Free-form Helm values per component, e.g. `values.trino.worker.resources`.
+    /// Deep-merged over the golden defaults, so one key can be pinned without
+    /// restating the rest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(schema_with = "component_values_schema")]
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// `--set` overrides per component: `set.<component>.<helm.key>: "value"`.
+    /// Highest precedence — Helm applies `--set` after any values document.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, BTreeMap<String, String>>,
+    /// External values documents per component, read from a ConfigMap or Secret key.
+    #[serde(
+        default,
+        rename = "valuesFrom",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub values_from: BTreeMap<String, ValuesSource>,
+}
+
+/// CRD schema for `values.<component>`: free-form YAML kept verbatim by the API
+/// server (`x-kubernetes-preserve-unknown-fields`).
+///
+/// schemars 1.x represents a schema as raw JSON instead of the old typed tree
+/// (`SchemaObject`/`InstanceType`/`ObjectValidation` are gone), so this is written
+/// as the object it is: an object whose values are free-form objects.
+fn component_values_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": {
+            "type": "object",
+            "x-kubernetes-preserve-unknown-fields": true
+        }
+    })
+    .try_into()
+    .expect("the schema literal above is valid JSON Schema")
+}
+
+/// Where users sign in (decision D20). Two modes besides none: an identity provider the
+/// organization already runs (`external`, for example Entra or Okta), or one the platform runs
+/// itself (`platform`, Keycloak). An organization often runs the platform several times against
+/// one external provider; each instance then has its own app registrations and group mapping.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityMode {
+    /// No sign-in: every component keeps its development default. Only for an unreachable stack.
+    #[default]
+    None,
+    /// The platform installs and configures Keycloak (realm `stardelt`) at `id.<baseDomain>`.
+    Platform,
+    /// An existing OIDC provider; `issuerUrl` is required.
+    External,
+}
+
+fn default_admin_group() -> String {
+    "stardelt-admins".into()
+}
+
+/// Which kind of provider an `external` instance talks to; it changes claims, audiences and provider names.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityProvider {
+    /// Any OIDC provider.
+    #[default]
+    Oidc,
+    /// Microsoft Entra ID: roles as groups, `oid` as the user id, one API audience, v2 tokens.
+    Entra,
+}
+
+/// A Secret in the platform namespace and the key that holds a client's secret.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ClientSecretRef {
+    #[schemars(
+        length(min = 1, max = 253),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+    )]
+    pub name: String,
+    #[serde(default = "default_client_secret_key")]
+    #[schemars(length(min = 1, max = 253))]
+    pub key: String,
+}
+
+fn default_client_secret_key() -> String {
+    "client-secret".into()
+}
+
+/// One app registration made by the customer in their provider.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct IdentityClient {
+    #[serde(rename = "clientId")]
+    #[schemars(length(min = 1, max = 256), regex(pattern = r"^\S+$"))]
+    pub client_id: String,
+    /// Required for every client except the public `lakekeeper` one. Never the value itself.
+    #[serde(
+        default,
+        rename = "clientSecretRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_secret_ref: Option<ClientSecretRef>,
+}
+
+/// Identity settings of a platform instance; the operator publishes them to the components as
+/// the ConfigMap `stardelt-identity` (see [`crate::identity::contract`]).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && (!has(self.clients) || size(self.clients) == 0))",
+        "message": "platform mode creates its own clients: leave provider, apiAudience and clients out"
+    },
+    {
+        "rule": "self.mode != 'external' || has(self.issuerUrl)",
+        "message": "external mode needs issuerUrl"
+    },
+    {
+        "rule": "self.mode != 'external' || has(self.tokenEndpoint)",
+        "message": "external mode needs tokenEndpoint"
+    },
+    {
+        "rule": "self.mode != 'external' || has(self.apiAudience)",
+        "message": "external mode needs apiAudience"
+    },
+    {
+        "rule": "self.mode != 'external' || (has(self.clients) && 'nova' in self.clients)",
+        "message": "external mode needs a nova client"
+    },
+    {
+        "rule": "!has(self.clients) || self.clients.all(k, k in ['nova','trino','lakekeeper','superset','airflow','jupyterhub','trino-group-sync'])",
+        "message": "client names are nova, trino, lakekeeper, superset, airflow, jupyterhub and trino-group-sync"
+    },
+    {
+        "rule": "!has(self.clients) || self.clients.all(k, k == 'lakekeeper' || has(self.clients[k].clientSecretRef))",
+        "message": "every client except lakekeeper needs a clientSecretRef"
+    }
+]))]
+pub struct IdentitySpec {
+    #[serde(default)]
+    pub mode: IdentityMode,
+    /// OIDC issuer URL, `https://` only. Required for `external`; for `platform` it is derived
+    /// from `baseDomain` and must be left out.
+    #[serde(default, rename = "issuerUrl", skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+    /// `external` only: the provider's OAuth2 token endpoint — `token_endpoint` in
+    /// `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: neither the
+    /// operator (API-server proxy only) nor Helm can fetch an external discovery document.
+    /// A `platform` instance derives it from the Keycloak it deploys and must leave it out.
+    #[serde(
+        default,
+        rename = "tokenEndpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(min = 1, max = 512), regex(pattern = r"^https://\S+$"))]
+    pub token_endpoint: Option<String>,
+    /// `external` only: which kind of provider this instance talks to.
+    #[serde(default)]
+    pub provider: IdentityProvider,
+    /// `external` only: the audience the engine and the catalog accept.
+    #[serde(
+        default,
+        rename = "apiAudience",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(min = 1, max = 256), regex(pattern = r"^\S+$"))]
+    pub api_audience: Option<String>,
+    /// `external` only: the app registrations the customer made, one entry per client.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub clients: BTreeMap<String, IdentityClient>,
+    /// Name of the token claim that carries group (or role) names. Defaults to `roles` for
+    /// `entra` and `groups` otherwise.
+    #[serde(
+        default,
+        rename = "groupClaim",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub group_claim: Option<String>,
+    /// Members of this group are platform administrators.
+    #[serde(default = "default_admin_group", rename = "adminGroup")]
+    pub admin_group: String,
+}
+
+impl IdentitySpec {
+    /// The group claim to read: the configured one, else `roles` for Entra and `groups` otherwise.
+    pub fn effective_group_claim(&self) -> &str {
+        self.group_claim.as_deref().unwrap_or(match self.provider {
+            IdentityProvider::Entra => "roles",
+            IdentityProvider::Oidc => "groups",
+        })
+    }
+}
+
+impl Default for IdentitySpec {
+    fn default() -> Self {
+        Self {
+            mode: IdentityMode::None,
+            issuer_url: None,
+            token_endpoint: None,
+            provider: IdentityProvider::Oidc,
+            api_audience: None,
+            clients: BTreeMap::new(),
+            group_claim: None,
+            admin_group: default_admin_group(),
+        }
+    }
+}
+
+/// How the applications are reached from outside the cluster. Off by default: a cluster without an
+/// ingress controller installs as it is, and an administrator brings their own ingress or uses a
+/// port-forward. The Services stay `ClusterIP` either way.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "!has(self.tls) || !has(self.tls.enabled) || !self.tls.enabled || (has(self.tls.issuer) && size(self.tls.issuer) > 0)",
+        "message": "ingress.tls.enabled needs ingress.tls.issuer, the name of a cert-manager ClusterIssuer"
+    },
+    {
+        "rule": "size(self.allowedCidrs) <= 64",
+        "message": "ingress.allowedCidrs: at most 64 entries"
+    },
+    {
+        "rule": "self.allowedCidrs.all(c, c.matches('^[0-9a-fA-F:.]+/[0-9]{1,3}$'))",
+        "message": "ingress.allowedCidrs: each entry is a CIDR such as 203.0.113.0/24"
+    }
+]))]
+pub struct IngressSettings {
+    /// Create an Ingress for Nova (on `baseDomain` itself); the identity provider
+    /// on `id.` with `identity.mode: platform`; Airflow on `airflow.` with the `pipelines` pillar;
+    /// JupyterHub on `jupyter.` with `notebooks`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// IngressClass name, for example `nginx` or `traefik`. Absent: the cluster default.
+    #[serde(default, rename = "className", skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 253))]
+    pub class_name: Option<String>,
+    /// Source ranges that may open a connection to the public endpoints
+    /// (`stardelt-platform#427`). Empty = open to everyone. A non-empty list renders
+    /// `nginx.ingress.kubernetes.io/whitelist-source-range` on every Ingress this operator
+    /// applies (ingress-nginx; other controllers ignore it). Entries are CIDRs, at most 64.
+    /// Always include the cluster's own egress address: pods that call the public names
+    /// arrive through it.
+    ///
+    /// The bounds are not cosmetic: the API server's CEL cost estimator treats an
+    /// unbounded array under a `matches()` rule as unbounded, and refuses the whole
+    /// CRD ("estimated rule cost exceeds budget by factor of more than 100x",
+    /// operator#536). `maxItems`/`maxLength` are what make the rule affordable.
+    #[serde(default, rename = "allowedCidrs")]
+    #[schemars(length(max = 64), inner(length(min = 1, max = 64)))]
+    pub allowed_cidrs: Vec<String>,
+    /// TLS through cert-manager.
+    #[serde(default)]
+    pub tls: IngressTls,
+}
+
+/// TLS of the Ingress objects.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct IngressTls {
+    /// Requires cert-manager. Leave off when TLS ends elsewhere (a cloud load balancer, an edge proxy).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Name of a cert-manager ClusterIssuer; written as the `cert-manager.io/cluster-issuer`
+    /// annotation of every Ingress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 253))]
+    pub issuer: Option<String>,
+    /// Name of the Secret that holds the certificate; `{host}` becomes the host name with the
+    /// dots turned into dashes.
+    #[serde(
+        default = "default_secret_name_template",
+        rename = "secretNameTemplate"
+    )]
+    #[schemars(length(min = 1, max = 253))]
+    pub secret_name_template: String,
+}
+
+fn default_secret_name_template() -> String {
+    "{host}-tls".to_string()
+}
+
+impl Default for IngressTls {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            issuer: None,
+            secret_name_template: default_secret_name_template(),
+        }
+    }
+}
+
+/// Which secret store the platform uses for user credentials (decision D23).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretsMode {
+    /// Kubernetes Secrets by hand; a `Connection` references one. Nothing is installed.
+    #[default]
+    None,
+    /// The platform runs a store; External Secrets syncs from it.
+    Platform,
+    /// The enterprise's own store; External Secrets syncs from it. The store is the administrator's.
+    External,
+}
+
+/// An object whose keys are the schema: the only shape a CRD may use for an arbitrary JSON block.
+/// `serde_json::Value` alone renders without a `type`, and the API server refuses such a field
+/// ("must not be empty for specified object fields", operator#267).
+fn preserved_object(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    serde_json::json!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true,
+    })
+    .as_object()
+    .cloned()
+    .expect("an object literal")
+    .into()
+}
+
+/// The enterprise's own store, used only in `secrets.mode: external` (decision D23).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+pub struct ExternalSecretsSpec {
+    /// The `provider` block of the `ClusterSecretStore` (`vault`, `aws`, `azurekv`, …), passed to
+    /// External Secrets verbatim. Exactly one provider key; credentials are referenced by Secret
+    /// name inside the block, never inline.
+    #[schemars(schema_with = "preserved_object")]
+    pub provider: serde_json::Value,
+}
+
+/// `PlatformInstance.spec.secrets`: where the credentials of `Connection` objects come from.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct SecretsSpec {
+    #[serde(default)]
+    pub mode: SecretsMode,
+    /// The enterprise's store; required for `external`, refused for the other modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalSecretsSpec>,
+    /// Owner groups that get their own store entry in `secrets.mode: platform` (decision D27):
+    /// each one may read only its own path. Mirrors the platform's `STORE_GROUPS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "group_list_schema")]
+    pub groups: Vec<String>,
+}
+
+/// Schema of `spec.secrets.groups`: the array bounds are load-bearing.
+///
+/// The CEL rule below runs `matches()` over every entry. The API server prices that rule per
+/// element and per character, so an unbounded array of unbounded strings is rejected on apply
+/// ("estimated rule cost exceeds budget by factor of more than 100x", platform#548/#555). The
+/// same rule passes once `maxItems` and the item `maxLength` are present, which is why they are
+/// part of the schema rather than only of the message.
+fn group_list_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+    serde_json::json!({
+        "type": "array",
+        "maxItems": 20,
+        "items": { "type": "string", "maxLength": 40 }
+    })
+    .try_into()
+    .expect("the schema literal above is valid JSON Schema")
+}
+
+/// Cluster-scoped root resource: declares which pillars and profile are installed.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "PlatformInstance",
+    status = "PlatformInstanceStatus",
+    shortname = "platform",
+    doc = "A stardelt platform instance."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "!has(self.identity) || !has(self.identity.mode) || self.identity.mode != 'external' || (has(self.identity.issuerUrl) && self.identity.issuerUrl.startsWith('https://'))",
+        "message": "identity.mode external needs identity.issuerUrl, an https:// URL"
+    },
+    {
+        "rule": "!has(self.identity) || !has(self.identity.mode) || self.identity.mode != 'platform' || !has(self.identity.issuerUrl)",
+        "message": "identity.mode platform derives the issuer from baseDomain; leave identity.issuerUrl out"
+    },
+    {
+        "rule": "!has(self.identity) || !has(self.identity.mode) || self.identity.mode != 'platform' || !has(self.identity.tokenEndpoint)",
+        "message": "identity.mode platform derives the token endpoint from the issuer; leave identity.tokenEndpoint out"
+    },
+    {
+        "rule": "!has(self.identity) || !has(self.identity.mode) || self.identity.mode == 'none' || has(self.baseDomain)",
+        "message": "identity needs baseDomain (the application hosts and redirect addresses are built from it)"
+    },
+    {
+        "rule": "!has(self.ingress) || !has(self.ingress.enabled) || !self.ingress.enabled || has(self.baseDomain)",
+        "message": "ingress needs baseDomain (the hosts are built from it)"
+    },
+    {
+        "rule": "!has(self.secrets) || !has(self.secrets.mode) || self.secrets.mode != 'external' || (has(self.secrets.external) && has(self.secrets.external.provider))",
+        "message": "secrets.mode external needs secrets.external.provider (the ClusterSecretStore provider block)"
+    },
+    {
+        "rule": "!has(self.secrets) || !has(self.secrets.external) || (has(self.secrets.mode) && self.secrets.mode == 'external')",
+        "message": "secrets.external is only allowed with secrets.mode external"
+    },
+    {
+        "rule": "!has(self.secrets) || !has(self.secrets.groups) || self.secrets.groups.all(g, g.matches('^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$'))",
+        "message": "secrets.groups entries are lower-case letters, digits and dashes (at most 40 characters)"
+    },
+    {
+        "rule": "!has(self.secrets) || !has(self.secrets.groups) || size(self.secrets.groups) == 0 || (has(self.secrets.mode) && self.secrets.mode == 'platform')",
+        "message": "secrets.groups is only allowed with secrets.mode platform"
+    },
+    {
+        "rule": "!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || has(self.baseDomain) || (has(self.mcp.audience) && self.mcp.audience.size() > 0)",
+        "message": "mcp.enabled needs baseDomain (the default audience is https://<baseDomain>/mcp) or an explicit mcp.audience"
+    },
+    {
+        "rule": "!has(self.mcp) || !has(self.mcp.maxRows) || (self.mcp.maxRows >= 1 && self.mcp.maxRows <= 1000)",
+        "message": "mcp.maxRows is from 1 to 1000"
+    },
+    {
+        "rule": "!has(self.mcp) || !has(self.mcp.queryTimeoutSeconds) || (self.mcp.queryTimeoutSeconds >= 1 && self.mcp.queryTimeoutSeconds <= 300)",
+        "message": "mcp.queryTimeoutSeconds is from 1 to 300"
+    },
+    {
+        "rule": "!has(self.mcp) || !has(self.mcp.callsPerMinute) || (self.mcp.callsPerMinute >= 1 && self.mcp.callsPerMinute <= 600)",
+        "message": "mcp.callsPerMinute is from 1 to 600"
+    },
+    {
+        "rule": "!has(self.mcp) || !has(self.mcp.writesPerHour) || (self.mcp.writesPerHour >= 1 && self.mcp.writesPerHour <= 600)",
+        "message": "mcp.writesPerHour is from 1 to 600"
+    },
+    {
+        "rule": "!has(self.mcp) || !has(self.mcp.auditRetentionDays) || (self.mcp.auditRetentionDays >= 0 && self.mcp.auditRetentionDays <= 3650)",
+        "message": "mcp.auditRetentionDays is from 0 to 3650 (0 keeps the rows)"
+    }
+]))]
+pub struct PlatformInstanceSpec {
+    #[serde(default = "default_profile")]
+    pub profile: Profile,
+    #[serde(default)]
+    pub pillars: Pillars,
+    /// Plan only (no cluster changes) until explicitly disabled. Safe default.
+    #[serde(default = "default_true", rename = "dryRun")]
+    pub dry_run: bool,
+    /// Freeze this resource: no cluster changes, status phase `Paused` (operator#64).
+    #[serde(default, rename = "clusterOperation")]
+    pub cluster_operation: ClusterOperation,
+    /// Per-component Helm value overrides for the platform's own components
+    /// (today: `cnpg`).
+    #[serde(flatten)]
+    pub component_values: ComponentValues,
+    /// Namespace the platform's own components are installed into.
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    /// Public DNS name the platform is served under, for example `data.example.com`: Nova answers
+    /// on the name itself and every other application on a subdomain (`id`, `trino`, `superset`...).
+    #[serde(
+        default,
+        rename = "baseDomain",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        length(min = 3, max = 253),
+        regex(pattern = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+    )]
+    pub base_domain: Option<String>,
+    /// How users sign in; see [`IdentitySpec`].
+    #[serde(default)]
+    pub identity: IdentitySpec,
+    /// Where the credentials of `Connection` objects come from; see [`SecretsSpec`].
+    #[serde(default)]
+    pub secrets: SecretsSpec,
+    /// How the applications are reached from outside the cluster; see [`IngressSettings`].
+    #[serde(default)]
+    pub ingress: IngressSettings,
+    /// The customer's Prometheus: the scrape objects, or a condition that says why not.
+    #[serde(default)]
+    pub monitoring: MonitoringSpec,
+    /// The hosted MCP endpoint on Nova: whether it answers, the audience its tokens carry, the
+    /// row cap and timeout of `sql_read`, and the client ids allowed to call it. Off by default.
+    #[serde(default)]
+    pub mcp: McpSpec,
+}
+
+/// The customer's Prometheus (operator#607, decision of 2026-11-12T20:27Z).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct MonitoringSpec {
+    /// Render a ServiceMonitor for every component that exposes Prometheus metrics.
+    /// Needs the monitoring.coreos.com/v1 CRDs; without them the operator renders
+    /// nothing and reports MonitoringCRDsMissing.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Labels added to every rendered object, so the customer's Prometheus selects them
+    /// (for example `release: kube-prometheus-stack`).
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
+/// The hosted MCP endpoint: `POST /mcp` on Nova, validated against `NOVA_MCP_AUDIENCE`.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct McpSpec {
+    /// Render `NOVA_MCP_ENABLED`/`NOVA_MCP_AUDIENCE` into Nova. Off by default.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The resource identifier tokens must carry. Empty = `https://<baseDomain>/mcp`, the
+    /// value the realm client `stardelt-mcp`'s `aud-mcp` mapper mints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// Rows one `sql_read` call may return; 1–1000. Empty = Nova's own default (200).
+    #[serde(default, rename = "maxRows", skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<u32>,
+    /// Seconds one `sql_read` call may run before it is cancelled; 1–300. Empty = Nova's own default (60).
+    #[serde(
+        default,
+        rename = "queryTimeoutSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub query_timeout_seconds: Option<u32>,
+    /// Client ids (`azp`) allowed to call `/mcp`, comma separated in the Deployment.
+    /// Empty = every client the audience accepts. Nova refuses a token without an `azp`
+    /// while this list is set.
+    #[serde(
+        default,
+        rename = "allowedClients",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_clients: Option<Vec<String>>,
+    /// Groups (`groups` claim) whose members may call `/mcp`, comma separated in the
+    /// Deployment. Empty = every group the audience accepts. Nova refuses a caller whose
+    /// token names none of them while this list is set.
+    #[serde(
+        default,
+        rename = "allowedGroups",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_groups: Option<Vec<String>>,
+    /// `tools/call`s one person may make per minute on `/mcp`; 1–600. Empty = Nova's own default (60).
+    #[serde(
+        default,
+        rename = "callsPerMinute",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub calls_per_minute: Option<u32>,
+    /// `tools/call`s of a write tool one person may make per hour on `/mcp`
+    /// (`NOVA_MCP_WRITES_PER_HOUR`); 1–600. Empty = Nova's own default (20).
+    #[serde(
+        default,
+        rename = "writesPerHour",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub writes_per_hour: Option<u32>,
+    /// Days the `mcp_call` audit rows are kept (`NOVA_MCP_AUDIT_RETENTION_DAYS`); 0–3650.
+    /// Empty = Nova's own default (30); `0` keeps the rows and switches the purge off.
+    #[serde(
+        default,
+        rename = "auditRetentionDays",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audit_retention_days: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct PlatformInstanceStatus {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+    #[serde(default)]
+    pub components: Vec<ComponentStatus>,
+}
+
+/// Catalog implementation (the plug behind the Iceberg REST contract).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogImpl {
+    #[default]
+    Lakekeeper,
+    Polaris,
+}
+
+/// Object-store implementation.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub enum StorageImpl {
+    #[default]
+    #[serde(rename = "seaweedfs")]
+    Seaweedfs,
+    #[serde(rename = "byoS3")]
+    ByoS3,
+}
+
+/// What happens to the Lakehouse's data when the resource is deleted (decision D18).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "PascalCase")]
+pub enum DeletionPolicy {
+    /// Uninstall the releases; the catalog database, its PVC and the object store survive.
+    #[default]
+    Retain,
+    /// Uninstall the releases and delete the data (catalog PVC, object store PVCs).
+    Delete,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct CatalogSpec {
+    #[serde(default)]
+    pub implementation: CatalogImpl,
+}
+
+impl Default for CatalogSpec {
+    fn default() -> Self {
+        Self {
+            implementation: CatalogImpl::Lakekeeper,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct StorageSpec {
+    #[serde(default)]
+    pub implementation: StorageImpl,
+    #[serde(default)]
+    pub bucket: Option<String>,
+}
+
+impl Default for StorageSpec {
+    fn default() -> Self {
+        Self {
+            implementation: StorageImpl::Seaweedfs,
+            bucket: None,
+        }
+    }
+}
+
+/// `Lakehouse.spec.compute`: compute endpoints the Lakehouse installs next to the catalog.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+pub struct ComputeSpec {
+    #[serde(default)]
+    pub spark: SparkCompute,
+}
+
+/// The Spark Connect endpoint (operator#239's builders): opt-in, because it is a second
+/// driver on the namespace and reads the Lakehouse's own S3 Secret.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+pub struct SparkCompute {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// The operator's switches for one resource (design: operator#64).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct ClusterOperation {
+    /// Stop reconciling: the operator writes `Paused` and applies nothing.
+    #[serde(default, rename = "reconciliationPaused")]
+    pub reconciliation_paused: bool,
+    /// Stop the workloads: scale every rendered Deployment and StatefulSet to zero, hibernate the
+    /// namespace's CNPG databases, and report `Stopped`. Data, PVCs and Secrets stay.
+    #[serde(default)]
+    pub stopped: bool,
+}
+
+/// A managed lakehouse: catalog + storage (+ query) on object storage.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "Lakehouse",
+    namespaced,
+    status = "LakehouseStatus",
+    shortname = "lh",
+    doc = "A managed Trino + catalog + Iceberg unit on object storage."
+)]
+pub struct LakehouseSpec {
+    #[serde(default)]
+    pub catalog: CatalogSpec,
+    #[serde(default)]
+    pub storage: StorageSpec,
+    #[serde(default = "default_profile")]
+    pub profile: Profile,
+    /// Plan only (no cluster changes) until explicitly disabled.  Safe default.
+    #[serde(default = "default_true", rename = "dryRun")]
+    pub dry_run: bool,
+    /// Take over Helm releases this operator did not create. Off by default so a
+    /// Lakehouse can never silently clobber an existing install.
+    #[serde(default)]
+    pub adopt: bool,
+    /// Freeze this resource: no cluster changes, status phase `Paused`.
+    #[serde(default, rename = "clusterOperation")]
+    pub cluster_operation: ClusterOperation,
+    /// What happens to the data when this resource is deleted (decision D18). Defaults to Retain.
+    #[serde(default, rename = "deletionPolicy")]
+    pub deletion_policy: DeletionPolicy,
+    /// Compute endpoints installed with the Lakehouse (default: none).
+    #[serde(default)]
+    pub compute: ComputeSpec,
+    /// Per-component Helm value overrides for the planned components
+    /// (`seaweedfs`, `lakekeeper` / `polaris`, `trino`).
+    #[serde(flatten)]
+    pub component_values: ComponentValues,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_namespace() -> String {
+    "stardelt".into()
+}
+
+fn default_min_workers() -> i32 {
+    1
+}
+
+fn default_max_workers() -> i32 {
+    1
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct LakehouseStatus {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+    #[serde(default)]
+    pub components: Vec<ComponentStatus>,
+}
+
+/// Ingestion domain — the deliberate three-way split of the ingestion contract
+/// (master spec §5, plugs 8–10). One contract, three defaults.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IngestionDomain {
+    /// SaaS connectors — default implementation Apache SeaTunnel.
+    #[default]
+    Saas,
+    /// Enterprise / edge integration — default implementation Apache NiFi.
+    Enterprise,
+    /// Change data capture — default implementation Debezium (+ Kafka).
+    Cdc,
+}
+
+/// An ingestion source: one contract, three domain defaults.
+///
+/// The source itself is deliberately opaque to the operator. `source` carries the
+/// connector's own key/value parameters (host, port, database, topics, tables, …)
+/// and is read by the plug (SeaTunnel / NiFi / Debezium), not by the reconciler —
+/// that keeps the CRD stable while connectors evolve.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "IngestionSource",
+    namespaced,
+    status = "IngestionSourceStatus",
+    shortname = "ingest",
+    doc = "An ingestion source: one contract with three domain defaults (saas, enterprise, cdc)."
+)]
+pub struct IngestionSourceSpec {
+    #[serde(default)]
+    pub domain: IngestionDomain,
+    /// Destination table, e.g. `warehouse.raw.events`. Ingestion lands in Iceberg
+    /// through the REST catalog — never in a side channel.
+    pub target: String,
+    /// Optional cron schedule; when unset the source follows its domain default
+    /// (continuous for cdc, otherwise the connector's own cadence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// Connector-specific parameters, passed through to the plug verbatim.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source: BTreeMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct IngestionSourceStatus {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// What a pipeline task does — the task contract behind `Pipeline`
+/// (master spec §5, plugs 6, 7 and 12). `sql` and `notebook` run today
+/// (scheduled jobs phases J0 and J1); `python`, `dbt` and `quality` are
+/// accepted so manifests can be written ahead of their runtimes.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    /// SQL statement, run through the query engine as the run-as principal.
+    Sql,
+    /// Published Jupyter notebook, run with papermill as the run-as principal.
+    /// The source is pinned by the object version in `config.objectVersion`.
+    Notebook,
+    /// Python transform. Accepted; no runtime yet.
+    Python,
+    /// dbt-core model run. Accepted; no runtime yet.
+    Dbt,
+    /// Data-quality gate (Soda + dbt tests). Accepted; no runtime yet.
+    Quality,
+}
+
+/// How a pipeline's writes reach the tables people read (WAP, nova#628).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelinePublish {
+    /// Write straight to `main` (the behaviour of every pipeline today).
+    #[default]
+    Direct,
+    /// Write to an `audit_<run>` branch, run the quality checks, then move `main` (nova#628).
+    Wap,
+}
+
+/// One SQL assertion of a `quality` task: the check passes when the query returns no rows.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityCheck {
+    /// Unique within the task; the run page names the check by it.
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    )]
+    pub name: String,
+    /// The assertion; it passes when it returns zero rows. `${table}` is the branch-qualified
+    /// table during the audit (nova#628 decision 2).
+    #[schemars(length(min = 1, max = 20000))]
+    pub sql: String,
+    /// `error` fails the run; `warn` records the rows and lets the run publish.
+    #[serde(default)]
+    pub severity: QualitySeverity,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QualitySeverity {
+    #[default]
+    Error,
+    Warn,
+}
+
+/// Schema for a task's `config` map. The bounds are not cosmetic: Kubernetes'
+/// CEL cost estimator refuses unbounded maps and strings used by the `notebook`
+/// rules at admission. 32 keys covers every kind's parameters, and 4096
+/// characters is the `notebook` params limit the ticket sets.
+fn task_config_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+    serde_json::json!({
+        "type": "object",
+        "maxProperties": 32,
+        "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096
+        }
+    })
+    .try_into()
+    .expect("the schema literal above is valid JSON Schema")
+}
+
+/// One task of a `Pipeline`. A task starts when every task in `dependsOn` has succeeded.
+///
+/// A `notebook` task names its source in `config`: `notebook` is the `.ipynb`
+/// file name and `objectVersion` the immutable published version; `params` is a
+/// JSON object string that papermill passes to the notebook. Nothing else is
+/// accepted, so a typo cannot silently become a default.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": r"self.kind != 'notebook' || (has(self.config) && 'notebook' in self.config && self.config['notebook'].matches('^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$') && 'objectVersion' in self.config && self.config['objectVersion'].matches('^\\S{1,128}$'))",
+        "message": "a notebook task needs config.notebook (a .ipynb file name) and config.objectVersion (the published version)"
+    },
+    {
+        "rule": r"self.kind != 'notebook' || !has(self.config) || self.config.all(k, k in ['notebook', 'objectVersion', 'params'])",
+        "message": "notebook tasks accept only notebook, objectVersion and params"
+    },
+    {
+        "rule": r"self.kind != 'notebook' || !has(self.config) || !('params' in self.config) || self.config['params'].size() <= 4096",
+        "message": "notebook params must be a JSON object string of at most 4096 characters"
+    },
+    {
+        "rule": r"self.kind != 'sql' || !has(self.connection)",
+        "message": "a sql task cannot name a connection: it runs inside the engine"
+    },
+    {
+        "rule": "!has(self.writes) || self.kind == 'sql'",
+        "message": "only a sql task declares writes"
+    },
+    {
+        "rule": "self.kind != 'sql' || !has(self.writes) || self.writes.all(w, w.matches('^[^ .]+[.][^ .]+[.][^ .]+$'))",
+        "message": "writes must be catalog.schema.table"
+    },
+    {
+        "rule": "!has(self.checks) || self.kind == 'quality'",
+        "message": "only a quality task declares checks"
+    }
+]))]
+pub struct PipelineTask {
+    /// Unique within the pipeline; becomes the task id in the engine.
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    )]
+    pub name: String,
+    pub kind: TaskKind,
+    /// Names of the tasks that must succeed first.
+    #[serde(default, rename = "dependsOn", skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 8))]
+    pub depends_on: Vec<String>,
+    /// The statement of a `sql` task. `${run.date}`, `${run.id}` and
+    /// `${params.<name>}` are expanded when the task runs, not in the resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 100000))]
+    pub sql: Option<String>,
+    /// Warehouse that runs a `sql` task; absent means the default warehouse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    /// The `Connection` whose secret fields this task receives as `CONN_<NAME>_<KEY>`: the name
+    /// upper-cased with `-` written as `_`. The credentials reach the pod through `secretKeyRef`s
+    /// and are never part of the resource, the DAG or a log. A `sql` task runs inside the engine
+    /// and cannot name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 1, max = 40),
+        regex(pattern = r"^[a-z]([a-z0-9-]*[a-z0-9])?$")
+    )]
+    pub connection: Option<String>,
+    /// Task-specific parameters of the other kinds (model path, gate threshold, …).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(schema_with = "task_config_schema")]
+    pub config: BTreeMap<String, String>,
+    /// The tables a `sql` task writes, as `catalog.schema.table`. Only these get an audit
+    /// branch when `spec.publish: wap`; a read leaves them alone (nova#628 decision 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16), inner(length(min = 1, max = 512)))]
+    pub writes: Vec<String>,
+    /// A `quality` task's assertions; empty on every other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 50))]
+    pub checks: Vec<QualityCheck>,
+}
+
+/// Engine that orchestrates (and for `spark`, executes) the pipeline.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineEngine {
+    /// Default implementation Apache Airflow 3.
+    #[default]
+    Airflow,
+    /// Apache Spark (Spark Connect) for heavy compute.
+    Spark,
+}
+
+/// When a pipeline runs by itself.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct PipelineSchedule {
+    /// Five-field cron expression, for example `0 3 * * *`.
+    #[schemars(length(min = 9, max = 100))]
+    pub cron: String,
+    /// IANA time zone name, for example `Europe/Berlin`. Absent means UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+/// Who is told when a run of this pipeline ends. Each list holds at most five destination
+/// names owned by the pipeline's `ownerGroup`; Nova refuses a name the group does not own
+/// (`stardelt-nova#815`). The operator only carries them — it sends nothing.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNotify {
+    /// Destinations told when the run fails, after the last retry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 5), inner(length(min = 1, max = 64)))]
+    pub on_failure: Vec<String>,
+    /// Destinations told when the run succeeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 5), inner(length(min = 1, max = 64)))]
+    pub on_success: Vec<String>,
+    /// Destinations told on the first success after a failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 5), inner(length(min = 1, max = 64)))]
+    pub on_recovered: Vec<String>,
+}
+
+/// Retry policy applied to every task.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct PipelineRetries {
+    /// Extra attempts after the first failure.
+    #[schemars(range(min = 0, max = 10))]
+    pub attempts: i32,
+    /// Wait between attempts, for example `5m`. Absent means one minute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff: Option<String>,
+}
+
+/// What happens when a run is due while the previous one is still running.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub enum PipelineConcurrency {
+    /// Start the new run next to the old one.
+    Allow,
+    /// Skip the new run.
+    #[default]
+    Forbid,
+    /// Stop the old run and start the new one.
+    Replace,
+}
+
+/// A pipeline: tasks with dependencies, an optional schedule, run by one engine.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "Pipeline",
+    namespaced,
+    status = "PipelineStatus",
+    shortname = "pipe",
+    doc = "A pipeline: tasks with dependencies and an optional schedule, run on one engine."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.tasks.all(t, self.tasks.exists_one(u, u.name == t.name))",
+        "message": "task names must be unique"
+    },
+    {
+        "rule": "self.tasks.all(t, !has(t.dependsOn) || t.dependsOn.all(d, d != t.name && self.tasks.exists(u, u.name == d)))",
+        "message": "dependsOn must name other tasks of this pipeline"
+    },
+    {
+        "rule": "self.tasks.all(t, t.kind != 'sql' || has(t.sql))",
+        "message": "a sql task needs a sql statement"
+    },
+    {
+        "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.exists(t, t.kind == 'quality' && has(t.checks) && size(t.checks) > 0)",
+        "message": "publish: wap needs a quality task with at least one check"
+    },
+    {
+        "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.exists(t, has(t.writes) && size(t.writes) > 0)",
+        "message": "publish: wap needs a task that writes at least one table"
+    },
+    {
+        "rule": "!has(self.notify) || has(self.ownerGroup)",
+        "message": "notify needs an ownerGroup: only a pipeline's owner group can name destinations"
+    }
+]))]
+pub struct PipelineSpec {
+    /// Tasks of the pipeline; at least one, at most 30.
+    #[schemars(length(min = 1, max = 30))]
+    pub tasks: Vec<PipelineTask>,
+    /// Optional schedule; a pipeline without one runs on demand only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<PipelineSchedule>,
+    /// The group that owns the pipeline: its members see it, run it and pause it in Nova. Optional so
+    /// that existing pipelines keep working; a pipeline without an owner is visible to administrators only.
+    #[serde(
+        default,
+        rename = "ownerGroup",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub owner_group: Option<String>,
+    /// Service principal the tasks run as. Absent means the platform's default pipeline principal.
+    /// By convention the principal of the owner group, named `pipeline-<ownerGroup>`; Nova's Schedule
+    /// writes that name.
+    #[serde(default, rename = "runAs", skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
+    /// Groups that may READ the pipeline in Nova — list it, open it, see its runs — and
+    /// nothing else. Running, pausing, resuming and deleting stay with `ownerGroup`.
+    /// Absent means the owner group only, which is what every pipeline had before this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        length(max = 16),
+        inner(
+            length(min = 1, max = 64),
+            regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+        )
+    )]
+    pub viewers: Vec<String>,
+    /// Values for `${params.<name>}` in task statements.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<PipelineRetries>,
+    /// Longest a whole run may take, for example `2h`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    #[serde(default)]
+    pub concurrency: PipelineConcurrency,
+    #[serde(default)]
+    pub engine: PipelineEngine,
+    /// `direct` (default) or `wap`; `wap` needs a `quality` task with at least one check
+    /// (nova#628 decision 1).
+    #[serde(default)]
+    pub publish: PipelinePublish,
+    /// Who to tell when a run ends; names of destinations owned by `ownerGroup`. Optional:
+    /// a pipeline without it notifies nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<PipelineNotify>,
+}
+
+/// The `config` keys a `notebook` task accepts. The CEL rule spells the same list.
+const NOTEBOOK_CONFIG_KEYS: [&str; 3] = ["notebook", "objectVersion", "params"];
+
+/// Most parameters one notebook task may pass to papermill.
+const MAX_NOTEBOOK_PARAMS: usize = 32;
+
+/// A notebook file name: 1 to 128 characters from `[A-Za-z0-9._ -]`, starting
+/// with a letter or digit and ending in `.ipynb`. The task's CEL rule spells the
+/// same regular expression for admission.
+fn notebook_file_ok(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".ipynb") else {
+        return false;
+    };
+    let bytes = stem.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b' ' | b'-'))
+}
+
+/// A published object version: 1 to 128 characters, none of them whitespace.
+fn object_version_ok(version: &str) -> bool {
+    let count = version.chars().count();
+    (1..=128).contains(&count) && !version.chars().any(char::is_whitespace)
+}
+
+/// The `notebook` rules of [`PipelineSpec::validate`], with the same sentences as
+/// the CEL messages (spike #268: a notebook is pinned by an immutable object
+/// version, never by a branch or tag).
+fn validate_notebook_task(task: &PipelineTask) -> Result<(), String> {
+    let needs = "a notebook task needs config.notebook (a .ipynb file name) and config.objectVersion (the published version)";
+    let file_ok = task
+        .config
+        .get("notebook")
+        .is_some_and(|name| notebook_file_ok(name));
+    let version_ok = task
+        .config
+        .get("objectVersion")
+        .is_some_and(|version| object_version_ok(version));
+    if !file_ok || !version_ok {
+        return Err(needs.to_string());
+    }
+    if let Some(key) = task
+        .config
+        .keys()
+        .find(|key| !NOTEBOOK_CONFIG_KEYS.contains(&key.as_str()))
+    {
+        return Err(format!(
+            "notebook tasks accept only notebook, objectVersion and params (found `{key}`)"
+        ));
+    }
+    if let Some(params) = task.config.get("params") {
+        let invalid =
+            "notebook params must be a JSON object string of string values, at most 32 keys";
+        let parsed: BTreeMap<String, String> =
+            serde_json::from_str(params).map_err(|_| invalid.to_string())?;
+        if parsed.len() > MAX_NOTEBOOK_PARAMS {
+            return Err(invalid.to_string());
+        }
+    }
+    Ok(())
+}
+
+impl PipelineSpec {
+    /// The rules the schema's CEL validations also enforce, plus the one they cannot
+    /// express (no dependency cycles), in one place for the controller and the tests.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(group) = &self.owner_group
+            && !group_name_ok(group)
+        {
+            return Err("ownerGroup must be a valid group name".to_string());
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for task in &self.tasks {
+            if !names.insert(task.name.as_str()) {
+                return Err(format!("task name `{}` is used twice", task.name));
+            }
+            if task.kind == TaskKind::Sql && task.sql.is_none() {
+                return Err(format!("sql task `{}` needs a sql statement", task.name));
+            }
+            if task.kind == TaskKind::Notebook {
+                validate_notebook_task(task)?;
+            }
+            if let Some(connection) = &task.connection {
+                if !connection_name_ok(connection) {
+                    return Err(format!(
+                        "task `{}` names `{connection}`, which is not a connection name (1 to 40 lower-case letters, digits and dashes, starting with a letter)",
+                        task.name
+                    ));
+                }
+                if task.kind == TaskKind::Sql {
+                    return Err(format!(
+                        "task `{}` is a sql task: a connection is used by a task that runs in a pod (notebook, python or dbt)",
+                        task.name
+                    ));
+                }
+            }
+            if !task.writes.is_empty() && task.kind != TaskKind::Sql {
+                return Err(format!(
+                    "task `{}` is not a sql task: only a sql task declares writes",
+                    task.name
+                ));
+            }
+            for table in &task.writes {
+                let parts: Vec<&str> = table.split('.').collect();
+                if parts.len() != 3
+                    || parts
+                        .iter()
+                        .any(|p| p.is_empty() || p.contains(char::is_whitespace))
+                {
+                    return Err(format!(
+                        "task `{}` writes `{table}`, which is not catalog.schema.table",
+                        task.name
+                    ));
+                }
+            }
+            if !task.checks.is_empty() && task.kind != TaskKind::Quality {
+                return Err(format!(
+                    "task `{}` is not a quality task: only a quality task declares checks",
+                    task.name
+                ));
+            }
+        }
+        for task in &self.tasks {
+            for dep in &task.depends_on {
+                if dep == &task.name || !names.contains(dep.as_str()) {
+                    return Err(format!(
+                        "task `{}` depends on `{dep}`, which is not another task of this pipeline",
+                        task.name
+                    ));
+                }
+            }
+        }
+        if self.publish == PipelinePublish::Wap
+            && !self
+                .tasks
+                .iter()
+                .any(|t| t.kind == TaskKind::Quality && !t.checks.is_empty())
+        {
+            return Err("publish: wap needs a quality task with at least one check".to_string());
+        }
+        if self.publish == PipelinePublish::Wap && !self.tasks.iter().any(|t| !t.writes.is_empty())
+        {
+            return Err("publish: wap needs a task that writes at least one table".to_string());
+        }
+        if let Some(notify) = &self.notify {
+            if self.owner_group.is_none() {
+                return Err(
+                    "notify needs an ownerGroup: only a pipeline's owner group can name destinations"
+                        .to_string(),
+                );
+            }
+            for (list, names) in [
+                ("onFailure", &notify.on_failure),
+                ("onSuccess", &notify.on_success),
+                ("onRecovered", &notify.on_recovered),
+            ] {
+                if names.len() > 5 {
+                    return Err(format!("notify.{list} names at most 5 destinations"));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for name in names {
+                    if name.trim().is_empty() || name.chars().count() > 64 {
+                        return Err(format!(
+                            "notify.{list} holds `{name}`, which is not a destination name (1 to 64 characters)"
+                        ));
+                    }
+                    if name != name.trim() {
+                        return Err(format!(
+                            "notify.{list} holds `{name}`, which has leading or trailing whitespace"
+                        ));
+                    }
+                    if !seen.insert(name.as_str()) {
+                        return Err(format!("notify.{list} names `{name}` twice"));
+                    }
+                }
+            }
+        }
+        // Kahn's algorithm: whatever cannot be ordered lies on or behind a cycle.
+        let mut waiting: std::collections::BTreeMap<&str, usize> = self
+            .tasks
+            .iter()
+            .map(|t| (t.name.as_str(), t.depends_on.len()))
+            .collect();
+        let mut ready: Vec<&str> = waiting
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let mut done = 0;
+        while let Some(name) = ready.pop() {
+            done += 1;
+            for task in self
+                .tasks
+                .iter()
+                .filter(|t| t.depends_on.iter().any(|d| d == name))
+            {
+                let n = waiting.get_mut(task.name.as_str()).expect("known task");
+                *n -= 1;
+                if *n == 0 {
+                    ready.push(task.name.as_str());
+                }
+            }
+        }
+        if done != self.tasks.len() {
+            return Err("the tasks depend on each other in a circle".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Last-known run of a pipeline. Intentionally minimal: the authoritative history
+/// belongs to the engine adapter (Airflow / Spark); this is the operator's view.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct PipelineRun {
+    pub id: String,
+    /// Free-form until the adapters land (`queued` | `running` | `succeeded` | `failed`).
+    pub state: String,
+    #[serde(default, rename = "startedAt", skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct PipelineStatus {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+    #[serde(default)]
+    pub runs: Vec<PipelineRun>,
+}
+
+/// Whose credential a connection holds and who may use it (decision D27,
+/// internal note `design/secrets-and-connections.md` §8). Personal connections have no
+/// resource: they live only in the secret store and never reach a pipeline.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionScope {
+    /// Managed and used by the members of `ownerGroup`; they may reveal the value in their own code.
+    #[default]
+    Group,
+    /// Written by administrators and readable by nobody. Only code the platform runs (a
+    /// connection test, a federated catalog, an ingestion template) uses it, for the groups
+    /// in `usableBy`.
+    Managed,
+}
+
+/// What a connection reaches. The type decides which settings and secret keys are required.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectionType {
+    Postgresql,
+    Mysql,
+    Sqlserver,
+    Oracle,
+    RestApi,
+    S3,
+    Kafka,
+    Sftp,
+    Generic,
+}
+
+/// Where the secret part of a connection lives.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ConnectionSecret {
+    /// Path in the secret store. Absent: derived from the scope, `connections/group/<ownerGroup>/<name>`
+    /// or `connections/managed/<name>`. Set it only when the platform reads the customer's own store
+    /// (`spec.secrets` mode `external`); in platform mode the controller refuses a value, because
+    /// a path chosen by the author could point at another group's secret.
+    #[serde(default, rename = "remoteRef", skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 1, max = 512),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_./-]*$")
+    )]
+    pub remote_ref: Option<String>,
+    /// Names of the secret fields, for example `user` and `password`. They become the keys of the
+    /// synced Kubernetes Secret and the environment variables `CONN_<NAME>_<KEY>`.
+    #[schemars(length(min = 1, max = 16), inner(length(min = 1, max = 63)))]
+    pub keys: Vec<String>,
+}
+
+/// A typed connection to a system outside the platform: non-secret settings here, the secret
+/// fields in the secret store (decision D23). No value of a secret is ever part of this resource.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "Connection",
+    namespaced,
+    status = "ConnectionStatus",
+    shortname = "conn",
+    doc = "A typed connection to an outside system: settings here, the credentials in the secret store."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.scope != 'group' || (has(self.ownerGroup) && !has(self.usableBy))",
+        "message": "a group connection needs ownerGroup and no usableBy"
+    },
+    {
+        "rule": "self.scope != 'managed' || (has(self.usableBy) && !has(self.ownerGroup))",
+        "message": "a managed connection needs usableBy and no ownerGroup"
+    },
+    {
+        "rule": "!has(self.usableBy) || self.usableBy.all(g, g.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'))",
+        "message": "usableBy must list group names (letters, digits, dot, underscore, dash)"
+    },
+    {
+        "rule": "!has(self.secret) || !has(self.secret.remoteRef) || (!self.secret.remoteRef.contains('..') && !self.secret.remoteRef.contains('//'))",
+        "message": "secret.remoteRef must not contain .. or //"
+    },
+    {
+        "rule": "!has(self.secret) || self.secret.keys.all(k, k.matches('^[A-Za-z][A-Za-z0-9_]{0,62}$') && self.secret.keys.exists_one(j, j == k))",
+        "message": "secret.keys must be unique names of letters, digits and underscore"
+    },
+    {
+        "rule": "!has(self.config) || self.config.all(k, k.matches('^[A-Za-z][A-Za-z0-9_.-]{0,62}$') && !k.lowerAscii().matches('(password|passwd|passphrase|secret|token|credential)'))",
+        "message": "config holds settings, not secrets: a name like password, secret or token belongs in secret.keys"
+    },
+    {
+        "rule": "!(self.type in ['postgresql', 'mysql', 'sqlserver', 'oracle']) || (has(self.config) && 'host' in self.config && has(self.secret) && 'user' in self.secret.keys && 'password' in self.secret.keys)",
+        "message": "a database connection needs config.host and the secret keys user and password"
+    },
+    {
+        "rule": "self.type != 'rest-api' || (has(self.config) && 'baseUrl' in self.config && has(self.secret) && ('token' in self.secret.keys || ('clientId' in self.secret.keys && 'clientSecret' in self.secret.keys)))",
+        "message": "a rest-api connection needs config.baseUrl and the secret key token, or clientId and clientSecret"
+    },
+    {
+        "rule": "self.type != 's3' || (has(self.config) && 'bucket' in self.config && has(self.secret) && 'accessKeyId' in self.secret.keys && 'secretAccessKey' in self.secret.keys)",
+        "message": "an s3 connection needs config.bucket and the secret keys accessKeyId and secretAccessKey"
+    },
+    {
+        "rule": "self.type != 'sftp' || (has(self.config) && 'host' in self.config && has(self.secret) && 'user' in self.secret.keys && ('password' in self.secret.keys || 'privateKey' in self.secret.keys))",
+        "message": "an sftp connection needs config.host and the secret keys user and password or privateKey"
+    },
+    {
+        "rule": "self.type != 'kafka' || (has(self.config) && 'bootstrapServers' in self.config)",
+        "message": "a kafka connection needs config.bootstrapServers"
+    }
+]))]
+pub struct ConnectionSpec {
+    #[serde(default)]
+    pub scope: ConnectionScope,
+    /// Scope `group`: the Keycloak group whose members manage and use the connection.
+    #[serde(
+        default,
+        rename = "ownerGroup",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub owner_group: Option<String>,
+    /// Scope `managed`: the groups whose platform-run work may use the connection.
+    #[serde(default, rename = "usableBy", skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 20), inner(length(min = 1, max = 64)))]
+    pub usable_by: Vec<String>,
+    #[serde(rename = "type")]
+    pub type_: ConnectionType,
+    /// Non-secret settings, for example `host`, `port`, `database`, `bucket`, `baseUrl`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("maxProperties" = 32))]
+    pub config: BTreeMap<String, String>,
+    /// The secret fields, when this connection has any. Absent for a connection that needs no
+    /// credentials (the platform's own Kafka bus, an anonymous `generic` endpoint). The per-type
+    /// validation below still requires it for every type that authenticates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<ConnectionSecret>,
+    /// How often the synced Secret is refreshed from the store, for example `15m`. Between one minute and 24 hours.
+    #[serde(default = "default_refresh_interval", rename = "refreshInterval")]
+    #[schemars(regex(pattern = r"^[0-9]{1,4}(m|h)$"))]
+    pub refresh_interval: String,
+}
+
+fn default_refresh_interval() -> String {
+    "15m".to_string()
+}
+
+impl ConnectionSpec {
+    /// The rules the schema's CEL validations also enforce, plus those a schema cannot express
+    /// (the resource name, the refresh range), in one place for the controller and the tests.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        if !connection_name_ok(name) {
+            return Err(format!(
+                "connection name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+            ));
+        }
+        let group_ok = |g: &str| {
+            !g.is_empty()
+                && g.len() <= 64
+                && g.as_bytes()[0].is_ascii_alphanumeric()
+                && g.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        };
+        match self.scope {
+            ConnectionScope::Group => match self.owner_group.as_deref() {
+                Some(g) if group_ok(g) && self.usable_by.is_empty() => {}
+                _ => {
+                    return Err(
+                        "a group connection needs a valid ownerGroup and no usableBy".to_string(),
+                    );
+                }
+            },
+            ConnectionScope::Managed => {
+                if self.owner_group.is_some()
+                    || self.usable_by.is_empty()
+                    || !self.usable_by.iter().all(|g| group_ok(g))
+                {
+                    return Err(
+                        "a managed connection needs usableBy (valid group names) and no ownerGroup"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        if let Some(secret) = &self.secret
+            && let Some(path) = &secret.remote_ref
+            && (path.contains("..") || path.contains("//"))
+        {
+            return Err("secret.remoteRef must not contain .. or //".to_string());
+        }
+        let keys = self.secret.as_ref().map(|s| &s.keys);
+        if let Some(keys) = keys {
+            let key_ok = |k: &str| {
+                !k.is_empty()
+                    && k.len() <= 63
+                    && k.as_bytes()[0].is_ascii_alphabetic()
+                    && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            };
+            let unique: std::collections::BTreeSet<&str> =
+                keys.iter().map(String::as_str).collect();
+            if keys.is_empty()
+                || keys.len() > 16
+                || unique.len() != keys.len()
+                || !keys.iter().all(|k| key_ok(k))
+            {
+                return Err(
+                    "secret.keys must be 1 to 16 unique names of letters, digits and underscore"
+                        .to_string(),
+                );
+            }
+        }
+        for key in self.config.keys() {
+            let lower = key.to_ascii_lowercase();
+            if [
+                "password",
+                "passwd",
+                "passphrase",
+                "secret",
+                "token",
+                "credential",
+            ]
+            .iter()
+            .any(|part| lower.contains(part))
+            {
+                return Err(format!(
+                    "config.{key} looks like a secret: settings go in config, secrets in secret.keys"
+                ));
+            }
+        }
+        let has_config = |k: &str| self.config.contains_key(k);
+        let has_key = |k: &str| keys.is_some_and(|ks| ks.iter().any(|x| x == k));
+        let needs = |ok: bool, what: &str| if ok { Ok(()) } else { Err(what.to_string()) };
+        match self.type_ {
+            ConnectionType::Postgresql
+            | ConnectionType::Mysql
+            | ConnectionType::Sqlserver
+            | ConnectionType::Oracle => needs(
+                has_config("host") && has_key("user") && has_key("password"),
+                "a database connection needs config.host and the secret keys user and password",
+            )?,
+            ConnectionType::RestApi => needs(
+                has_config("baseUrl")
+                    && (has_key("token") || (has_key("clientId") && has_key("clientSecret"))),
+                "a rest-api connection needs config.baseUrl and the secret key token, or clientId and clientSecret",
+            )?,
+            ConnectionType::S3 => needs(
+                has_config("bucket") && has_key("accessKeyId") && has_key("secretAccessKey"),
+                "an s3 connection needs config.bucket and the secret keys accessKeyId and secretAccessKey",
+            )?,
+            ConnectionType::Sftp => needs(
+                has_config("host")
+                    && has_key("user")
+                    && (has_key("password") || has_key("privateKey")),
+                "an sftp connection needs config.host and the secret keys user and password or privateKey",
+            )?,
+            ConnectionType::Kafka => needs(
+                has_config("bootstrapServers"),
+                "a kafka connection needs config.bootstrapServers",
+            )?,
+            ConnectionType::Generic => {}
+        }
+        let digits: String = self
+            .refresh_interval
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let minutes = match (digits.parse::<u32>(), self.refresh_interval.chars().last()) {
+            (Ok(n), Some('m')) => n,
+            (Ok(n), Some('h')) => n.saturating_mul(60),
+            _ => 0,
+        };
+        if !(1..=1440).contains(&minutes) {
+            return Err("refreshInterval must be between 1m and 24h, for example 15m".to_string());
+        }
+        Ok(())
+    }
+
+    /// The path in the secret store this connection reads, when the platform runs the store:
+    /// `connections/group/<ownerGroup>/<name>` or `connections/managed/<name>`.
+    pub fn derived_remote_ref(&self, name: &str) -> String {
+        match (self.scope, self.owner_group.as_deref()) {
+            (ConnectionScope::Group, Some(group)) => format!("connections/group/{group}/{name}"),
+            _ => format!("connections/managed/{name}"),
+        }
+    }
+}
+
+/// The Kubernetes Secret a connection is synced into.
+pub fn connection_secret_name(name: &str) -> String {
+    format!("conn-{name}")
+}
+
+/// Prefix of the environment variables a task gets from the Secret: `crm-db` becomes `CONN_CRM_DB_`.
+pub fn connection_env_prefix(name: &str) -> String {
+    format!("CONN_{}_", name.to_ascii_uppercase().replace('-', "_"))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct ConnectionStatus {
+    /// True when the Secret exists and holds every key in `spec.secret.keys`.
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(
+        default,
+        rename = "secretName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_name: Option<String>,
+    /// RFC 3339 time of the last successful sync from the store.
+    #[serde(default, rename = "lastSync", skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// What a volume holds. A `libraries` volume is code that every reader executes, so it
+/// restricts `write` to groups that also manage it (decision D28, internal note
+/// `design/volumes.md` §5).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumePurpose {
+    /// Files of any kind: drops, exports, model artifacts, notebook output.
+    #[default]
+    Data,
+    /// Wheels and requirement files, installed into readers' environments.
+    Libraries,
+}
+
+/// What a grant lets a group do: `read` a file or list a folder, `write` upload, change or
+/// delete one, `manage` change the grants and delete the volume.
+#[derive(
+    Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeVerb {
+    Read,
+    Write,
+    Manage,
+}
+
+/// One group's rights on a volume. Subjects are groups, never users.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct VolumeGrant {
+    /// The Keycloak group whose members hold these verbs.
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub group: String,
+    /// At least one verb; each verb at most once.
+    #[schemars(length(min = 1, max = 3))]
+    pub verbs: Vec<VolumeVerb>,
+}
+
+/// Storage the platform owns: the volume gets `volumes/<catalog>/<name>/` in the platform
+/// object store. `managed: {}` selects it.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct ManagedStorage {}
+
+/// A prefix in the customer's own bucket, reached through an `s3` connection.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ExternalStorage {
+    /// Name of the `s3` connection that holds the endpoint, bucket and credentials.
+    #[schemars(
+        length(min = 1, max = 40),
+        regex(pattern = r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
+    )]
+    pub connection: String,
+    /// Key prefix inside the bucket; absent means the prefix the connection already scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512), regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_./-]*$"))]
+    pub prefix: Option<String>,
+}
+
+/// Where a volume's files live: exactly one of platform-managed storage or an external
+/// prefix. Files live in the volume bucket, never in the table bucket (D28).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct VolumeStorage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedStorage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalStorage>,
+}
+
+/// A governed folder of files in the object store with an owner group and grants.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "Volume",
+    namespaced,
+    status = "VolumeStatus",
+    shortname = "vol",
+    doc = "A governed folder of files in the object store with an owner group and grants."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "has(self.storage.managed) != has(self.storage.external)",
+        "message": "storage must be either managed or external, not both and not neither"
+    },
+    {
+        "rule": "!has(self.storage.external) || !has(self.storage.external.prefix) || (!self.storage.external.prefix.contains('..') && !self.storage.external.prefix.contains('//'))",
+        "message": "an external prefix must not contain .. or //"
+    },
+    {
+        "rule": "self.grants.all(g, self.grants.exists_one(h, h.group == g.group))",
+        "message": "each group may appear once in grants"
+    },
+    {
+        "rule": "self.grants.all(g, g.verbs.all(v, g.verbs.exists_one(w, w == v)))",
+        "message": "a verb may appear once per grant"
+    },
+    {
+        "rule": "self.purpose != 'libraries' || self.grants.all(g, !('write' in g.verbs) || ('manage' in g.verbs))",
+        "message": "on a libraries volume only a group that also manages it may write"
+    }
+]))]
+pub struct VolumeSpec {
+    /// The catalog (Lakehouse) this volume belongs to; the owner group is inherited.
+    #[schemars(
+        length(min = 1, max = 40),
+        regex(pattern = r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
+    )]
+    pub catalog: String,
+    #[serde(default)]
+    pub purpose: VolumePurpose,
+    pub storage: VolumeStorage,
+    #[serde(default)]
+    #[schemars(length(max = 20))]
+    pub grants: Vec<VolumeGrant>,
+}
+
+impl VolumeSpec {
+    /// The rules the schema's CEL validations also enforce, plus the resource name, in one
+    /// place for the controller and the tests.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        let bytes = name.as_bytes();
+        let name_ok = !name.is_empty()
+            && name.len() <= 40
+            && bytes[0].is_ascii_lowercase()
+            && bytes[bytes.len() - 1] != b'-'
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if !name_ok {
+            return Err(format!(
+                "volume name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+            ));
+        }
+        if self.storage.managed.is_some() == self.storage.external.is_some() {
+            return Err(
+                "storage must be either managed or external, not both and not neither".to_string(),
+            );
+        }
+        if let Some(external) = &self.storage.external
+            && let Some(prefix) = &external.prefix
+            && (prefix.contains("..") || prefix.contains("//"))
+        {
+            return Err("an external prefix must not contain .. or //".to_string());
+        }
+        let groups: std::collections::BTreeSet<&str> =
+            self.grants.iter().map(|g| g.group.as_str()).collect();
+        if groups.len() != self.grants.len() {
+            return Err("each group may appear once in grants".to_string());
+        }
+        for grant in &self.grants {
+            let verbs: std::collections::BTreeSet<&VolumeVerb> = grant.verbs.iter().collect();
+            if verbs.len() != grant.verbs.len() {
+                return Err("a verb may appear once per grant".to_string());
+            }
+        }
+        if self.purpose == VolumePurpose::Libraries
+            && !self.grants.iter().all(|g| {
+                !g.verbs.contains(&VolumeVerb::Write) || g.verbs.contains(&VolumeVerb::Manage)
+            })
+        {
+            return Err(
+                "on a libraries volume only a group that also manages it may write".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// `volumes/<catalog>/<name>/` for managed storage, or the external prefix (an empty
+    /// string when the connection already scopes one).
+    pub fn derived_prefix(&self, name: &str) -> String {
+        if self.storage.managed.is_some() {
+            format!("volumes/{}/{name}/", self.catalog)
+        } else {
+            self.storage
+                .external
+                .as_ref()
+                .and_then(|external| external.prefix.clone())
+                .unwrap_or_default()
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct VolumeStatus {
+    /// True when the prefix exists and its grants apply; filled by a later controller.
+    #[serde(default)]
+    pub ready: bool,
+    /// The object-store prefix the volume maps to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, rename = "sizeBytes", skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<i64>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// What a service principal is for — a pipeline, maintenance, a collector, or the platform's own
+/// client. It decides nothing by itself (grants do); it makes the intent visible in `kubectl get`
+/// and in Nova.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PrincipalPurpose {
+    /// Runs the tasks of scheduled pipelines (`Pipeline.spec.runAs`).
+    #[default]
+    Pipeline,
+    /// Runs table maintenance (compaction, snapshot expiry).
+    Maintenance,
+    /// Delivers events or metrics into the platform (for example the query-log collector).
+    Collector,
+    /// The platform's own client for the catalog (Lakekeeper's management API): grants, warehouses
+    /// and the `project_admin` assignment. Not a pipeline identity and not a person.
+    Catalog,
+}
+
+/// What a principal's tokens are valid for (the `aud` claim of its access token).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PrincipalAudience {
+    /// The query engine.
+    Trino,
+    /// The catalog.
+    Lakekeeper,
+}
+
+/// A secret that already holds the credentials of an app registration made by the identity
+/// provider's administrator (`identity.mode: external`). The Secret must be in the same namespace
+/// and have the keys `client-id` and `client-secret`.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ExistingSecretRef {
+    #[schemars(
+        length(min = 1, max = 253),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+    )]
+    pub name: String,
+}
+
+/// A group name as Keycloak and the platform's resources spell it: 1 to 64 characters, starting
+/// with a letter or digit, then letters, digits, dot, underscore or dash.
+pub(crate) fn group_name_ok(group: &str) -> bool {
+    let bytes = group.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// The name rule of a `Connection` (1-40 lower-case letters, digits and dashes, starting with a
+/// letter and not ending in a dash). `ConnectionSpec::validate` and a `PipelineTask.connection`
+/// share it, so a pipeline can never name a connection the API would refuse to create.
+pub(crate) fn connection_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && !name.ends_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A non-human identity for jobs, maintenance and collectors (decisions D20 and D21, internal note
+/// `design/scheduled-jobs.md`). With the platform identity provider the operator creates a client
+/// with a service account and the audiences below and writes its credentials to the Secret
+/// `sp-<name>`; with an external provider it only checks the Secret named in `existingSecretRef`.
+/// The owner group's members may name the principal as a pipeline's `runAs`; nobody may read the Secret.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "ServicePrincipal",
+    namespaced,
+    status = "ServicePrincipalStatus",
+    shortname = "sp",
+    doc = "A non-human identity (client credentials) for pipelines, maintenance and collectors."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.audiences.all(a, self.audiences.exists_one(b, b == a))",
+        "message": "each audience may appear once"
+    }
+]))]
+pub struct ServicePrincipalSpec {
+    /// The group whose members may use the principal. Members never read its credentials.
+    #[serde(rename = "ownerGroup")]
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub owner_group: String,
+    #[serde(default)]
+    pub purpose: PrincipalPurpose,
+    /// What the principal's tokens are valid for; at least one, both engines by default
+    /// (`trino` for SQL, `lakekeeper` for the `spark` session in a notebook).
+    #[serde(default = "default_principal_audiences")]
+    #[schemars(length(min = 1, max = 2))]
+    pub audiences: Vec<PrincipalAudience>,
+    /// Only with an external identity provider: the Secret that holds the app registration's credentials.
+    #[serde(
+        default,
+        rename = "existingSecretRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub existing_secret_ref: Option<ExistingSecretRef>,
+}
+
+fn default_principal_audiences() -> Vec<PrincipalAudience> {
+    // Both, because a principal is created before its tasks are known: a SQL task calls Trino,
+    // while the `spark` session in a notebook calls Lakekeeper's REST catalog. An extra audience is
+    // harmless to the engine that does not use it; a missing `lakekeeper` is an opaque Iceberg
+    // `NotAuthorizedException` after the pod has already started (operator#168).
+    vec![PrincipalAudience::Trino, PrincipalAudience::Lakekeeper]
+}
+
+impl ServicePrincipalSpec {
+    /// The rules the schema enforces, repeated for the controller and the tests, plus the resource name.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        let bytes = name.as_bytes();
+        let name_ok = !name.is_empty()
+            && name.len() <= 40
+            && bytes[0].is_ascii_lowercase()
+            && bytes[bytes.len() - 1] != b'-'
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if !name_ok {
+            return Err(format!(
+                "service principal name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+            ));
+        }
+        if !group_name_ok(&self.owner_group) {
+            return Err("ownerGroup must be a valid group name".to_string());
+        }
+        let unique: std::collections::BTreeSet<_> =
+            self.audiences.iter().map(|a| format!("{a:?}")).collect();
+        if self.audiences.is_empty() || unique.len() != self.audiences.len() {
+            return Err("audiences must list each audience once, at least one".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// The client id of the principal `name` in the identity provider (platform mode) and the name of
+/// the Secret that holds its credentials: `client-id`, `client-secret`, `token-url` and `subject`.
+pub fn principal_client_id(name: &str) -> String {
+    format!("sp-{name}")
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct ServicePrincipalStatus {
+    /// True when the client exists (or the referenced Secret is valid) and the Secret is written.
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default, rename = "clientId", skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(
+        default,
+        rename = "secretName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_name: Option<String>,
+    /// The identity provider's user id of this principal (the `sub` of its tokens), written in
+    /// platform mode after the client converges. The query log records it as the engine user;
+    /// Nova maps it back to `spec.ownerGroup` so a team sees its principals' queries
+    /// (stardelt-nova#116). External mode leaves it unset: the provider's administrator owns
+    /// the account and the operator never talks to that provider.
+    #[serde(default, rename = "subject", skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// One long-running stream: a Kafka topic in, an Iceberg table out (decision D42).
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "StreamApp",
+    namespaced,
+    status = "StreamAppStatus",
+    shortname = "sapp",
+    doc = "A streaming app: a Kafka topic in, an Iceberg table out."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.source.topic.size() > 0 && self.source.topic.matches('^[A-Za-z0-9._-]{1,249}$')",
+        "message": "a stream needs a topic of 1 to 249 characters: letters, digits, dot, underscore or dash"
+    },
+    {
+        "rule": "self.sink.table.matches('^[a-z0-9_]+\\\\.[a-z0-9_]+$')",
+        "message": "sink.table is schema.table, lower-case letters, digits and underscores"
+    },
+    {
+        "rule": "self.sink.mode == 'merge' ? self.sink.mergeKeys.size() > 0 : !has(self.sink.mergeKeys) || self.sink.mergeKeys.size() == 0",
+        "message": "sink.mode merge needs mergeKeys; append forbids them"
+    }
+]))]
+pub struct StreamAppSpec {
+    pub source: StreamSource,
+    pub sink: StreamSink,
+    #[serde(default)]
+    pub engine: StreamEngine,
+    /// The group whose members may see and stop the stream; absent means administrators only.
+    #[serde(
+        default,
+        rename = "ownerGroup",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub owner_group: Option<String>,
+    /// The `ServicePrincipal` the job runs as (convention: `pipeline-<ownerGroup>`).
+    #[serde(default, rename = "runAs", skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 40), regex(pattern = r"^[a-z0-9][a-z0-9-]*$"))]
+    pub run_as: Option<String>,
+    #[serde(default, rename = "restartPolicy")]
+    pub restart_policy: StreamRestartPolicy,
+    /// `true` stops the job and deletes its SparkApplication; the checkpoint is kept, so
+    /// `stopped: false` resumes from it. The one verb Nova's page needs (D42).
+    #[serde(default)]
+    pub stopped: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamEngine {
+    /// Spark Structured Streaming through a `SparkApplication` (D42: the first engine).
+    #[default]
+    Spark,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamFormat {
+    #[default]
+    Json,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamSource {
+    /// Name of the `Connection` (`type: kafka`) whose `config.bootstrapServers` the job reads.
+    /// Absent: the platform's own bus, `kafka-kafka-bootstrap.<namespace>.svc.cluster.local:9092`.
+    #[serde(
+        default,
+        rename = "connectionRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    )]
+    pub connection_ref: Option<String>,
+    #[schemars(length(min = 1, max = 249), regex(pattern = r"^[A-Za-z0-9._-]+$"))]
+    pub topic: String,
+    #[serde(default)]
+    pub format: StreamFormat,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SinkMode {
+    /// `foreachBatch` + `MERGE` on `mergeKeys`: the stream owns the key.
+    #[default]
+    Merge,
+    /// Append-only: at-least-once.
+    Append,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamSink {
+    /// Catalog the sink table lives in; it must let `runAs` write.
+    #[schemars(length(min = 1, max = 63), regex(pattern = r"^[a-z0-9][a-z0-9-]*$"))]
+    pub catalog: String,
+    /// `schema.table`.
+    #[schemars(
+        length(min = 3, max = 128),
+        regex(pattern = r"^[a-z0-9_]+\.[a-z0-9_]+$")
+    )]
+    pub table: String,
+    #[serde(default)]
+    pub mode: SinkMode,
+    /// Columns of `MERGE … ON`; 1 to 8, each one an existing column.
+    #[serde(default, rename = "mergeKeys", skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        length(min = 0, max = 8),
+        inner(length(min = 1, max = 63), regex(pattern = r"^[a-z0-9_]+$"))
+    )]
+    pub merge_keys: Vec<String>,
+    /// S3 prefix for the checkpoint; absent means `checkpoints/<namespace>/<name>`.
+    #[serde(
+        default,
+        rename = "checkpointPrefix",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        length(min = 1, max = 512),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_./-]*$")
+    )]
+    pub checkpoint_prefix: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamRestartPolicy {
+    #[default]
+    Always,
+    OnFailure,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct StreamAppStatus {
+    /// `Pending`, `Running`, `Failed` or `Stopped`.
+    #[serde(default)]
+    pub phase: String,
+    /// The time of the newest checkpoint commit (RFC 3339). Absent until the operator reports
+    /// it; the checkpoint itself is written to the object store and survives a stop.
+    #[serde(
+        default,
+        rename = "lastCheckpointAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_checkpoint_at: Option<String>,
+    #[serde(default, rename = "lastError", skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// How many times Spark has submitted the application
+    /// (`SparkApplication.status.executionAttempts`); absent until it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    /// When Spark last submitted the application (RFC 3339), from
+    /// `SparkApplication.status.lastSubmissionAttemptTime`.
+    #[serde(
+        default,
+        rename = "lastSubmittedAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_submitted_at: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+impl StreamAppSpec {
+    /// The rules the schema enforces, repeated for the controller and the tests, plus the name.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        let bytes = name.as_bytes();
+        let name_ok = !name.is_empty()
+            && name.len() <= 40
+            && bytes[0].is_ascii_lowercase()
+            && bytes[bytes.len() - 1] != b'-'
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if !name_ok {
+            return Err(format!(
+                "stream name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+            ));
+        }
+        let topic_ok = !self.source.topic.is_empty()
+            && self.source.topic.len() <= 249
+            && self
+                .source
+                .topic
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !topic_ok {
+            return Err("source.topic must be 1 to 249 characters: letters, digits, dot, underscore or dash".to_string());
+        }
+        if !catalog_ok(&self.sink.catalog) {
+            return Err("sink.catalog must be a lower-case catalog name".to_string());
+        }
+        let mut parts = self.sink.table.split('.');
+        let (schema, table) = (
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+        );
+        if parts.next().is_some() || !data_identifier_ok(schema) || !data_identifier_ok(table) {
+            return Err(
+                "sink.table must be schema.table, lower-case letters, digits and underscores"
+                    .to_string(),
+            );
+        }
+        match self.sink.mode {
+            SinkMode::Merge if self.sink.merge_keys.is_empty() => {
+                return Err("sink.mode merge needs at least one merge key".to_string());
+            }
+            SinkMode::Append if !self.sink.merge_keys.is_empty() => {
+                return Err("sink.mode append must not set mergeKeys".to_string());
+            }
+            _ => {}
+        }
+        if self.sink.merge_keys.len() > 8 {
+            return Err("at most 8 merge keys".to_string());
+        }
+        for key in &self.sink.merge_keys {
+            if !data_identifier_ok(key) {
+                return Err(format!("merge key `{key}` must be a column name"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A lower-case column or schema identifier: a letter, then letters, digits, underscores or
+/// dashes; at most 63 characters.
+fn data_identifier_ok(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+}
+
+/// A catalog name: a lower-case letter or digit, then letters, digits or dashes; no underscore
+/// (Lakekeeper and the `Catalog` resource spell it that way).
+fn catalog_ok(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// What a grant lets a group do with a catalog (decision D21, internal note
+/// `design/multitenant-catalogs.md` §5.2). Six verbs exist; `use` belongs to compute (`SqlWarehouse`)
+/// and is not a data verb. There is no deny, no `ALL PRIVILEGES` and no per-column verb.
+#[derive(
+    Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum DataVerb {
+    /// Metadata and existence only; no rows.
+    Browse,
+    /// Read data.
+    Select,
+    /// Insert, update, delete, merge, alter.
+    Write,
+    /// Create schemas and tables inside the catalog.
+    Create,
+    /// Grant, revoke, transfer ownership, drop and rename the catalog.
+    Manage,
+}
+
+/// One group, one verb. Subjects are groups, never people.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct CatalogGrant {
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub group: String,
+    pub verb: DataVerb,
+}
+
+/// The `Lakehouse` that hosts a catalog or a warehouse.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct LakehouseRef {
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    )]
+    pub name: String,
+}
+
+/// A reference to one key of a Secret in the same namespace.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct SecretKeySelector {
+    #[schemars(
+        length(min = 1, max = 253),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+    )]
+    pub name: String,
+    #[schemars(length(min = 1, max = 253), regex(pattern = r"^[-._a-zA-Z0-9]+$"))]
+    pub key: String,
+}
+
+/// Where a catalog's data files live. Omitted: the `Lakehouse`'s storage defaults.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct CatalogStorage {
+    /// An isolated bucket per catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 3, max = 63),
+        regex(pattern = r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
+    )]
+    pub bucket: Option<String>,
+    /// Required where all catalogs share one bucket (the demo profile); no leading slash, no `..`.
+    #[serde(default, rename = "keyPrefix", skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512), regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_./-]*$"))]
+    pub key_prefix: Option<String>,
+    /// The per-catalog storage identity. A reference only: the Secret is never part of this resource.
+    #[serde(
+        default,
+        rename = "credentialSecretRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_secret_ref: Option<SecretKeySelector>,
+}
+
+/// `Catalog.spec.maintenance`: the automatic Iceberg table maintenance policy (platform#129).
+/// On by default and conservative; `excludeTables` opts a table out.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct MaintenanceSpec {
+    /// Five-field cron; the default is 02:00 every day. A `Catalog` that keeps this
+    /// default is staggered by name at reconcile time (operator#490); any other value is
+    /// applied verbatim.
+    #[serde(default = "default_maintenance_schedule")]
+    #[schemars(regex(pattern = r"^(\S+\s+){4}\S+$"))]
+    pub schedule: String,
+    #[serde(default)]
+    pub optimize: OptimizeSpec,
+    #[serde(default, rename = "expireSnapshots")]
+    pub expire_snapshots: ExpireSnapshotsSpec,
+    #[serde(default, rename = "removeOrphanFiles")]
+    pub remove_orphan_files: RemoveOrphanFilesSpec,
+    /// Tables (`schema.table`) this policy never touches.
+    #[serde(default, rename = "excludeTables")]
+    #[schemars(length(max = 100))]
+    pub exclude_tables: Vec<String>,
+}
+
+fn default_maintenance_schedule() -> String {
+    MaintenanceSpec::DEFAULT_SCHEDULE.to_string()
+}
+
+impl Default for MaintenanceSpec {
+    fn default() -> Self {
+        Self {
+            schedule: default_maintenance_schedule(),
+            optimize: OptimizeSpec::default(),
+            expire_snapshots: ExpireSnapshotsSpec::default(),
+            remove_orphan_files: RemoveOrphanFilesSpec::default(),
+            exclude_tables: Vec::new(),
+        }
+    }
+}
+
+impl MaintenanceSpec {
+    /// The schedule a `Catalog` carries when it sets none. It is staggered per catalog by
+    /// the maintenance controller (`maintenance::effective_schedule`), so nine catalogs do
+    /// not start their runs in the same second (operator#490).
+    pub const DEFAULT_SCHEDULE: &'static str = "0 2 * * *";
+
+    /// The rules the engine enforces at run time, repeated here so a bad policy is refused when
+    /// the resource is written. Trino's `iceberg.expire-snapshots.min-retention` and
+    /// `iceberg.remove-orphan-files.min-retention` are 7 days; a smaller value fails every run.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.optimize.min_small_files < 1 {
+            return Err("maintenance.optimize.minSmallFiles must be at least 1".to_string());
+        }
+        for (field, value) in [
+            ("expireSnapshots", &self.expire_snapshots.retention),
+            ("removeOrphanFiles", &self.remove_orphan_files.retention),
+        ] {
+            let days = value
+                .strip_suffix('d')
+                .and_then(|d| d.parse::<u32>().ok())
+                .ok_or_else(|| format!("maintenance.{field}.retention must look like `7d`"))?;
+            if days < 7 {
+                return Err(format!(
+                    "maintenance.{field}.retention must be at least 7d (the engine's minimum)"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Compaction: files smaller than the threshold are rewritten when at least `minSmallFiles` exist.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct OptimizeSpec {
+    #[serde(default = "default_file_size_threshold", rename = "fileSizeThreshold")]
+    #[schemars(regex(pattern = r"^[1-9][0-9]*(MB|GB)$"))]
+    pub file_size_threshold: String,
+    #[serde(default = "default_min_small_files", rename = "minSmallFiles")]
+    #[schemars(range(min = 1))]
+    pub min_small_files: i32,
+}
+
+fn default_file_size_threshold() -> String {
+    "128MB".to_string()
+}
+
+fn default_min_small_files() -> i32 {
+    20
+}
+
+impl Default for OptimizeSpec {
+    fn default() -> Self {
+        Self {
+            file_size_threshold: default_file_size_threshold(),
+            min_small_files: default_min_small_files(),
+        }
+    }
+}
+
+/// Snapshot expiry. The engine's minimum is 7 days (`iceberg.expire-snapshots.min-retention`),
+/// so `retention` is a minimum, not a preference. The schema refuses a shorter retention;
+/// `MaintenanceSpec::validate` repeats the rule because no controller runs it yet.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ExpireSnapshotsSpec {
+    #[serde(default = "default_retention")]
+    #[schemars(regex(pattern = r"^([7-9]|[1-9][0-9]+)d$"))]
+    pub retention: String,
+}
+
+/// Orphan-file removal. The engine's minimum is 7 days
+/// (`iceberg.remove-orphan-files.min-retention`). The schema refuses a shorter retention;
+/// `MaintenanceSpec::validate` repeats the rule because no controller runs it yet.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct RemoveOrphanFilesSpec {
+    #[serde(default = "default_retention")]
+    #[schemars(regex(pattern = r"^([7-9]|[1-9][0-9]+)d$"))]
+    pub retention: String,
+}
+
+fn default_retention() -> String {
+    "7d".to_string()
+}
+
+impl Default for ExpireSnapshotsSpec {
+    fn default() -> Self {
+        Self {
+            retention: default_retention(),
+        }
+    }
+}
+
+impl Default for RemoveOrphanFilesSpec {
+    fn default() -> Self {
+        Self {
+            retention: default_retention(),
+        }
+    }
+}
+
+/// One data domain inside the catalog software of a `Lakehouse`: its storage, its owner and its
+/// grants. `metadata.name` is the name users type (`finance.orders`) and the name of the
+/// catalog's warehouse; there is no alias.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "Catalog",
+    namespaced,
+    status = "CatalogDomainStatus",
+    shortname = "cat",
+    doc = "A data domain: a catalog with its storage location, an owner group and grants."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.grants.all(g, self.grants.exists_one(h, h.group == g.group && h.verb == g.verb))",
+        "message": "each group may hold each verb once"
+    },
+    {
+        "rule": "!has(self.storage) || !has(self.storage.keyPrefix) || (!self.storage.keyPrefix.contains('..') && !self.storage.keyPrefix.contains('//'))",
+        "message": "storage.keyPrefix must not contain .. or //"
+    }
+]))]
+pub struct CatalogDomainSpec {
+    #[serde(rename = "lakehouseRef")]
+    pub lakehouse_ref: LakehouseRef,
+    #[serde(
+        default,
+        rename = "displayName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(max = 100))]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 500))]
+    pub description: Option<String>,
+    /// Exactly one group. Ownership means `manage` and does not mean `select`.
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<CatalogStorage>,
+    #[serde(default)]
+    #[schemars(length(max = 50))]
+    pub grants: Vec<CatalogGrant>,
+    /// True: the owner cannot grant on this catalog; only platform administrators can.
+    #[serde(default, rename = "managedAccess")]
+    pub managed_access: bool,
+    /// The automatic Iceberg maintenance policy (platform#129): compaction, snapshot expiry and
+    /// orphan-file removal, daily at 02:00 unless changed. On by default.
+    #[serde(default)]
+    pub maintenance: MaintenanceSpec,
+}
+
+/// Trino catalog names that are taken by the engine or by the platform.
+const RESERVED_CATALOG_NAMES: [&str; 6] = [
+    "system",
+    "information_schema",
+    "memory",
+    "tpch",
+    "tpcds",
+    "jmx",
+];
+
+impl CatalogDomainSpec {
+    /// The rules the schema enforces, repeated for the controller and the tests, plus the name:
+    /// it becomes a Trino catalog and a Lakekeeper warehouse, so it is an unquoted SQL identifier
+    /// (lower-case letters and digits, starting with a letter, 1 to 40) and not a reserved name.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        let bytes = name.as_bytes();
+        let name_ok = !name.is_empty()
+            && name.len() <= 40
+            && bytes[0].is_ascii_lowercase()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        if !name_ok {
+            return Err(format!(
+                "catalog name `{name}` must be 1 to 40 lower-case letters and digits, starting with a letter (it is a SQL identifier)"
+            ));
+        }
+        if RESERVED_CATALOG_NAMES.contains(&name) {
+            return Err(format!("catalog name `{name}` is reserved"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for grant in &self.grants {
+            if !seen.insert((grant.group.as_str(), grant.verb)) {
+                return Err(format!(
+                    "group `{}` holds `{:?}` twice",
+                    grant.group, grant.verb
+                ));
+            }
+        }
+        if let Some(prefix) = self.storage.as_ref().and_then(|s| s.key_prefix.as_deref())
+            && (prefix.contains("..") || prefix.contains("//"))
+        {
+            return Err("storage.keyPrefix must not contain .. or //".to_string());
+        }
+        self.maintenance.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct CatalogDomainStatus {
+    #[serde(default)]
+    pub phase: String,
+    /// The Lakekeeper warehouse id, so Nova and the access bridge never guess it by name.
+    #[serde(
+        default,
+        rename = "warehouseId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub warehouse_id: Option<String>,
+    /// The Trino catalog name actually rendered.
+    #[serde(
+        default,
+        rename = "catalogName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub catalog_name: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+    /// The newest finished maintenance Job's result (operator#476 slice c).
+    #[serde(
+        default,
+        rename = "maintenance",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub maintenance: Option<MaintenanceStatus>,
+}
+
+/// What the newest finished `maint-<name>` Job did (operator#476 slice c).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceStatus {
+    /// The Job's `status.completionTime`, RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<String>,
+    /// `Succeeded` when the Job succeeded, `Failed` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<String>,
+    /// The summary line's `tablesDone`; absent when the log held no summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables_done: Option<i64>,
+    /// The summary line's `tablesFailed`; absent when the log held no summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables_failed: Option<i64>,
+}
+
+/// The platform's compute classes. A class is a name for four numbers (running, queued, memory
+/// share, scheduling), not a promise about hardware: the query engine has resource groups, not
+/// separate clusters (internal note `design/multitenant-catalogs.md` §4.3).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WarehouseSize {
+    Xs,
+    #[default]
+    Small,
+    Medium,
+    Large,
+}
+
+/// How queued queries are chosen to run.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarehouseScheduling {
+    Fifo,
+    Fair,
+    Weighted,
+    WeightedFair,
+}
+
+/// Overrides of the class defaults. An absent field keeps the class value.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct WarehouseConcurrency {
+    /// Queries that run at the same time (the resource group's hard concurrency limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
+    pub running: Option<i32>,
+    /// Queries that may wait (the resource group's queue limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 10000))]
+    pub queued: Option<i32>,
+    /// Share of the engine's memory the class may use, for example `40%`.
+    #[serde(
+        default,
+        rename = "memoryShare",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(regex(pattern = r"^([1-9][0-9]?|100)%$"))]
+    pub memory_share: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduling: Option<WarehouseScheduling>,
+}
+
+/// A group that may send queries into a warehouse (the compute verb `use`).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct WarehouseGrant {
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub group: String,
+}
+
+/// The query-serving plug: one named compute class inside the engine of a `Lakehouse`, with its size,
+/// its caps and the groups that may use it (decision D21, internal note `design/multitenant-catalogs.md`
+/// §4.3). Exactly one warehouse per `Lakehouse` is the default.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "SqlWarehouse",
+    namespaced,
+    status = "SqlWarehouseStatus",
+    shortname = "wh",
+    doc = "A compute class for SQL: size, caps and the groups that may use it."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.grants.all(g, self.grants.exists_one(h, h.group == g.group))",
+        "message": "each group may appear once in grants"
+    },
+    {
+        "rule": "!has(self.autoStop) || duration(self.autoStop) <= duration('24h')",
+        "message": "autoStop must be at most 24h"
+    },
+    {
+        "rule": "self.minWorkers != 0 || has(self.autoStop)",
+        "message": "minWorkers: 0 needs autoStop — a warehouse that never stops cannot ask for no workers"
+    },
+    {
+        "rule": "self.maxWorkers >= self.minWorkers",
+        "message": "maxWorkers must be at least minWorkers"
+    }
+]))]
+pub struct SqlWarehouseSpec {
+    #[serde(rename = "lakehouseRef")]
+    pub lakehouse_ref: LakehouseRef,
+    #[serde(
+        default,
+        rename = "displayName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(max = 100))]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub size: WarehouseSize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<WarehouseConcurrency>,
+    /// How long the engine may sit idle before its workers scale to zero, for example
+    /// `15m` or `2h` (platform#131 step A). Absent: the warehouse is always on.
+    #[serde(default, rename = "autoStop", skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^([1-9][0-9]*)(m|h)$"))]
+    pub auto_stop: Option<String>,
+    /// The workers the engine keeps ready while this class may be used. `0` is only legal
+    /// with `autoStop` (a class that never stops cannot ask for no workers).
+    #[serde(default = "default_min_workers", rename = "minWorkers")]
+    #[schemars(range(min = 0, max = 10))]
+    pub min_workers: i32,
+    /// The most workers the engine may run for this class.
+    #[serde(default = "default_max_workers", rename = "maxWorkers")]
+    #[schemars(range(min = 1, max = 10))]
+    pub max_workers: i32,
+    #[serde(default)]
+    #[schemars(length(max = 50))]
+    pub grants: Vec<WarehouseGrant>,
+    /// The class that queries land in when nothing selects another one.
+    #[serde(default)]
+    pub default: bool,
+}
+
+impl SqlWarehouseSpec {
+    /// The rules the schema enforces, repeated for the controller and the tests, plus the name: it
+    /// becomes the resource group (1 to 40 lower-case letters, digits and dashes, starting with a letter).
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        let bytes = name.as_bytes();
+        let name_ok = !name.is_empty()
+            && name.len() <= 40
+            && bytes[0].is_ascii_lowercase()
+            && bytes[bytes.len() - 1] != b'-'
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if !name_ok {
+            return Err(format!(
+                "warehouse name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for grant in &self.grants {
+            if !seen.insert(grant.group.as_str()) {
+                return Err(format!("group `{}` appears twice in grants", grant.group));
+            }
+        }
+        if let Some(c) = &self.concurrency {
+            if let Some(n) = c.running
+                && !(1..=100).contains(&n)
+            {
+                return Err("concurrency.running must be between 1 and 100".to_string());
+            }
+            if let Some(n) = c.queued
+                && !(0..=10000).contains(&n)
+            {
+                return Err("concurrency.queued must be between 0 and 10000".to_string());
+            }
+        }
+        if !(0..=10).contains(&self.min_workers) {
+            return Err("minWorkers must be between 0 and 10".to_string());
+        }
+        if !(1..=10).contains(&self.max_workers) {
+            return Err("maxWorkers must be between 1 and 10".to_string());
+        }
+        if self.min_workers == 0 && self.auto_stop.is_none() {
+            return Err(
+                "minWorkers: 0 needs autoStop — a warehouse that never stops cannot ask for no workers"
+                    .to_string(),
+            );
+        }
+        if self.max_workers < self.min_workers {
+            return Err("maxWorkers must be at least minWorkers".to_string());
+        }
+        if let Some(text) = &self.auto_stop
+            && idle_minutes(text).is_none()
+        {
+            return Err(
+                "autoStop must be a whole number of minutes or hours between 1m and 24h, for example `15m` or `2h`"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Minutes of idle time a duration like `15m` or `2h` means; `None` for anything else.
+pub fn idle_minutes(text: &str) -> Option<u64> {
+    let (digits, unit) = text.split_at(text.len().checked_sub(1)?);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.starts_with('0') {
+        return None;
+    }
+    let value: u64 = digits.parse().ok()?;
+    let minutes = match unit {
+        "m" => value,
+        "h" => value.checked_mul(60)?,
+        _ => return None,
+    };
+    if !(1..=1440).contains(&minutes) {
+        return None;
+    }
+    Some(minutes)
+}
+
+/// The engine's worker scaling, written by the access-sync job (platform#131 step A).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+pub struct WarehouseScale {
+    /// `Running`, `Starting` or `Stopped`.
+    #[serde(default)]
+    pub phase: String,
+    /// Worker replicas the engine currently asks for.
+    #[serde(default)]
+    pub workers: i32,
+    /// Queries in flight, as Nova last reported them.
+    #[serde(default, rename = "queriesInFlight")]
+    pub queries_in_flight: i32,
+    /// The last query the engine saw, RFC 3339.
+    #[serde(
+        default,
+        rename = "lastQueryAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_query_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct SqlWarehouseStatus {
+    #[serde(default)]
+    pub phase: String,
+    /// The worker scaling of the engine that serves this class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<WarehouseScale>,
+    /// The resource group actually written.
+    #[serde(
+        default,
+        rename = "renderedGroup",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rendered_group: Option<String>,
+    /// Which engine implements the class, for example `trino@default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// A Spark cluster's size class: three shapes an administrator picks instead of every number.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SparkClusterSize {
+    #[default]
+    Small,
+    Medium,
+    Large,
+}
+
+/// The desired state of a `SparkCluster`. Start and Stop write it; the controller follows it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "PascalCase")]
+pub enum SparkClusterState {
+    #[default]
+    Stopped,
+    Running,
+}
+
+/// Who owns a `SparkCluster`: a group, or as an exception one person.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct SparkClusterOwner {
+    /// The Keycloak group whose members start, stop and use the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub group: Option<String>,
+    /// One person's user name. The exception: prefer `group`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 1, max = 128),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._@-]*$")
+    )]
+    pub user: Option<String>,
+}
+
+/// The pod shape of a driver or an executor. Absent fields follow the size class.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct SparkResources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 16))]
+    pub cores: Option<i32>,
+    /// For example `4Gi`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^[1-9][0-9]*(Mi|Gi)$"))]
+    pub memory: Option<String>,
+}
+
+/// Where an environment variable's value comes from when it is not written in the spec.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct ConnectionKeyRef {
+    /// Name of a `Connection` in the same namespace.
+    #[serde(rename = "name")]
+    #[schemars(length(min = 1, max = 40), regex(pattern = r"^[a-z0-9][a-z0-9-]*$"))]
+    pub name: String,
+    /// The key inside that connection's synced Secret.
+    #[serde(rename = "key")]
+    #[schemars(length(min = 1, max = 63), regex(pattern = r"^[A-Za-z][A-Za-z0-9_]*$"))]
+    pub key: String,
+}
+
+/// One environment variable of the driver and executors: a literal value or a reference to a
+/// `Connection` key, never both.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "has(self.value) != has(self.connectionRef)",
+        "message": "set exactly one of value and connectionRef"
+    }
+]))]
+pub struct SparkEnvVar {
+    #[serde(rename = "name")]
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Z_][A-Z0-9_]*$"))]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub value: Option<String>,
+    #[serde(
+        default,
+        rename = "connectionRef",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_ref: Option<ConnectionKeyRef>,
+}
+
+/// Admin-defined Spark compute for the platform, a team or one person: size, runtime, image,
+/// environment, Spark settings and an idle stop. Started by hand, stopped when idle. This resource
+/// carries the *desired* state (`Start`/`Stop` write `state`); the controller drives a
+/// `SparkApplication` from it.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "SparkCluster",
+    namespaced,
+    status = "SparkClusterStatus",
+    shortname = "spc",
+    doc = "Spark compute for the platform, a team or one person: size, runtime, settings; started by hand, stopped when idle."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "has(self.owner.group) != has(self.owner.user)",
+        "message": "set exactly one of owner.group and owner.user"
+    },
+    {
+        "rule": "!has(self.image) || self.image.contains('@sha256:')",
+        "message": "pin the image by digest"
+    },
+    {
+        "rule": "!has(self.env) || self.env.all(e, self.env.exists_one(f, f.name == e.name))",
+        "message": "each env var name may appear once in env"
+    }
+]))]
+pub struct SparkClusterSpec {
+    #[serde(
+        default,
+        rename = "displayName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(max = 100))]
+    pub display_name: Option<String>,
+    pub owner: SparkClusterOwner,
+    #[serde(default)]
+    pub size: SparkClusterSize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<SparkResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<SparkResources>,
+    #[serde(
+        default,
+        rename = "maxExecutors",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(min = 0, max = 50))]
+    pub max_executors: Option<i32>,
+    /// The Spark and Python runtime, for example `spark-4.0-py3.12`.
+    #[schemars(regex(pattern = r"^spark-[0-9]+\.[0-9]+-py3\.[0-9]+$"))]
+    pub runtime: String,
+    /// A custom image, pinned by digest so a tag cannot move under the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512))]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 50))]
+    pub env: Vec<SparkEnvVar>,
+    /// Spark settings applied to the driver and the executors.
+    #[serde(
+        default,
+        rename = "sparkConf",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[schemars(extend("maxProperties" = 100))]
+    pub spark_conf: BTreeMap<String, String>,
+    /// Minutes without a job before the cluster stops by itself. `0` (never) is reserved for the
+    /// shared cluster.
+    #[serde(default = "default_idle_stop_minutes", rename = "idleStopMinutes")]
+    #[schemars(range(min = 0, max = 1440))]
+    pub idle_stop_minutes: i32,
+    #[serde(default)]
+    pub state: SparkClusterState,
+}
+
+fn default_idle_stop_minutes() -> i32 {
+    60
+}
+
+impl SparkClusterSpec {
+    /// The rules the schema enforces, repeated for the controller and the tests, plus the name
+    /// (1 to 40 lower-case letters, digits and dashes, starting with a letter) and the
+    /// `sparkConf` denylist: the settings the platform owns and a user must not override.
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        let bytes = name.as_bytes();
+        let name_ok = !name.is_empty()
+            && name.len() <= 40
+            && bytes[0].is_ascii_lowercase()
+            && bytes[bytes.len() - 1] != b'-'
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if !name_ok {
+            return Err(format!(
+                "spark cluster name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+            ));
+        }
+        if self.owner.group.is_some() == self.owner.user.is_some() {
+            return Err("set exactly one of owner.group and owner.user".to_string());
+        }
+        if let Some(display_name) = &self.display_name
+            && display_name.len() > 100
+        {
+            return Err("displayName must be at most 100 characters".to_string());
+        }
+        for (what, resources) in [
+            ("driver", self.driver.as_ref()),
+            ("executor", self.executor.as_ref()),
+        ] {
+            let Some(resources) = resources else {
+                continue;
+            };
+            if let Some(cores) = resources.cores
+                && !(1..=16).contains(&cores)
+            {
+                return Err(format!("{what}.cores must be between 1 and 16"));
+            }
+            if let Some(memory) = &resources.memory
+                && !memory_matches(memory)
+            {
+                return Err(format!("{what}.memory must look like `4Gi` or `512Mi`"));
+            }
+        }
+        if let Some(max) = self.max_executors
+            && !(0..=50).contains(&max)
+        {
+            return Err("maxExecutors must be between 0 and 50".to_string());
+        }
+        if !runtime_matches(&self.runtime) {
+            return Err(format!(
+                "runtime `{}` must look like `spark-4.0-py3.12`",
+                self.runtime
+            ));
+        }
+        if let Some(image) = &self.image {
+            if image.len() > 512 {
+                return Err("image must be at most 512 characters".to_string());
+            }
+            if !image.contains("@sha256:") {
+                return Err("pin the image by digest".to_string());
+            }
+        }
+        if self.env.len() > 50 {
+            return Err("env must have at most 50 entries".to_string());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for var in &self.env {
+            if !env_name_matches(&var.name) {
+                return Err(format!(
+                    "env name `{}` must be upper-case letters, digits and underscores, starting with a letter or underscore",
+                    var.name
+                ));
+            }
+            if !seen.insert(var.name.as_str()) {
+                return Err(format!(
+                    "each env var name may appear once in env: `{}` appears twice",
+                    var.name
+                ));
+            }
+            if var.value.is_some() == var.connection_ref.is_some() {
+                return Err(format!(
+                    "env `{}` must set exactly one of value and connectionRef",
+                    var.name
+                ));
+            }
+            if let Some(value) = &var.value
+                && value.len() > 1024
+            {
+                return Err(format!(
+                    "env `{}` value must be at most 1024 characters",
+                    var.name
+                ));
+            }
+        }
+        if self.spark_conf.len() > 100 {
+            return Err("sparkConf must have at most 100 entries".to_string());
+        }
+        for key in self.spark_conf.keys() {
+            if managed_spark_conf_key(key) {
+                return Err(format!("sparkConf key {key} is managed by the platform"));
+            }
+        }
+        if !(0..=1440).contains(&self.idle_stop_minutes) {
+            return Err("idleStopMinutes must be between 0 and 1440".to_string());
+        }
+        if self.idle_stop_minutes == 0 && name != "shared" {
+            return Err("only the shared cluster may run without an idle stop".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn memory_matches(memory: &str) -> bool {
+    let Some(number) = memory
+        .strip_suffix("Gi")
+        .or_else(|| memory.strip_suffix("Mi"))
+    else {
+        return false;
+    };
+    !number.is_empty() && !number.starts_with('0') && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn runtime_matches(runtime: &str) -> bool {
+    let Some(rest) = runtime.strip_prefix("spark-") else {
+        return false;
+    };
+    let Some((spark, python)) = rest.split_once("-py3.") else {
+        return false;
+    };
+    let spark_ok = spark
+        .split_once('.')
+        .is_some_and(|(major, minor)| digits(major) && digits(minor));
+    spark_ok && digits(python)
+}
+
+fn digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn env_name_matches(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && matches!(name.as_bytes()[0], b'A'..=b'Z' | b'_')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Settings the platform owns: the Kubernetes identity of the pods, the catalog credentials and
+/// the object-store keys a `Connection` supplies. A user value here would break the isolation the
+/// platform guarantees, so it is refused instead of ignored.
+fn managed_spark_conf_key(key: &str) -> bool {
+    key.starts_with("spark.kubernetes.authenticate.")
+        || key == "spark.kubernetes.namespace"
+        || key.contains("serviceAccount")
+        || (key.starts_with("spark.hadoop.fs.s3a.") && key.contains("key"))
+        || (key.starts_with("spark.sql.catalog.")
+            && (key.contains("credential") || key.contains("token")))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct SparkClusterStatus {
+    /// `Stopped`, `Starting`, `Running`, `Stopping` or `Failed`.
+    #[serde(default)]
+    pub phase: String,
+    /// The Spark Connect endpoint while the cluster runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, rename = "startedAt", skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(
+        default,
+        rename = "lastActivityAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_activity_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// Where a model endpoint runs: in the customer's network, or at a cloud provider (prompts leave the cluster).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelLocation {
+    #[default]
+    OnPremise,
+    Cloud,
+}
+
+/// What a model endpoint is used for.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelPurpose {
+    Ask,
+    Agents,
+}
+
+/// Token limits; absent means no limit.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+pub struct ModelQuota {
+    #[serde(
+        default,
+        rename = "perGroupMonthlyTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(min = 1, max = 10_000_000_000i64))]
+    pub per_group_monthly_tokens: Option<i64>,
+    #[serde(
+        default,
+        rename = "perPersonDailyTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(min = 1, max = 1_000_000_000i64))]
+    pub per_person_daily_tokens: Option<i64>,
+}
+
+/// The plug to the customer's own OpenAI-compatible model endpoint (D46). stardelt ships no model.
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "ModelEndpoint",
+    namespaced,
+    status = "ModelEndpointStatus",
+    shortname = "me",
+    doc = "The customer's own OpenAI-compatible model endpoint: URL, model, key, where it runs, what it is for and how much each group may use."
+)]
+#[schemars(extend("x-kubernetes-validations" = [
+    {
+        "rule": "self.location != 'cloud' || self.url.startsWith('https://')",
+        "message": "a cloud endpoint must use https"
+    },
+    {
+        "rule": "self.purposes.all(p, self.purposes.exists_one(q, q == p))",
+        "message": "each purpose may appear once"
+    }
+]))]
+pub struct ModelEndpointSpec {
+    /// The OpenAI-compatible base URL, for example `https://llm.internal.example/v1`.
+    #[schemars(length(min = 8, max = 512), regex(pattern = r"^https?://"))]
+    pub url: String,
+    /// The model id the endpoint serves.
+    #[schemars(length(min = 1, max = 200))]
+    pub model: String,
+    /// The API key: a key of a `Connection` in the same namespace. Absent for a keyless in-cluster endpoint.
+    #[serde(default, rename = "keyRef", skip_serializing_if = "Option::is_none")]
+    pub key_ref: Option<ConnectionKeyRef>,
+    #[serde(default)]
+    pub location: ModelLocation,
+    #[serde(default = "default_model_purposes")]
+    #[schemars(length(min = 1, max = 2))]
+    pub purposes: Vec<ModelPurpose>,
+    /// May query results (rows) be sent to this model? Off by default.
+    #[serde(default, rename = "sendRows")]
+    pub send_rows: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<ModelQuota>,
+}
+
+fn default_model_purposes() -> Vec<ModelPurpose> {
+    vec![ModelPurpose::Ask, ModelPurpose::Agents]
+}
+
+/// What Nova's probe found (slice c writes it).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub struct ModelEndpointStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+    #[serde(
+        default,
+        rename = "toolCalling",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_calling: Option<bool>,
+    #[serde(
+        default,
+        rename = "jsonOutput",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub json_output: Option<bool>,
+    #[serde(
+        default,
+        rename = "contextTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_tokens: Option<i64>,
+    #[serde(default, rename = "checkedAt", skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The conditions Nova reports for this endpoint. `Ready` is `True` when the last probe
+    /// found an endpoint that answers and returns a tool call; `False` with a `reason` and a
+    /// `message` names what is missing. The `Condition` shape every other status in this file
+    /// uses — no new type.
+    #[serde(default, rename = "conditions", skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct ComponentStatus {
+    pub name: String,
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Fingerprint (args + values) of the release that was applied last time a
+    /// hash was recorded; lets the next reconcile skip an unchanged component.
+    #[serde(
+        default,
+        rename = "appliedHash",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub applied_hash: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+pub struct Condition {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(
+        default,
+        rename = "lastTransitionTime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_transition_time: Option<String>,
+    #[serde(
+        default,
+        rename = "observedGeneration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_generation: Option<i64>,
+}
+
+/// Every CRD this operator serves, in one place: the startup apply
+/// ([`crate::controller::apply_crds`]) and `bin/crdgen.rs` both read this list, so the
+/// binary, `chart/crds/` and the live cluster cannot disagree about which kinds exist.
+pub fn crd_documents() -> Vec<CustomResourceDefinition> {
+    vec![
+        PlatformInstance::crd(),
+        Lakehouse::crd(),
+        IngestionSource::crd(),
+        Pipeline::crd(),
+        Connection::crd(),
+        Volume::crd(),
+        ServicePrincipal::crd(),
+        StreamApp::crd(),
+        Catalog::crd(),
+        SqlWarehouse::crd(),
+        SparkCluster::crd(),
+        ModelEndpoint::crd(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A CRD field must be structural: a `type`, a `$ref`, a combinator, or the preserve flag. The
+    /// API server refuses the whole CRD otherwise ("must not be empty for specified object fields",
+    /// operator#267), and nothing in CI applies a CRD, so the check lives here.
+    fn assert_structural(pointer: &str, schema: &serde_json::Value) {
+        let Some(object) = schema.as_object() else {
+            return;
+        };
+        if let Some(properties) = object.get("properties").and_then(|p| p.as_object()) {
+            for (name, child) in properties {
+                let structural = child.as_object().is_some_and(|o| {
+                    o.contains_key("type")
+                        || o.contains_key("$ref")
+                        || o.contains_key("oneOf")
+                        || o.contains_key("anyOf")
+                        || o.contains_key("allOf")
+                        || o.get("x-kubernetes-preserve-unknown-fields")
+                            == Some(&serde_json::Value::Bool(true))
+                });
+                assert!(structural, "{pointer}/{name} has no schema type: {child}");
+                assert_structural(&format!("{pointer}/{name}"), child);
+            }
+        }
+        for key in ["items", "additionalProperties"] {
+            if let Some(child) = object.get(key) {
+                assert_structural(&format!("{pointer}/{key}"), child);
+            }
+        }
+        if let Some(defs) = object.get("$defs").and_then(|d| d.as_object()) {
+            for (name, child) in defs {
+                assert_structural(&format!("{pointer}/$defs/{name}"), child);
+            }
+        }
+    }
+
+    #[test]
+    fn every_platform_instance_field_has_a_schema_type() {
+        let schema = serde_json::to_value(schemars::schema_for!(PlatformInstance))
+            .expect("the CRD schema serialises");
+        assert_structural("#", &schema);
+    }
+
+    #[test]
+    fn model_endpoint_defaults() {
+        let spec: ModelEndpointSpec =
+            serde_json::from_value(serde_json::json!({"url":"https://x.example/v1","model":"m"}))
+                .expect("deserialize ModelEndpointSpec");
+        assert_eq!(spec.location, ModelLocation::OnPremise);
+        assert_eq!(
+            spec.purposes,
+            vec![ModelPurpose::Ask, ModelPurpose::Agents],
+            "a new endpoint serves both Ask and the agent harness"
+        );
+        assert!(!spec.send_rows, "rows never leave the cluster by default");
+        assert!(spec.key_ref.is_none());
+    }
+
+    #[test]
+    fn model_endpoint_schema_has_the_rules() {
+        let crd = ModelEndpoint::crd();
+        let schema = serde_json::to_value(
+            crd.spec.versions[0]
+                .schema
+                .as_ref()
+                .and_then(|s| s.open_api_v3_schema.clone())
+                .expect("ModelEndpoint CRD carries an openAPIV3Schema"),
+        )
+        .expect("serialize the ModelEndpoint schema");
+        assert_structural("#", &schema);
+        let text = schema.to_string();
+        assert!(
+            text.contains("a cloud endpoint must use https"),
+            "the cloud-https CEL rule is in the schema"
+        );
+        assert!(
+            text.contains("each purpose may appear once"),
+            "the duplicate-purpose CEL rule is in the schema"
+        );
+        let spec = &schema["properties"]["spec"]["properties"];
+        let mut locations: Vec<&str> = spec["location"]["enum"]
+            .as_array()
+            .expect("location is an enum in the schema")
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings"))
+            .collect();
+        locations.sort_unstable();
+        assert_eq!(locations, ["cloud", "on-premise"]);
+    }
+
+    #[test]
+    fn crd_documents_lists_every_served_kind() {
+        let docs = crd_documents();
+        let mut names: Vec<String> = docs
+            .iter()
+            .map(|crd| crd.metadata.name.clone().expect("a CRD name"))
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "catalogs.stardelt.io",
+                "connections.stardelt.io",
+                "ingestionsources.stardelt.io",
+                "lakehouses.stardelt.io",
+                "modelendpoints.stardelt.io",
+                "pipelines.stardelt.io",
+                "platforminstances.stardelt.io",
+                "serviceprincipals.stardelt.io",
+                "sparkclusters.stardelt.io",
+                "sqlwarehouses.stardelt.io",
+                "streamapps.stardelt.io",
+                "volumes.stardelt.io",
+            ]
+        );
+        for crd in &docs {
+            assert_eq!(crd.spec.group, "stardelt.io");
+            assert_eq!(
+                crd.spec.versions.len(),
+                1,
+                "{}",
+                crd.metadata.name.clone().unwrap()
+            );
+            assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+            assert!(
+                crd.spec.names.singular.is_some(),
+                "crdgen derives the schema filename from spec.names.singular"
+            );
+        }
+    }
+
+    #[test]
+    fn model_endpoint_status_carries_conditions() {
+        let docs = crd_documents();
+        let crd = docs
+            .iter()
+            .find(|crd| crd.metadata.name.as_deref() == Some("modelendpoints.stardelt.io"))
+            .expect("the ModelEndpoint CRD is served");
+        let version = crd
+            .spec
+            .versions
+            .iter()
+            .find(|version| version.name == "v1alpha1")
+            .expect("ModelEndpoint serves v1alpha1");
+        let schema = serde_json::to_value(
+            version
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.open_api_v3_schema.clone())
+                .expect("ModelEndpoint CRD carries an openAPIV3Schema"),
+        )
+        .expect("serialize the ModelEndpoint schema");
+        let conditions = &schema["properties"]["status"]["properties"]["conditions"];
+        assert_eq!(
+            conditions["type"], "array",
+            "status.conditions is an array in the generated document"
+        );
+        assert_eq!(conditions["items"]["type"], "object");
+        let items = &conditions["items"]["properties"];
+        assert_eq!(items["type"]["type"], "string");
+        assert_eq!(items["status"]["type"], "string");
+    }
+
+    #[test]
+    fn lakehouse_defaults_are_lakekeeper_seaweedfs_demo() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "stardelt" },
+            "spec": {}
+        }))
+        .expect("deserialize Lakehouse");
+        assert_eq!(lh.spec.catalog.implementation, CatalogImpl::Lakekeeper);
+        assert_eq!(lh.spec.storage.implementation, StorageImpl::Seaweedfs);
+        assert_eq!(lh.spec.profile, Profile::Demo);
+        assert!(lh.spec.dry_run, "new Lakehouses must plan only");
+    }
+
+    #[test]
+    fn spark_compute_is_off_by_default_and_read_from_the_spec() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1", "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "data" },
+            "spec": {}
+        }))
+        .expect("deserialize Lakehouse");
+        assert!(!lh.spec.compute.spark.enabled);
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1", "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "data" },
+            "spec": { "compute": { "spark": { "enabled": true } } }
+        }))
+        .expect("deserialize Lakehouse");
+        assert!(lh.spec.compute.spark.enabled);
+    }
+
+    #[test]
+    fn lakehouse_parses_explicit_implementations() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "stardelt" },
+            "spec": {
+                "catalog": { "implementation": "polaris" },
+                "storage": { "implementation": "byoS3", "bucket": "s3://acme-lake" },
+                "profile": "full"
+            }
+        }))
+        .expect("deserialize Lakehouse");
+        assert_eq!(lh.spec.catalog.implementation, CatalogImpl::Polaris);
+        assert_eq!(lh.spec.storage.implementation, StorageImpl::ByoS3);
+        assert_eq!(lh.spec.storage.bucket.as_deref(), Some("s3://acme-lake"));
+        assert_eq!(lh.spec.profile, Profile::Full);
+    }
+
+    #[test]
+    fn lakehouse_deletion_policy_defaults_to_retain() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "stardelt" },
+            "spec": {}
+        }))
+        .expect("deserialize Lakehouse");
+        assert_eq!(
+            lh.spec.deletion_policy,
+            DeletionPolicy::Retain,
+            "a Lakehouse must keep its data unless deletion is opted into (D18)"
+        );
+    }
+
+    #[test]
+    fn lakehouse_parses_deletion_policy_delete() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "stardelt" },
+            "spec": { "deletionPolicy": "Delete" }
+        }))
+        .expect("deserialize Lakehouse");
+        assert_eq!(lh.spec.deletion_policy, DeletionPolicy::Delete);
+        assert_eq!(
+            serde_json::to_value(lh.spec.deletion_policy).expect("serialize policy"),
+            serde_json::json!("Delete"),
+            "the YAML value is PascalCase, like PV reclaim policies"
+        );
+    }
+
+    #[test]
+    fn lakehouse_schema_carries_the_deletion_policy_enum() {
+        let crd = Lakehouse::crd();
+        let schema = serde_json::to_value(
+            crd.spec.versions[0]
+                .schema
+                .as_ref()
+                .and_then(|s| s.open_api_v3_schema.clone())
+                .expect("Lakehouse CRD carries an openAPIV3Schema"),
+        )
+        .expect("serialize the Lakehouse schema");
+        let mut values: Vec<&str> =
+            schema["properties"]["spec"]["properties"]["deletionPolicy"]["enum"]
+                .as_array()
+                .expect("deletionPolicy is an enum in the schema")
+                .iter()
+                .map(|value| value.as_str().expect("enum values are strings"))
+                .collect();
+        values.sort_unstable();
+        assert_eq!(values, ["Delete", "Retain"]);
+    }
+
+    #[test]
+    fn platform_instance_defaults_to_demo_lakehouse_only() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {}
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(pi.spec.profile, Profile::Demo);
+        assert!(pi.spec.pillars.lakehouse);
+        assert!(!pi.spec.pillars.batch);
+        assert!(pi.spec.dry_run, "a new PlatformInstance must plan only");
+    }
+
+    #[test]
+    fn platform_instance_namespace_defaults_to_stardelt() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {}
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(pi.spec.namespace, "stardelt");
+    }
+
+    #[test]
+    fn platform_instance_namespace_is_configurable() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": { "namespace": "lab" }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(pi.spec.namespace, "lab");
+    }
+
+    #[test]
+    fn ingress_is_off_by_default_and_uses_the_cluster_default_class() {
+        let spec: PlatformInstanceSpec = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!spec.ingress.enabled);
+        assert_eq!(spec.ingress.class_name, None);
+        assert!(!spec.ingress.tls.enabled);
+        assert_eq!(spec.ingress.tls.issuer, None);
+        assert_eq!(spec.ingress.tls.secret_name_template, "{host}-tls");
+    }
+
+    #[test]
+    fn ingress_settings_are_read_from_the_spec() {
+        let spec: PlatformInstanceSpec = serde_json::from_value(serde_json::json!({
+            "baseDomain": "data.example.com",
+            "ingress": {
+                "enabled": true,
+                "className": "traefik",
+                "tls": { "enabled": true, "issuer": "letsencrypt", "secretNameTemplate": "tls-{host}" }
+            }
+        }))
+        .unwrap();
+        assert!(spec.ingress.enabled);
+        assert_eq!(spec.ingress.class_name.as_deref(), Some("traefik"));
+        assert!(spec.ingress.tls.enabled);
+        assert_eq!(spec.ingress.tls.issuer.as_deref(), Some("letsencrypt"));
+        assert_eq!(spec.ingress.tls.secret_name_template, "tls-{host}");
+    }
+
+    #[test]
+    fn the_crd_refuses_an_ingress_without_a_domain_and_tls_without_an_issuer() {
+        let crd = serde_json::to_string(&PlatformInstance::crd()).unwrap();
+        assert!(crd.contains("ingress needs baseDomain (the hosts are built from it)"));
+        assert!(crd.contains(
+            "!has(self.ingress) || !has(self.ingress.enabled) || !self.ingress.enabled || has(self.baseDomain)"
+        ));
+        assert!(crd.contains(
+            "ingress.tls.enabled needs ingress.tls.issuer, the name of a cert-manager ClusterIssuer"
+        ));
+        assert!(crd.contains(
+            "!has(self.tls) || !has(self.tls.enabled) || !self.tls.enabled || (has(self.tls.issuer) && size(self.tls.issuer) > 0)"
+        ));
+        assert!(crd.contains("ingress.allowedCidrs: at most 64 entries"));
+        assert!(crd.contains("ingress.allowedCidrs: each entry is a CIDR such as 203.0.113.0/24"));
+        assert!(crd.contains("\"allowedCidrs\""));
+    }
+
+    /// `spec.mcp` is off by default and its CEL rule refuses "enabled without an audience".
+    #[test]
+    fn mcp_defaults_to_disabled() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {}
+        }))
+        .expect("deserialize PlatformInstance");
+        let spec = pi.spec;
+        assert!(!spec.mcp.enabled);
+        assert!(spec.mcp.audience.is_none());
+
+        let on: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {
+                "mcp": {
+                    "enabled": true,
+                    "audience": "https://data.example.com/mcp"
+                }
+            }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert!(on.spec.mcp.enabled);
+        assert_eq!(
+            on.spec.mcp.audience.as_deref(),
+            Some("https://data.example.com/mcp")
+        );
+
+        let crd = serde_json::to_string(&PlatformInstance::crd()).unwrap();
+        assert!(crd.contains("mcp.callsPerMinute is from 1 to 600"));
+        assert!(crd.contains("\"callsPerMinute\""));
+        assert!(crd.contains("mcp.writesPerHour is from 1 to 600"));
+        assert!(crd.contains("\"writesPerHour\""));
+        assert!(crd.contains("mcp.auditRetentionDays is from 0 to 3650 (0 keeps the rows)"));
+        assert!(crd.contains("\"auditRetentionDays\""));
+    }
+
+    #[test]
+    fn external_secrets_mode_deserializes_and_crd_has_cel_rules() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {
+                "secrets": {
+                    "mode": "external",
+                    "external": {
+                        "provider": {
+                            "vault": {
+                                "server": "https://vault.example.com",
+                                "path": "secret",
+                                "version": "v2",
+                                "auth": { "tokenSecretRef": { "name": "vault-token", "key": "token" } }
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert!(pi.spec.secrets.external.is_some());
+        // external without mode still deserializes (CEL rejects it on the server, not serde)
+        let pi2: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {
+                "secrets": {
+                    "external": {
+                        "provider": { "vault": { "server": "https://vault.example.com" } }
+                    }
+                }
+            }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert!(pi2.spec.secrets.external.is_some());
+
+        let crd = PlatformInstance::crd();
+        let crd_json = serde_json::to_value(&crd).unwrap();
+        let crd_str = serde_json::to_string(&crd_json).unwrap();
+        assert!(crd_str.contains("secrets.mode external needs secrets.external.provider"));
+        assert!(crd_str.contains("secrets.external is only allowed with secrets.mode external"));
+    }
+
+    /// `spec.secrets.groups` must carry the bounds its CEL rule is priced against.
+    ///
+    /// The rule runs `matches()` over every entry. Without `maxItems` on the array and
+    /// `maxLength` on the items the API server estimates the rule above the CEL budget and
+    /// refuses the whole CRD: rolling out #275 (which added the rule) failed with
+    /// "estimated rule cost exceeds budget by factor of more than 100x" until both were
+    /// added. A server-side dry run accepted the CRD with `maxItems: 20` / `maxLength: 40`.
+    #[test]
+    fn the_secrets_groups_schema_is_bounded() {
+        let crd = serde_json::to_value(PlatformInstance::crd()).expect("serialize CRD");
+        let groups = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["secrets"]["properties"]["groups"];
+        assert_eq!(groups["maxItems"], 20, "groups schema: {groups}");
+        assert_eq!(groups["items"]["maxLength"], 40, "groups schema: {groups}");
+    }
+
+    /// `spec.ingress.allowedCidrs` must carry the bounds its CEL rule is priced against.
+    ///
+    /// The rule runs `matches()` over every entry (`stardelt-platform#427`). Without
+    /// `maxItems` on the array and `maxLength` on the items the API server estimates the
+    /// rule above the CEL budget and refuses the whole CRD — rolling out operator#533
+    /// failed with "estimated rule cost exceeds budget by factor of more than 100x" until
+    /// both were added (operator#536). A server-side dry run on the dev node accepted the
+    /// CRD with `maxItems: 64` / `maxLength: 64`.
+    #[test]
+    fn the_ingress_allowed_cidrs_schema_is_bounded() {
+        let crd = serde_json::to_value(PlatformInstance::crd()).expect("serialize CRD");
+        let cidrs = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["ingress"]["properties"]["allowedCidrs"];
+        assert_eq!(cidrs["maxItems"], 64, "allowedCidrs schema: {cidrs}");
+        assert_eq!(
+            cidrs["items"]["maxLength"], 64,
+            "allowedCidrs schema: {cidrs}"
+        );
+    }
+
+    #[test]
+    fn the_pipelines_pillar_is_off_by_default_and_read_from_the_spec() {
+        let default: PlatformInstanceSpec = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.pillars.pipelines);
+        assert!(
+            default.pillars.lakehouse,
+            "the other defaults are unchanged"
+        );
+        assert!(!default.pillars.notebooks);
+        let on: PlatformInstanceSpec =
+            serde_json::from_value(serde_json::json!({ "pillars": { "pipelines": true } }))
+                .unwrap();
+        assert!(on.pillars.pipelines);
+        assert!(
+            on.pillars.lakehouse,
+            "naming one pillar keeps the lakehouse on"
+        );
+    }
+
+    #[test]
+    fn crd_manifest_generation_succeeds() {
+        // kube can render a CRD manifest from the type; the schema must be valid.
+        let crd = Lakehouse::crd();
+        assert_eq!(crd.spec.names.kind, "Lakehouse");
+        assert_eq!(crd.spec.group, "stardelt.io");
+    }
+
+    #[test]
+    fn ingestion_source_defaults_to_saas_with_empty_source() {
+        let src: IngestionSource = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "IngestionSource",
+            "metadata": { "name": "events", "namespace": "stardelt" },
+            "spec": { "target": "warehouse.raw.events" }
+        }))
+        .expect("deserialize IngestionSource");
+        assert_eq!(src.spec.domain, IngestionDomain::Saas);
+        assert_eq!(src.spec.target, "warehouse.raw.events");
+        assert_eq!(src.spec.schedule, None);
+        assert!(src.spec.source.is_empty());
+        assert_eq!(src.metadata.namespace.as_deref(), Some("stardelt"));
+    }
+
+    #[test]
+    fn ingestion_source_explicit_cdc_spec_round_trips() {
+        let spec = serde_json::json!({
+            "domain": "cdc",
+            "target": "warehouse.raw.customers",
+            "schedule": "*/5 * * * *",
+            "source": { "connector": "postgres", "table": "public.customers" }
+        });
+        let parsed: IngestionSourceSpec =
+            serde_json::from_value(spec.clone()).expect("deserialize IngestionSourceSpec");
+        assert_eq!(parsed.domain, IngestionDomain::Cdc);
+        assert_eq!(parsed.schedule.as_deref(), Some("*/5 * * * *"));
+        assert_eq!(
+            parsed.source.get("connector").map(String::as_str),
+            Some("postgres")
+        );
+        assert_eq!(serde_json::to_value(&parsed).expect("serialize"), spec);
+    }
+
+    #[test]
+    fn ingestion_source_rejects_unknown_domain() {
+        let err = serde_json::from_value::<IngestionSourceSpec>(serde_json::json!({
+            "domain": "webhook",
+            "target": "warehouse.raw.events"
+        }));
+        assert!(err.is_err(), "unknown domains must not silently default");
+    }
+
+    fn task(name: &str, kind: TaskKind, depends_on: &[&str]) -> PipelineTask {
+        PipelineTask {
+            name: name.into(),
+            kind,
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+            sql: (kind == TaskKind::Sql).then(|| "SELECT 1".to_string()),
+            warehouse: None,
+            connection: None,
+            config: BTreeMap::new(),
+            writes: Vec::new(),
+            checks: Vec::new(),
+        }
+    }
+
+    fn spec_of(tasks: Vec<PipelineTask>) -> PipelineSpec {
+        PipelineSpec {
+            tasks,
+            schedule: None,
+            run_as: None,
+            owner_group: None,
+            viewers: Vec::new(),
+            params: BTreeMap::new(),
+            retries: None,
+            timeout: None,
+            concurrency: PipelineConcurrency::default(),
+            engine: PipelineEngine::default(),
+            publish: PipelinePublish::Direct,
+            notify: None,
+        }
+    }
+
+    #[test]
+    fn pipeline_defaults_to_airflow_unless_stated() {
+        let p: Pipeline = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": { "name": "daily", "namespace": "stardelt" },
+            "spec": {
+                "tasks": [
+                    { "name": "load", "kind": "sql", "sql": "SELECT 1" },
+                    { "name": "assert", "kind": "quality", "dependsOn": ["load"], "config": { "gate": "warn" } }
+                ]
+            }
+        }))
+        .expect("deserialize Pipeline");
+        assert_eq!(p.spec.engine, PipelineEngine::Airflow);
+        assert_eq!(p.spec.schedule, None);
+        assert_eq!(p.spec.concurrency, PipelineConcurrency::Forbid);
+        assert_eq!(p.spec.tasks.len(), 2);
+        assert_eq!(p.spec.tasks[0].kind, TaskKind::Sql);
+        assert!(p.spec.tasks[0].config.is_empty() && p.spec.tasks[0].depends_on.is_empty());
+        assert_eq!(p.spec.tasks[1].kind, TaskKind::Quality);
+        assert_eq!(p.spec.tasks[1].depends_on, ["load"]);
+        assert_eq!(
+            p.spec.tasks[1].config.get("gate").map(String::as_str),
+            Some("warn")
+        );
+        assert_eq!(p.spec.validate(), Ok(()));
+    }
+
+    #[test]
+    fn pipeline_full_spec_round_trips() {
+        let spec = serde_json::json!({
+            "tasks": [
+                { "name": "load", "kind": "sql", "sql": "INSERT INTO t SELECT 1", "warehouse": "default" },
+                { "name": "build", "kind": "dbt", "dependsOn": ["load"], "config": { "selector": "tag:nightly" } }
+            ],
+            "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" },
+            "runAs": "pipeline-analytics",
+            "params": { "days": "1" },
+            "retries": { "attempts": 2, "backoff": "5m" },
+            "timeout": "2h",
+            "concurrency": "Replace",
+            "engine": "spark",
+            "publish": "direct"
+        });
+        let parsed: PipelineSpec =
+            serde_json::from_value(spec.clone()).expect("deserialize PipelineSpec");
+        assert_eq!(parsed.engine, PipelineEngine::Spark);
+        assert_eq!(parsed.concurrency, PipelineConcurrency::Replace);
+        assert_eq!(parsed.run_as.as_deref(), Some("pipeline-analytics"));
+        assert_eq!(parsed.tasks[1].kind, TaskKind::Dbt);
+        assert_eq!(serde_json::to_value(&parsed).expect("serialize"), spec);
+    }
+
+    #[test]
+    fn pipeline_owner_group_is_optional() {
+        let p: Pipeline = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": { "name": "daily", "namespace": "stardelt" },
+            "spec": { "tasks": [ { "name": "load", "kind": "sql", "sql": "SELECT 1" } ] }
+        }))
+        .expect("deserialize Pipeline");
+        assert_eq!(p.spec.owner_group, None);
+        assert_eq!(p.spec.validate(), Ok(()));
+    }
+
+    #[test]
+    fn pipeline_owner_group_must_be_a_group_name() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        for bad in ["bad group!", "", &"a".repeat(65)] {
+            spec.owner_group = Some(bad.to_string());
+            assert_eq!(
+                spec.validate().unwrap_err(),
+                "ownerGroup must be a valid group name",
+                "{bad:?}"
+            );
+        }
+        for good in ["analytics", "data-eng.eu"] {
+            spec.owner_group = Some(good.to_string());
+            assert_eq!(spec.validate(), Ok(()), "{good}");
+        }
+    }
+
+    fn pipeline_spec_schema() -> serde_json::Value {
+        let yaml = serde_yaml::to_string(&Pipeline::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"].clone()
+    }
+
+    #[test]
+    fn pipeline_viewers_are_optional_group_names() {
+        let schema = pipeline_spec_schema();
+        let viewers = &schema["properties"]["viewers"];
+        assert_eq!(viewers["type"], "array");
+        assert_eq!(viewers["maxItems"], 16);
+        assert_eq!(viewers["items"]["type"], "string");
+        assert_eq!(viewers["items"]["maxLength"], 64);
+        assert_eq!(
+            viewers["items"]["pattern"], schema["properties"]["ownerGroup"]["pattern"],
+            "a viewer is a group name, exactly as the owner group is"
+        );
+
+        let empty = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        assert!(
+            !serde_json::to_value(&empty)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("viewers"),
+            "an empty viewers list is left out of the spec"
+        );
+        let mut two = empty;
+        two.viewers = vec!["analytics".into(), "visitors".into()];
+        assert_eq!(
+            serde_json::to_value(&two).unwrap()["viewers"],
+            serde_json::json!(["analytics", "visitors"])
+        );
+    }
+
+    #[test]
+    fn pipeline_notify_is_optional_and_bounded() {
+        let schema = pipeline_spec_schema();
+        let notify = &schema["properties"]["notify"];
+        assert_eq!(notify["nullable"], true, "notify is optional");
+        for list in ["onFailure", "onSuccess", "onRecovered"] {
+            assert_eq!(notify["properties"][list]["type"], "array", "{list}");
+            assert_eq!(notify["properties"][list]["maxItems"], 5, "{list}");
+            assert_eq!(
+                notify["properties"][list]["items"]["maxLength"], 64,
+                "{list}"
+            );
+        }
+        let empty = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        assert!(
+            !serde_json::to_value(&empty)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("notify"),
+            "a pipeline without notify leaves it out of the spec"
+        );
+    }
+
+    #[test]
+    fn pipeline_notify_needs_an_owner_group() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.notify = Some(PipelineNotify {
+            on_failure: vec!["on call".into()],
+            ..PipelineNotify::default()
+        });
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "notify needs an ownerGroup: only a pipeline's owner group can name destinations"
+        );
+        spec.owner_group = Some("analytics".into());
+        assert_eq!(spec.validate(), Ok(()));
+    }
+
+    #[test]
+    fn pipeline_notify_refuses_bad_names() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.owner_group = Some("analytics".into());
+
+        spec.notify = Some(PipelineNotify {
+            on_success: vec![
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+                "e".into(),
+                "f".into(),
+            ],
+            ..PipelineNotify::default()
+        });
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "notify.onSuccess names at most 5 destinations"
+        );
+
+        spec.notify = Some(PipelineNotify {
+            on_failure: vec!["  ".into()],
+            ..PipelineNotify::default()
+        });
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "notify.onFailure holds `  `, which is not a destination name (1 to 64 characters)"
+        );
+
+        spec.notify = Some(PipelineNotify {
+            on_recovered: vec!["pager".into(), "pager".into()],
+            ..PipelineNotify::default()
+        });
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "notify.onRecovered names `pager` twice"
+        );
+
+        spec.notify = Some(PipelineNotify {
+            on_failure: vec!["on call".into(), "pager".into()],
+            on_success: vec![],
+            on_recovered: vec![],
+        });
+        assert_eq!(
+            spec.validate(),
+            Ok(()),
+            "a space is a legal destination name"
+        );
+    }
+
+    #[test]
+    fn a_valid_wap_pipeline_passes_validation() {
+        let mut spec = spec_of(vec![
+            task("load", TaskKind::Sql, &[]),
+            task("assert", TaskKind::Quality, &["load"]),
+        ]);
+        spec.tasks[0].writes = vec!["mobility.silver.trips".to_string()];
+        spec.tasks[1].checks = vec![QualityCheck {
+            name: "no_null_ids".to_string(),
+            sql: "SELECT id FROM ${table} WHERE id IS NULL".to_string(),
+            severity: QualitySeverity::Error,
+        }];
+        spec.publish = PipelinePublish::Wap;
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn wap_needs_a_quality_task_with_a_check() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.tasks[0].writes = vec!["mobility.silver.trips".to_string()];
+        spec.publish = PipelinePublish::Wap;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "publish: wap needs a quality task with at least one check"
+        );
+    }
+
+    #[test]
+    fn only_a_sql_task_declares_writes_and_only_a_quality_task_checks() {
+        let mut spec = spec_of(vec![task("nb", TaskKind::Notebook, &[])]);
+        spec.tasks[0]
+            .config
+            .insert("notebook".into(), "x.ipynb".into());
+        spec.tasks[0]
+            .config
+            .insert("objectVersion".into(), "v1".into());
+        spec.tasks[0].writes = vec!["mobility.silver.trips".to_string()];
+        assert!(
+            spec.validate().is_err(),
+            "a notebook task cannot declare writes"
+        );
+
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.tasks[0].checks = vec![QualityCheck {
+            name: "c".into(),
+            sql: "SELECT 1".into(),
+            severity: QualitySeverity::Warn,
+        }];
+        assert!(spec.validate().is_err(), "a sql task cannot declare checks");
+    }
+
+    #[test]
+    fn a_write_must_be_catalog_schema_table() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.tasks[0].writes = vec!["silver.trips".to_string()];
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "task `load` writes `silver.trips`, which is not catalog.schema.table"
+        );
+    }
+
+    #[test]
+    fn publish_defaults_to_direct_and_round_trips() {
+        let p: Pipeline = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": { "name": "daily", "namespace": "stardelt" },
+            "spec": { "tasks": [ { "name": "load", "kind": "sql", "sql": "SELECT 1" } ] }
+        }))
+        .expect("a pipeline without publish still parses");
+        assert_eq!(p.spec.publish, PipelinePublish::Direct);
+        let value = serde_json::to_value(&p.spec).expect("serializes");
+        assert_eq!(value["publish"], "direct");
+    }
+
+    fn notebook_task(file: &str, version: &str) -> PipelineTask {
+        let mut t = task("report", TaskKind::Notebook, &[]);
+        t.config.insert("notebook".into(), file.into());
+        t.config.insert("objectVersion".into(), version.into());
+        t
+    }
+
+    const NOTEBOOK_NEEDS: &str = "a notebook task needs config.notebook (a .ipynb file name) and config.objectVersion (the published version)";
+
+    #[test]
+    fn notebook_task_needs_file_and_version() {
+        let missing = task("report", TaskKind::Notebook, &[]);
+        assert_eq!(
+            spec_of(vec![missing]).validate().unwrap_err(),
+            NOTEBOOK_NEEDS
+        );
+
+        let mut no_version = notebook_task("daily report.ipynb", "v1");
+        no_version.config.remove("objectVersion");
+        assert_eq!(
+            spec_of(vec![no_version]).validate().unwrap_err(),
+            NOTEBOOK_NEEDS
+        );
+
+        let mut no_file = notebook_task("daily report.ipynb", "v1");
+        no_file.config.remove("notebook");
+        assert_eq!(
+            spec_of(vec![no_file]).validate().unwrap_err(),
+            NOTEBOOK_NEEDS
+        );
+
+        assert_eq!(
+            spec_of(vec![notebook_task("daily report.ipynb", "v1")]).validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn notebook_file_must_be_ipynb() {
+        for bad in [
+            "report.py",
+            "report.ipynb ",
+            "/report.ipynb",
+            ".ipynb",
+            "réport.ipynb",
+            &format!("{}.ipynb", "a".repeat(129)),
+        ] {
+            let spec = spec_of(vec![notebook_task(bad, "v1")]);
+            assert_eq!(spec.validate().unwrap_err(), NOTEBOOK_NEEDS, "{bad:?}");
+        }
+        for good in [
+            "report.ipynb",
+            "daily report.ipynb",
+            "team.report-2_final.ipynb",
+            &format!("{}.ipynb", "a".repeat(128)),
+        ] {
+            assert_eq!(
+                spec_of(vec![notebook_task(good, "v1")]).validate(),
+                Ok(()),
+                "{good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn notebook_object_version_must_be_pinned() {
+        for bad in ["", " ", "v1 2", "v1\n2", &format!("v{}", "a".repeat(128))] {
+            let spec = spec_of(vec![notebook_task("report.ipynb", bad)]);
+            assert_eq!(spec.validate().unwrap_err(), NOTEBOOK_NEEDS, "{bad:?}");
+        }
+        let longest = format!("v{}", "a".repeat(127));
+        assert_eq!(longest.chars().count(), 128);
+        assert_eq!(
+            spec_of(vec![notebook_task("report.ipynb", &longest)]).validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn notebook_refuses_unknown_config_keys() {
+        let mut t = notebook_task("report.ipynb", "v1");
+        t.config
+            .insert("repo".into(), "github.com/example/reports".into());
+        let err = spec_of(vec![t]).validate().unwrap_err();
+        assert!(
+            err.contains("notebook tasks accept only notebook, objectVersion and params"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn notebook_params_must_be_a_string_object() {
+        fn with_params(params: &str) -> Result<(), String> {
+            let mut t = notebook_task("report.ipynb", "v1");
+            t.config.insert("params".into(), params.into());
+            spec_of(vec![t]).validate()
+        }
+
+        assert_eq!(with_params("{}"), Ok(()));
+        assert_eq!(with_params(r#"{"days": "1", "region": "eu"}"#), Ok(()));
+        for bad in [
+            "1",
+            "[]",
+            "not json",
+            r#"{"days": 1}"#,
+            r#"{"days": null}"#,
+            r#"{"nested": {"a": "b"}}"#,
+        ] {
+            let err = with_params(bad).unwrap_err();
+            assert!(
+                err.contains("notebook params must be a JSON object string"),
+                "{bad:?}: {err}"
+            );
+        }
+
+        let params = |n: usize| -> String {
+            let map: BTreeMap<String, String> =
+                (0..n).map(|i| (format!("p{i}"), "x".to_string())).collect();
+            serde_json::to_string(&map).expect("serialize params")
+        };
+        assert_eq!(with_params(&params(32)), Ok(()));
+        assert!(
+            with_params(&params(33))
+                .unwrap_err()
+                .contains("at most 32 keys")
+        );
+    }
+
+    #[test]
+    fn a_task_can_name_a_connection() {
+        let mut notebook = notebook_task("report.ipynb", "v1");
+        notebook.connection = Some("crm-db".into());
+        assert_eq!(spec_of(vec![notebook]).validate(), Ok(()));
+
+        let mut sql = task("load", TaskKind::Sql, &[]);
+        sql.connection = Some("crm-db".into());
+        assert!(
+            spec_of(vec![sql])
+                .validate()
+                .unwrap_err()
+                .contains("is a sql task")
+        );
+    }
+
+    #[test]
+    fn a_connection_name_must_be_a_connection_name() {
+        let too_long = "a".repeat(41);
+        for bad in ["", "-crm", "crm-", "crm_db", "Crm-db", too_long.as_str()] {
+            let mut t = notebook_task("report.ipynb", "v1");
+            t.connection = Some(bad.into());
+            assert!(
+                spec_of(vec![t])
+                    .validate()
+                    .unwrap_err()
+                    .contains("is not a connection name"),
+                "{bad:?}"
+            );
+        }
+        let mut good = notebook_task("report.ipynb", "v1");
+        good.connection = Some("crm-db".into());
+        assert_eq!(spec_of(vec![good]).validate(), Ok(()));
+    }
+
+    #[test]
+    fn sql_tasks_unchanged() {
+        // Other kinds keep their free-form config: `params` is a notebook rule only.
+        let mut sql = task("load", TaskKind::Sql, &[]);
+        sql.config.insert("gate".into(), "warn".into());
+        sql.config.insert("anything".into(), "not json".into());
+        assert_eq!(spec_of(vec![sql]).validate(), Ok(()));
+
+        let mut no_sql = task("load", TaskKind::Sql, &[]);
+        no_sql.sql = None;
+        assert!(
+            spec_of(vec![no_sql])
+                .validate()
+                .unwrap_err()
+                .contains("needs a sql statement")
+        );
+    }
+
+    #[test]
+    fn example_manifest_validates() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/pipeline-notebook.yaml");
+        let text = std::fs::read_to_string(&path).expect("read examples/pipeline-notebook.yaml");
+        let pipeline: Pipeline =
+            serde_yaml::from_str(&text).expect("deserialize the example Pipeline");
+        assert_eq!(
+            pipeline.spec.validate(),
+            Ok(()),
+            "the example must pass the Rust rules"
+        );
+        let notebook = pipeline
+            .spec
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Notebook)
+            .expect("the example has a notebook task");
+        assert!(notebook.config.contains_key("objectVersion"));
+        let params = notebook
+            .config
+            .get("params")
+            .expect("params in the example");
+        let parsed: BTreeMap<String, String> =
+            serde_json::from_str(params).expect("params is a JSON object of strings");
+        assert!(!parsed.is_empty());
+    }
+
+    #[test]
+    fn existing_pipeline_manifests_still_deserialise() {
+        fn yaml_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read examples/") {
+                let path = entry.expect("read examples/ entry").path();
+                if path.is_dir() {
+                    yaml_files(&path, out);
+                } else if matches!(
+                    path.extension().and_then(std::ffi::OsStr::to_str),
+                    Some("yaml" | "yml")
+                ) {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let mut files = Vec::new();
+        yaml_files(&root, &mut files);
+        for path in files {
+            let text = std::fs::read_to_string(&path).expect("read example");
+            for document in serde_yaml::Deserializer::from_str(&text) {
+                let value = serde_yaml::Value::deserialize(document)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                if value.get("kind").and_then(serde_yaml::Value::as_str) != Some("Pipeline") {
+                    continue;
+                }
+                serde_yaml::from_value::<Pipeline>(value)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            }
+        }
+    }
+
+    #[test]
+    fn the_minimal_platform_example_is_what_its_comments_say() {
+        let text = include_str!("../../../examples/platform-minimal.yaml");
+        let mut platform = None;
+        let mut lakehouse = None;
+        for document in serde_yaml::Deserializer::from_str(text) {
+            let value = serde_yaml::Value::deserialize(document).expect("a YAML document");
+            match value.get("kind").and_then(serde_yaml::Value::as_str) {
+                Some("PlatformInstance") => {
+                    platform = Some(
+                        serde_yaml::from_value::<PlatformInstance>(value)
+                            .expect("a PlatformInstance"),
+                    );
+                }
+                Some("Lakehouse") => {
+                    lakehouse =
+                        Some(serde_yaml::from_value::<Lakehouse>(value).expect("a Lakehouse"));
+                }
+                other => panic!("unexpected kind {other:?}"),
+            }
+        }
+        let platform = platform.expect("a PlatformInstance document");
+        let lakehouse = lakehouse.expect("a Lakehouse document");
+        let spec = &platform.spec;
+        assert!(
+            !spec.dry_run,
+            "the example is the switch that changes the cluster"
+        );
+        assert!(spec.pillars.lakehouse, "Nova needs the lakehouse pillar");
+        assert_eq!(spec.identity.mode, IdentityMode::Platform);
+        // The two rules the CRD enforces on the API server, checked here as well.
+        assert!(
+            spec.base_domain.is_some(),
+            "identity and ingress both need baseDomain"
+        );
+        assert!(spec.ingress.enabled);
+        assert_eq!(spec.ingress.class_name.as_deref(), Some("traefik"));
+        assert!(spec.ingress.tls.enabled && spec.ingress.tls.issuer.is_some());
+        assert_eq!(
+            lakehouse.metadata.namespace.as_deref(),
+            Some(spec.namespace.as_str()),
+            "the Lakehouse lives in the platform namespace"
+        );
+        assert!(!lakehouse.spec.dry_run);
+    }
+
+    #[test]
+    fn validate_accepts_a_diamond_and_rejects_the_broken_shapes() {
+        let diamond = spec_of(vec![
+            task("a", TaskKind::Sql, &[]),
+            task("b", TaskKind::Sql, &["a"]),
+            task("c", TaskKind::Sql, &["a"]),
+            task("d", TaskKind::Quality, &["b", "c"]),
+        ]);
+        assert_eq!(diamond.validate(), Ok(()));
+
+        let twice = spec_of(vec![
+            task("a", TaskKind::Sql, &[]),
+            task("a", TaskKind::Sql, &[]),
+        ]);
+        assert!(twice.validate().unwrap_err().contains("used twice"));
+
+        let unknown = spec_of(vec![task("a", TaskKind::Sql, &["ghost"])]);
+        assert!(unknown.validate().unwrap_err().contains("ghost"));
+
+        let itself = spec_of(vec![task("a", TaskKind::Sql, &["a"])]);
+        assert!(itself.validate().is_err());
+
+        let circle = spec_of(vec![
+            task("a", TaskKind::Sql, &["c"]),
+            task("b", TaskKind::Sql, &["a"]),
+            task("c", TaskKind::Sql, &["b"]),
+        ]);
+        assert!(circle.validate().unwrap_err().contains("circle"));
+
+        let mut no_sql = task("a", TaskKind::Sql, &[]);
+        no_sql.sql = None;
+        assert!(
+            spec_of(vec![no_sql])
+                .validate()
+                .unwrap_err()
+                .contains("needs a sql")
+        );
+    }
+
+    #[test]
+    fn the_generated_schema_carries_the_cel_rules() {
+        let crd = serde_json::to_string(&Pipeline::crd()).expect("serialize CRD");
+        assert!(crd.contains("x-kubernetes-validations"));
+        assert!(crd.contains("task names must be unique"));
+        assert!(crd.contains("a sql task needs a sql statement"));
+        assert!(crd.contains("a notebook task needs config.notebook"));
+        assert!(crd.contains("notebook tasks accept only notebook, objectVersion and params"));
+        assert!(crd.contains("a sql task cannot name a connection"));
+    }
+
+    #[test]
+    fn pipeline_status_carries_runs() {
+        let run = PipelineRun {
+            id: "2026-10-17T03:00:00Z".into(),
+            state: "succeeded".into(),
+            started_at: Some("2026-10-17T03:00:00Z".into()),
+        };
+        let status = PipelineStatus {
+            phase: "Ready".into(),
+            conditions: vec![],
+            observed_generation: None,
+            runs: vec![run],
+        };
+        let json = serde_json::to_value(&status).expect("serialize PipelineStatus");
+        assert_eq!(json["runs"][0]["state"], "succeeded");
+        assert_eq!(json["conditions"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn ingestion_and_pipeline_crd_manifests_generate() {
+        let ingest = IngestionSource::crd();
+        assert_eq!(ingest.spec.names.kind, "IngestionSource");
+        assert_eq!(ingest.spec.scope, "Namespaced");
+        let pipeline = Pipeline::crd();
+        assert_eq!(pipeline.spec.names.kind, "Pipeline");
+        assert_eq!(pipeline.spec.scope, "Namespaced");
+    }
+
+    #[test]
+    fn component_value_overrides_default_to_empty() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "stardelt" },
+            "spec": {}
+        }))
+        .expect("deserialize Lakehouse");
+        assert!(lh.spec.component_values.values.is_empty());
+        assert!(lh.spec.component_values.set.is_empty());
+        assert!(lh.spec.component_values.values_from.is_empty());
+
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {}
+        }))
+        .expect("deserialize PlatformInstance");
+        assert!(pi.spec.component_values.values.is_empty());
+        assert!(pi.spec.component_values.set.is_empty());
+        assert!(pi.spec.component_values.values_from.is_empty());
+    }
+
+    #[test]
+    fn lakehouse_parses_per_component_values_set_and_values_from() {
+        let lh: Lakehouse = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Lakehouse",
+            "metadata": { "name": "main", "namespace": "stardelt" },
+            "spec": {
+                "values": {
+                    "trino": {
+                        "coordinator": { "jvm": { "maxHeapSize": "4G" } }
+                    }
+                },
+                "set": { "trino": { "server.workers": "3" } },
+                "valuesFrom": {
+                    "seaweedfs": {
+                        "configMapRef": { "name": "sw-values", "key": "values.yaml" }
+                    },
+                    "lakekeeper": {
+                        "secretRef": { "name": "keeper-values", "key": "values.yaml", "namespace": "stardelt" }
+                    }
+                }
+            }
+        }))
+        .expect("deserialize Lakehouse");
+
+        let overrides = &lh.spec.component_values;
+        assert_eq!(
+            overrides.values["trino"]["coordinator"]["jvm"]["maxHeapSize"],
+            serde_json::json!("4G")
+        );
+        assert_eq!(overrides.set["trino"]["server.workers"], "3");
+
+        let sw = &overrides.values_from["seaweedfs"];
+        let cm = sw.config_map_ref.as_ref().expect("configMapRef");
+        assert_eq!(cm.name, "sw-values");
+        assert_eq!(cm.key, "values.yaml");
+        assert_eq!(cm.namespace, None);
+        assert!(sw.secret_ref.is_none());
+
+        let keeper = &overrides.values_from["lakekeeper"];
+        let secret = keeper.secret_ref.as_ref().expect("secretRef");
+        assert_eq!(secret.name, "keeper-values");
+        assert_eq!(secret.namespace.as_deref(), Some("stardelt"));
+        assert!(keeper.config_map_ref.is_none());
+    }
+
+    #[test]
+    fn platform_instance_parses_component_values() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {
+                "values": { "cnpg": { "replicaCount": 2 } },
+                "set": { "cnpg": { "image.tag": "1.25.0" } },
+                "valuesFrom": {
+                    "cnpg": { "configMapRef": { "name": "cnpg-values", "key": "values.yaml", "namespace": "stardelt" } }
+                }
+            }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(
+            pi.spec.component_values.values["cnpg"]["replicaCount"],
+            serde_json::json!(2)
+        );
+        assert_eq!(pi.spec.component_values.set["cnpg"]["image.tag"], "1.25.0");
+        assert!(
+            pi.spec.component_values.values_from["cnpg"]
+                .config_map_ref
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn lakehouse_crd_documents_free_form_component_values() {
+        use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::JSONSchemaPropsOrBool;
+
+        let crd = Lakehouse::crd();
+        let schema = crd.spec.versions[0]
+            .schema
+            .as_ref()
+            .and_then(|s| s.open_api_v3_schema.as_ref())
+            .expect("openAPIV3Schema");
+        let spec = schema
+            .properties
+            .as_ref()
+            .and_then(|p| p.get("spec"))
+            .expect("spec schema");
+        let spec_properties = spec.properties.as_ref().expect("spec properties");
+
+        for field in ["values", "set", "valuesFrom"] {
+            assert!(
+                spec_properties.contains_key(field),
+                "spec.{field} must be part of the CRD schema"
+            );
+        }
+
+        // `values.<component>` must survive API-server pruning.
+        let values = spec_properties.get("values").expect("values schema");
+        let per_component = match values
+            .additional_properties
+            .as_ref()
+            .expect("additionalProperties")
+        {
+            JSONSchemaPropsOrBool::Schema(props) => props,
+            JSONSchemaPropsOrBool::Bool(_) => panic!("values.<component> must carry a schema"),
+        };
+        assert_eq!(
+            per_component.x_kubernetes_preserve_unknown_fields,
+            Some(true),
+            "free-form values must set x-kubernetes-preserve-unknown-fields"
+        );
+        assert_eq!(
+            per_component.type_.as_deref(),
+            Some("object"),
+            "values.<component> is a values document, i.e. an object"
+        );
+    }
+
+    fn connection(spec: serde_json::Value) -> Connection {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Connection",
+            "metadata": { "name": "crm-db", "namespace": "stardelt" },
+            "spec": spec
+        }))
+        .expect("deserialize Connection")
+    }
+
+    fn crm(patch: serde_json::Value) -> serde_json::Value {
+        let mut spec = serde_json::json!({
+            "scope": "group",
+            "ownerGroup": "analytics",
+            "type": "sqlserver",
+            "config": { "host": "crm.example.com", "port": "1433", "database": "sales" },
+            "secret": { "keys": ["user", "password"] }
+        });
+        for (k, v) in patch.as_object().unwrap() {
+            if v.is_null() {
+                spec.as_object_mut().unwrap().remove(k);
+            } else {
+                spec[k] = v.clone();
+            }
+        }
+        spec
+    }
+
+    #[test]
+    fn a_group_connection_parses_and_derives_its_store_path_and_names() {
+        let c = connection(crm(serde_json::json!({})));
+        assert_eq!(c.spec.scope, ConnectionScope::Group);
+        assert_eq!(c.spec.type_, ConnectionType::Sqlserver);
+        assert_eq!(c.spec.refresh_interval, "15m");
+        assert!(c.spec.secret.as_ref().unwrap().remote_ref.is_none());
+        assert!(c.spec.validate("crm-db").is_ok());
+        assert_eq!(
+            c.spec.derived_remote_ref("crm-db"),
+            "connections/group/analytics/crm-db"
+        );
+        assert_eq!(connection_secret_name("crm-db"), "conn-crm-db");
+        assert_eq!(connection_env_prefix("crm-db"), "CONN_CRM_DB_");
+    }
+
+    #[test]
+    fn a_managed_connection_names_the_groups_that_may_use_it() {
+        let c = connection(crm(serde_json::json!({
+            "scope": "managed", "ownerGroup": null, "usableBy": ["analytics", "finance"]
+        })));
+        assert!(c.spec.validate("crm-db").is_ok());
+        assert_eq!(
+            c.spec.derived_remote_ref("crm-db"),
+            "connections/managed/crm-db"
+        );
+    }
+
+    #[test]
+    fn a_connection_without_secret_deserialises_and_validates_per_type() {
+        let kafka: Connection = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Connection",
+            "metadata": { "name": "bus", "namespace": "stardelt" },
+            "spec": {
+                "scope": "group",
+                "ownerGroup": "analytics",
+                "type": "kafka",
+                "config": { "bootstrapServers": "kafka-kafka-bootstrap.stardelt.svc.cluster.local:9092" }
+            }
+        }))
+        .expect("deserialize Connection without secret");
+        assert!(kafka.spec.secret.is_none());
+        assert!(kafka.spec.validate("bus").is_ok());
+
+        let pg: Connection = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Connection",
+            "metadata": { "name": "db", "namespace": "stardelt" },
+            "spec": {
+                "scope": "group",
+                "ownerGroup": "analytics",
+                "type": "postgresql",
+                "config": { "host": "db.example.com" }
+            }
+        }))
+        .expect("deserialize Connection without secret");
+        assert!(pg.spec.secret.is_none());
+        let err = pg.spec.validate("db").unwrap_err();
+        assert!(err.contains("user") && err.contains("password"), "{err}");
+    }
+
+    #[test]
+    fn the_scope_rules_are_enforced() {
+        let bad =
+            |patch: serde_json::Value| connection(crm(patch)).spec.validate("crm-db").unwrap_err();
+        assert!(bad(serde_json::json!({ "ownerGroup": null })).contains("ownerGroup"));
+        assert!(bad(serde_json::json!({ "usableBy": ["finance"] })).contains("usableBy"));
+        assert!(bad(serde_json::json!({ "ownerGroup": "../finance" })).contains("ownerGroup"));
+        assert!(bad(serde_json::json!({ "ownerGroup": "a/b" })).contains("ownerGroup"));
+        assert!(
+            bad(serde_json::json!({ "scope": "managed", "ownerGroup": null })).contains("usableBy")
+        );
+        assert!(
+            bad(serde_json::json!({ "scope": "managed", "usableBy": ["x/y"], "ownerGroup": null }))
+                .contains("usableBy")
+        );
+    }
+
+    #[test]
+    fn each_type_demands_its_settings_and_secret_keys() {
+        let bad =
+            |patch: serde_json::Value| connection(crm(patch)).spec.validate("crm-db").unwrap_err();
+        assert!(bad(serde_json::json!({ "config": { "port": "1433" } })).contains("config.host"));
+        assert!(
+            bad(serde_json::json!({ "secret": { "keys": ["user"] } }))
+                .contains("user and password")
+        );
+        assert!(bad(serde_json::json!({ "type": "rest-api", "config": { "baseUrl": "https://x" }, "secret": { "keys": ["clientId"] } })).contains("rest-api"));
+        assert!(bad(serde_json::json!({ "type": "s3", "config": { "bucket": "b" }, "secret": { "keys": ["accessKeyId"] } })).contains("s3"));
+        assert!(bad(serde_json::json!({ "type": "sftp", "config": { "host": "h" }, "secret": { "keys": ["user"] } })).contains("sftp"));
+        assert!(
+            bad(serde_json::json!({ "type": "kafka", "config": {}, "secret": { "keys": ["x"] } }))
+                .contains("kafka")
+        );
+        for ok in [
+            serde_json::json!({ "type": "rest-api", "config": { "baseUrl": "https://x" }, "secret": { "keys": ["token"] } }),
+            serde_json::json!({ "type": "rest-api", "config": { "baseUrl": "https://x" }, "secret": { "keys": ["clientId", "clientSecret"] } }),
+            serde_json::json!({ "type": "s3", "config": { "bucket": "b" }, "secret": { "keys": ["accessKeyId", "secretAccessKey"] } }),
+            serde_json::json!({ "type": "sftp", "config": { "host": "h" }, "secret": { "keys": ["user", "privateKey"] } }),
+            serde_json::json!({ "type": "generic", "config": {}, "secret": { "keys": ["anything"] } }),
+        ] {
+            assert!(connection(crm(ok)).spec.validate("c").is_ok());
+        }
+    }
+
+    #[test]
+    fn secrets_do_not_hide_in_config_and_keys_stay_clean() {
+        let bad =
+            |patch: serde_json::Value| connection(crm(patch)).spec.validate("crm-db").unwrap_err();
+        assert!(
+            bad(serde_json::json!({ "config": { "host": "h", "dbPassword": "x" } }))
+                .contains("looks like a secret")
+        );
+        assert!(
+            bad(serde_json::json!({ "config": { "host": "h", "API_TOKEN": "x" } }))
+                .contains("looks like a secret")
+        );
+        assert!(
+            bad(serde_json::json!({ "secret": { "keys": ["user", "password", "user"] } }))
+                .contains("unique")
+        );
+        assert!(
+            bad(serde_json::json!({ "secret": { "keys": ["user", "pass word"] } }))
+                .contains("secret.keys")
+        );
+    }
+
+    #[test]
+    fn a_store_path_cannot_climb_out_of_its_prefix() {
+        let ok = connection(crm(
+            serde_json::json!({ "secret": { "keys": ["user", "password"], "remoteRef": "kv/team/crm" } }),
+        ));
+        assert!(ok.spec.validate("crm-db").is_ok());
+        for path in ["connections/group/finance/../analytics/x", "a//b"] {
+            let bad = connection(crm(
+                serde_json::json!({ "secret": { "keys": ["user", "password"], "remoteRef": path } }),
+            ));
+            assert!(
+                bad.spec
+                    .validate("crm-db")
+                    .unwrap_err()
+                    .contains("remoteRef"),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_and_refresh_interval_are_checked() {
+        let spec = connection(crm(serde_json::json!({}))).spec;
+        for name in ["", "Crm", "1crm", "crm_db", "crm-", &"a".repeat(41)] {
+            assert!(spec.validate(name).is_err(), "{name}");
+        }
+        let mut s = spec.clone();
+        for (interval, ok) in [
+            ("15m", true),
+            ("1m", true),
+            ("24h", true),
+            ("0m", false),
+            ("25h", false),
+            ("90s", false),
+            ("m", false),
+        ] {
+            s.refresh_interval = interval.to_string();
+            assert_eq!(s.validate("c").is_ok(), ok, "{interval}");
+        }
+    }
+
+    #[test]
+    fn the_connection_crd_carries_the_cel_rules_and_the_bounds() {
+        let crd = Connection::crd();
+        assert_eq!(crd.spec.names.plural, "connections");
+        let yaml = serde_yaml::to_string(&crd).unwrap();
+        for needle in [
+            "x-kubernetes-validations",
+            "a group connection needs ownerGroup and no usableBy",
+            "a managed connection needs usableBy and no ownerGroup",
+            "config holds settings, not secrets",
+            "maxProperties: 32",
+            "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        ] {
+            assert!(yaml.contains(needle), "the CRD lacks `{needle}`");
+        }
+        assert!(
+            !yaml.contains("password:"),
+            "no field may be called password"
+        );
+    }
+
+    fn volume(spec: serde_json::Value) -> Volume {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Volume",
+            "metadata": { "name": "raw-landing", "namespace": "stardelt" },
+            "spec": spec
+        }))
+        .expect("deserialize Volume")
+    }
+
+    fn volume_spec(patch: serde_json::Value) -> serde_json::Value {
+        let mut spec = serde_json::json!({
+            "catalog": "analytics",
+            "purpose": "data",
+            "storage": { "managed": {} },
+            "grants": [
+                { "group": "analysts", "verbs": ["read"] },
+                { "group": "engineers", "verbs": ["read", "write"] }
+            ]
+        });
+        for (k, v) in patch.as_object().unwrap() {
+            if v.is_null() {
+                spec.as_object_mut().unwrap().remove(k);
+            } else {
+                spec[k] = v.clone();
+            }
+        }
+        spec
+    }
+
+    #[test]
+    fn a_managed_volume_parses_and_derives_its_prefix() {
+        let v = volume(volume_spec(serde_json::json!({})));
+        assert_eq!(v.spec.purpose, VolumePurpose::Data);
+        assert!(v.spec.storage.managed.is_some());
+        assert!(v.spec.storage.external.is_none());
+        assert!(v.spec.validate("raw-landing").is_ok());
+        assert_eq!(
+            v.spec.derived_prefix("raw-landing"),
+            "volumes/analytics/raw-landing/"
+        );
+    }
+
+    #[test]
+    fn an_external_volume_parses_and_keeps_its_prefix() {
+        let v = volume(volume_spec(serde_json::json!({
+            "storage": { "external": { "connection": "raw-s3", "prefix": "landing/" } }
+        })));
+        assert_eq!(
+            v.spec.storage.external.as_ref().unwrap().connection,
+            "raw-s3"
+        );
+        assert!(v.spec.validate("raw-landing").is_ok());
+        assert_eq!(v.spec.derived_prefix("raw-landing"), "landing/");
+        let root = volume(volume_spec(serde_json::json!({
+            "storage": { "external": { "connection": "raw-s3" } }
+        })));
+        assert_eq!(root.spec.derived_prefix("raw-landing"), "");
+    }
+
+    #[test]
+    fn managed_storage_serializes_as_an_empty_object() {
+        let v = volume(volume_spec(serde_json::json!({})));
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["spec"]["storage"]["managed"], serde_json::json!({}));
+        assert_eq!(json["spec"]["storage"].get("external"), None);
+    }
+
+    #[test]
+    fn the_storage_choice_is_exclusive() {
+        let both = volume(volume_spec(serde_json::json!({
+            "storage": { "managed": {}, "external": { "connection": "raw-s3" } }
+        })));
+        assert_eq!(
+            both.spec.validate("raw-landing").unwrap_err(),
+            "storage must be either managed or external, not both and not neither"
+        );
+        let neither = volume(volume_spec(serde_json::json!({ "storage": {} })));
+        assert_eq!(
+            neither.spec.validate("raw-landing").unwrap_err(),
+            "storage must be either managed or external, not both and not neither"
+        );
+    }
+
+    #[test]
+    fn an_external_prefix_cannot_climb_out_of_its_volume() {
+        for prefix in ["a/../b", "a//b"] {
+            let bad = volume(volume_spec(serde_json::json!({
+                "storage": { "external": { "connection": "raw-s3", "prefix": prefix } }
+            })));
+            assert_eq!(
+                bad.spec.validate("raw-landing").unwrap_err(),
+                "an external prefix must not contain .. or //",
+                "{prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_group_appears_once_in_grants() {
+        let bad = volume(volume_spec(serde_json::json!({
+            "grants": [
+                { "group": "analysts", "verbs": ["read"] },
+                { "group": "analysts", "verbs": ["write"] }
+            ]
+        })));
+        assert_eq!(
+            bad.spec.validate("raw-landing").unwrap_err(),
+            "each group may appear once in grants"
+        );
+    }
+
+    #[test]
+    fn a_verb_appears_once_per_grant() {
+        let bad = volume(volume_spec(serde_json::json!({
+            "grants": [ { "group": "analysts", "verbs": ["read", "read"] } ]
+        })));
+        assert_eq!(
+            bad.spec.validate("raw-landing").unwrap_err(),
+            "a verb may appear once per grant"
+        );
+    }
+
+    #[test]
+    fn a_libraries_volume_only_lets_managers_write() {
+        let ok = volume(volume_spec(serde_json::json!({
+            "purpose": "libraries",
+            "grants": [
+                { "group": "analysts", "verbs": ["read"] },
+                { "group": "engineers", "verbs": ["read", "write", "manage"] }
+            ]
+        })));
+        assert!(ok.spec.validate("raw-landing").is_ok());
+        let bad = volume(volume_spec(serde_json::json!({
+            "purpose": "libraries",
+            "grants": [ { "group": "engineers", "verbs": ["write"] } ]
+        })));
+        assert_eq!(
+            bad.spec.validate("raw-landing").unwrap_err(),
+            "on a libraries volume only a group that also manages it may write"
+        );
+    }
+
+    #[test]
+    fn verbs_sort_in_ascending_rights() {
+        let mut verbs = vec![VolumeVerb::Manage, VolumeVerb::Read, VolumeVerb::Write];
+        verbs.sort();
+        assert_eq!(
+            verbs,
+            vec![VolumeVerb::Read, VolumeVerb::Write, VolumeVerb::Manage]
+        );
+    }
+
+    #[test]
+    fn volume_names_are_checked() {
+        let spec = volume(volume_spec(serde_json::json!({}))).spec;
+        for name in ["", "Vol", "1vol", "raw_landing", "raw-", &"a".repeat(41)] {
+            assert!(spec.validate(name).is_err(), "{name}");
+        }
+        for name in ["raw-landing", "a", &"a".repeat(40)] {
+            assert!(spec.validate(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_volume_crd_carries_the_cel_rules_and_the_bounds() {
+        let crd = Volume::crd();
+        assert_eq!(crd.spec.names.plural, "volumes");
+        assert_eq!(crd.spec.names.short_names, Some(vec!["vol".to_string()]));
+        let yaml = serde_yaml::to_string(&crd).unwrap();
+        for needle in [
+            "x-kubernetes-validations",
+            "storage must be either managed or external, not both and not neither",
+            "an external prefix must not contain .. or //",
+            "each group may appear once in grants",
+            "a verb may appear once per grant",
+            "on a libraries volume only a group that also manages it may write",
+        ] {
+            assert!(yaml.contains(needle), "the CRD lacks `{needle}`");
+        }
+        for bound in [
+            "maxItems: 20",
+            "maxItems: 3",
+            "maxLength: 512",
+            "maxLength: 64",
+        ] {
+            assert!(yaml.contains(bound), "the CRD lacks `{bound}`");
+        }
+    }
+
+    fn principal(spec: serde_json::Value) -> ServicePrincipal {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": { "name": "pipeline-analytics", "namespace": "stardelt" },
+            "spec": spec
+        }))
+        .expect("deserialize ServicePrincipal")
+    }
+
+    #[test]
+    fn a_principal_defaults_to_a_pipeline_identity_for_the_engine() {
+        let sp = principal(serde_json::json!({ "ownerGroup": "analytics" }));
+        assert_eq!(sp.spec.purpose, PrincipalPurpose::Pipeline);
+        assert_eq!(
+            sp.spec.audiences,
+            vec![PrincipalAudience::Trino, PrincipalAudience::Lakekeeper],
+            "a pipeline principal must reach both engines by default (operator#168)"
+        );
+        assert!(sp.spec.existing_secret_ref.is_none());
+        assert!(sp.spec.validate("pipeline-analytics").is_ok());
+        assert_eq!(
+            principal_client_id("pipeline-analytics"),
+            "sp-pipeline-analytics"
+        );
+    }
+
+    #[test]
+    fn a_principal_may_reach_the_catalog_too_and_name_a_secret_for_an_external_provider() {
+        let sp = principal(serde_json::json!({
+            "ownerGroup": "analytics", "purpose": "maintenance",
+            "audiences": ["trino", "lakekeeper"],
+            "existingSecretRef": { "name": "sp-maintenance" }
+        }));
+        assert_eq!(sp.spec.purpose, PrincipalPurpose::Maintenance);
+        assert_eq!(sp.spec.audiences.len(), 2);
+        assert_eq!(
+            sp.spec.existing_secret_ref.as_ref().unwrap().name,
+            "sp-maintenance"
+        );
+        assert!(sp.spec.validate("maintenance").is_ok());
+    }
+
+    #[test]
+    fn a_catalog_principal_is_accepted() {
+        let sp = principal(serde_json::json!({
+            "ownerGroup": "stardelt-admins",
+            "purpose": "catalog",
+            "audiences": ["lakekeeper"]
+        }));
+        assert_eq!(sp.spec.purpose, PrincipalPurpose::Catalog);
+        assert!(sp.spec.validate("catalog-operator").is_ok());
+    }
+
+    #[test]
+    fn bad_owner_groups_audiences_and_names_are_refused() {
+        let bad =
+            |spec: serde_json::Value, name: &str| principal(spec).spec.validate(name).unwrap_err();
+        assert!(bad(serde_json::json!({ "ownerGroup": "a/b" }), "x").contains("ownerGroup"));
+        assert!(bad(serde_json::json!({ "ownerGroup": "../x" }), "x").contains("ownerGroup"));
+        assert!(
+            bad(
+                serde_json::json!({ "ownerGroup": "g", "audiences": ["trino", "trino"] }),
+                "x"
+            )
+            .contains("audience")
+        );
+        assert!(
+            bad(
+                serde_json::json!({ "ownerGroup": "g", "audiences": [] }),
+                "x"
+            )
+            .contains("audience")
+        );
+        for name in ["", "Pipeline", "1p", "p_", "p-", &"a".repeat(41)] {
+            assert!(
+                bad(serde_json::json!({ "ownerGroup": "g" }), name).contains("name"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_principal_crd_has_the_rule_the_short_name_and_no_secret_field() {
+        let crd = ServicePrincipal::crd();
+        assert_eq!(crd.spec.names.plural, "serviceprincipals");
+        assert_eq!(
+            crd.spec.names.short_names.as_deref(),
+            Some(&["sp".to_string()][..])
+        );
+        let yaml = serde_yaml::to_string(&crd).unwrap();
+        assert!(yaml.contains("each audience may appear once"));
+        assert!(
+            !yaml.contains("clientSecret") && !yaml.contains("password"),
+            "no field holds a credential"
+        );
+    }
+
+    fn catalog(spec: serde_json::Value) -> Catalog {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Catalog",
+            "metadata": { "name": "finance", "namespace": "stardelt" },
+            "spec": spec
+        }))
+        .expect("deserialize Catalog")
+    }
+
+    fn finance(patch: serde_json::Value) -> serde_json::Value {
+        let mut spec = serde_json::json!({
+            "lakehouseRef": { "name": "default" },
+            "owner": "stardelt-finops",
+            "grants": [
+                { "group": "stardelt-finops", "verb": "browse" },
+                { "group": "stardelt-analytics", "verb": "browse" },
+                { "group": "stardelt-analytics", "verb": "select" }
+            ]
+        });
+        for (k, v) in patch.as_object().unwrap() {
+            if v.is_null() {
+                spec.as_object_mut().unwrap().remove(k);
+            } else {
+                spec[k] = v.clone();
+            }
+        }
+        spec
+    }
+
+    #[test]
+    fn a_catalog_parses_with_its_owner_grants_and_defaults() {
+        let c = catalog(finance(serde_json::json!({})));
+        assert_eq!(c.spec.owner, "stardelt-finops");
+        assert_eq!(c.spec.grants.len(), 3);
+        assert_eq!(c.spec.grants[2].verb, DataVerb::Select);
+        assert!(
+            !c.spec.managed_access,
+            "managed access is off unless asked for"
+        );
+        assert!(c.spec.storage.is_none());
+        assert!(c.spec.validate("finance").is_ok());
+    }
+
+    #[test]
+    fn a_catalog_may_name_its_own_bucket_prefix_and_credential() {
+        let c = catalog(finance(serde_json::json!({
+            "storage": { "bucket": "finance", "keyPrefix": "warehouse/finance",
+                         "credentialSecretRef": { "name": "finance-s3-creds", "key": "identity-entry" } },
+            "managedAccess": true
+        })));
+        let storage = c.spec.storage.as_ref().unwrap();
+        assert_eq!(storage.bucket.as_deref(), Some("finance"));
+        assert_eq!(
+            storage.credential_secret_ref.as_ref().unwrap().key,
+            "identity-entry"
+        );
+        assert!(c.spec.managed_access);
+        assert!(c.spec.validate("finance").is_ok());
+    }
+
+    #[test]
+    fn names_that_are_not_sql_identifiers_or_are_reserved_are_refused() {
+        let spec = catalog(finance(serde_json::json!({}))).spec;
+        for name in [
+            "",
+            "Finance",
+            "1fin",
+            "fin-ance",
+            "fin_ance",
+            "fin.ance",
+            &"a".repeat(41),
+        ] {
+            assert!(
+                spec.validate(name).unwrap_err().contains("SQL identifier"),
+                "{name}"
+            );
+        }
+        for name in ["system", "information_schema", "memory", "tpch"] {
+            assert!(spec.validate(name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_grant_and_a_climbing_prefix_are_refused() {
+        let twice = catalog(finance(serde_json::json!({
+            "grants": [ { "group": "g", "verb": "select" }, { "group": "g", "verb": "select" } ]
+        })));
+        assert!(
+            twice
+                .spec
+                .validate("finance")
+                .unwrap_err()
+                .contains("twice")
+        );
+        // the same group may hold different verbs
+        let two_verbs = catalog(finance(serde_json::json!({
+            "grants": [ { "group": "g", "verb": "browse" }, { "group": "g", "verb": "select" } ]
+        })));
+        assert!(two_verbs.spec.validate("finance").is_ok());
+        let climbing = catalog(finance(
+            serde_json::json!({ "storage": { "keyPrefix": "a/../b" } }),
+        ));
+        assert!(
+            climbing
+                .spec
+                .validate("finance")
+                .unwrap_err()
+                .contains("keyPrefix")
+        );
+    }
+
+    #[test]
+    fn platform_instance_defaults_secrets_to_none() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {}
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(
+            pi.spec.secrets.mode,
+            SecretsMode::None,
+            "a CR without spec.secrets installs no secret store"
+        );
+    }
+
+    #[test]
+    fn platform_instance_parses_the_secrets_mode() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": { "secrets": { "mode": "external" } }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(pi.spec.secrets.mode, SecretsMode::External);
+    }
+
+    #[test]
+    fn there_is_no_use_verb_no_deny_and_no_credential_value_in_the_catalog_crd() {
+        assert!(
+            serde_json::from_value::<CatalogGrant>(
+                serde_json::json!({ "group": "g", "verb": "use" })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CatalogGrant>(
+                serde_json::json!({ "group": "g", "verb": "deny" })
+            )
+            .is_err()
+        );
+        let crd = Catalog::crd();
+        assert_eq!(crd.spec.names.plural, "catalogs");
+        let yaml = serde_yaml::to_string(&crd).unwrap();
+        assert!(yaml.contains("each group may hold each verb once"));
+        assert!(yaml.contains("credentialSecretRef"));
+        assert!(
+            !yaml.contains("secretKey:") && !yaml.contains("password"),
+            "no field holds a credential"
+        );
+    }
+
+    #[test]
+    fn catalog_maintenance_is_on_by_default_and_conservative() {
+        let c: Catalog = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Catalog",
+            "metadata": { "name": "finance", "namespace": "stardelt" },
+            "spec": { "lakehouseRef": { "name": "default" }, "owner": "analytics" }
+        }))
+        .expect("deserialize Catalog");
+        let m = &c.spec.maintenance;
+        assert_eq!(m.schedule, "0 2 * * *");
+        assert_eq!(m.optimize.file_size_threshold, "128MB");
+        assert_eq!(m.optimize.min_small_files, 20);
+        assert_eq!(m.expire_snapshots.retention, "7d");
+        assert_eq!(m.remove_orphan_files.retention, "7d");
+        assert!(m.exclude_tables.is_empty());
+    }
+
+    #[test]
+    fn catalog_maintenance_refuses_what_the_engine_refuses() {
+        let mut m = MaintenanceSpec::default();
+        assert!(m.validate().is_ok());
+
+        m.optimize.min_small_files = 0;
+        assert!(m.validate().unwrap_err().contains("minSmallFiles"));
+        m.optimize.min_small_files = 20;
+
+        m.expire_snapshots.retention = "6d".to_string();
+        assert!(m.validate().unwrap_err().contains("at least 7d"));
+        m.expire_snapshots.retention = "7d".to_string();
+
+        m.remove_orphan_files.retention = "1d".to_string();
+        assert!(m.validate().unwrap_err().contains("at least 7d"));
+        m.remove_orphan_files.retention = "30d".to_string();
+
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn catalog_crd_carries_the_maintenance_defaults() {
+        let yaml = serde_yaml::to_string(&Catalog::crd()).unwrap();
+        for key in [
+            "fileSizeThreshold",
+            "minSmallFiles",
+            "expireSnapshots",
+            "removeOrphanFiles",
+            "excludeTables",
+        ] {
+            assert!(yaml.contains(key), "the catalog CRD is missing {key}");
+        }
+        assert!(
+            yaml.contains("0 2 * * *"),
+            "the default schedule is in the schema"
+        );
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        let maintenance = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["maintenance"]["properties"];
+        assert_eq!(
+            maintenance["optimize"]["properties"]["minSmallFiles"]["minimum"],
+            1.0
+        );
+        for field in ["expireSnapshots", "removeOrphanFiles"] {
+            assert_eq!(
+                maintenance[field]["properties"]["retention"]["pattern"], "^([7-9]|[1-9][0-9]+)d$",
+                "{field} must refuse a retention under the engine's 7-day minimum"
+            );
+        }
+    }
+
+    fn warehouse(spec: serde_json::Value) -> SqlWarehouse {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "SqlWarehouse",
+            "metadata": { "name": "big", "namespace": "stardelt" },
+            "spec": spec
+        }))
+        .expect("deserialize SqlWarehouse")
+    }
+
+    #[test]
+    fn a_warehouse_defaults_to_a_small_class_that_is_not_the_default_one() {
+        let w = warehouse(serde_json::json!({ "lakehouseRef": { "name": "default" } }));
+        assert_eq!(w.spec.size, WarehouseSize::Small);
+        assert!(!w.spec.default);
+        assert!(w.spec.grants.is_empty() && w.spec.concurrency.is_none());
+        assert_eq!((w.spec.min_workers, w.spec.max_workers), (1, 1));
+        assert!(w.spec.auto_stop.is_none());
+        assert!(w.spec.validate("big").is_ok());
+    }
+
+    #[test]
+    fn a_warehouse_scales_only_when_its_contract_allows_it() {
+        let scale = |fields: serde_json::Value| {
+            let mut spec = serde_json::json!({ "lakehouseRef": { "name": "default" } });
+            let object = spec.as_object_mut().expect("an object");
+            for (key, value) in fields.as_object().expect("an object") {
+                object.insert(key.clone(), value.clone());
+            }
+            warehouse(spec)
+        };
+        let zero = scale(serde_json::json!({ "minWorkers": 0 }));
+        assert!(
+            zero.spec
+                .validate("big")
+                .unwrap_err()
+                .contains("needs autoStop")
+        );
+        let idle = scale(serde_json::json!({
+            "autoStop": "15m", "minWorkers": 0, "maxWorkers": 2
+        }));
+        assert_eq!((idle.spec.min_workers, idle.spec.max_workers), (0, 2));
+        assert!(idle.spec.validate("big").is_ok());
+        for spec in [
+            serde_json::json!({ "minWorkers": 5, "maxWorkers": 2 }),
+            serde_json::json!({ "minWorkers": 11 }),
+            serde_json::json!({ "maxWorkers": 0 }),
+            serde_json::json!({ "autoStop": "15s" }),
+            serde_json::json!({ "autoStop": "0m" }),
+            serde_json::json!({ "autoStop": "25h" }),
+            serde_json::json!({ "autoStop": "soon" }),
+        ] {
+            assert!(scale(spec.clone()).spec.validate("big").is_err(), "{spec}");
+        }
+        assert_eq!(idle_minutes("15m"), Some(15));
+        assert_eq!(idle_minutes("2h"), Some(120));
+        assert_eq!(idle_minutes("24h"), Some(1440));
+        assert_eq!(idle_minutes("25h"), None);
+    }
+
+    #[test]
+    fn the_sqlwarehouse_crd_carries_the_scale_contract() {
+        let yaml = serde_yaml::to_string(&SqlWarehouse::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"];
+        assert_eq!(spec["autoStop"]["pattern"], "^([1-9][0-9]*)(m|h)$");
+        assert_eq!(spec["minWorkers"]["default"], 1.0);
+        assert_eq!(spec["minWorkers"]["minimum"], 0.0);
+        assert_eq!(spec["maxWorkers"]["default"], 1.0);
+        assert_eq!(spec["maxWorkers"]["minimum"], 1.0);
+        let status = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+            ["properties"];
+        assert_eq!(status["scale"]["properties"]["phase"]["type"], "string");
+        assert_eq!(
+            status["scale"]["properties"]["queriesInFlight"]["type"],
+            "integer"
+        );
+    }
+
+    #[test]
+    fn a_warehouse_parses_overrides_grants_and_scheduling_names() {
+        let w = warehouse(serde_json::json!({
+            "lakehouseRef": { "name": "default" }, "displayName": "Large (analytics)", "size": "large", "default": true,
+            "concurrency": { "running": 4, "queued": 20, "memoryShare": "40%", "scheduling": "weighted_fair" },
+            "grants": [ { "group": "stardelt-analytics" }, { "group": "stardelt-admins" } ]
+        }));
+        assert_eq!(w.spec.size, WarehouseSize::Large);
+        let c = w.spec.concurrency.as_ref().unwrap();
+        assert_eq!((c.running, c.queued), (Some(4), Some(20)));
+        assert_eq!(c.scheduling, Some(WarehouseScheduling::WeightedFair));
+        assert_eq!(c.memory_share.as_deref(), Some("40%"));
+        assert!(w.spec.default && w.spec.grants.len() == 2);
+        assert!(w.spec.validate("big").is_ok());
+    }
+
+    #[test]
+    fn names_duplicate_groups_and_out_of_range_caps_are_refused() {
+        let base = warehouse(serde_json::json!({ "lakehouseRef": { "name": "default" } })).spec;
+        for name in ["", "Big", "1big", "big_", "big-", &"a".repeat(41)] {
+            assert!(base.validate(name).is_err(), "{name}");
+        }
+        let twice = warehouse(serde_json::json!({
+            "lakehouseRef": { "name": "default" }, "grants": [ { "group": "g" }, { "group": "g" } ]
+        }));
+        assert!(twice.spec.validate("big").unwrap_err().contains("twice"));
+        for (running, queued) in [(0, 1), (101, 1), (1, -1), (1, 10001)] {
+            let w = warehouse(serde_json::json!({
+                "lakehouseRef": { "name": "default" }, "concurrency": { "running": running, "queued": queued }
+            }));
+            assert!(w.spec.validate("big").is_err(), "{running}/{queued}");
+        }
+    }
+
+    fn spark_spec_schema() -> serde_json::Value {
+        let yaml = serde_yaml::to_string(&SparkCluster::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"].clone()
+    }
+
+    fn cel_rules(schema: &serde_json::Value) -> Vec<(String, String)> {
+        schema["x-kubernetes-validations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                (
+                    r["rule"].as_str().unwrap_or_default().to_string(),
+                    r["message"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn has_cel_rule(schema: &serde_json::Value, rule: &str, message: &str) -> bool {
+        cel_rules(schema)
+            .iter()
+            .any(|(r, m)| r.as_str() == rule && m.as_str() == message)
+    }
+
+    fn spark_cluster(spec: serde_json::Value) -> SparkCluster {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "SparkCluster",
+            "metadata": { "name": "shared", "namespace": "stardelt" },
+            "spec": spec
+        }))
+        .expect("deserialize SparkCluster")
+    }
+
+    fn minimal_spark_spec() -> serde_json::Value {
+        serde_json::json!({ "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12" })
+    }
+
+    #[test]
+    fn a_spark_cluster_defaults_to_small_stopped_and_a_one_hour_idle_stop() {
+        let c = spark_cluster(minimal_spark_spec());
+        assert_eq!(c.spec.size, SparkClusterSize::Small);
+        assert_eq!(c.spec.state, SparkClusterState::Stopped);
+        assert_eq!(c.spec.idle_stop_minutes, 60);
+        assert!(c.spec.env.is_empty() && c.spec.spark_conf.is_empty());
+        assert!(c.spec.validate("analytics").is_ok());
+        assert_eq!(SparkCluster::crd().spec.names.plural, "sparkclusters");
+    }
+
+    #[test]
+    fn a_spark_cluster_owner_is_exactly_one_group_or_user() {
+        for owner in [
+            serde_json::json!({ "group": "analytics", "user": "ada" }),
+            serde_json::json!({}),
+        ] {
+            let c = spark_cluster(serde_json::json!({
+                "owner": owner, "runtime": "spark-4.0-py3.12"
+            }));
+            assert!(
+                c.spec
+                    .validate("analytics")
+                    .unwrap_err()
+                    .contains("owner.group and owner.user"),
+                "{owner}"
+            );
+        }
+        assert!(has_cel_rule(
+            &spark_spec_schema(),
+            "has(self.owner.group) != has(self.owner.user)",
+            "set exactly one of owner.group and owner.user"
+        ));
+        let one_person = spark_cluster(serde_json::json!({
+            "owner": { "user": "ada" }, "runtime": "spark-4.0-py3.12"
+        }));
+        assert!(one_person.spec.validate("ada-spark").is_ok());
+    }
+
+    #[test]
+    fn a_spark_image_must_be_pinned_by_digest() {
+        let unpinned = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "image": "ghcr.io/stardelt/spark:4.0"
+        }));
+        assert!(
+            unpinned
+                .spec
+                .validate("analytics")
+                .unwrap_err()
+                .contains("pin the image by digest")
+        );
+        assert!(
+            has_cel_rule(
+                &spark_spec_schema(),
+                "!has(self.image) || self.image.contains('@sha256:')",
+                "pin the image by digest"
+            ),
+            "the CRD schema must refuse an image without a digest"
+        );
+        let pinned = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "image": "ghcr.io/stardelt/spark@sha256:0123456789abcdef"
+        }));
+        assert!(pinned.spec.validate("analytics").is_ok());
+    }
+
+    #[test]
+    fn spark_conf_keys_the_platform_manages_are_refused() {
+        for key in [
+            "spark.kubernetes.authenticate.driver.serviceAccountName",
+            "spark.kubernetes.namespace",
+            "spark.driver.serviceAccount",
+            "spark.hadoop.fs.s3a.access.key",
+            "spark.hadoop.fs.s3a.secret.key",
+            "spark.sql.catalog.lakekeeper.credential",
+            "spark.sql.catalog.lakekeeper.token",
+        ] {
+            let c = spark_cluster(serde_json::json!({
+                "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+                "sparkConf": { (key): "x" }
+            }));
+            assert_eq!(
+                c.spec.validate("analytics").unwrap_err(),
+                format!("sparkConf key {key} is managed by the platform"),
+                "{key}"
+            );
+        }
+        let allowed = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "sparkConf": { "spark.sql.shuffle.partitions": "200" }
+        }));
+        assert!(allowed.spec.validate("analytics").is_ok());
+    }
+
+    #[test]
+    fn only_the_shared_cluster_may_run_without_an_idle_stop() {
+        let c = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "idleStopMinutes": 0
+        }));
+        assert_eq!(
+            c.spec.validate("mobility").unwrap_err(),
+            "only the shared cluster may run without an idle stop"
+        );
+        assert!(c.spec.validate("shared").is_ok());
+    }
+
+    #[test]
+    fn a_duplicate_spark_env_name_is_refused() {
+        let c = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "env": [
+                { "name": "ETL_HOME", "value": "/opt/etl" },
+                { "name": "ETL_HOME", "value": "/var/etl" }
+            ]
+        }));
+        assert!(
+            c.spec
+                .validate("analytics")
+                .unwrap_err()
+                .contains("ETL_HOME")
+        );
+        assert!(has_cel_rule(
+            &spark_spec_schema(),
+            "!has(self.env) || self.env.all(e, self.env.exists_one(f, f.name == e.name))",
+            "each env var name may appear once in env"
+        ));
+    }
+
+    #[test]
+    fn a_spark_spec_without_env_is_admitted() {
+        let c = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12"
+        }));
+        assert!(c.spec.validate("analytics").is_ok());
+        assert!(c.spec.env.is_empty());
+        assert!(has_cel_rule(
+            &spark_spec_schema(),
+            "!has(self.env) || self.env.all(e, self.env.exists_one(f, f.name == e.name))",
+            "each env var name may appear once in env"
+        ));
+    }
+
+    #[test]
+    fn a_spark_env_var_is_a_value_or_a_connection_key() {
+        let both = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "env": [ { "name": "PG_PASSWORD", "value": "x",
+                       "connectionRef": { "name": "pg", "key": "password" } } ]
+        }));
+        assert!(
+            both.spec
+                .validate("analytics")
+                .unwrap_err()
+                .contains("exactly one of value and connectionRef")
+        );
+        let env_items = &spark_spec_schema()["properties"]["env"]["items"];
+        assert!(has_cel_rule(
+            env_items,
+            "has(self.value) != has(self.connectionRef)",
+            "set exactly one of value and connectionRef"
+        ));
+        let referenced = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "env": [ { "name": "PG_PASSWORD",
+                       "connectionRef": { "name": "pg", "key": "password" } } ]
+        }));
+        assert!(referenced.spec.validate("analytics").is_ok());
+        let var = &referenced.spec.env[0];
+        assert_eq!(var.connection_ref.as_ref().unwrap().name, "pg");
+    }
+
+    #[test]
+    fn spark_cluster_round_trips_camel_case() {
+        let c = spark_cluster(serde_json::json!({
+            "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
+            "displayName": "Analytics Spark", "maxExecutors": 4,
+            "idleStopMinutes": 30, "state": "Running"
+        }));
+        let json = serde_json::to_value(&c.spec).expect("serialises");
+        for key in ["displayName", "maxExecutors", "idleStopMinutes"] {
+            assert!(json.get(key).is_some(), "{key} must be camelCase");
+        }
+        assert_eq!(c.spec.state, SparkClusterState::Running);
+        assert_eq!(c.spec.max_executors, Some(4));
+        assert_eq!(c.spec.idle_stop_minutes, 30);
+    }
+
+    #[test]
+    fn the_example_manifest_deserialises_and_validates() {
+        let yaml = include_str!("../../../examples/platforminstance-external-entra.yaml");
+        let instance: PlatformInstance =
+            serde_yaml::from_str(yaml).expect("the documentation example parses");
+        assert_eq!(instance.spec.identity.mode, IdentityMode::External);
+        assert_eq!(instance.spec.identity.provider, IdentityProvider::Entra);
+        crate::identity::validate(&instance.spec).expect("the documentation example validates");
+    }
+
+    #[test]
+    fn unknown_sizes_and_scheduling_names_do_not_parse() {
+        for spec in [
+            serde_json::json!({ "lakehouseRef": { "name": "d" }, "size": "2x-small" }),
+            serde_json::json!({ "lakehouseRef": { "name": "d" }, "concurrency": { "scheduling": "round-robin" } }),
+        ] {
+            assert!(serde_json::from_value::<SqlWarehouseSpec>(spec).is_err());
+        }
+        let crd = SqlWarehouse::crd();
+        assert_eq!(crd.spec.names.plural, "sqlwarehouses");
+        let yaml = serde_yaml::to_string(&crd).unwrap();
+        assert!(yaml.contains("each group may appear once in grants"));
+        assert!(yaml.contains("weighted_fair"));
+    }
+
+    #[test]
+    fn stream_app_defaults_are_spark_merge_json() {
+        let spec: StreamAppSpec = serde_json::from_value(serde_json::json!({
+            "source": { "connectionRef": "kafka", "topic": "pegelonline.measurements" },
+            "sink": {
+                "catalog": "shared",
+                "table": "gold.pegelonline_hourly",
+                "mergeKeys": ["station_uuid", "measured_at"]
+            }
+        }))
+        .expect("minimal stream deserialises");
+        assert!(matches!(spec.engine, StreamEngine::Spark));
+        assert!(matches!(spec.sink.mode, SinkMode::Merge));
+        assert!(matches!(spec.source.format, StreamFormat::Json));
+        assert!(matches!(spec.restart_policy, StreamRestartPolicy::Always));
+    }
+
+    fn minimal_stream_spec(
+        topic: &str,
+        table: &str,
+        mode: SinkMode,
+        merge_keys: Vec<&str>,
+    ) -> StreamAppSpec {
+        serde_json::from_value(serde_json::json!({
+            "source": { "connectionRef": "kafka", "topic": topic },
+            "sink": {
+                "catalog": "shared",
+                "table": table,
+                "mode": mode,
+                "mergeKeys": merge_keys
+            }
+        }))
+        .expect("stream spec parses")
+    }
+
+    #[test]
+    fn stream_app_validation_rejects_a_bad_topic() {
+        let spec = minimal_stream_spec(
+            "a/b",
+            "gold.pegelonline_hourly",
+            SinkMode::Merge,
+            vec!["station_uuid"],
+        );
+        assert!(spec.validate("pegel").is_err());
+    }
+
+    #[test]
+    fn stream_app_merge_without_keys_is_refused() {
+        let spec = minimal_stream_spec(
+            "pegelonline.measurements",
+            "gold.pegelonline_hourly",
+            SinkMode::Merge,
+            vec![],
+        );
+        assert!(spec.validate("pegel").is_err());
+    }
+
+    #[test]
+    fn stream_app_append_with_keys_is_refused() {
+        let spec = minimal_stream_spec(
+            "pegelonline.measurements",
+            "gold.pegelonline_hourly",
+            SinkMode::Append,
+            vec!["station_uuid"],
+        );
+        assert!(spec.validate("pegel").is_err());
+    }
+
+    #[test]
+    fn stream_app_rejects_a_table_without_a_schema() {
+        let spec = minimal_stream_spec(
+            "pegelonline.measurements",
+            "orders",
+            SinkMode::Merge,
+            vec!["id"],
+        );
+        assert!(spec.validate("pegel").is_err());
+    }
+
+    #[test]
+    fn stream_app_round_trips_camel_case() {
+        let spec = minimal_stream_spec(
+            "pegelonline.measurements",
+            "gold.pegelonline_hourly",
+            SinkMode::Merge,
+            vec!["station_uuid"],
+        );
+        let json = serde_json::to_value(&spec).expect("serialises");
+        assert!(json.get("source").unwrap().get("connectionRef").is_some());
+        assert!(json.get("sink").unwrap().get("mergeKeys").is_some());
+        assert!(json.get("restartPolicy").is_some());
+        // checkpointPrefix and ownerGroup/runAs are absent (skipped when None/empty)
+        assert!(json.get("sink").unwrap().get("checkpointPrefix").is_none());
+        assert!(json.get("ownerGroup").is_none());
+        assert!(json.get("runAs").is_none());
+    }
+
+    #[test]
+    fn stream_app_without_source_connection_ref_deserialises_to_none() {
+        let spec: StreamAppSpec = serde_json::from_value(serde_json::json!({
+            "source": { "topic": "pegelonline.measurements" },
+            "sink": {
+                "catalog": "shared",
+                "table": "gold.pegelonline_hourly",
+                "mergeKeys": ["station_uuid"]
+            }
+        }))
+        .expect("stream without connectionRef deserialises");
+        assert_eq!(spec.source.connection_ref, None);
+    }
+
+    #[test]
+    fn stream_app_with_source_connection_ref_keeps_it() {
+        let spec: StreamAppSpec = serde_json::from_value(serde_json::json!({
+            "source": { "connectionRef": "kafka-bus", "topic": "pegelonline.measurements" },
+            "sink": {
+                "catalog": "shared",
+                "table": "gold.pegelonline_hourly",
+                "mergeKeys": ["station_uuid"]
+            }
+        }))
+        .expect("stream with connectionRef deserialises");
+        assert_eq!(spec.source.connection_ref.as_deref(), Some("kafka-bus"));
+    }
+}
