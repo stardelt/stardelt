@@ -257,8 +257,8 @@ test('a hovered query day names its local date and count, and the tooltip stays 
 
 test('a hovered run day names its four state counts, and the legend names the colours', async ({ page }) => {
   const noon = new Date()
-  noon.setUTCDate(noon.getUTCDate() - 1)
-  noon.setUTCHours(12, 0, 0, 0)
+  noon.setDate(noon.getDate() - 1)
+  noon.setHours(12, 0, 0, 0)
   const at = (minutes: number, state: string, id: string) => runAt(id, state, noon.getTime() - minutes * 60_000)
   await stubApi(page, {
     runsBody: { runs: [at(10, 'success', 'y1'), at(20, 'success', 'y2'), at(30, 'failed', 'y3')], groups: [] },
