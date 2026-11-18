@@ -25,8 +25,9 @@
 # in the way Nova does (POST /auth/token -> 201) and reads the same API v2 endpoints.
 #
 # A stale success is printed, never fatal: scheduling that stopped is a different check. A
-# paused DAG, a DAG with no run, and a run that is running or queued are printed with `·`
-# and never fail this check.
+# paused DAG, a DAG with no timetable (no schedule — a manual-only pipeline such as
+# retail-medallion since platform#1713), a DAG with no run, and a run that is running or
+# queued are printed with `·` and never fail this check.
 #
 # Exit 0 = PASS, 1 = FAIL (an unpaused DAG's newest run failed), 3 = UNVERIFIED (could not
 # see the subject: no kubectl/curl/python3, no Secret, the port already in use, no
@@ -148,7 +149,8 @@ dag_rows="$(printf '%s' "$dags_payload" | python3 -c '
 import json, sys
 dags = json.load(sys.stdin).get("dags") or []
 for dag in dags:
-    print("%s\t%s" % (dag.get("dag_id"), "true" if dag.get("is_paused") else "false"))
+    print("%s\t%s\t%s" % (dag.get("dag_id"), "true" if dag.get("is_paused") else "false",
+                          dag.get("timetable_summary") or ""))
 ')" || unverified "cannot read the DAG list"
 unset dags_raw dags_payload
 
@@ -157,14 +159,21 @@ unset dags_raw dags_payload
 failed_ids=()
 dags_seen=0
 paused_count=0
+unscheduled_count=0
 
-while IFS=$'\t' read -r dag is_paused; do
+while IFS=$'\t' read -r dag is_paused timetable; do
   [ -n "$dag" ] || continue
   dags_seen=$((dags_seen + 1))
 
   if [ "$is_paused" = "true" ]; then
     paused_count=$((paused_count + 1))
     printf '%s %-32s paused\n' '·' "$dag"
+    continue
+  fi
+
+  if [ -z "$timetable" ]; then
+    unscheduled_count=$((unscheduled_count + 1))
+    printf '%s %-32s %s\n' '·' "$dag" "unscheduled"
     continue
   fi
 
@@ -234,4 +243,4 @@ if [ "${#failed_ids[@]}" -gt 0 ]; then
   fail "${#failed_ids[@]} DAG run(s) failed: ${failed_ids[*]}"
 fi
 
-echo "PASS ($dags_seen DAG(s): every unpaused DAG's newest run succeeded, $paused_count paused)"
+echo "PASS ($dags_seen DAG(s): every unpaused and scheduled DAG's newest run succeeded, $paused_count paused, $unscheduled_count unscheduled)"
