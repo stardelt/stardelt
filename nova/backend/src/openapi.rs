@@ -273,6 +273,7 @@ pub struct ErrorResponse {
         crate::pipelines::ValidatePipelineResponse,
         crate::pipelines::ValidationIssue,
         crate::pipelines::RunView,
+        crate::pipelines::RunStart,
         crate::pipelines::RunsListRow,
         crate::pipelines::RunsListResponse,
         crate::pipelines::NotebookScheduleRow,

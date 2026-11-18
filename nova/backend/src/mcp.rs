@@ -991,6 +991,8 @@ async fn call_tool(
                     if !namespace.is_empty() && !pipeline_name.is_empty() =>
                 {
                     let resources = crate::pipelines::resources(state);
+                    // The MCP tool starts a run for now and takes no run date or parameters
+                    // (nova#817 adds the body to the REST route only).
                     match crate::pipelines::run_now(
                         resources.as_ref(),
                         state.airflow.as_ref(),
@@ -998,6 +1000,7 @@ async fn call_tool(
                         &principal.identity,
                         namespace,
                         pipeline_name,
+                        &crate::pipelines::RunStart::default(),
                     )
                     .await
                     {

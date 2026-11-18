@@ -620,14 +620,16 @@ impl AirflowClient {
         Self::parse(body)
     }
 
-    /// Trigger a run. `logical_date` is required by Airflow 3 (`422` without it); `note` is
-    /// omitted from the body when there is none. A paused DAG still answers `200` and its run
+    /// Trigger a run. `logical_date` is required by Airflow 3 (`422` without it); `note` and
+    /// `conf` are omitted from the body when there is none. `conf` is the DAG-run configuration
+    /// the loader reads (`dag_run.conf`, nova#817). A paused DAG still answers `200` and its run
     /// waits `queued` — this is not a promise that anything runs.
     pub async fn trigger(
         &self,
         dag_id: &str,
         logical_date: &str,
         note: Option<&str>,
+        conf: Option<&Value>,
     ) -> Result<DagRun, AirflowError> {
         let url = self.url(&format!("{API}/dags/{}/dagRuns", encode_segment(dag_id)));
         let mut payload = serde_json::Map::new();
@@ -637,6 +639,9 @@ impl AirflowClient {
         );
         if let Some(note) = note {
             payload.insert("note".into(), Value::String(note.to_string()));
+        }
+        if let Some(conf) = conf {
+            payload.insert("conf".into(), conf.clone());
         }
         let payload = Value::Object(payload);
         let body = self
@@ -1408,7 +1413,7 @@ mod tests {
     async fn trigger_sends_only_logical_date_when_there_is_no_note() {
         let (client, _cfg, fake) = fake::start().await;
         let run = client
-            .trigger("stardelt__spike-j1", "2026-10-20T07:20:17Z", None)
+            .trigger("stardelt__spike-j1", "2026-10-20T07:20:17Z", None, None)
             .await
             .unwrap();
         assert_eq!(run.state.as_deref(), Some("queued"));
@@ -1426,6 +1431,7 @@ mod tests {
                 "stardelt__spike-j1",
                 "2026-10-20T07:20:17Z",
                 Some("run from Nova"),
+                None,
             )
             .await
             .unwrap();
@@ -1437,11 +1443,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trigger_sends_the_conf_it_is_given() {
+        let (client, _cfg, fake) = fake::start().await;
+        client
+            .trigger(
+                "stardelt__spike-j1",
+                "2026-10-20T07:20:17Z",
+                Some("run from Nova"),
+                Some(&json!({ "runDate": "2026-11-13" })),
+            )
+            .await
+            .unwrap();
+        let state = fake.lock().unwrap();
+        assert_eq!(
+            body_of(&state, "POST /api/v2/dags/stardelt__spike-j1/dagRuns")["conf"]["runDate"],
+            json!("2026-11-13"),
+            "the conf travels in the body: {:?}",
+            state.calls
+        );
+    }
+
+    #[tokio::test]
     async fn trigger_422_is_rejected_with_the_detail() {
         let (client, _cfg, fake) = fake::start().await;
         fake.lock().unwrap().rejected = 1;
         match client
-            .trigger("stardelt__spike-j1", "2026-10-20T07:20:17Z", None)
+            .trigger("stardelt__spike-j1", "2026-10-20T07:20:17Z", None, None)
             .await
         {
             Err(AirflowError::Rejected(m)) => {
@@ -1587,7 +1614,7 @@ mod tests {
             state.rejected = 1;
         }
         let error = client
-            .trigger("stardelt__spike-j1", "2026-10-20T07:20:17Z", None)
+            .trigger("stardelt__spike-j1", "2026-10-20T07:20:17Z", None, None)
             .await
             .unwrap_err();
         let text = format!("{error}");

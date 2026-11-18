@@ -87,6 +87,7 @@ use std::sync::Mutex;
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{FromRequestParts, Path, Query, Request},
     http::{HeaderValue, StatusCode, header, request::Parts},
     middleware::Next,
@@ -2426,6 +2427,14 @@ pub struct RunView {
     pub note: Option<String>,
 }
 
+/// The body of `POST …/runs`: a run date and parameter values for this run only (nova#817).
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunStart {
+    pub run_date: Option<String>,
+    pub params: Option<BTreeMap<String, String>>,
+}
+
 /// One task instance of a run.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -3824,7 +3833,8 @@ fn concurrency_of(spec: &Value) -> &str {
 
 /// `POST …/runs`: start a run now. Refusals happen before Airflow is asked to trigger:
 /// not loaded (409), paused (409), rate limit (429), an active run under `Forbid`/`Replace`
-/// (409). `Allow` skips the activity check.
+/// (409). `Allow` skips the activity check. `start` carries the run date and parameter values
+/// of this run only (`dag_run.conf`, nova#817); it never changes the stored schedule.
 pub(crate) async fn run_now(
     resources: Option<&PipelineResources>,
     airflow: Option<&AirflowClient>,
@@ -3832,8 +3842,9 @@ pub(crate) async fn run_now(
     who: &Identity,
     namespace: &str,
     name: &str,
+    start: &RunStart,
 ) -> Result<RunView, Fail> {
-    let result = run_now_inner(resources, airflow, limiter, who, namespace, name).await;
+    let result = run_now_inner(resources, airflow, limiter, who, namespace, name, start).await;
     match &result {
         Ok(run) => {
             audit::pipeline_event("run", who, namespace, name, Some(&run.run_id), "ok", None)
@@ -3850,6 +3861,7 @@ async fn run_now_inner(
     who: &Identity,
     namespace: &str,
     name: &str,
+    start: &RunStart,
 ) -> Result<RunView, ActionError> {
     let resources = resources
         .ok_or_else(no_cluster)
@@ -3893,11 +3905,33 @@ async fn run_now_inner(
     }
 
     // Always now, whole seconds, UTC: Airflow accepts any date and makes a run with no tasks for
-    // one that is not now (#255).
+    // one that is not now (#255). The date the person asked for travels as `conf`, which the
+    // loader reads (`dag_run.conf`, nova#817), never as the logical date.
     let note = format!("Started from Nova by {}", who.display_name);
-    match airflow.trigger(&dag_id, &now_rfc3339(), Some(&note)).await {
+    let conf = run_conf(start);
+    match airflow
+        .trigger(&dag_id, &now_rfc3339(), Some(&note), conf.as_ref())
+        .await
+    {
         Ok(run) => Ok(run_view(&run)),
         Err(e) => Err(ActionError::error(scheduler_fail(e))),
+    }
+}
+
+/// The `conf` of a triggered run: only the keys the caller gave, `None` when there were none
+/// (so an empty body sends exactly what Nova sent before #817).
+fn run_conf(start: &RunStart) -> Option<Value> {
+    let mut conf = serde_json::Map::new();
+    if let Some(date) = &start.run_date {
+        conf.insert("runDate".into(), Value::String(date.clone()));
+    }
+    if let Some(params) = &start.params {
+        conf.insert("params".into(), json!(params));
+    }
+    if conf.is_empty() {
+        None
+    } else {
+        Some(Value::Object(conf))
     }
 }
 
@@ -6186,19 +6220,41 @@ pub(crate) async fn run_notebook(
     }
 }
 
+/// The body of `POST …/runs` (nova#817): absent, or `{}`, starts a run for now with the
+/// schedule's parameters, exactly as before. A run date must be `YYYY-MM-DD`; parameters are
+/// checked like a saved parameter (`validate_params`), and the names and values are never
+/// echoed in the refusal.
+fn run_start(body: &[u8]) -> Result<RunStart, Fail> {
+    if body.is_empty() {
+        return Ok(RunStart::default());
+    }
+    let start: RunStart = serde_json::from_slice(body)
+        .map_err(|_| Fail::new(StatusCode::BAD_REQUEST, "the run body is not valid JSON"))?;
+    if let Some(date) = &start.run_date {
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| Fail::new(StatusCode::BAD_REQUEST, "runDate is a date (YYYY-MM-DD)"))?;
+    }
+    if let Some(params) = &start.params {
+        validate_params(params).map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    }
+    Ok(start)
+}
+
 #[utoipa::path(
     post,
     operation_id = "pipelines_run_trigger",
     path = "/api/pipelines/{namespace}/{name}/runs",
     tag = "public",
-    description = "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+    description = "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). The body is optional: `runDate` (a `YYYY-MM-DD` calendar date, past or future) applies to this run only, as does `params`, this run's values of the schedule's `${params.<name>}` placeholders (at most 16, lower-case names, values up to 256 characters); the stored schedule never changes, and neither value is audited. `logicalDate` stays now, UTC, whole seconds, so the run has tasks — the date travels as Airflow's `dag_run.conf` instead. An absent body or `{}` starts a run for now with the schedule's parameters, exactly as before. Every attempt that reaches the run logic, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
     ),
+    request_body = Option<RunStart>,
     responses(
         (status = 201, description = "The new run, queued", body = RunView),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The body is not JSON, the run date is not `YYYY-MM-DD`, or a parameter is refused", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The pipeline is not loaded, is paused, or already has an active run", body = crate::openapi::ErrorResponse),
         (status = 429, description = "More than ten runs were started in the last minute", body = crate::openapi::ErrorResponse),
@@ -6209,7 +6265,12 @@ pub(crate) async fn run_notebook(
 pub(crate) async fn trigger_run(
     signed: SignedIn,
     Path((namespace, name)): Path<(String, String)>,
+    body: Bytes,
 ) -> Response {
+    let start = match run_start(&body) {
+        Ok(start) => start,
+        Err(fail) => return fail.into_response(),
+    };
     answer_with(
         StatusCode::CREATED,
         run_now(
@@ -6219,6 +6280,7 @@ pub(crate) async fn trigger_run(
             signed.identity(),
             &namespace,
             &name,
+            &start,
         )
         .await,
     )
@@ -6467,6 +6529,16 @@ mod tests {
 
     fn limiter() -> RunStartsLimiter {
         Mutex::new(std::collections::HashMap::new())
+    }
+
+    /// The pipelines router with a fake cluster (one `smoke` pipeline) and a fake Airflow,
+    /// signed in as a member of `analytics`: what a browser calls for `POST …/runs` (nova#817).
+    async fn run_route(airflow: AirflowClient) -> Router {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let kube = fake_kube::start(vec![resource("smoke", Some("analytics"))]).await;
+        router()
+            .with_state(test_state(Some(kube), airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))))
     }
 
     fn memory(items: &[(&str, Value)]) -> PipelineResources {
@@ -8544,9 +8616,17 @@ mod tests {
         let limiter = limiter();
 
         // No scheduler client: every action answers 503 and names the missing client.
-        let error = run_now(Some(&resources), None, &limiter, &root, &namespace, "smoke")
-            .await
-            .expect_err("no Airflow client");
+        let error = run_now(
+            Some(&resources),
+            None,
+            &limiter,
+            &root,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("no Airflow client");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.message(), "the scheduler is not configured");
         let error = pause_pipeline(Some(&resources), None, &root, &namespace, "smoke")
@@ -8598,6 +8678,7 @@ mod tests {
                     &root,
                     &namespace,
                     "smoke",
+                    &RunStart::default(),
                 )
                 .await
                 .expect_err("Airflow is down"),
@@ -9086,6 +9167,7 @@ mod tests {
                     &outsider,
                     &namespace,
                     "smoke",
+                    &RunStart::default(),
                 )
                 .await
                 .expect_err("an outsider may not run"),
@@ -9230,6 +9312,7 @@ mod tests {
             &viewer,
             &namespace,
             "shop",
+            &RunStart::default(),
         )
         .await
         .expect("a viewer may run the shared pipeline");
@@ -9346,6 +9429,7 @@ mod tests {
                     &outsider,
                     &namespace,
                     "hidden",
+                    &RunStart::default(),
                 )
                 .await
                 .expect_err("an outsider may not run"),
@@ -9422,6 +9506,7 @@ mod tests {
             &member,
             &namespace,
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect("the run starts");
@@ -9456,6 +9541,159 @@ mod tests {
         );
     }
 
+    /// The route with a run date and parameters: they reach Airflow as `conf`, and the logical
+    /// date stays now (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_sends_the_run_date_and_params_as_conf() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+
+        let started = now_seconds();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/pipelines/{}/smoke/runs",
+                        crate::cluster::namespace()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "runDate": "2026-11-13", "params": { "days": "7" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let body = &fake.trigger_bodies[0];
+        assert_eq!(
+            body["conf"]["runDate"], "2026-11-13",
+            "the date travels as conf: {body}"
+        );
+        assert_eq!(body["conf"]["params"]["days"], "7", "the params travel too");
+        let logical_date = body["logical_date"].as_str().expect("a logical_date");
+        assert_ne!(logical_date, "2026-11-13", "the logical date stays now");
+        assert!(
+            logical_date.ends_with('Z') && !logical_date.contains('.'),
+            "now, whole seconds, UTC: {logical_date}"
+        );
+        let at = parse_rfc3339(logical_date).expect("RFC 3339");
+        assert!(
+            (at - started).abs() <= 2.0,
+            "logical_date is now, not the run date: {logical_date} vs {started}"
+        );
+    }
+
+    /// No body, exactly as the interface posts today: no `conf` key at all (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_without_a_body_sends_no_conf() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/pipelines/{}/smoke/runs",
+                        crate::cluster::namespace()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let body = &fake.trigger_bodies[0];
+        assert!(
+            body.get("conf").is_none(),
+            "an empty body sends no conf: {body}"
+        );
+        assert_eq!(body["note"], "Started from Nova by sub-ada");
+    }
+
+    /// A date that is not `YYYY-MM-DD` is a 400 before Airflow is asked (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_refuses_a_bad_run_date() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/pipelines/{}/smoke/runs",
+                        crate::cluster::namespace()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "runDate": "13.11.2026" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "runDate is a date (YYYY-MM-DD)");
+        assert!(
+            fake.lock().unwrap().trigger_bodies.is_empty(),
+            "nothing was triggered"
+        );
+    }
+
+    /// A saved parameter's rules apply to a run's parameters too: a name that is not
+    /// lower-case, and 17 of them, are a 400 (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_refuses_more_than_16_params() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+        let uri = format!("/pipelines/{}/smoke/runs", crate::cluster::namespace());
+
+        for (body, sentence) in [
+            (
+                json!({ "params": { "Days": "7" } }),
+                "parameter names are lower-case letters, digits and underscores",
+            ),
+            (
+                json!({ "params": (0..17).map(|n| (format!("p{n}"), "v")).collect::<BTreeMap<_, _>>() }),
+                "at most 16 parameters",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], sentence);
+        }
+        assert!(
+            fake.lock().unwrap().trigger_bodies.is_empty(),
+            "nothing was triggered"
+        );
+    }
+
     #[tokio::test]
     async fn run_now_refuses_a_paused_pipeline_and_does_not_trigger() {
         let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
@@ -9469,6 +9707,7 @@ mod tests {
             &who("sub-ada", &["analytics"], false),
             &crate::cluster::namespace(),
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect_err("a paused pipeline does not start");
@@ -9499,6 +9738,7 @@ mod tests {
             &who("sub-ada", &["analytics"], false),
             &crate::cluster::namespace(),
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect_err("Forbid refuses a second run");
@@ -9531,6 +9771,7 @@ mod tests {
             &who("sub-ada", &["analytics"], false),
             &crate::cluster::namespace(),
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect("Allow skips the activity check");
@@ -9550,6 +9791,7 @@ mod tests {
             &who("sub-ada", &["analytics"], false),
             &crate::cluster::namespace(),
             "brand-new",
+            &RunStart::default(),
         )
         .await
         .expect_err("no DAG yet");
@@ -9588,6 +9830,7 @@ mod tests {
                 &ada,
                 &namespace,
                 "other",
+                &RunStart::default(),
             )
             .await
             .expect_err("paused");
@@ -9601,6 +9844,7 @@ mod tests {
                 &ada,
                 &namespace,
                 "smoke",
+                &RunStart::default(),
             )
             .await
             .unwrap_or_else(|error| panic!("start {attempt}: {}", error.message()));
@@ -9612,6 +9856,7 @@ mod tests {
             &ada,
             &namespace,
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect_err("the eleventh start in a minute");
@@ -9626,6 +9871,7 @@ mod tests {
             &who("sub-bob", &["analytics"], false),
             &namespace,
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect("another user is unaffected");
@@ -9973,6 +10219,7 @@ mod tests {
             &actor,
             &namespace,
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect("run");
@@ -9984,6 +10231,7 @@ mod tests {
             &actor,
             &namespace,
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect_err("paused");
@@ -10040,6 +10288,7 @@ mod tests {
             &actor,
             &namespace,
             "smoke",
+            &RunStart::default(),
         )
         .await
         .expect_err("Airflow is down");
