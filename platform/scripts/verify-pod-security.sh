@@ -60,6 +60,8 @@ if ! kubectl label namespace "$PROBE" \
   exit 1
 fi
 
+plural() { [ "$1" -eq 1 ] && echo exception || echo exceptions; }
+
 total=0 passed=0 failed=0 allowed=0
 : > "$tmp/allowed"
 : > "$tmp/refused"
@@ -109,11 +111,11 @@ for pattern in ${allow[@]+"${allow[@]}"}; do
 done
 
 if [ "$failed" -gt 0 ]; then
-  echo "FAIL ($passed of $total pods admitted, $failed refused, $allowed known exceptions)"
+  echo "FAIL ($passed of $total pods admitted, $failed refused, $allowed known $(plural "$allowed"))"
   exit 1
 fi
 if [ "$passed" -lt 5 ]; then
   echo "UNVERIFIED ($passed of $total pods admitted; install the platform first)"
   exit 3
 fi
-echo "PASS ($passed of $total pods admitted by $level, $allowed known exceptions)"
+echo "PASS ($passed of $total pods admitted by $level, $allowed known $(plural "$allowed"))"
