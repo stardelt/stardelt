@@ -223,6 +223,13 @@ export default function PipelineDetail() {
             )}
           </Fact>
         )}
+        {!pipeline.deployment && pipeline.tasks.some((task) => task.kind === 'notebook') && (
+          <Fact label="Deployed from">
+            <span className="text-text-mute">
+              Not from Git — this notebook was published by hand.
+            </span>
+          </Fact>
+        )}
       </dl>
 
       <section className="card p-5">
