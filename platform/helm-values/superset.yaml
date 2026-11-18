@@ -24,7 +24,7 @@ image:
   # so the pod pulls without credentials. The daily pin rollup rewrites this tag and the
   # group-roles CronJob together (scripts/pin-rollup.sh → `pin-image.sh superset`);
   # `make step-superset` still rolls the chart's two Deployments and applies the CronJob.
-  tag: "dev@sha256:507c59ef3231d699d76d1bdcb5fdcecc4364a3107f074ab99208b458b52508e0"
+  tag: "dev@sha256:ae91a271f8080cdaf3e248670eb88ef07c5cd2a7cd7bf7c38749b7e7380c51f7"
   pullPolicy: IfNotPresent
 
 # The Superset package is public now, so pulling this image needs no credentials; the secret stays
