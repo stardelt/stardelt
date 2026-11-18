@@ -6,9 +6,9 @@ the Lakekeeper Iceberg REST catalog and the Trino query engine.
 
 ## Read first
 
-- `../stardelt-docs/docs/design/master-spec.md` — canonical spec; when documents
+- `../../stardelt-internal/design/master-spec.md` — canonical spec; when documents
   disagree, it wins. Also `execution-plan.md` and `gap-decisions.md` in the same folder.
-- `../stardelt-docs/docs/architecture/licenses.md` — license policy.
+- `../../stardelt-docs/docs/architecture/licenses.md` — license policy.
 - Published copies: https://stardelt.io
 
 The running development environment is the Hetzner k3s cluster
@@ -46,7 +46,7 @@ make image       # docker build -t ghcr.io/stardelt/nova:dev
   scoped. Update docs when user-visible behavior changes.
 - **License policy: OSI-permissive only** (Apache-2.0, MIT, BSD-2/3-Clause). The single
   documented exception is OpenBao (MPL-2.0). See
-  `../stardelt-docs/docs/architecture/licenses.md`; do not add dependencies outside it.
+  `../../stardelt-docs/docs/architecture/licenses.md`; do not add dependencies outside it.
 - Read the master spec before implementing. Nova is a viewport — platform state lives in
   CRDs; nothing in Nova is state that is not a resource.
 

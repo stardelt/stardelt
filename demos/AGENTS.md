@@ -7,9 +7,9 @@ real node (a full install needs about 8 vCPU / 16 GB). The single-node kind demo
 
 ## Read first
 
-- `../stardelt-docs/docs/design/master-spec.md` — canonical spec (published at
+- `../../stardelt-internal/design/master-spec.md` — canonical spec (published at
   https://stardelt.io); when documents disagree, it wins.
-- `../stardelt-docs/docs/architecture/licenses.md` — license policy.
+- `../../stardelt-docs/docs/architecture/licenses.md` — license policy.
 - https://stardelt.io/getting-started/hetzner-k3s — the single-node k3s development cluster
   (`stardelt-platform/dev/hetzner-k3s`), where the platform and these DAGs are run.
 
@@ -51,7 +51,7 @@ the Hetzner k3s dev cluster, not in CI.
 
 - **PR-only.** Never push to `main`; branch off `origin/main` and keep PRs small.
 - **License policy: OSI-permissive only** (Apache-2.0, MIT, BSD). The single documented
-  exception is OpenBao (MPL-2.0). See `../stardelt-docs/docs/architecture/licenses.md`.
+  exception is OpenBao (MPL-2.0). See `../../stardelt-docs/docs/architecture/licenses.md`.
 - Read the master spec first. Never add install steps here: change them in `stardelt-platform` so
   the platform has one install path.
 - Keep `plan.py` in step with the operator's `PipelineSpec::validate`: the API server's schema

@@ -6,11 +6,11 @@ install is pinned upstream charts + this repo's values (master spec §6).
 
 ## Read first
 
-- `../stardelt-docs/docs/design/master-spec.md` — canonical spec (published at
+- `../../stardelt-internal/design/master-spec.md` — canonical spec (published at
   https://stardelt.io); when documents disagree, it wins.
-- `../stardelt-docs/docs/design/execution-plan.md` + `gap-decisions.md` — work packages
+- `../../stardelt-internal/design/execution-plan.md` + `gap-decisions.md` — work packages
   and decisions D8–D16.
-- `../stardelt-docs/docs/architecture/licenses.md` — license policy.
+- `../../stardelt-docs/docs/architecture/licenses.md` — license policy.
 
 The running development environment is the Hetzner k3s cluster
 (`alpha.dev.stardelt.io`), provisioned by `dev/hetzner-k3s/` (`make dev-up`, needs
@@ -48,7 +48,7 @@ CI (`.github/workflows/ci.yml`): yamllint on `helm-values/` + `manifests/`,
 
 - **PR-only.** Never push to `main`; branch off `origin/main` and keep PRs small.
 - **License policy: OSI-permissive only.** The single documented exception is OpenBao
-  (MPL-2.0) — see `../stardelt-docs/docs/architecture/licenses.md`.
+  (MPL-2.0) — see `../../stardelt-docs/docs/architecture/licenses.md`.
 - Chart bumps arrive as Renovate PRs; `chart/Chart.yaml` and `ci.yml` carry hand-maintained
   copies of the pins — keep them in sync.
 - Read the master spec first; never add a component without a contract and a license.
