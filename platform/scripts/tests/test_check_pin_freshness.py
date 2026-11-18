@@ -118,6 +118,7 @@ class CompareLibTagTest(unittest.TestCase):
         self.assertTrue(line.startswith("✓"), line)
         self.assertIn("v0.4.0", line)
         self.assertIn("681e8734…", line)
+        self.assertIn("matches the tag python/v0.4.0 in stardelt/stardelt", line)
         self.assertEqual(exit_code([line]), 0)
 
     def test_a_tag_that_is_another_commit_fails(self):

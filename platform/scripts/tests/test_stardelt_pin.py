@@ -1,10 +1,11 @@
 """The library pin check: the Dockerfile's pin and the Makefile's must agree.
 
-The notebook helper lives in its own repository (``stardelt/stardelt-python``)
-and the platform consumes one pinned release of it (platform#417). The pin
-lives in two places — the ``Makefile`` (``STARDELT_LIB_REF``, the source of
-truth) and the ``Dockerfile`` (the build arg's default) — and
-``scripts/check-stardelt-pin.sh`` is what keeps them from drifting.
+The notebook helper is a folder of the product repository (``python/`` in
+``stardelt/stardelt``) and the platform consumes one pinned release of it
+(platform#417). The pin lives in two places — the ``Makefile``
+(``STARDELT_LIB_REF``, the source of truth) and the ``Dockerfile`` (the build
+arg's default) — and ``scripts/check-stardelt-pin.sh`` is what keeps them from
+drifting.
 
 The script is exercised against a copy of the real tree, so the check the
 repository runs in CI is the one the tests describe.
@@ -38,7 +39,7 @@ class StardeltPinTest(unittest.TestCase):
             "# the release v0.1.0\n"
             "ARG STARDELT_LIB_REF={sha}\n"
             'RUN pip install "stardelt @ git+https://github.com/stardelt/'
-            'stardelt-python@${{STARDELT_LIB_REF}}"\n'.format(sha=SHA)
+            'stardelt@${{STARDELT_LIB_REF}}#subdirectory=python"\n'.format(sha=SHA)
         )
         # The demo bundle's own pin, a second and differently named one
         # (stardelt-platform#1129). It must be fetched at the ARG, not hardcoded.

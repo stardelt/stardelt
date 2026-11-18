@@ -134,9 +134,9 @@ COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
 # Makefile's ref disagree. Installed rather than copied so every notebook
 # imports it with no sys.path tweak; the import check fails the build here, not
 # in a user's first cell.
-ARG STARDELT_LIB_REF=17a262fc5ff7caee24165b361192d4f0fb2a0a9a
+ARG STARDELT_LIB_REF=15dff221646fab7ae8c82c1d39c01ca781a3fad0
 RUN python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@${STARDELT_LIB_REF}" \
+        "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt@${STARDELT_LIB_REF}#subdirectory=python" \
     && python3 -c "import stardelt; print('stardelt', stardelt.__version__)" \
     && python3 -c "import stardelt.notebook_run; print('stardelt.notebook_run: the notebook task wrapper is installed')" \
     && python3 -c "import sql; print('jupysql', sql.__version__)"

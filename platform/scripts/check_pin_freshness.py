@@ -119,7 +119,7 @@ def exit_code(lines: list[str]) -> int:
 def compare_lib_tag(tag: str, ref: str, tag_commit: str) -> str:
     """One line: the Makefile's tag must be the release that contains its pinned commit."""
     if tag_commit == ref:
-        return f"✓ notebook library {tag}@{_short(ref)} matches the tag in stardelt/stardelt-python"
+        return f"✓ notebook library {tag}@{_short(ref)} matches the tag python/{tag} in stardelt/stardelt"
     return (
         f"✗ the Makefile names {tag} for {_short(ref)}, but the tag {tag} is {_short(tag_commit)}"
         " — set STARDELT_LIB_TAG to the release that contains the pinned commit"
@@ -128,8 +128,8 @@ def compare_lib_tag(tag: str, ref: str, tag_commit: str) -> str:
 
 def resolve_tag_commit(tag: str) -> tuple[str | None, str]:
     proc = subprocess.run(
-        ["git", "ls-remote", "--tags", "https://github.com/stardelt/stardelt-python",
-         f"refs/tags/{tag}"],
+        ["git", "ls-remote", "--tags", "https://github.com/stardelt/stardelt",
+         f"refs/tags/python/{tag}"],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:
@@ -226,8 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         lines.extend(compare(app, pinned, resolved, manifest, tag))
 
     # The notebook library's pin: the Makefile names the release its commit is, and the
-    # release is a tag in stardelt/stardelt-python — ask the remote which commit it is
-    # (offline in `make lint`; the network lives here, in the daily check).
+    # release is a tag `python/<tag>` in stardelt/stardelt — ask the remote which commit
+    # it is (offline in `make lint`; the network lives here, in the daily check).
     makefile_text, makefile_notes = pin_text(REPO, "Makefile")
     notes.extend(makefile_notes)
     ref_match = LIB_REF_RE.search(makefile_text)
