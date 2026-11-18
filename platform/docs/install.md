@@ -1,6 +1,6 @@
 # Prerequisites
 
-Part of the [stardelt-platform](../README.md) manual.
+Part of the [platform manual](../README.md).
 
 | Tool | Minimum version | Notes |
 |------|----------------|-------|
@@ -153,7 +153,7 @@ make dev-status                # what the cluster runs vs what the manifests pin
 ```
 
 `TAG=` matters when "the newest" is not what you want: every merged commit keeps an
-immutable `sha-<short>` tag (`git -C stardelt-nova log origin/main --format=%h -1`),
+immutable `sha-<short>` tag (`git -C nova log origin/main --format=%h -1`),
 so you can put one specific commit on the cluster — to check a fix, or to bisect a
 regression — without a branch and without moving `dev`. Pull-request builds are *not*
 published (`Image` pushes only off `main` and `v*`), so a branch is tested by merging

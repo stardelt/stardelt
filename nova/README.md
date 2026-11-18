@@ -324,7 +324,7 @@ In this mode every operation mutates memory and is recorded as a job. Set
 `NOVA_DEMO` unset to talk to real Trino and Lakekeeper.
 
 ```
-stardelt-nova/
+nova/
 ├── backend/          Rust crate (axum, tower-http, reqwest, sqlx)
 │   ├── src/
 │   │   ├── main.rs   server setup, /api/health, /api/me, /api/trino
@@ -476,7 +476,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_S3_URL` | — (empty) | S3 endpoint of the versioned `notebooks` bucket, plain HTTP in-cluster (`http://seaweedfs-s3.stardelt.svc.cluster.local:8333`). Needs the three below; unless all four are set the notebook routes answer `503 {"error":"notebook storage is not configured"}` and publishing is off. A partial set refuses to start |
 | `NOVA_S3_ACCESS_KEY` | — (required with the URL) | Access key of the platform identity every object-store consumer already uses (Secret `stardelt-s3-creds`, key `access-key`) |
 | `NOVA_S3_SECRET_KEY` | — (required with the URL) | That identity's secret key. Held as an `auth::Secret`; never logged, never part of an error or a response |
-| `NOVA_S3_NOTEBOOK_BUCKET` | — (required with the URL) | Bucket for published notebooks (`notebooks`). Versioning must be enabled (`make notebooks-bucket` in stardelt-platform); a publish without a returned version is `502` rather than a Notebook that is not immutable |
+| `NOVA_S3_NOTEBOOK_BUCKET` | — (required with the URL) | Bucket for published notebooks (`notebooks`). Versioning must be enabled (`make notebooks-bucket` in `platform/`); a publish without a returned version is `502` rather than a Notebook that is not immutable |
 | `POD_NAMESPACE` | `stardelt` | Namespace whose workloads Nova reports (downward API in the manifests); `NOVA_NAMESPACE` overrides it for a local run |
 | `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
 | `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino (`Authorization: Bearer`). Only useful once the platform configures the engine to validate it — the identity contract's phase 2. With it on, the engine can also filter `SHOW CATALOGS` per person, which is what Nova's catalog list reads (`GET /api/catalog/catalogs`); with it off the engine sees an unauthenticated request. Lakekeeper still sees Nova's own service token (above), never the caller's. `/api/me` reports whether forwarding is on (`identity_forwarding`) |
@@ -655,7 +655,7 @@ timezone rules as a create.
 
 A notebook is published as **an immutable object version** in the versioned `notebooks` bucket, so a
 schedule can pin exactly the bytes a person approved. The bucket and its versioning are created by
-stardelt-platform (`make notebooks-bucket`); Nova only writes to it with the platform identity in
+platform/ (`make notebooks-bucket`); Nova only writes to it with the platform identity in
 `NOVA_S3_*` (see [Configuration](#configuration)), never with the caller's token.
 
 ```text

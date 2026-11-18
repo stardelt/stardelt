@@ -138,14 +138,14 @@ client names are limited to the platform's known clients, and every client excep
 `https://` issuer, `platform` derives it and refuses one, both need `baseDomain`). `contract()`
 in `src/identity.rs` turns them into the data of the ConfigMap `stardelt-identity` that every
 component reads; publishing that ConfigMap from the controller is the next wave step. Until then
-`make install-identity` in `stardelt-platform` writes it.
+`make install-identity` in `platform/` writes it.
 
 Notebooks are platform-level on purpose: one hub serves every lakehouse, and it is a whole
 stack (hub, proxy, single-user pods) rather than a per-catalog concern. The golden values
-mirror `stardelt-platform/helm-values/jupyterhub.yaml` — small resources, `ClusterIP`,
+mirror `platform/helm-values/jupyterhub.yaml` — small resources, `ClusterIP`,
 ephemeral per-user storage, sign-in through the platform IdP: the hub reads the identity
 contract (ConfigMap `stardelt-identity`, Secret `stardelt-oidc-clients`) from its namespace;
-install it with stardelt-platform's `make install-identity` first, or nobody can sign in.
+install it with platform/'s `make install-identity` first, or nobody can sign in.
 
 ### Identity registration checklist
 
@@ -447,7 +447,7 @@ Notes:
 Unit and schema tests run in CI. Integration is checked on a real cluster (the dev cluster); a
 Lakehouse or PlatformInstance cannot be exercised on laptop-size clusters.
 
-`parity/steps.tsv` lists every install step of stardelt-platform and what the operator does for
+`parity/steps.tsv` lists every install step of the platform folder (`platform/`) and what the operator does for
 it; `scripts/check-parity.sh` keeps it complete.
 
 ### Safety: `dryRun`
