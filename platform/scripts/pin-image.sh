@@ -4,6 +4,7 @@
 #   ./scripts/pin-image.sh nova              # ghcr.io/stardelt/nova:dev → namespace stardelt
 #   ./platform/scripts/pin-image.sh nova     # from the repository root, same as below
 #   ./scripts/pin-image.sh stardelt-operator stardelt main
+#   ./scripts/pin-image.sh stardelt-operator            # also verifies the golden values in the live binary
 #   APP=trino NS=lab TAG=v480 ./scripts/pin-image.sh
 #   ./scripts/pin-image.sh airflow           # the loader (`:demo`, airflow-api-server, three files)
 #   WRITE_MANIFEST_ONLY=1 ./scripts/pin-image.sh jupyter   # the notebook image, three files, no cluster
@@ -467,4 +468,17 @@ fi
 # `SYNC_CHART=0` keeps the old image+CRD path for a fast dev loop.
 if [ "$APP" = "stardelt-operator" ] && [ "${SYNC_CHART:-1}" = "1" ] && [ "${WRITE_MANIFEST_ONLY:-0}" != "1" ]; then
   bash scripts/sync-operator-chart.sh "$digest" "$NS"
+fi
+
+# A pin and a rollout are two events, and the golden values are compiled into the operator binary:
+# the Deployment can run the pinned image while the values in it are a merge behind. Measured
+# 2026-11-18T13:0xZ: the rollout succeeded, verify-pins was green, and `make verify-operator-values`
+# printed `FAIL (7 of 44 probes)` because the build predated #161. Ask the Deployment here, so a
+# rollout either proves itself or fails loudly.
+# WRITE_MANIFEST=0 is the dev loop: the file keeps its old digest and the new one is applied with
+# `helm --set`, so the probe would compare two different things — skip it there.
+# WRITE_MANIFEST_ONLY=1 has no cluster at all (#739) — the same reason `SYNC_CHART` above skips it.
+if [ "$APP" = "stardelt-operator" ] && [ "${WRITE_MANIFEST:-1}" = "1" ] \
+   && [ "${WRITE_MANIFEST_ONLY:-0}" != "1" ]; then
+  bash scripts/verify-operator-values.sh
 fi
