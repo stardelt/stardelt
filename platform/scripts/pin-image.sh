@@ -2,6 +2,7 @@
 # Pin a deployment to the newest published digest of an image tag.
 #
 #   ./scripts/pin-image.sh nova              # ghcr.io/stardelt/nova:dev → namespace stardelt
+#   ./platform/scripts/pin-image.sh nova     # from the repository root, same as below
 #   ./scripts/pin-image.sh stardelt-operator stardelt main
 #   APP=trino NS=lab TAG=v480 ./scripts/pin-image.sh
 #   ./scripts/pin-image.sh airflow           # the loader (`:demo`, airflow-api-server, three files)
@@ -18,6 +19,11 @@
 # Works for public packages anonymously, and for private ones with `gh` logged
 # in (the token is passed to the registry, never printed).
 set -euo pipefail
+
+# Every path below is relative to platform/ (manifests/, helm-values/, chart/files/). Resolve
+# them from this script rather than the caller's cwd: from the repository root the old form
+# rolled the Deployment and then died on the first file edit, leaving the two halves apart.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The deployment an app runs in, when it is not named after the app: Spark runs in
 # `spark-connect`. `DEPLOY=` still overrides it.

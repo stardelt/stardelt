@@ -111,6 +111,13 @@ class PinImageTest(unittest.TestCase):
         self.log = self.tmp / "kubectl.log"
         self.work = self.tmp / "work"
         (self.work / "manifests").mkdir(parents=True)
+        # The script resolves manifests/, helm-values/ and chart/files/ from its own directory
+        # (`dirname "$0"/..`), not from the caller's cwd, so it is copied into the fixture tree
+        # the way test_stardelt_pin.py copies its script.
+        self.scripts = self.work / "scripts"
+        self.scripts.mkdir()
+        shutil.copy(SCRIPT, self.scripts / SCRIPT.name)
+        self.script = self.scripts / SCRIPT.name
         self.manifest = self.work / "manifests" / "nova-deployment.yaml"
         self.manifest.write_text(
             "    containers:\n"
@@ -129,7 +136,7 @@ class PinImageTest(unittest.TestCase):
         env["FAKE_MISSING"] = missing
         env["FAKE_CONTAINER"] = container
         return subprocess.run(
-            ["bash", str(SCRIPT), app],
+            ["bash", str(self.script), app],
             cwd=self.work,
             env=env,
             capture_output=True,
@@ -173,6 +180,25 @@ class PinImageTest(unittest.TestCase):
         proc = self.run_pin("nova", current="ghcr.io/stardelt/nova:dev@sha256:" + "00" * 32)
         self.assertNotIn("already pinned", proc.stdout)
         self.assertIn("app=ghcr.io/stardelt/nova:dev@" + DIGEST, self.calls())
+
+    def test_the_manifest_is_written_relative_to_the_script_not_the_caller(self):
+        # The repository-root invocation (`./platform/scripts/pin-image.sh nova`) must write
+        # platform/manifests/nova-deployment.yaml, not a path under the caller's cwd — and must
+        # not die after moving the Deployment (platform#156).
+        env = dict(os.environ)
+        env["PATH"] = str(self.bin) + os.pathsep + env["PATH"]
+        env["FAKE_LOG"] = str(self.log)
+        env["FAKE_DIGEST"] = DIGEST
+        env["FAKE_CURRENT_IMAGE"] = "ghcr.io/stardelt/nova:dev@sha256:" + "00" * 32
+        proc = subprocess.run(
+            ["bash", str(self.script), "nova"],
+            cwd=self.tmp,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("ghcr.io/stardelt/nova:dev@" + DIGEST, self.manifest.read_text())
 
     def test_a_missing_deployment_fails_loudly(self):
         proc = self.run_pin("nova", missing="nova")
