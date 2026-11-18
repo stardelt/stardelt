@@ -12,7 +12,11 @@ spec:
     singular: platforminstance
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Waiting
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: A stardelt platform instance.
