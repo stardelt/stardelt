@@ -1,0 +1,10 @@
+version: 2
+
+exposures:
+  - name: shop_dashboard
+    label: Shop dashboard
+    type: dashboard
+    maturity: medium
+    description: The shop's revenue, top customers and product mix, in the platform's dashboards.
+    owner: {name: demo}
+    depends_on: [ref('daily_revenue'), ref('customer_ltv'), ref('product_mix')]

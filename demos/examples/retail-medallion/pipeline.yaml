@@ -1,0 +1,31 @@
+apiVersion: stardelt.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: retail-medallion
+  labels:
+    stardelt.io/use-case: retail-analytics
+spec:
+  concurrency: Forbid
+  engine: airflow
+  ownerGroup: retail-analytics
+  publish: direct
+  retries:
+    attempts: 1
+    backoff: 2m
+  runAs: pipeline-retail-analytics
+  tasks:
+    - config:
+        notebook: retail_spark_ingest.ipynb
+        objectVersion: 671ba4bb597f8ed679e5eacad127c706
+        params: '{"rows":"1500000"}'
+      kind: notebook
+      name: ingest
+    - config:
+        notebook: retail_gold.ipynb
+        objectVersion: 671ba4bb56954f973058859f85771261
+        params: '{}'
+      dependsOn:
+        - ingest
+      kind: notebook
+      name: gold
+  timeout: 1h

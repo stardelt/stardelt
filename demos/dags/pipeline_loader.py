@@ -1,0 +1,230 @@
+"""One Airflow DAG per `Pipeline` resource in this namespace (scheduled jobs, phase J0).
+
+The resource is the source of truth; this file only reads it (one LIST per parse, through a
+read-only ServiceAccount) and builds DAGs from it, so nobody edits DAGs by hand. The pure
+parts live in `stardelt_pipelines` and are unit-tested without Airflow.
+
+A pipeline with an `ownerGroup` runs as that group's `ServicePrincipal` (`runAs`): the plan checks
+it against the namespace's `ServicePrincipal` resources, and each of the pipeline's task pods gets
+the principal's credentials through a `secretKeyRef` (see `stardelt_pipelines.principal`). The
+loader itself never reads a Secret.
+
+A stopped run (the executor sends SIGTERM) cancels the running statement: the task deletes the
+statement's `nextUri`, so the next poll reports `USER_CANCELED` and the task fails with that
+engine error instead of leaving the query running behind it.
+
+Environment of the dag-processor and the task pods:
+  PIPELINE_TRINO_URL        base URL of the query engine, e.g. https://trino:8443
+  PIPELINE_TRINO_CA_FILE    CA bundle that signed the engine's certificate (optional; the token POST uses the public trust store)
+  PIPELINE_TOKEN_URL        token endpoint of the identity provider
+  PIPELINE_CLIENT_ID        the default principal, `pipeline-runner` (a pipeline with a group
+                            principal overrides it in its own task pods)
+  PIPELINE_CLIENT_SECRET    its secret (from a Kubernetes Secret, never in a file)
+  PIPELINE_NOTEBOOK_IMAGE   the notebook image a `notebook` task's own pod runs (platform#316)
+  PIPELINE_NOTEBOOK_BUCKET  the versioned bucket of published notebooks and executed copies
+  PIPELINE_NOTEBOOK_S3_CONN the Airflow connection that pre-signs the notebook's GET and PUT
+  PIPELINE_NOTEBOOK_TRINO_CA_SECRET  the Secret mounted into the notebook pod for the CA
+  PIPELINE_NOTEBOOK_KERNEL_TIMEOUT  seconds a notebook pod waits for its kernel (optional, 30 to 900, default 180)
+  PIPELINE_API_GROUP / PIPELINE_API_PLURAL   defaults `stardelt.io` / `pipelines` (tests override)
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
+from airflow.timetables.trigger import CronTriggerTimetable
+
+# The support package sits next to this file. Airflow does not put the DAGs folder on the
+# import path in every process (dag-processor, task pod, tests), so do it here.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stardelt_pipelines import trino  # noqa: E402
+from stardelt_pipelines.access import dag_access  # noqa: E402
+from stardelt_pipelines.expand import expand, run_values  # noqa: E402
+from stardelt_pipelines.notebook import NotebookPodOperator  # noqa: E402
+from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan  # noqa: E402
+from stardelt_pipelines.principal import principal_pod_override  # noqa: E402
+
+log = logging.getLogger(__name__)
+
+API_GROUP = os.environ.get("PIPELINE_API_GROUP", "stardelt.io")
+API_PLURAL = os.environ.get("PIPELINE_API_PLURAL", "pipelines")
+API_VERSION = "v1alpha1"
+PRINCIPAL_PLURAL = "serviceprincipals"
+CONNECTION_PLURAL = "connections"
+NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+TRINO_SOURCE = "stardelt-pipeline"
+
+
+def _namespace() -> str:
+    with open(NAMESPACE_FILE) as handle:
+        return handle.read().strip()
+
+
+def _list_resources(
+    namespace: str,
+) -> tuple[list[dict], dict[str, dict], dict[str, dict]]:
+    """Every `Pipeline` of the namespace, plus its `ServicePrincipal` and `Connection` resources by
+    name."""
+    from kubernetes import client, config
+
+    config.load_incluster_config()
+    api = client.CustomObjectsApi()
+    pipelines = api.list_namespaced_custom_object(
+        API_GROUP, API_VERSION, namespace, API_PLURAL
+    ).get("items", [])
+    principals = api.list_namespaced_custom_object(
+        API_GROUP, API_VERSION, namespace, PRINCIPAL_PLURAL
+    ).get("items", [])
+    connections = api.list_namespaced_custom_object(
+        API_GROUP, API_VERSION, namespace, CONNECTION_PLURAL
+    ).get("items", [])
+    return (
+        pipelines,
+        {
+            resource["metadata"]["name"]: resource
+            for resource in principals
+            if resource.get("metadata", {}).get("name")
+        },
+        {
+            resource["metadata"]["name"]: resource
+            for resource in connections
+            if resource.get("metadata", {}).get("name")
+        },
+    )
+
+
+def _run_task(task: dict, params: dict, **context) -> None:
+    """Executes inside the task pod. `sql` tasks run as the service principal, never logging it."""
+    if task["kind"] != "sql":
+        # A silent no-op for a kind that has no runtime yet would hide that nothing ran.
+        raise NotImplementedError(f"task kind `{task['kind']}` has no runtime yet")
+    dag_run = context["dag_run"]
+    fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
+    run_date, overrides = run_values(dag_run.conf, fallback)
+    sql = expand(
+        task["sql"],
+        run_date=run_date,
+        run_id=dag_run.run_id,
+        params={**params, **overrides},
+    )
+    tags = trino.lineage_tags(context["dag"].dag_id, context["ti"].task_id, dag_run.run_id)
+
+    ca_file = os.environ.get("PIPELINE_TRINO_CA_FILE")
+    with trino.identity_client() as identity, httpx.Client(
+        verify=ca_file or True, timeout=60.0
+    ) as http:
+        token = trino.client_credentials_token(
+            os.environ["PIPELINE_TOKEN_URL"],
+            os.environ.get("PIPELINE_CLIENT_ID", DEFAULT_PRINCIPAL),
+            os.environ["PIPELINE_CLIENT_SECRET"],
+            client=identity,
+        )
+        # What a stop needs: the id as soon as the engine has it, and the URI to DELETE. Without
+        # the cancel the statement outlives the task (and can still commit a write).
+        current: dict[str, str | None] = {"query_id": None, "next_uri": None}
+
+        def _started(query_id: str, next_uri: str | None) -> None:
+            if current["query_id"] != query_id:
+                log.info("query %s submitted", query_id)
+            current["query_id"] = query_id
+            current["next_uri"] = next_uri
+
+        # The executor SIGTERMs the task when the run is stopped; the handler cancels the
+        # statement and the next poll turns it into a real `USER_CANCELED` error.
+        handler = trino.cancel_handler(
+            http, token=token, current=current, source=TRINO_SOURCE, tags=tags
+        )
+        with trino.cancel_on_termination(handler):
+            outcome = trino.run_statement(
+                sql,
+                base_url=os.environ["PIPELINE_TRINO_URL"],
+                token=token,
+                client=http,
+                source=TRINO_SOURCE,
+                tags=tags,
+                on_started=_started,
+            )
+    log.info(
+        "task %s finished: query %s, %s rows, update count %s",
+        task["name"],
+        outcome.query_id,
+        outcome.rows,
+        outcome.update_count,
+    )
+
+
+def _build_dag(p) -> DAG:
+    access = dag_access(p.owner_group)
+    dag = DAG(
+        dag_id=p.dag_id,
+        schedule=CronTriggerTimetable(p.cron, timezone=p.timezone) if p.cron else None,
+        start_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        catchup=False,
+        is_paused_upon_creation=False,
+        max_active_runs=p.max_active_runs,
+        dagrun_timeout=timedelta(seconds=p.timeout_s) if p.timeout_s else None,
+        default_args={
+            "owner": access["owner"],
+            "retries": p.retries,
+            "retry_delay": timedelta(seconds=p.retry_delay_s),
+        },
+        tags=["stardelt", "pipeline", *access["tags"]],
+        access_control=access["access_control"],
+    )
+    # The credentials of a group's principal reach the pods of that pipeline only: every other
+    # DAG keeps the default principal the deployment sets.
+    executor_config = (
+        principal_pod_override(p.principal.secret_name) if p.principal is not None else None
+    )
+    operators = {}
+    for t in p.tasks:
+        if t.kind == "notebook":
+            # A notebook runs in a pod of its own: the worker only orchestrates it, so the pod
+            # override that hands the worker its credentials is not this task's business.
+            if p.principal is None:  # the plan refuses this; a silent default would run as nobody
+                raise PlanError(f"notebook task `{t.name}` has no principal")
+            operators[t.name] = NotebookPodOperator(
+                task_id=t.name,
+                pipeline=p.name,
+                owner_group=p.owner_group,
+                notebook=t.notebook,
+                object_version=t.object_version,
+                task_params=dict(t.notebook_params),
+                pipeline_params=p.params,
+                principal_secret=p.principal.secret_name,
+                connection_name=t.connection,
+                connection_keys=t.connection_keys,
+                namespace=namespace,
+                dag=dag,
+            )
+            continue
+        operators[t.name] = PythonOperator(
+            task_id=t.name,
+            python_callable=_run_task,
+            op_kwargs={
+                "task": {"name": t.name, "kind": t.kind, "sql": t.sql},
+                "params": p.params,
+            },
+            executor_config=executor_config,
+            dag=dag,
+        )
+    for t in p.tasks:
+        for dep in t.depends_on:
+            operators[dep] >> operators[t.name]
+    return dag
+
+
+namespace = _namespace()
+pipelines, principals, connections = _list_resources(namespace)
+for resource in pipelines:
+    name = resource.get("metadata", {}).get("name", "?")
+    try:
+        pipeline_plan = plan(resource, namespace, principals, connections)
+        globals()[pipeline_plan.dag_id] = _build_dag(pipeline_plan)
+    except PlanError as problem:
+        log.warning("pipeline %s/%s is not loaded: %s", namespace, name, problem)

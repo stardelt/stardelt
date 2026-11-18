@@ -1,0 +1,7 @@
+.kube/
+*.kubeconfig
+.env
+.env.local
+*.log
+__pycache__/
+.pytest_cache/
