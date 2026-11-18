@@ -158,6 +158,11 @@ fi
 
 for c in "${changes[@]}"; do echo "$c"; done
 
+# One commit holds the operator's golden copies too (D49): a roll that moves a platform pin without
+# its twin is red on main the moment the PR merges (#168), so write the twin first and let the check
+# below refuse a roll it cannot finish.
+bash scripts/sync-operator-goldens.sh
+
 # The PR's own checks are suppressed for a bot push; the two pin guards are the only
 # evidence for the loader and Superset halves. Run them even locally, and refuse to open
 # a PR whose pins they reject.
