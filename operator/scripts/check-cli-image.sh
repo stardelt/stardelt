@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Fail when the maintenance CLI image (maintenance.rs IMAGE) is not the build ghcr.io serves
-# under the :dev tag, or when that build names no revision. The constant is the only place a
-# stardelt-cli digest is pinned; no other check in either repository sees it (operator#806).
+# under the tag the constant names, or when that build names no revision. The constant is the
+# only place a stardelt-cli digest is pinned; no other check in either repository sees it
+# (operator#806).
 #
 #   bash scripts/check-cli-image.sh     # 0 equal, 1 differ or unreadable
 #
@@ -11,13 +12,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 LOCAL_FILE=crates/stardelt-operator/src/maintenance.rs
 REPO=stardelt/stardelt-cli
-REF=dev
-IMAGE="ghcr.io/$REPO:$REF"
 REGISTRY=https://ghcr.io/v2/$REPO
 
 die() { echo "$@" >&2; exit 1; }
 
-local_digest="$(sed -n 's|^pub const IMAGE: &str = "ghcr\.io/stardelt/stardelt-cli:dev@sha256:\([0-9a-f]\{64\}\)";$|\1|p' "$LOCAL_FILE")"
+REF="$(sed -n 's|^pub const IMAGE: &str = "ghcr\.io/stardelt/stardelt-cli:\([^@]*\)@sha256:.*$|\1|p' "$LOCAL_FILE")"
+[[ -n "$REF" ]] || die "✗ no image tag in $LOCAL_FILE"
+IMAGE="ghcr.io/$REPO:$REF"
+
+local_digest="$(sed -n 's|^pub const IMAGE: &str = "ghcr\.io/stardelt/stardelt-cli:[^@]*@sha256:\([0-9a-f]\{64\}\)";$|\1|p' "$LOCAL_FILE")"
 [[ "$local_digest" =~ ^[0-9a-f]{64}$ ]] || die "✗ no IMAGE digest in $LOCAL_FILE"
 
 token="$(curl -fsSL "https://ghcr.io/token?scope=repository:$REPO:pull&service=ghcr.io" \
