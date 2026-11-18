@@ -4,9 +4,9 @@ on:
   push:
     branches: [main]
     tags: ["python/v*"]
-    paths: ["python/**", ".github/workflows/python-ci.yml"]
+    paths: ["python/**", "nova/openapi/nova.json", ".github/workflows/python-ci.yml"]
   pull_request:
-    paths: ["python/**", ".github/workflows/python-ci.yml"]
+    paths: ["python/**", "nova/openapi/nova.json", ".github/workflows/python-ci.yml"]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -43,6 +43,11 @@ jobs:
 
       - name: Run the tests
         run: python -m pytest tests -q
+
+      - name: The SDK lists every operation the contract has
+        run: |
+          python scripts/sync_contract.py
+          git -C .. diff --exit-code -- python/stardelt/operations.json
 
   image-cli-check:
     name: Build the CLI image (no push)
