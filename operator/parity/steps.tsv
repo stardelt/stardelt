@@ -17,7 +17,7 @@ step-superset	built	superset	-
 step-pgdump	built	ensure_pg_dumps	-
 step-nova	built	ensure_nova	-
 step-pins	not-planned	-	the operator carries its pins; see stardelt-operator#545
-step-verify	missing	-	stardelt-platform#293
+step-verify	missing	-	stardelt/stardelt#48 (the fresh-node run; the check is platform/scripts/verify-fresh-node.sh)
 install-identity	built	ensure_keycloak	-
 step-notebooks	built	jupyterhub	-
 step-spark	built	ensure_spark	-
