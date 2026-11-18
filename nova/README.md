@@ -397,9 +397,9 @@ sign-in page must never look like a broken notebook.
 **Prerequisites:** Rust stable, Node 20+, npm, Docker (for image builds).
 
 ```bash
-# Clone and install frontend deps
-git clone https://github.com/stardelt/stardelt-nova.git
-cd stardelt-nova
+# Clone the repository and install frontend deps
+git clone https://github.com/stardelt/stardelt.git
+cd stardelt/nova
 npm --prefix frontend install
 
 # Start both servers in one terminal

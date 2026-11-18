@@ -3,7 +3,7 @@
 The stardelt sample pipelines, the pipeline loader DAGs and the Airflow image they run in.
 
 There is no install here. The platform is installed from
-[`stardelt-platform`](https://github.com/stardelt/stardelt-platform) on a real node — a full
+[`platform/`](https://github.com/stardelt/stardelt/tree/main/platform) on a real node — a full
 install needs about 8 vCPU and 16 GB. The single-node kind demo this repository used to carry was
 dropped because the platform no longer fits a laptop (D36).
 

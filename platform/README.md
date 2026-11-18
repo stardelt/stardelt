@@ -18,8 +18,8 @@ SQL over Iceberg tables, notebooks, scheduled pipelines and dashboards behind on
 You need a Kubernetes cluster with one real node (8 GB of memory or more), `kubectl` 1.28+, `helm` 3.19+ and, for sign-in, `cert-manager` 1.15+.
 
 ```sh
-git clone https://github.com/stardelt/stardelt-platform
-cd stardelt-platform
+git clone https://github.com/stardelt/stardelt
+cd stardelt/platform
 make platform-dry-run                                  # what would happen, nothing is written
 IDENTITY=1 BASE_DOMAIN=data.example.com make platform  # install; safe to run twice
 ```

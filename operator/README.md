@@ -348,7 +348,7 @@ controller. `VolumeSpec::derived_prefix` is the path the gateway will use.
 `volume.schema.json`). Add
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/stardelt/stardelt-operator/main/schemas/pipeline.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/stardelt/stardelt/main/operator/schemas/pipeline.schema.json
 ```
 
 as the first line of a file (replace the file name by the kind) to get validation

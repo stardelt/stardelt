@@ -53,8 +53,8 @@ export EXPECT_CONTEXT=stardelt-dev
 ## Install — one command
 
 ```sh
-git clone https://github.com/stardelt/stardelt-platform
-cd stardelt-platform
+git clone https://github.com/stardelt/stardelt
+cd stardelt/platform
 IDENTITY=1 BASE_DOMAIN=platform.example.com make platform
 ```
 
