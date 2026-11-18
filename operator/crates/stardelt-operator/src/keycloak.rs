@@ -585,6 +585,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_realm_description_fits_keycloaks_255_character_column() {
+        // CLIENT.DESCRIPTION, KEYCLOAK_ROLE.DESCRIPTION and KEYCLOAK_GROUP.DESCRIPTION are varchar(255):
+        // a longer one makes the first import fail and Keycloak crash-loop (stardelt-platform#293 run).
+        fn walk(v: &serde_json::Value, path: &str, bad: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, x) in m {
+                        if k == "description"
+                            && let Some(s) = x.as_str()
+                            && s.chars().count() > 255
+                        {
+                            bad.push(format!("{path}.{k} ({} chars)", s.chars().count()));
+                        }
+                        walk(x, &format!("{path}.{k}"), bad);
+                    }
+                }
+                serde_json::Value::Array(a) => {
+                    for (i, x) in a.iter().enumerate() {
+                        walk(x, &format!("{path}[{i}]"), bad)
+                    }
+                }
+                _ => {}
+            }
+        }
+        let realm: serde_json::Value =
+            serde_json::from_str(REALM_TEMPLATE).expect("the realm template is JSON");
+        let mut bad = Vec::new();
+        walk(&realm, "", &mut bad);
+        assert!(bad.is_empty(), "descriptions over 255 characters: {bad:?}");
+    }
+
     /// `stardelt-mcp` is the client MCP agents sign in with (operator#69 slice 1): public, PKCE
     /// and device grant, and its `aud-mcp` mapper mints the audience Nova's `/mcp` validates.
     #[test]
