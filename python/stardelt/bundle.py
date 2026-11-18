@@ -946,8 +946,7 @@ def destroy(nova, directory, target, confirm=False):
     bundle's name and this target (in a ``development`` target only the caller's own ``dev-<user>-`` ones). A pipeline made by
     hand, or stamped by another bundle or target, is never touched. Without ``confirm`` nothing is removed and the results
     are ``would-delete`` lines; with it each pipeline is deleted and the results are ``deleted`` lines. The files of the
-    bundle are not touched. Only pipelines are removed: stream apps are not removed yet, although Nova
-    can delete one since the ``streams_delete`` operation exists.
+    bundle are not touched. Stream apps stamped by the same bundle and target are removed too, after the pipelines.
     """
     problems, _, resolved = validate(directory, target)
     if problems:
@@ -957,12 +956,23 @@ def destroy(nova, directory, target, confirm=False):
     if mode == "development" and not user:
         return [(target, "sign in first: a development target removes only your own pipelines")], []
     found = _stale(nova, provenance(directory, target)["bundle"], target, mode, user, set())
+    namespace, listed = _listed(nova)
+    found_streams = [
+        (namespace, stream["name"])
+        for stream in _deployed_streams(listed, provenance(directory, target)["bundle"], target, mode, user)
+    ]
     if not confirm:
-        return [], [{"action": "would-delete", "name": name} for _, name in found]
+        return [], [
+            *({"action": "would-delete", "name": name} for _, name in found),
+            *({"action": "would-delete", "name": name, "kind": "StreamApp"} for _, name in found_streams),
+        ]
     done = []
     for namespace, name in found:
         nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
         done.append({"action": "deleted", "name": name})
+    for namespace, name in found_streams:
+        nova.call("streams_delete", path={"namespace": namespace, "name": name})
+        done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
     return [], done
 
 

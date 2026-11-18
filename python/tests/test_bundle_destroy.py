@@ -36,24 +36,27 @@ LISTING = {
     ]
 }
 WARNING = "stardelt: nothing was removed; add --yes to remove what is listed\n"
+STREAMS_NONE = FakeResponse(payload={"namespace": "stardelt", "streams": []})
 
 
 def test_without_yes_it_only_lists_what_this_bundle_target_deployed(tmp_path):
     make(tmp_path)
-    code, out, err, session = run(["bundle", "destroy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=LISTING))
+    code, out, err, session = run(
+        ["bundle", "destroy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=LISTING), STREAMS_NONE
+    )
     assert (code, err) == (0, WARNING)
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "would-delete", "name": "load"},
         {"action": "would-delete", "name": "nightly"},
     ]
-    assert calls(session) == [("GET", "/api/me"), ("GET", "/api/pipelines")], "nothing is deleted without --yes"
+    assert calls(session) == [("GET", "/api/me"), ("GET", "/api/pipelines"), ("GET", "/api/streams")], "nothing is deleted without --yes"
 
 
 def test_with_yes_each_listed_pipeline_is_deleted_and_nothing_else(tmp_path):
     make(tmp_path)
     code, out, err, session = run(
         ["bundle", "destroy", str(tmp_path), "-t", "prod", "--yes"],
-        ME, FakeResponse(payload=LISTING), FakeResponse(204), FakeResponse(204),
+        ME, FakeResponse(payload=LISTING), STREAMS_NONE, FakeResponse(204), FakeResponse(204),
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
@@ -75,7 +78,7 @@ def test_a_development_target_removes_only_the_callers_own_pipelines(tmp_path):
             stamped("dev-alice-old", target="prod"),
         ]
     }
-    code, out, _, _ = run(["bundle", "destroy", str(tmp_path), "-t", "dev"], ME, FakeResponse(payload=listing))
+    code, out, _, _ = run(["bundle", "destroy", str(tmp_path), "-t", "dev"], ME, FakeResponse(payload=listing), STREAMS_NONE)
     assert code == 0
     assert [json.loads(line)["name"] for line in out.splitlines()] == ["dev-alice-load"]
 
@@ -83,11 +86,58 @@ def test_a_development_target_removes_only_the_callers_own_pipelines(tmp_path):
 def test_nothing_to_remove_says_so(tmp_path):
     make(tmp_path)
     code, out, err, _ = run(
-        ["bundle", "destroy", str(tmp_path), "-t", "prod", "--yes"], ME, FakeResponse(payload={"pipelines": [stamped("x", target="dev")]})
+        ["bundle", "destroy", str(tmp_path), "-t", "prod", "--yes"],
+        ME, FakeResponse(payload={"pipelines": [stamped("x", target="dev")]}), STREAMS_NONE,
     )
     assert (code, out) == (0, "")
-    code, out, err, _ = run(["bundle", "destroy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload={"pipelines": []}))
+    code, out, err, _ = run(
+        ["bundle", "destroy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload={"pipelines": []}), STREAMS_NONE
+    )
     assert (code, out, err) == (0, "", "stardelt: nothing to remove\n")
+
+
+def test_without_yes_it_lists_this_bundles_streams_too(tmp_path):
+    make(tmp_path)
+    streams = FakeResponse(
+        payload={
+            "namespace": "stardelt",
+            "streams": [
+                {"name": "measurements", "namespace": "stardelt", "deployment": {"bundle": "sales-etl", "target": "prod"}},
+                {"name": "theirs", "namespace": "stardelt", "deployment": {"bundle": "other-bundle", "target": "prod"}},
+            ],
+        }
+    )
+    code, out, err, session = run(["bundle", "destroy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=LISTING), streams)
+    assert (code, err) == (0, WARNING)
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "would-delete", "name": "load"},
+        {"action": "would-delete", "name": "nightly"},
+        {"action": "would-delete", "name": "measurements", "kind": "StreamApp"},
+    ]
+    assert not [call for call in calls(session) if call[0] == "DELETE"], "nothing is deleted without --yes"
+
+
+def test_with_yes_each_listed_stream_is_deleted(tmp_path):
+    make(tmp_path)
+    streams = FakeResponse(
+        payload={
+            "namespace": "stardelt",
+            "streams": [
+                {"name": "measurements", "namespace": "stardelt", "deployment": {"bundle": "sales-etl", "target": "prod"}},
+            ],
+        }
+    )
+    code, out, err, session = run(
+        ["bundle", "destroy", str(tmp_path), "-t", "prod", "--yes"],
+        ME, FakeResponse(payload=LISTING), streams, FakeResponse(204), FakeResponse(204), FakeResponse(204),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "deleted", "name": "load"},
+        {"action": "deleted", "name": "nightly"},
+        {"action": "deleted", "name": "measurements", "kind": "StreamApp"},
+    ]
+    assert calls(session)[-1] == ("DELETE", "/api/streams/stardelt/measurements")
 
 
 def test_a_bundle_problem_and_a_development_target_without_a_sign_in_name_stop_before_anything_is_removed(tmp_path):

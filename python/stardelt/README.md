@@ -263,7 +263,8 @@ JSON line `{"action": "ran", "name", "runId", "state"}` per run, plus `failedTas
 end `success` stops the rest and the exit code is `1`; nothing is deployed by it, so `bundle deploy` first.
 `bundle destroy -t TARGET` empties a stage: it lists as `would-delete` every pipeline an earlier deploy of this bundle target
 stamped (in a `development` target only your own `dev-<your name>-` ones) and removes them, as `deleted`, only when you add `--yes`.
-A pipeline made by hand, or stamped by another bundle or target, is never touched, and the files of the bundle stay.
+A pipeline made by hand, or stamped by another bundle or target, is never touched, and the files of the bundle stay. Stream apps
+stamped by the same bundle and target are listed and removed too, after the pipelines, as `{"action": ..., "name": ..., "kind": "StreamApp"}`.
 `bundle generate NAMESPACE NAME [DIRECTORY]` is the way in for a pipeline that was made in the interface: it writes
 `resources/<name>.yaml` (with `sqlFile: sql/<name>.sql` and without `ownerGroup`, which the bundle's group supplies) and
 `sql/<name>.sql` into an existing bundle. It writes nothing, and says why in one sentence, when `bundle.yaml` is missing, the
