@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refresh ``stardelt/operations.json`` from Nova's OpenAPI contract.
 
-    python scripts/sync_contract.py                       # the contract on stardelt-nova's main (needs `gh`)
+    python scripts/sync_contract.py                       # ../nova/openapi/nova.json in this repository
     python scripts/sync_contract.py --contract nova.json  # a local copy
 
 The file lists the ``public`` operations by ``operationId``: method, path, the names of the
@@ -20,9 +20,14 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent.parent / "stardelt" / "operations.json"
 
 
+SIBLING = Path(__file__).resolve().parents[2] / "nova" / "openapi" / "nova.json"
+
+
 def fetch_main_contract():
+    if SIBLING.exists():
+        return json.loads(SIBLING.read_text(encoding="utf-8"))
     done = subprocess.run(
-        ["gh", "api", "repos/stardelt/stardelt-nova/contents/openapi/nova.json", "--jq", ".content"],
+        ["gh", "api", "repos/stardelt/stardelt/contents/nova/openapi/nova.json", "--jq", ".content"],
         capture_output=True,
         text=True,
         check=True,

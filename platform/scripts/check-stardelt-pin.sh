@@ -3,7 +3,7 @@
 #
 #   bash scripts/check-stardelt-pin.sh
 #
-# The notebook helper (stardelt/stardelt-python) has its own repository, its own
+# The notebook helper (python/ in this repository) has its own release tags, its own
 # releases and its own tests; the platform consumes one pinned release of it
 # (platform#417). Two places carry that pin:
 #
@@ -80,14 +80,14 @@ fi
 # outlive the Makefile's pin silently — the ARG would still look right.
 # The literal `${STARDELT_LIB_REF}` is what the Dockerfile must contain.
 # shellcheck disable=SC2016
-if ! grep -q 'stardelt\(\[[a-z,]*\]\)\{0,1\} @ git+https://github.com/stardelt/stardelt-python@${STARDELT_LIB_REF}' "$dockerfile"; then
+if ! grep -q 'stardelt\(\[[a-z,]*\]\)\{0,1\} @ git+https://github.com/stardelt/stardelt@${STARDELT_LIB_REF}#subdirectory=python' "$dockerfile"; then
   echo "check-stardelt-pin: $dockerfile does not install the library at \${STARDELT_LIB_REF}" >&2
   exit 1
 fi
 
 # The archive URL interpolates the ARG: a commit written into it would outlive the pin.
 # shellcheck disable=SC2016
-if ! grep -q 'stardelt-demos/archive/${STARDELT_DEMOS_REF}.tar.gz' "$dockerfile"; then
+if ! grep -q 'stardelt/stardelt/archive/${STARDELT_DEMOS_REF}.tar.gz' "$dockerfile"; then
   echo "check-stardelt-pin: $dockerfile does not fetch the demo bundle at \${STARDELT_DEMOS_REF}" >&2
   exit 1
 fi

@@ -1,6 +1,6 @@
 # stardelt_jupyterlab
 
-[![Github Actions Status](https://github.com/stardelt/stardelt-python/workflows/Build/badge.svg)](https://github.com/stardelt/stardelt-python/actions/workflows/build.yml)
+[![Github Actions Status](https://github.com/stardelt/stardelt/actions/workflows/python-jupyterlab.yml/badge.svg)](https://github.com/stardelt/stardelt/actions/workflows/python-jupyterlab.yml)
 
 stardelt inside JupyterLab: theme, top bar, catalog, publish
 

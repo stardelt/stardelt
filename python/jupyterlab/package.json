@@ -7,9 +7,9 @@
         "jupyterlab",
         "jupyterlab-extension"
     ],
-    "homepage": "https://github.com/stardelt/stardelt-python",
+    "homepage": "https://github.com/stardelt/stardelt/tree/main/python/jupyterlab",
     "bugs": {
-        "url": "https://github.com/stardelt/stardelt-python/issues"
+        "url": "https://github.com/stardelt/stardelt/issues"
     },
     "license": "Apache-2.0",
     "author": "stardelt",
@@ -23,7 +23,7 @@
     "style": "style/index.css",
     "repository": {
         "type": "git",
-        "url": "https://github.com/stardelt/stardelt-python.git"
+        "url": "https://github.com/stardelt/stardelt.git"
     },
     "scripts": {
         "build": "jlpm build:lib && jlpm build:labextension:dev",

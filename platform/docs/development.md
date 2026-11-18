@@ -251,7 +251,7 @@ client only — no Spark jars, notebooks never run Spark locally), `pandas` and 
 `quay.io/jupyter/scipy-notebook` and ships `warehouse-quickstart.ipynb`, which queries the
 catalog the account may write to (`shared` for a member, `playground` in the public demo) and
 never drops a table. It also installs the **pinned release** of the notebook helper
-(`stardelt/stardelt-python`): the pin lives in the `Makefile` (`STARDELT_LIB_REF`, the commit;
+(`python/` in this repository): the pin lives in the `Makefile` (`STARDELT_LIB_REF`, the commit;
 `STARDELT_LIB_TAG`, the release) and the Dockerfile installs it as a build arg —
 `scripts/check-stardelt-pin.sh`, run by `make lint`, fails the build when the two disagree or
 when the pin is not a full commit SHA. Same workflow:

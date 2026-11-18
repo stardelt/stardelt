@@ -99,7 +99,7 @@ RUN python3 -m pip uninstall -y jupyterlab-git \
 # default keeps a bare `docker build` working. `STARDELT_NOVA_URL`, the link
 # target, comes from the hub's spawn environment (singleuser.extraEnv), not from
 # the image.
-ARG STARDELT_JUPYTERLAB_WHEEL=https://github.com/stardelt/stardelt-python/releases/download/jupyterlab-v0.2.0/stardelt_jupyterlab-0.2.0-py3-none-any.whl
+ARG STARDELT_JUPYTERLAB_WHEEL=https://github.com/stardelt/stardelt/releases/download/python/jupyterlab-v0.2.0/stardelt_jupyterlab-0.2.0-py3-none-any.whl
 ARG STARDELT_RUNTIME=dev
 ENV STARDELT_RUNTIME=${STARDELT_RUNTIME}
 RUN python3 -m pip install --no-cache-dir "${STARDELT_JUPYTERLAB_WHEEL}" \
@@ -116,14 +116,14 @@ COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
 
 # The stardelt notebook helper (`import stardelt`: sql, write_df, publish,
 # spark, and the connection() stub) has its own repository
-# (stardelt/stardelt-python) and is installed here as a **pinned release**.
+# (python/ in stardelt/stardelt) and is installed here as a **pinned release**.
 # Pure Python, MIT, versioned and tested there; the platform consumes one
 # release of it (platform#417).
 #
 # Pinned by commit SHA, not by tag: a moving tag is not an upgrade path — the
 # same rule the image pins follow (scripts/pin-image.sh). The SHA below is the
 # v0.4.1 release
-# (https://github.com/stardelt/stardelt-python/releases/tag/v0.4.1): it carries
+# (tag python/v0.4.1 in stardelt/stardelt): it carries
 # `stardelt.notebook` (the native `spark` and `display`), the publish source
 # header (`X-Stardelt-Source`, the hand publish and a bundle deploy report the
 # notebook's commit) and a failed deploy that records a `failed` row. It reports
@@ -134,9 +134,9 @@ COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
 # Makefile's ref disagree. Installed rather than copied so every notebook
 # imports it with no sys.path tweak; the import check fails the build here, not
 # in a user's first cell.
-ARG STARDELT_LIB_REF=17a262fc5ff7caee24165b361192d4f0fb2a0a9a
+ARG STARDELT_LIB_REF=15dff221646fab7ae8c82c1d39c01ca781a3fad0
 RUN python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@${STARDELT_LIB_REF}" \
+        "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt@${STARDELT_LIB_REF}#subdirectory=python" \
     && python3 -c "import stardelt; print('stardelt', stardelt.__version__)" \
     && python3 -c "import stardelt.notebook_run; print('stardelt.notebook_run: the notebook task wrapper is installed')" \
     && python3 -c "import sql; print('jupysql', sql.__version__)"
@@ -157,12 +157,15 @@ COPY jupyter_server_config.py /usr/local/etc/jupyter/jupyter_server_config.py
 # notebook must not depend on a network clone at spawn: once a visitor has no
 # public egress, the clone fails silently and the demo loses its bundle. Pinned
 # by commit, like the library above; the archive is public, no credential.
-ARG STARDELT_DEMOS_REF=17acac27b896c0f776822c7037983e45cefff52c
+ARG STARDELT_DEMOS_REF=4509d63ec61865f060b40eaa5eae3dd18b629480
 USER root
-RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/stardelt/stardelt-demos/archive/${STARDELT_DEMOS_REF}.tar.gz', '/tmp/demos.tar.gz')" \
+# The bundle is the demos/ folder of stardelt/stardelt at that commit; only that folder is
+# extracted, to the path the notebooks have always used.
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/stardelt/stardelt/archive/${STARDELT_DEMOS_REF}.tar.gz', '/tmp/demos.tar.gz')" \
     && mkdir -p /opt/stardelt \
-    && tar -xzf /tmp/demos.tar.gz -C /opt/stardelt \
-    && mv "/opt/stardelt/stardelt-demos-${STARDELT_DEMOS_REF}" /opt/stardelt/stardelt-demos \
+    && tar -xzf /tmp/demos.tar.gz -C /opt/stardelt "stardelt-${STARDELT_DEMOS_REF}/demos" \
+    && mv "/opt/stardelt/stardelt-${STARDELT_DEMOS_REF}/demos" /opt/stardelt/stardelt-demos \
+    && rmdir "/opt/stardelt/stardelt-${STARDELT_DEMOS_REF}" \
     && test -f /opt/stardelt/stardelt-demos/examples/shop-bundle/bundle.yaml \
     && rm /tmp/demos.tar.gz
 USER ${NB_UID}
