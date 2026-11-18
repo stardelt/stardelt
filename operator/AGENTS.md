@@ -8,9 +8,9 @@ against the dev cluster. New resources default to `spec.dryRun: true`, so they p
 
 ## Read first
 
-- `../stardelt-docs/docs/design/master-spec.md` — canonical spec (published at
+- `../../stardelt-internal/design/master-spec.md` — canonical spec (published at
   https://stardelt.io); when documents disagree, it wins (§5 plug matrix, §6).
-- `../stardelt-docs/docs/architecture/licenses.md` — license policy.
+- `../../stardelt-docs/docs/architecture/licenses.md` — license policy.
 
 The running development environment is the Hetzner k3s cluster
 (`alpha.dev.stardelt.io`), provisioned from `stardelt-platform/dev/hetzner-k3s`. The
@@ -42,7 +42,7 @@ cargo run                         # reconcile against the current kubeconfig (id
   scoped.
 - **License policy: OSI-permissive only** (Apache-2.0, MIT, BSD). The single documented
   exception is OpenBao (MPL-2.0). See
-  `../stardelt-docs/docs/architecture/licenses.md`.
+  `../../stardelt-docs/docs/architecture/licenses.md`.
 - Read the master spec first — the CRDs are the product surface, so schema changes are
   design changes.
 
