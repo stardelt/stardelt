@@ -72,9 +72,12 @@ workspace (Nova → Profile → VS Code).
 
 ## Releases
 
-Semantic versions, tagged (`v0.2.0`). The package is not on PyPI: install a tag from Git, as above. `v0.2.0` is the first release that contains the `stardelt` command line (`stardelt login`, `stardelt bundle ...`). The platform pins a **release**, never a branch: a
-moving tag is not an upgrade path. A release states the platform versions it was tested
-against (the table above).
+Semantic versions, tagged `python/v<version>` (`python/v0.4.1`). The package is not on PyPI:
+install a tag from Git, as above. `python/v0.2.0` is the first release that contains the
+`stardelt` command line (`stardelt login`, `stardelt bundle ...`). The platform pins a
+**release**, never a branch: a moving tag is not an upgrade path. A release also publishes the
+CLI image as `ghcr.io/stardelt/stardelt-cli:v<version>`; `:dev` stays the moving development
+tag. A release states the platform versions it was tested against (the table above).
 
 ## Development
 
