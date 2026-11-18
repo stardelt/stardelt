@@ -44,7 +44,7 @@ from airflow.timetables.trigger import CronTriggerTimetable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stardelt_pipelines import trino  # noqa: E402
 from stardelt_pipelines.access import dag_access  # noqa: E402
-from stardelt_pipelines.expand import expand  # noqa: E402
+from stardelt_pipelines.expand import expand, run_values  # noqa: E402
 from stardelt_pipelines.notebook import NotebookPodOperator  # noqa: E402
 from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan  # noqa: E402
 from stardelt_pipelines.principal import principal_pod_override  # noqa: E402
@@ -104,8 +104,14 @@ def _run_task(task: dict, params: dict, **context) -> None:
         # A silent no-op for a kind that has no runtime yet would hide that nothing ran.
         raise NotImplementedError(f"task kind `{task['kind']}` has no runtime yet")
     dag_run = context["dag_run"]
-    run_date = (context.get("logical_date") or dag_run.run_after).date().isoformat()
-    sql = expand(task["sql"], run_date=run_date, run_id=dag_run.run_id, params=params)
+    fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
+    run_date, overrides = run_values(dag_run.conf, fallback)
+    sql = expand(
+        task["sql"],
+        run_date=run_date,
+        run_id=dag_run.run_id,
+        params={**params, **overrides},
+    )
     tags = trino.lineage_tags(context["dag"].dag_id, context["ti"].task_id, dag_run.run_id)
 
     ca_file = os.environ.get("PIPELINE_TRINO_CA_FILE")

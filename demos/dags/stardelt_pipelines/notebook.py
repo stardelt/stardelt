@@ -24,6 +24,8 @@ from collections.abc import Mapping
 
 from kubernetes.client import models as k8s
 
+from stardelt_pipelines.expand import run_values
+
 try:  # Airflow is in the loader image and on the cluster, not in the unit-test environment.
     from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 except ImportError:  # pragma: no cover - the operator tests importorskip the provider
@@ -282,7 +284,8 @@ class NotebookPodOperator(KubernetesPodOperator):
         ]
 
         dag_run = context["dag_run"]
-        run_date = (context.get("logical_date") or dag_run.run_after).date().isoformat()
+        fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
+        run_date, overrides = run_values(dag_run.conf, fallback)
         run_id = dag_run.run_id
         get_key = source_key(self.owner_group, self.notebook)
         put_key = output_key(self.owner_group, self.pipeline, run_id, self.task_id)
@@ -300,7 +303,7 @@ class NotebookPodOperator(KubernetesPodOperator):
         self.env_vars = list(self.env_vars) + pod_env(
             run_date=run_date,
             run_id=run_id,
-            params=merged_params(self.pipeline_params, self.task_params),
+            params=merged_params(merged_params(self.pipeline_params, self.task_params), overrides),
             principal_secret=self.principal_secret,
             connection_name=self.connection_name,
             connection_keys=self.connection_keys,
