@@ -206,7 +206,7 @@ class PinImageTest(unittest.TestCase):
         self.assertIn("NotFound", proc.stderr)
 
     def spark_fixtures(self):
-        """The two files a spark pin writes: the manifest and the runtime catalogue."""
+        """The three files a spark pin writes: the manifest, the catalogue and the pod-guard fixture."""
         zero = "00" * 32
         manifest = self.work / "manifests" / "spark.yaml"
         manifest.write_text(
@@ -224,7 +224,15 @@ class PinImageTest(unittest.TestCase):
             + zero
             + '"}}\n'
         )
-        return manifest, catalogue
+        # The measured executor shape of scripts/verify-spark-pod-guard.sh: that check compares
+        # this file with the manifest, so the pin has to move it too (#209).
+        fixture = self.fixture(
+            "scripts/fixtures/spark-executor-pod.yaml",
+            "  containers:\n"
+            "    - name: spark-kubernetes-executor\n"
+            "      image: ghcr.io/stardelt/spark:dev@sha256:" + zero + "\n",
+        )
+        return manifest, catalogue, fixture
 
     def apply_payloads(self):
         return [
@@ -234,7 +242,7 @@ class PinImageTest(unittest.TestCase):
         ]
 
     def test_a_spark_pin_applies_the_runtime_catalogue_configmap(self):
-        _, catalogue = self.spark_fixtures()
+        _, catalogue, fixture = self.spark_fixtures()
         self.run_pin("spark", current="ghcr.io/stardelt/spark:dev@sha256:" + "00" * 32)
         calls = self.calls()
         self.assertIn("get configmap stardelt-spark-runtimes", calls)
@@ -250,10 +258,12 @@ class PinImageTest(unittest.TestCase):
         )
         # the cluster half comes after the file was written, not instead of it
         self.assertIn(DIGEST, catalogue.read_text())
+        # the pod-guard fixture follows the pin, or its executor-shape case drifts (#209)
+        self.assertIn("ghcr.io/stardelt/spark:dev@" + DIGEST, fixture.read_text())
         self.assertGreater(calls.index("apply "), calls.rindex("set image"))
 
     def test_a_spark_pin_without_a_cluster_writes_no_configmap(self):
-        _, catalogue = self.spark_fixtures()
+        _, catalogue, fixture = self.spark_fixtures()
         self.run_pin(
             "spark",
             current="ghcr.io/stardelt/spark:dev@sha256:" + "00" * 32,

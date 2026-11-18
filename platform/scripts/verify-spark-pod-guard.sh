@@ -19,9 +19,21 @@ SA="system:serviceaccount:${NS}:spark-connect"
 SA_STREAM="system:serviceaccount:${NS}:spark-stream-driver"
 SA_BATCH="system:serviceaccount:${NS}:spark-batch-driver"
 SA_CLUSTER="system:serviceaccount:${NS}:spark-cluster-driver"
-IMAGE="ghcr.io/stardelt/spark:dev@sha256:1acae61431891d5354fc959374adf3d5c1fbfc5cf7a7a39b099ef7c6eba89709"
+# The image is the one the platform pins, not a literal: a copy here goes stale unnoticed
+# (#209). `scripts/pin-image.sh spark` moves this file, the fixture and the catalogue.
+IMAGE="$(awk '/spark\.kubernetes\.container\.image/ {print $2; exit}' manifests/spark.yaml)"
+[ -n "$IMAGE" ] || { echo "UNVERIFIED (manifests/spark.yaml names no spark.kubernetes.container.image)"; exit 3; }
 problems=0
 command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
+
+# The measured executor shape must name the image production runs, or the case admits a pod
+# that a real query would not start.
+fixture_image="$(awk '/image: ghcr\.io\/stardelt\/spark:/ {print $2; exit}' scripts/fixtures/spark-executor-pod.yaml)"
+if [ "$fixture_image" != "$IMAGE" ]; then
+  echo "✗ the executor fixture carries ${fixture_image##*@}, manifests/spark.yaml pins ${IMAGE##*@}" >&2
+  echo "  scripts/fixtures/spark-executor-pod.yaml must name the image production runs." >&2
+  exit 1
+fi
 
 POLICIES="spark-connect-executor-pods spark-connect-configmaps \
           spark-stream-executor-pods spark-stream-configmaps \
