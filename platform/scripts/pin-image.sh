@@ -314,6 +314,20 @@ if app == "spark":
     open(catalogue, "w").write(ctext)
     print(f"› {catalogue}: image pinned to {repo}:…@{digest[:19]}…")
 
+    # The measured executor shape in the pod-guard check carries the same image; the check
+    # compares it with manifests/spark.yaml and refuses when they drift (#209).
+    fixture = "scripts/fixtures/spark-executor-pod.yaml"
+    ftext = open(fixture).read()
+    ftext, fn = re.subn(
+        r'(image:\s*ghcr\.io/stardelt/spark:[^\s@]+)@sha256:[0-9a-f]{64}',
+        lambda m: f'{m.group(1)}@{digest}',
+        ftext,
+    )
+    if fn != 1:
+        sys.exit(f"expected exactly one spark image in {fixture}, found {fn}")
+    open(fixture, "w").write(ftext)
+    print(f"› {fixture}: image pinned to {repo}:…@{digest[:19]}…")
+
 if replaced:
     open(path, "w").write(text)
     print(f"› {path}: image pinned to {repo}:…@{digest[:19]}…")
