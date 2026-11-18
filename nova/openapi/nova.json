@@ -338,7 +338,7 @@
         "tags": [
           "internal"
         ],
-        "description": "The last calls of the hosted MCP endpoint (`/mcp`), newest first: when, the signed-in subject, the client id (`azp`), the tool, the status, the duration and a SHA-256 of the arguments — never the arguments themselves, and never a result. `limit` is 1 to 500 (50 by default); `sub` and `tool` narrow by exact match. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
+        "description": "The last calls of the hosted MCP endpoint (`/mcp`), newest first: when, the signed-in subject, the client id (`azp`), the tool, the status, the duration and a SHA-256 of the arguments \u2014 never the arguments themselves, and never a result. `limit` is 1 to 500 (50 by default); `sub` and `tool` narrow by exact match. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
         "operationId": "admin_mcp_audit",
         "parameters": [
           {
@@ -419,7 +419,7 @@
         "tags": [
           "internal"
         ],
-        "description": "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
+        "description": "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first \u2014 `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
         "operationId": "admin_model_usage",
         "parameters": [
           {
@@ -491,7 +491,7 @@
         "tags": [
           "internal"
         ],
-        "description": "Create a new team space in one call: the `Catalog` resources `<team>` (production), `<team>lab` (the team's sandbox) and `<team>ref` (shared reference data), each owned by `group` with the four verbs `browse`, `select`, `write` and `create` for `group` and for `stardelt-admins`, plus the `ServicePrincipal` `pipeline-<group>` when it does not exist yet (it may already serve another team of the same group). The group must already exist in the company's sign-in provider — stardelt never creates groups. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A team name outside 2 to 21 lower-case letters and digits starting with a letter, a group name outside the group rule, or a description over 500 characters is a 400; any of the three catalogs already existing is a 409 `the catalog <name> already exists` with nothing created, and a platform without any `Catalog` is a 409 `no lakehouse to put the catalogs in`; more than ten team spaces per administrator in an hour is a 429. When the API server refuses one of the creates the answer is a 502 naming what failed and what was created so far; nothing is rolled back, so a half-created space stays visible and can be finished by hand. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova`. Answers 201 with the three catalog names and the principal, `Cache-Control: no-store`.",
+        "description": "Create a new team space in one call: the `Catalog` resources `<team>` (production), `<team>lab` (the team's sandbox) and `<team>ref` (shared reference data), each owned by `group` with the four verbs `browse`, `select`, `write` and `create` for `group` and for `stardelt-admins`, plus the `ServicePrincipal` `pipeline-<group>` when it does not exist yet (it may already serve another team of the same group). The group must already exist in the company's sign-in provider \u2014 stardelt never creates groups. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A team name outside 2 to 21 lower-case letters and digits starting with a letter, a group name outside the group rule, or a description over 500 characters is a 400; any of the three catalogs already existing is a 409 `the catalog <name> already exists` with nothing created, and a platform without any `Catalog` is a 409 `no lakehouse to put the catalogs in`; more than ten team spaces per administrator in an hour is a 429. When the API server refuses one of the creates the answer is a 502 naming what failed and what was created so far; nothing is rolled back, so a half-created space stays visible and can be finished by hand. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova`. Answers 201 with the three catalog names and the principal, `Cache-Control: no-store`.",
         "operationId": "admin_teams_create",
         "requestBody": {
           "content": {
@@ -626,7 +626,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`GET /api/apps/links` — the header's app switcher, for every signed-in user.",
+        "summary": "`GET /api/apps/links` \u2014 the header's app switcher, for every signed-in user.",
         "description": "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI and Airflow for everybody who is not an administrator. Field names are snake_case.",
         "operationId": "apps_links",
         "responses": {
@@ -723,8 +723,8 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/ask` — a question in, checked SQL out.",
-        "description": "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables, sends the question and **the documentation of those tables only** — description, tags, owner, domain, column names and their descriptions — to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+        "summary": "`POST /api/ask` \u2014 a question in, checked SQL out.",
+        "description": "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables, sends the question and **the documentation of those tables only** \u2014 description, tags, owner, domain, column names and their descriptions \u2014 to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
         "operationId": "ask_answer",
         "requestBody": {
           "content": {
@@ -805,8 +805,8 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/ask/feedback` — one 👍 or 👎 on the row an Ask answer wrote (nova#891 slice b).",
-        "description": "Writes the caller's own 👍 or 👎 on the `model_call` row that `/api/ask` returned as `callId` — the row the answer's model call wrote, and the input of the model check. A vote is `up` or `down`. A call id that belongs to somebody else is a `404`, never a `403`: an id probe learns nothing. The vote overwrites the row's earlier one; retention is the row's own. Every answer carries `Cache-Control: no-store`.",
+        "summary": "`POST /api/ask/feedback` \u2014 one \ud83d\udc4d or \ud83d\udc4e on the row an Ask answer wrote (nova#891 slice b).",
+        "description": "Writes the caller's own \ud83d\udc4d or \ud83d\udc4e on the `model_call` row that `/api/ask` returned as `callId` \u2014 the row the answer's model call wrote, and the input of the model check. A vote is `up` or `down`. A call id that belongs to somebody else is a `404`, never a `403`: an id probe learns nothing. The vote overwrites the row's earlier one; retention is the row's own. Every answer carries `Cache-Control: no-store`.",
         "operationId": "ask_feedback",
         "requestBody": {
           "content": {
@@ -880,7 +880,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/ask/history` — the caller's last 20 conversations (nova#891 slice c).",
+        "summary": "`GET /api/ask/history` \u2014 the caller's last 20 conversations (nova#891 slice c).",
         "description": "The caller's own last 20 Ask questions and answers, newest first. Nobody else's conversations are readable, and there is no way to ask for another person's. Every answer carries `Cache-Control: no-store`.",
         "operationId": "ask_history",
         "responses": {
@@ -937,7 +937,7 @@
         "tags": [
           "public"
         ],
-        "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+        "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order \u2014 one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each \u2014 and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
         "operationId": "catalogs_list",
         "responses": {
           "200": {
@@ -1019,7 +1019,7 @@
         "tags": [
           "public"
         ],
-        "description": "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 — the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
+        "description": "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 \u2014 the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
         "operationId": "catalog_metrics_refresh",
         "responses": {
           "202": {
@@ -1066,7 +1066,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1146,7 +1146,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1237,7 +1237,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1303,7 +1303,7 @@
         "tags": [
           "public"
         ],
-        "description": "Find tables in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case, or when one of its documented fields (the description, a tag, the owner, the domain) contains every word — a table found both ways appears once. `tag`, `owner` and `domain` narrow the answer to documented tables: a table without a documentation row has no tag, owner or domain, so it is not shown. Those three filters need the state store and answer 503 without it (demo mode has none). The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only single-level namespaces are searched. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
+        "description": "Find tables in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case, or when one of its documented fields (the description, a tag, the owner, the domain) contains every word \u2014 a table found both ways appears once. `tag`, `owner` and `domain` narrow the answer to documented tables: a table without a documentation row has no tag, owner or domain, so it is not shown. Those three filters need the state store and answer 503 without it (demo mode has none). The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only single-level namespaces are searched. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
         "operationId": "catalog_search",
         "parameters": [
           {
@@ -1318,7 +1318,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to search (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to search (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1455,7 +1455,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1554,7 +1554,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1664,7 +1664,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1728,7 +1728,7 @@
         "tags": [
           "public"
         ],
-        "description": "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
+        "description": "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** \u2014 anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
         "operationId": "table_documentation_update",
         "parameters": [
           {
@@ -1752,7 +1752,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1862,7 +1862,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1928,7 +1928,7 @@
         "tags": [
           "public"
         ],
-        "description": "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired. Only the catalog owner group or an administrator may roll back; others are refused with that sentence before the engine is called.",
+        "description": "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE \u2026 EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired. Only the catalog owner group or an administrator may roll back; others are refused with that sentence before the engine is called.",
         "operationId": "table_rollback",
         "parameters": [
           {
@@ -1952,7 +1952,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2028,7 +2028,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/catalog/tables/{ns}/{tbl}/verified-queries` — the table's, newest first.",
+        "summary": "`GET /api/catalog/tables/{ns}/{tbl}/verified-queries` \u2014 the table's, newest first.",
         "description": "The verified queries of one table: questions its owners answered with one read-only statement, who verified each and when, its expected result and the last check's outcome. Newest first, at most 50. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
         "operationId": "verified_queries_list",
         "parameters": [
@@ -2053,7 +2053,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2130,7 +2130,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/catalog/tables/{ns}/{tbl}/verified-queries` — `201` with the stored row.",
+        "summary": "`POST /api/catalog/tables/{ns}/{tbl}/verified-queries` \u2014 `201` with the stored row.",
         "description": "Verify one answer to a question about this table: the question (at most 500 characters), one read-only statement (at most 20 000) and, optionally, the known answer as up to 100 rows of values. Only the owner group of the table and administrators may add one; the caller is recorded as `verifiedBy`. The statement is checked on create and run only by `POST /api/verified-queries/{id}/check`. `?catalog=` picks the catalog.",
         "operationId": "verified_queries_create",
         "parameters": [
@@ -2155,7 +2155,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2241,7 +2241,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/catalog/tables/{ns}/{tbl}/verified-queries/check` — run every verified query of\none table as the caller, one after another, and answer the totals.",
+        "summary": "`POST /api/catalog/tables/{ns}/{tbl}/verified-queries/check` \u2014 run every verified query of\none table as the caller, one after another, and answer the totals.",
         "description": "Run every verified query of one table as the caller, one after another, in id order and at most 50, and answer how many were checked, how many passed and how many failed, with the rows as the checks left them. Each row is checked exactly as `POST /api/verified-queries/{id}/check` checks it; a scheduled job calls this once instead of once per query. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
         "operationId": "verified_queries_check_all",
         "parameters": [
@@ -2266,7 +2266,7 @@
           {
             "name": "catalog",
             "in": "query",
-            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "description": "Catalog to work in (`warehouse`, `finance`, \u2026). Omitted, the default catalog is used.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2621,7 +2621,7 @@
         "tags": [
           "public"
         ],
-        "description": "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names.",
+        "description": "The caller's connections: their own, their groups', and \u2014 for administrators \u2014 the managed ones. Values are never part of an answer, only the field names.",
         "operationId": "connections_list",
         "responses": {
           "200": {
@@ -2761,7 +2761,7 @@
         "tags": [
           "public"
         ],
-        "description": "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome — never a value. `Cache-Control: no-store`.",
+        "description": "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome \u2014 never a value. `Cache-Control: no-store`.",
         "operationId": "connections_break_glass_log",
         "responses": {
           "200": {
@@ -3576,7 +3576,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/deployments` — the caller's rows, newest first, at most 50.",
+        "summary": "`GET /api/deployments` \u2014 the caller's rows, newest first, at most 50.",
         "description": "The deployment records the caller may see: an administrator sees every row, anybody else the rows of their own groups. Newest first, at most 50, a bare JSON array. `?bundle=` and `?target=` narrow the list to one bundle and one stage.",
         "operationId": "deployments_list",
         "parameters": [
@@ -3639,7 +3639,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/deployments` — `201` with the stored row.",
+        "summary": "`POST /api/deployments` \u2014 `201` with the stored row.",
         "description": "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the pipelines it touched. Only an administrator or a member of the owner group may record one; the caller is stored as `actor`.",
         "operationId": "deployments_record",
         "requestBody": {
@@ -3711,7 +3711,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`GET /api/destinations` — the caller's groups' destinations, newest first.",
+        "summary": "`GET /api/destinations` \u2014 the caller's groups' destinations, newest first.",
         "description": "The notification destinations of the caller's groups, newest first. `?group=<group>` narrows to one group the caller belongs to. Times are epoch milliseconds.",
         "operationId": "destinations_list",
         "parameters": [
@@ -3765,7 +3765,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`POST /api/destinations` — `201` with the stored row.",
+        "summary": "`POST /api/destinations` \u2014 `201` with the stored row.",
         "description": "Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything.",
         "operationId": "destinations_create",
         "requestBody": {
@@ -3837,7 +3837,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`DELETE /api/destinations/{id}` — `204`; `404` for another group's id or none.",
+        "summary": "`DELETE /api/destinations/{id}` \u2014 `204`; `404` for another group's id or none.",
         "description": "Delete one of the caller's groups' notification destinations.",
         "operationId": "destinations_remove",
         "parameters": [
@@ -3894,7 +3894,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`POST /api/destinations/{id}/test` — send one test message to a webhook destination\nand record the attempt.",
+        "summary": "`POST /api/destinations/{id}/test` \u2014 send one test message to a webhook destination\nand record the attempt.",
         "description": "Send one test message to a webhook destination and record the attempt. An email destination answers 400 until the platform's SMTP relay exists. The answer never contains the webhook's URL.",
         "operationId": "destinations_test",
         "parameters": [
@@ -4161,7 +4161,7 @@
           {
             "name": "days",
             "in": "query",
-            "description": "Time window in days, 1–365, default 30",
+            "description": "Time window in days, 1\u2013365, default 30",
             "required": false,
             "schema": {
               "type": "integer",
@@ -4261,7 +4261,7 @@
           {
             "name": "days",
             "in": "query",
-            "description": "Time window in days, 1–365, default 30",
+            "description": "Time window in days, 1\u2013365, default 30",
             "required": false,
             "schema": {
               "type": "integer",
@@ -4271,7 +4271,7 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Tables to answer, 1–20, default 5",
+            "description": "Tables to answer, 1\u201320, default 5",
             "required": false,
             "schema": {
               "type": "integer",
@@ -4430,7 +4430,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/migrations/approve` — a second person says yes to a plan.",
+        "summary": "`POST /api/migrations/approve` \u2014 a second person says yes to a plan.",
         "description": "Record that the caller has looked at a migration plan, so a breaking change may run in a production target (stardelt-nova#617 decision 3). The body is the `planId` a plan answered with. The plan's own author cannot approve it: a second person has to. Repeating a call is a no-op that answers the same row with the first approval time. Plans and approvals live in the state store.",
         "operationId": "migrations_approve",
         "requestBody": {
@@ -4584,7 +4584,7 @@
           "public"
         ],
         "summary": "`GET /api/model-endpoints`: the models an administrator connected to the platform.",
-        "description": "Every `ModelEndpoint` of the platform namespace, name order: `name`, `model`, `location` (`on-premise` | `cloud`, default `on-premise`), `purposes` (default `[\"ask\",\"agents\"]`), `sendRows` (may query results be sent to this model; off by default), the quota of `spec.quota` — `perGroupMonthlyTokens` and `perPersonDailyTokens`, each `null` for no limit — and the probe's last answer — `reachable`, `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`, `message`, each `null` until the probe has run. The endpoint's `url` and its `keyRef` are absent on purpose: the shape says that a model exists, what it is, where prompts go and whether it works, never the internal hostname or the name of the Connection holding the key. Without a cluster connection (demo mode, a local run) the answer is an empty list: no endpoint means no AI feature. A cluster that refuses or fails is a 502, never an empty list that would read as \"no model\". Answers `Cache-Control: no-store`.",
+        "description": "Every `ModelEndpoint` of the platform namespace, name order: `name`, `model`, `location` (`on-premise` | `cloud`, default `on-premise`), `purposes` (default `[\"ask\",\"agents\"]`), `sendRows` (may query results be sent to this model; off by default), the quota of `spec.quota` \u2014 `perGroupMonthlyTokens` and `perPersonDailyTokens`, each `null` for no limit \u2014 and the probe's last answer \u2014 `reachable`, `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`, `message`, each `null` until the probe has run. The endpoint's `url` and its `keyRef` are absent on purpose: the shape says that a model exists, what it is, where prompts go and whether it works, never the internal hostname or the name of the Connection holding the key. Without a cluster connection (demo mode, a local run) the answer is an empty list: no endpoint means no AI feature. A cluster that refuses or fails is a 502, never an empty list that would read as \"no model\". Answers `Cache-Control: no-store`.",
         "operationId": "model_endpoints_list",
         "responses": {
           "200": {
@@ -4628,8 +4628,8 @@
         "tags": [
           "internal"
         ],
-        "summary": "`POST /api/model-endpoints/{name}/probe` — an administrator asks Nova to check one\nendpoint now, instead of waiting for the minute round.",
-        "description": "Start the same probe the minute round runs, for one endpoint only, and answer at once. Administrator-only (the administrator gate is `main`'s). The answer is **not** the probe's result: a probe makes up to three calls of up to 120 seconds each, so this answers `202` with the endpoint as it is now — `GET /api/model-endpoints` shows the new `checkedAt`, `reachable` and `message` when the probe has written its `status`. A second call while a probe of the same endpoint runs is also `202` and starts nothing: two clicks make one probe. Answers `Cache-Control: no-store`.",
+        "summary": "`POST /api/model-endpoints/{name}/probe` \u2014 an administrator asks Nova to check one\nendpoint now, instead of waiting for the minute round.",
+        "description": "Start the same probe the minute round runs, for one endpoint only, and answer at once. Administrator-only (the administrator gate is `main`'s). The answer is **not** the probe's result: a probe makes up to three calls of up to 120 seconds each, so this answers `202` with the endpoint as it is now \u2014 `GET /api/model-endpoints` shows the new `checkedAt`, `reachable` and `message` when the probe has written its `status`. A second call while a probe of the same endpoint runs is also `202` and starts nothing: two clicks make one probe. Answers `Cache-Control: no-store`.",
         "operationId": "model_endpoint_probe",
         "parameters": [
           {
@@ -4777,7 +4777,7 @@
           "public"
         ],
         "summary": "`PUT /api/notebooks/{group}/{name}`: validate, strip, store one immutable version.",
-        "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing — no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
+        "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing \u2014 no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
         "operationId": "notebooks_publish",
         "parameters": [
           {
@@ -5114,7 +5114,7 @@
           "public"
         ],
         "summary": "`GET /api/notebooks/{group}/{name}/parameters`: the parameters of one version, so the\nSchedule dialog can offer the form the notebook declares (stardelt-nova#237).",
-        "description": "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "description": "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes \u2014 a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
         "operationId": "notebooks_parameters",
         "parameters": [
           {
@@ -5223,7 +5223,7 @@
         "tags": [
           "public"
         ],
-        "description": "The pipelines that run one published notebook — the schedules and on-demand pipelines of that group, sorted by name. Each row is the one-task `Pipeline` a Schedule created (#516): its pinned `objectVersion`, its cron and timezone when it has a schedule, and its `runAs`. Owner-group scoped: a caller who is not a member of `group` answers 403, and an administrator gets no wider view. Answers `Cache-Control: no-store`.",
+        "description": "The pipelines that run one published notebook \u2014 the schedules and on-demand pipelines of that group, sorted by name. Each row is the one-task `Pipeline` a Schedule created (#516): its pinned `objectVersion`, its cron and timezone when it has a schedule, and its `runAs`. Owner-group scoped: a caller who is not a member of `group` answers 403, and an administrator gets no wider view. Answers `Cache-Control: no-store`.",
         "operationId": "notebooks_usage",
         "parameters": [
           {
@@ -5422,7 +5422,7 @@
           "public"
         ],
         "description": "The pipelines the caller may see: their groups' pipelines, and every pipeline for an administrator. A pipeline without `spec.ownerGroup` is administrators-only. `state` is one of `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`; `loaded` is false while Airflow has no DAG for a new pipeline yet. Answers `Cache-Control: no-store`.",
-        "operationId": "pipelines_list",
+        "operationId": "listPipelinesRenamed",
         "responses": {
           "200": {
             "description": "The visible pipelines, sorted by name",
@@ -5470,7 +5470,7 @@
         "tags": [
           "public"
         ],
-        "description": "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+        "description": "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) \u2014 both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` \u2014 administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${\u2026}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version \u2014 never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_create",
         "requestBody": {
           "content": {
@@ -5571,7 +5571,7 @@
         "tags": [
           "public"
         ],
-        "description": "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create … as …` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
+        "description": "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create \u2026 as \u2026` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_check",
         "requestBody": {
           "content": {
@@ -5874,7 +5874,7 @@
         "tags": [
           "public"
         ],
-        "description": "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+        "description": "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change \u2014 a viewer (`spec.viewers`) \u2014 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version \u2014 never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_update",
         "parameters": [
           {
@@ -5993,7 +5993,7 @@
         "tags": [
           "public"
         ],
-        "description": "Delete a pipeline Nova created. Only the owner group and administrators may delete: a viewer (`spec.viewers`) answers 403 `only the owner group may change this pipeline`, and a pipeline the caller cannot see 404. A pipeline that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
+        "description": "Delete a pipeline Nova created. Only the owner group and administrators may delete: a viewer (`spec.viewers`) answers 403 `only the owner group may change this pipeline`, and a pipeline the caller cannot see 404. A pipeline that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called \u2014 the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
         "operationId": "pipelines_delete",
         "parameters": [
           {
@@ -6087,7 +6087,7 @@
         "tags": [
           "public"
         ],
-        "description": "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not pause it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+        "description": "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not pause it, and answers 403 `only the owner group may change this pipeline` \u2014 a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` \u2014 the DAG as Airflow returned it after the patch \u2014 and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
         "operationId": "pipelines_pause",
         "parameters": [
           {
@@ -6188,7 +6188,7 @@
         "tags": [
           "public"
         ],
-        "description": "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not resume it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+        "description": "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not resume it, and answers 403 `only the owner group may change this pipeline` \u2014 a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` \u2014 the DAG as Airflow returned it after the patch \u2014 and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
         "operationId": "pipelines_resume",
         "parameters": [
           {
@@ -6289,7 +6289,7 @@
         "tags": [
           "public"
         ],
-        "description": "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). The body is optional: `runDate` (a `YYYY-MM-DD` calendar date, past or future) applies to this run only, as does `params`, this run's values of the schedule's `${params.<name>}` placeholders (at most 16, lower-case names, values up to 256 characters); the stored schedule never changes, and neither value is audited. `logicalDate` stays now, UTC, whole seconds, so the run has tasks — the date travels as Airflow's `dag_run.conf` instead. An absent body or `{}` starts a run for now with the schedule's parameters, exactly as before. Every attempt that reaches the run logic, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+        "description": "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). The body is optional: `runDate` (a `YYYY-MM-DD` calendar date, past or future) applies to this run only, as does `params`, this run's values of the schedule's `${params.<name>}` placeholders (at most 16, lower-case names, values up to 256 characters); the stored schedule never changes, and neither value is audited. `logicalDate` stays now, UTC, whole seconds, so the run has tasks \u2014 the date travels as Airflow's `dag_run.conf` instead. An absent body or `{}` starts a run for now with the schedule's parameters, exactly as before. Every attempt that reaches the run logic, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_run_trigger",
         "parameters": [
           {
@@ -6686,7 +6686,7 @@
         "tags": [
           "public"
         ],
-        "description": "Stop a run: mark it failed. A viewer (`spec.viewers`) may stop a run, as it may start one. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+        "description": "Stop a run: mark it failed. A viewer (`spec.viewers`) may stop a run, as it may start one. This is **not a cancel** \u2014 work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
         "operationId": "pipelines_run_stop",
         "parameters": [
           {
@@ -6786,7 +6786,7 @@
         "tags": [
           "public"
         ],
-        "description": "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source-details block dropped — its marker, the internal object-store path it wraps and its `::endgroup::` (they are never returned). A failed task's line is followed by the exception the scheduler recorded (`ExcType: message`) and up to 20 of its stack frames, each with the file's last path segment; they count against the same caps. `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
+        "description": "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source-details block dropped \u2014 its marker, the internal object-store path it wraps and its `::endgroup::` (they are never returned). A failed task's line is followed by the exception the scheduler recorded (`ExcType: message`) and up to 20 of its stack frames, each with the file's last path segment; they count against the same caps. `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task \u2014 never the content. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_run_task_logs",
         "parameters": [
           {
@@ -7304,7 +7304,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/query-log/usage?scope=&by=&warehouse=&from=&to=` — compute and bytes added up.",
+        "summary": "`GET /api/query-log/usage?scope=&by=&warehouse=&from=&to=` \u2014 compute and bytes added up.",
         "description": "Compute and bytes added up per person, warehouse or day, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. The window defaults to the last 7 days.",
         "operationId": "query_log_usage",
         "parameters": [
@@ -7405,7 +7405,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/query-log/{id}` — everything stored about one query the caller may see.",
+        "summary": "`GET /api/query-log/{id}` \u2014 everything stored about one query the caller may see.",
         "description": "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited. With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's statement shows '?' in place of every string literal.",
         "operationId": "query_log_detail",
         "parameters": [
@@ -7458,7 +7458,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/query-log/{id}/history` — the last runs of the same statement, and whether this\none is slower than their median.",
+        "summary": "`GET /api/query-log/{id}/history` \u2014 the last runs of the same statement, and whether this\none is slower than their median.",
         "description": "The last 20 runs of the same statement by the same principal: each one's state, end time, wall and execution time, bytes and rows read, newest first. The same visibility rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's history is audited. medianWallMs is the median of the returned runs' wall times; slower is true when this run's wall time is more than twice that median and at least three runs were compared. Answers Cache-Control: no-store.",
         "operationId": "query_log_history",
         "parameters": [
@@ -7511,7 +7511,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/query-log/{id}/profile` — where one finished query spent its time: the engine's\nplan and the per-operator statistics it reported.",
+        "summary": "`GET /api/query-log/{id}/profile` \u2014 where one finished query spent its time: the engine's\nplan and the per-operator statistics it reported.",
         "description": "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal. The answer also carries \"hints\", an array of deterministic suggestions computed from the profile and the query's timing, each with its evidence and a documentation link; an empty array means no rule found evidence.",
         "operationId": "query_log_profile",
         "parameters": [
@@ -7692,7 +7692,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`GET /api/saved-queries` — the caller's own, newest first.",
+        "summary": "`GET /api/saved-queries` \u2014 the caller's own, newest first.",
         "description": "The caller's own saved queries, most recently changed first. Times are epoch milliseconds.",
         "operationId": "saved_queries_list",
         "responses": {
@@ -7725,7 +7725,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/saved-queries` — `201` with the stored row.",
+        "summary": "`POST /api/saved-queries` \u2014 `201` with the stored row.",
         "description": "Save a query for the caller. The title is at most 200 characters and the SQL at most 100 000.",
         "operationId": "saved_queries_create",
         "requestBody": {
@@ -7777,7 +7777,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`DELETE /api/saved-queries/{id}` — `204`; `404` when the id is not the caller's.",
+        "summary": "`DELETE /api/saved-queries/{id}` \u2014 `204`; `404` when the id is not the caller's.",
         "description": "Delete one of the caller's saved queries.",
         "operationId": "saved_queries_remove",
         "parameters": [
@@ -7824,7 +7824,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/saved-queries/{id}/share` — `204`, whether the share is new, a repeat or\nthe id is not the caller's.",
+        "summary": "`POST /api/saved-queries/{id}/share` \u2014 `204`, whether the share is new, a repeat or\nthe id is not the caller's.",
         "description": "Share one of the caller's saved queries with a group. Members of the group see it in the list.",
         "operationId": "saved_queries_share",
         "parameters": [
@@ -7891,7 +7891,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`DELETE /api/saved-queries/{id}/share/{group}` — `204` when a share was removed;\n`404` when there was none, or the query is not the caller's.",
+        "summary": "`DELETE /api/saved-queries/{id}/share/{group}` \u2014 `204` when a share was removed;\n`404` when there was none, or the query is not the caller's.",
         "description": "Stop sharing one of the caller's saved queries with a group.",
         "operationId": "saved_queries_unshare",
         "parameters": [
@@ -7998,7 +7998,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`GET /api/settings` — the caller's settings as one JSON object (`{}` when none).",
+        "summary": "`GET /api/settings` \u2014 the caller's settings as one JSON object (`{}` when none).",
         "description": "The caller's personal settings as one JSON object, key to value (`{}` when there are none). The UI decides what a key means; Nova only stores them.",
         "operationId": "settings_list",
         "responses": {
@@ -8030,7 +8030,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`PUT /api/settings/{key}` — the body is the value (any JSON); creates or replaces.\nAnswers `200 {\"key\":…,\"value\":…}`.",
+        "summary": "`PUT /api/settings/{key}` \u2014 the body is the value (any JSON); creates or replaces.\nAnswers `200 {\"key\":\u2026,\"value\":\u2026}`.",
         "description": "Create or replace one of the caller's settings. The body is the value itself, any JSON, at most 16 KiB of JSON text. A key is 1 to 64 characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit.",
         "operationId": "settings_put",
         "parameters": [
@@ -8090,7 +8090,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`DELETE /api/settings/{key}` — `204`, or `404` when the caller has no such key.",
+        "summary": "`DELETE /api/settings/{key}` \u2014 `204`, or `404` when the caller has no such key.",
         "description": "Remove one of the caller's settings.",
         "operationId": "settings_remove",
         "parameters": [
@@ -8136,7 +8136,7 @@
         "tags": [
           "public"
         ],
-        "description": "This stage's deployed pipelines against a peer stage's, for the Deployments page. The peer is called with the caller's own token (`GET {peer}/api/pipelines`), so the answer is filtered by that person's rights there. `status` is `ok`, `unauthorized` (the peer refused the token — sign in there) or `unreachable` (no answer within 5 s). Nova neither compares Git ancestry nor deploys to the peer. Answers `Cache-Control: no-store`.",
+        "description": "This stage's deployed pipelines against a peer stage's, for the Deployments page. The peer is called with the caller's own token (`GET {peer}/api/pipelines`), so the answer is filtered by that person's rights there. `status` is `ok`, `unauthorized` (the peer refused the token \u2014 sign in there) or `unreachable` (no answer within 5 s). Nova neither compares Git ancestry nor deploys to the peer. Answers `Cache-Control: no-store`.",
         "operationId": "stages_compare",
         "parameters": [
           {
@@ -8512,7 +8512,7 @@
         "tags": [
           "public"
         ],
-        "description": "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`) and an optional `provenance` (`bundle`, `target`, optional `revision` and `repository`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the provenance, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. `provenance` is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
+        "description": "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`) and an optional `provenance` (`bundle`, `target`, optional `revision` and `repository`). Every rule a write runs is checked in order \u2014 the name, the body's name against the path's, the caller's groups, the provenance, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy \u2014 and then the group's ready `ServicePrincipal`. `provenance` is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
         "operationId": "streams_validate",
         "requestBody": {
           "content": {
@@ -8573,7 +8573,7 @@
         "tags": [
           "public"
         ],
-        "description": "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. `provenance` (`bundle`, `target`, optional `revision` and `repository`) is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy, a bundle stamp outside a pipeline's provenance rules — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
+        "description": "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. `provenance` (`bundle`, `target`, optional `revision` and `repository`) is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy, a bundle stamp outside a pipeline's provenance rules \u2014 all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
         "operationId": "streams_put",
         "parameters": [
           {
@@ -8948,7 +8948,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`DELETE /api/verified-queries/{id}` — `204`; `404` when the id is not a row.",
+        "summary": "`DELETE /api/verified-queries/{id}` \u2014 `204`; `404` when the id is not a row.",
         "description": "Remove one verified query. Only the owner group of its table and administrators may delete it.",
         "operationId": "verified_queries_delete",
         "parameters": [
@@ -9015,7 +9015,7 @@
         "tags": [
           "public"
         ],
-        "summary": "`POST /api/verified-queries/{id}/check` — run the statement as the caller and compare it\nwith the expected result; `200` with the updated row either way.",
+        "summary": "`POST /api/verified-queries/{id}/check` \u2014 run the statement as the caller and compare it\nwith the expected result; `200` with the updated row either way.",
         "description": "Run one verified query as the caller and compare its rows with the expected result, store the outcome on the row and answer the row. Without an expected result it passes when the statement runs; with one it passes when the rows are equal as a multiset, numbers compared after rounding to six decimals. A readable difference says what was expected and what came back. Whoever may see the table may check it.",
         "operationId": "verified_queries_check",
         "parameters": [
@@ -9100,7 +9100,7 @@
           "public"
         ],
         "summary": "`GET /api/warehouses`: the compute classes of the platform, which one this caller may use\nand which one a query will land in.",
-        "description": "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. `scale` is the scaler's verdict on the one engine the classes share (`phase`, `workers`, `queriesInFlight`, `lastQueryAt`), read from `status.scale`; `null` until the scaler has written one. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
+        "description": "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row \u2014 the class the engine's first matching selector picks \u2014 or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. `scale` is the scaler's verdict on the one engine the classes share (`phase`, `workers`, `queriesInFlight`, `lastQueryAt`), read from `status.scale`; `null` until the scaler has written one. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
         "operationId": "warehouses_list",
         "responses": {
           "200": {
@@ -9145,7 +9145,7 @@
           "public"
         ],
         "summary": "`POST /api/warehouses/{name}/start`: keep a class warm.",
-        "description": "Wake the engine for one SQL compute class by writing the class's `stardelt.io/last-query-at` annotation (the scaler reads it on its two-minute tick; the replica count is the scaler's, not Nova's). The answer is `202` with `phase: \"Starting\"` — `status.scale.phase` is written by the scaler, not by Nova. An administrator may start any class; a person needs one of their groups in `spec.grants`. Without a cluster connection the answer is `503`; a class that does not exist is `404`.",
+        "description": "Wake the engine for one SQL compute class by writing the class's `stardelt.io/last-query-at` annotation (the scaler reads it on its two-minute tick; the replica count is the scaler's, not Nova's). The answer is `202` with `phase: \"Starting\"` \u2014 `status.scale.phase` is written by the scaler, not by Nova. An administrator may start any class; a person needs one of their groups in `spec.grants`. Without a cluster connection the answer is `503`; a class that does not exist is `404`.",
         "operationId": "warehouses_start",
         "parameters": [
           {
@@ -9227,7 +9227,7 @@
         "tags": [
           "internal"
         ],
-        "summary": "`GET /api/workloads` — every workload Nova can see, with the image it runs.",
+        "summary": "`GET /api/workloads` \u2014 every workload Nova can see, with the image it runs.",
         "description": "Every Deployment and StatefulSet of Nova's namespace, flattened to `name`, `kind`, the `image` exactly as the cluster has it (tag or digest) and the `ready` and `desired` replica counts, ordered by name. The answer says how far to trust the list: `state` is `ok` (just read), `stale` (the last read failed, so `workloads` is the last good one, `error` says why and `age_seconds` how old it is) or `unreachable` (the read failed and there never was a good one: an empty list then does NOT mean nothing runs). Reads are cached for a few seconds. Administrator-only: anybody else gets 403. Without a cluster connection (demo mode, a local run) the list is empty or the demo set. Field names are snake_case.",
         "operationId": "workloads_list",
         "responses": {
@@ -9435,7 +9435,7 @@
     "schemas": {
       "AdminCatalog": {
         "type": "object",
-        "description": "One catalog, as an administrator sees it.\n\n`displayName`, `description`, `owner`, `keyPrefix`, `warehouseId` and the two\ngeneration numbers are `null` when the resource does not carry them — never\nan empty string or a guessed value.",
+        "description": "One catalog, as an administrator sees it.\n\n`displayName`, `description`, `owner`, `keyPrefix`, `warehouseId` and the two\ngeneration numbers are `null` when the resource does not carry them \u2014 never\nan empty string or a guessed value.",
         "required": [
           "name",
           "managedAccess",
@@ -9557,7 +9557,7 @@
       },
       "AppDetail": {
         "type": "object",
-        "description": "`GET /api/apps/:id` — everything Nova can say about one service.",
+        "description": "`GET /api/apps/:id` \u2014 everything Nova can say about one service.",
         "required": [
           "app",
           "probe",
@@ -9600,7 +9600,7 @@
           },
           "replicas": {
             "$ref": "#/components/schemas/Replicas",
-            "description": "Ready/desired replicas across the app's workloads — a scale-to-zero\nworkload contributes `0/0`, which is a fact, not a failure."
+            "description": "Ready/desired replicas across the app's workloads \u2014 a scale-to-zero\nworkload contributes `0/0`, which is a fact, not a failure."
           },
           "workloads": {
             "type": "array",
@@ -9707,7 +9707,7 @@
           },
           "target": {
             "type": "string",
-            "description": "The bundle target whose ledger rows count (`dev`, `prod`, …)."
+            "description": "The bundle target whose ledger rows count (`dev`, `prod`, \u2026)."
           }
         }
       },
@@ -9766,7 +9766,7 @@
           },
           "endpoint": {
             "type": "string",
-            "description": "The `ModelEndpoint` that answered — never its URL."
+            "description": "The `ModelEndpoint` that answered \u2014 never its URL."
           },
           "error": {
             "type": [
@@ -10010,7 +10010,7 @@
       },
       "BreakGlassRequest": {
         "type": "object",
-        "description": "`POST …/break-glass` body. No `Debug`: a reason can be sensitive and nothing here should ever\nbe printed by accident.",
+        "description": "`POST \u2026/break-glass` body. No `Debug`: a reason can be sensitive and nothing here should ever\nbe printed by accident.",
         "required": [
           "reason"
         ],
@@ -10159,7 +10159,7 @@
               "string",
               "null"
             ],
-            "description": "`bronze`, `silver` or `gold` when the catalog is a medallion layer — from the\n`stardelt.io/layer` label on its `Catalog` resource, else from its name. Absent for\nevery other catalog."
+            "description": "`bronze`, `silver` or `gold` when the catalog is a medallion layer \u2014 from the\n`stardelt.io/layer` label on its `Catalog` resource, else from its name. Absent for\nevery other catalog."
           },
           "maintenance": {
             "oneOf": [
@@ -10174,7 +10174,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, …)."
+            "description": "Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, \u2026)."
           },
           "owner": {
             "type": [
@@ -10235,11 +10235,11 @@
                   "string",
                   "null"
                 ],
-                "description": "Why this catalog could not be read — absent for a catalog that was. A sentence,\nnever URL, token or stack trace."
+                "description": "Why this catalog could not be read \u2014 absent for a catalog that was. A sentence,\nnever URL, token or stack trace."
               },
               "pending": {
                 "type": "boolean",
-                "description": "No numbers yet — the catalog appeared after the last round (or before the first),\nand one scan is reading it now. Its numbers are zeros and the totals leave it out."
+                "description": "No numbers yet \u2014 the catalog appeared after the last round (or before the first),\nand one scan is reading it now. Its numbers are zeros and the totals leave it out."
               },
               "updatedAt": {
                 "type": [
@@ -10252,7 +10252,7 @@
             }
           }
         ],
-        "description": "One catalog in the answer: the numbers, plus the sentence when the last scan failed. A\nfailed catalog is zeros only when it never answered — a catalog that answered once\nkeeps those numbers — never omitted: a page that silently drops a catalog says \"you\nhave none\", which is not what happened."
+        "description": "One catalog in the answer: the numbers, plus the sentence when the last scan failed. A\nfailed catalog is zeros only when it never answered \u2014 a catalog that answered once\nkeeps those numbers \u2014 never omitted: a page that silently drops a catalog says \"you\nhave none\", which is not what happened."
       },
       "CatalogStats": {
         "type": "object",
@@ -10306,7 +10306,7 @@
           "tables": {
             "type": "integer",
             "format": "int32",
-            "description": "Tables in the catalog — every one the catalog lists, loaded or not.",
+            "description": "Tables in the catalog \u2014 every one the catalog lists, loaded or not.",
             "minimum": 0
           },
           "truncated": {
@@ -10753,7 +10753,7 @@
       },
       "ComputeSpecBody": {
         "type": "object",
-        "description": "The body of `PUT /api/admin/compute/{name}`: everything an administrator may set.\nNo `state` — Start and Stop own it — and no `metadata`.",
+        "description": "The body of `PUT /api/admin/compute/{name}`: everything an administrator may set.\nNo `state` \u2014 Start and Stop own it \u2014 and no `metadata`.",
         "required": [
           "owner",
           "runtime"
@@ -10870,7 +10870,7 @@
           },
           "member": {
             "type": "boolean",
-            "description": "Whether the caller belongs to the scope that owns this row: `true` for a personal or managed\nconnection and for a group connection of one of the caller's groups; `false` for a group\nconnection an administrator sees only because they are an administrator. `false` means\nread-only for this person — no create, no rotation — except delete and break-glass."
+            "description": "Whether the caller belongs to the scope that owns this row: `true` for a personal or managed\nconnection and for a group connection of one of the caller's groups; `false` for a group\nconnection an administrator sees only because they are an administrator. `false` means\nread-only for this person \u2014 no create, no rotation \u2014 except delete and break-glass."
           },
           "name": {
             "type": "string"
@@ -11230,7 +11230,7 @@
         ],
         "properties": {
           "config": {
-            "description": "The kind's address: `{\"recipients\": [...]}` or `{\"url\": \"https://…\"}`."
+            "description": "The kind's address: `{\"recipients\": [...]}` or `{\"url\": \"https://\u2026\"}`."
           },
           "created_at": {
             "type": "integer",
@@ -11356,14 +11356,14 @@
               "string",
               "null"
             ],
-            "description": "That header's value, verbatim — what the operator has to change."
+            "description": "That header's value, verbatim \u2014 what the operator has to change."
           },
           "sign_in_host": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Host a visitor without a session is sent to for sign-in, when the app's\nown page redirects off its hosts before it renders. That page (Keycloak\non this platform) refuses framing, so the frame stays empty until the\nvisitor signs in in a top-level tab; the UI turns this into a call to\naction. `None` when the app answers for itself — a login form on its own\nhost is part of the app and frames fine."
+            "description": "Host a visitor without a session is sent to for sign-in, when the app's\nown page redirects off its hosts before it renders. That page (Keycloak\non this platform) refuses framing, so the frame stays empty until the\nvisitor signs in in a top-level tab; the UI turns this into a call to\naction. `None` when the app answers for itself \u2014 a login form on its own\nhost is part of the app and frames fine."
           },
           "state": {
             "type": "string",
@@ -12329,7 +12329,7 @@
         ],
         "properties": {
           "config": {
-            "description": "The kind's address: `{\"recipients\": [...]}` or `{\"url\": \"https://…\"}`."
+            "description": "The kind's address: `{\"recipients\": [...]}` or `{\"url\": \"https://\u2026\"}`."
           },
           "kind": {
             "type": "string"
@@ -12483,7 +12483,7 @@
         "properties": {
           "objectVersion": {
             "type": "string",
-            "description": "The version the answer describes — the one asked for, or the latest when the query\nnamed none. A schedule pins this exact id."
+            "description": "The version the answer describes \u2014 the one asked for, or the latest when the query\nnamed none. A schedule pins this exact id."
           },
           "parameters": {
             "type": "array",
@@ -13013,7 +13013,7 @@
       },
       "PipelineOptions": {
         "type": "object",
-        "description": "The advanced options of a schedule (#223), all optional: an omitted field keeps today's\ndefault (one retry, five minutes between retries, a two-hour time limit, one run at a time).\n`Replace` is deliberately not offered — the loader treats it as `Forbid`.",
+        "description": "The advanced options of a schedule (#223), all optional: an omitted field keeps today's\ndefault (one retry, five minutes between retries, a two-hour time limit, one run at a time).\n`Replace` is deliberately not offered \u2014 the loader treats it as `Forbid`.",
         "properties": {
           "backoffMinutes": {
             "type": [
@@ -13050,7 +13050,7 @@
       },
       "PipelineOptionsView": {
         "type": "object",
-        "description": "The options as the resource carries them, defaults filled in — what the edit dialog prefills.",
+        "description": "The options as the resource carries them, defaults filled in \u2014 what the edit dialog prefills.",
         "required": [
           "retries",
           "backoffMinutes",
@@ -13155,7 +13155,7 @@
         "properties": {
           "canEdit": {
             "type": "boolean",
-            "description": "Whether the caller may also pause, resume, change or delete it — the owner group and\nadministrators only (epic#895 decision 12)."
+            "description": "Whether the caller may also pause, resume, change or delete it \u2014 the owner group and\nadministrators only (epic#895 decision 12)."
           },
           "canRun": {
             "type": "boolean",
@@ -13307,7 +13307,7 @@
           },
           "target": {
             "type": "string",
-            "description": "The bundle target whose ledger rows count (`dev`, `prod`, …)."
+            "description": "The bundle target whose ledger rows count (`dev`, `prod`, \u2026)."
           }
         }
       },
@@ -13374,7 +13374,7 @@
           },
           "external_url": {
             "type": "string",
-            "description": "Reachable-from-the-browser URL. Empty when no base domain is configured,\nand empty for an app with no browsable surface (nothing serves its host —\nsee `public_url`)."
+            "description": "Reachable-from-the-browser URL. Empty when no base domain is configured,\nand empty for an app with no browsable surface (nothing serves its host \u2014\nsee `public_url`)."
           },
           "id": {
             "type": "string"
@@ -14093,7 +14093,7 @@
       },
       "RotateRequest": {
         "type": "object",
-        "description": "`PUT …/secret` body: the field values to write. Write-only, like the create body, and never\nprinted — no `Debug` on purpose.",
+        "description": "`PUT \u2026/secret` body: the field values to write. Write-only, like the create body, and never\nprinted \u2014 no `Debug` on purpose.",
         "required": [
           "secret"
         ],
@@ -14114,7 +14114,7 @@
       },
       "RunQueriesResponse": {
         "type": "object",
-        "description": "`GET …/runs/{run_id}/queries` — the run's statements, slowest first.",
+        "description": "`GET \u2026/runs/{run_id}/queries` \u2014 the run's statements, slowest first.",
         "required": [
           "queries"
         ],
@@ -14194,7 +14194,7 @@
       },
       "RunResponse": {
         "type": "object",
-        "description": "`GET …/runs/{run_id}`: one run and its task instances.",
+        "description": "`GET \u2026/runs/{run_id}`: one run and its task instances.",
         "required": [
           "run",
           "tasks"
@@ -14213,7 +14213,7 @@
       },
       "RunStart": {
         "type": "object",
-        "description": "The body of `POST …/runs`: a run date and parameter values for this run only (nova#817).",
+        "description": "The body of `POST \u2026/runs`: a run date and parameter values for this run only (nova#817).",
         "properties": {
           "params": {
             "type": [
@@ -14544,7 +14544,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`ok` | `stale` | `unreachable` — computed here rather than by the client, so the\nUI and the API cannot disagree about what an empty list means."
+            "description": "`ok` | `stale` | `unreachable` \u2014 computed here rather than by the client, so the\nUI and the API cannot disagree about what an empty list means."
           },
           "workloads": {
             "type": "array",
@@ -15251,7 +15251,7 @@
       },
       "TableMetadataResponse": {
         "type": "object",
-        "description": "Iceberg `LoadTable` result: where the metadata lives plus the metadata\ndocument itself (schema, partition specs, properties). The metadata body\nis the catalog's own document — Nova never reshapes it.",
+        "description": "Iceberg `LoadTable` result: where the metadata lives plus the metadata\ndocument itself (schema, partition specs, properties). The metadata body\nis the catalog's own document \u2014 Nova never reshapes it.",
         "required": [
           "metadata-location",
           "metadata"
@@ -15443,7 +15443,7 @@
       },
       "UpdatePipelineRequest": {
         "type": "object",
-        "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters\nand the options — or, for a notebook pipeline, the notebook, its version and its parameters.\nEvery other field of the resource stays as it is, and what the pipeline runs never changes\nkind.",
+        "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters\nand the options \u2014 or, for a notebook pipeline, the notebook, its version and its parameters.\nEvery other field of the resource stays as it is, and what the pipeline runs never changes\nkind.",
         "properties": {
           "notebook": {
             "oneOf": [
@@ -15460,7 +15460,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/PipelineNotify",
-                "description": "Who is told when a run ends (`spec.notify`). Omitted keeps the stored `spec.notify`;\ngiven with all three lists empty, it removes it — a form save must not wipe a\nnotification a bundle deployed until the form edits it."
+                "description": "Who is told when a run ends (`spec.notify`). Omitted keeps the stored `spec.notify`;\ngiven with all three lists empty, it removes it \u2014 a form save must not wipe a\nnotification a bundle deployed until the form edits it."
               },
               {
                 "type": "null"
@@ -15854,7 +15854,7 @@
       },
       "WarehouseInfo": {
         "type": "object",
-        "description": "OpenAPI shapes for the catalog routes (first slice of ticket #107).\n\nNova proxies these bodies — from Lakekeeper upstream, or from the\nin-memory demo shapes in `demo.rs` — so the structs below mirror the\nproxied Iceberg REST shapes rather than being constructed anywhere.\n`#[schema(rename = …)]` keeps the hyphenated Iceberg field names.",
+        "description": "OpenAPI shapes for the catalog routes (first slice of ticket #107).\n\nNova proxies these bodies \u2014 from Lakekeeper upstream, or from the\nin-memory demo shapes in `demo.rs` \u2014 so the structs below mirror the\nproxied Iceberg REST shapes rather than being constructed anywhere.\n`#[schema(rename = \u2026)]` keeps the hyphenated Iceberg field names.",
         "required": [
           "name",
           "id"
@@ -15888,7 +15888,7 @@
           },
           "phase": {
             "type": "string",
-            "description": "`Stopped`, `Starting` or `Running` — the scaler's words."
+            "description": "`Stopped`, `Starting` or `Running` \u2014 the scaler's words."
           },
           "queriesInFlight": {
             "type": "integer",
@@ -15906,7 +15906,7 @@
       },
       "WarehouseStart": {
         "type": "object",
-        "description": "The answer to `POST /api/warehouses/{name}/start`: the class, and the phase the scaler will\nreport once it has woken the engine. Nova never writes `status` — 202 is the whole promise.",
+        "description": "The answer to `POST /api/warehouses/{name}/start`: the class, and the phase the scaler will\nreport once it has woken the engine. Nova never writes `status` \u2014 202 is the whole promise.",
         "required": [
           "name",
           "phase"
@@ -15937,7 +15937,7 @@
           },
           "image": {
             "type": "string",
-            "description": "Image reference as the cluster has it — tag or digest, verbatim."
+            "description": "Image reference as the cluster has it \u2014 tag or digest, verbatim."
           },
           "kind": {
             "type": "string",
