@@ -12,7 +12,7 @@ ENV PYTHONUNBUFFERED=1 \
 # since that build (stardelt-platform#1071).
 ARG REVISION=
 LABEL org.opencontainers.image.title="stardelt-cli" \
-      org.opencontainers.image.source="https://github.com/stardelt/stardelt-python" \
+      org.opencontainers.image.source="https://github.com/stardelt/stardelt" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.revision=$REVISION
 
