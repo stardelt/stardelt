@@ -256,7 +256,13 @@ test('a hovered query day names its local date and count, and the tooltip stays 
 })
 
 test('a hovered run day names its four state counts, and the legend names the colours', async ({ page }) => {
-  await stubApi(page)
+  const noon = new Date()
+  noon.setUTCDate(noon.getUTCDate() - 1)
+  noon.setUTCHours(12, 0, 0, 0)
+  const at = (minutes: number, state: string, id: string) => runAt(id, state, noon.getTime() - minutes * 60_000)
+  await stubApi(page, {
+    runsBody: { runs: [at(10, 'success', 'y1'), at(20, 'success', 'y2'), at(30, 'failed', 'y3')], groups: [] },
+  })
   await page.goto('/')
   const card = pulseCard(page)
   await expect(card).toBeVisible()
@@ -268,10 +274,13 @@ test('a hovered run day names its four state counts, and the legend names the co
   await expect(legend).toContainText('other')
   await expect(card.locator('[data-chart-max="runs"]')).toHaveText('max 3')
 
-  const today = card.locator('svg[data-chart="runs"] [data-day]').last()
-  const label = await today.getAttribute('aria-label')
+  // The window ends today (`runsPerDay(..., 7, now)` in Overview.tsx), so the point before the
+  // last one is yesterday: it always carries the three runs, whatever the hour.
+  const days = card.locator('svg[data-chart="runs"] [data-day]')
+  const day = days.nth((await days.count()) - 2)
+  const label = await day.getAttribute('aria-label')
   expect(label).toMatch(/^[^·]+ · 2 ok · 1 failed · 0 running · 0 other$/)
-  await today.hover()
+  await day.hover()
   const tip = card.locator('[role="tooltip"]')
   await expect(tip).toHaveText(label!)
   await boxesInside((await tip.boundingBox())!, (await card.boundingBox())!)
