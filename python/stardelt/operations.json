@@ -1,0 +1,980 @@
+{
+  "contract_version": "0.1.0",
+  "operations": {
+    "ask_answer": {
+      "method": "POST",
+      "path": "/api/ask",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "ask_feedback": {
+      "method": "POST",
+      "path": "/api/ask/feedback",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "ask_history": {
+      "method": "GET",
+      "path": "/api/ask/history",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "auth_config": {
+      "method": "GET",
+      "path": "/api/auth/config",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "catalog_metrics_get": {
+      "method": "GET",
+      "path": "/api/catalog/metrics",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "catalog_metrics_refresh": {
+      "method": "POST",
+      "path": "/api/catalog/metrics/refresh",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "catalog_search": {
+      "method": "GET",
+      "path": "/api/catalog/search",
+      "path_params": [],
+      "query_params": [
+        "q",
+        "catalog",
+        "limit",
+        "tag",
+        "owner",
+        "domain"
+      ],
+      "body": false
+    },
+    "catalogs_list": {
+      "method": "GET",
+      "path": "/api/catalog/catalogs",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "column_description_update": {
+      "method": "PUT",
+      "path": "/api/catalog/tables/{ns}/{tbl}/columns/{column}/description",
+      "path_params": [
+        "ns",
+        "tbl",
+        "column"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "compute_list": {
+      "method": "GET",
+      "path": "/api/compute",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "compute_start": {
+      "method": "POST",
+      "path": "/api/compute/{name}/start",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "compute_stop": {
+      "method": "POST",
+      "path": "/api/compute/{name}/stop",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "connections_break_glass_log": {
+      "method": "GET",
+      "path": "/api/connections/break-glass-log",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "connections_create": {
+      "method": "POST",
+      "path": "/api/connections",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "connections_group_break_glass": {
+      "method": "POST",
+      "path": "/api/connections/group/{group}/{name}/break-glass",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "connections_group_delete": {
+      "method": "DELETE",
+      "path": "/api/connections/group/{group}/{name}",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "connections_group_rotate": {
+      "method": "PUT",
+      "path": "/api/connections/group/{group}/{name}/secret",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "connections_list": {
+      "method": "GET",
+      "path": "/api/connections",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "connections_managed_break_glass": {
+      "method": "POST",
+      "path": "/api/connections/managed/{name}/break-glass",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "connections_managed_delete": {
+      "method": "DELETE",
+      "path": "/api/connections/managed/{name}",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "connections_managed_rotate": {
+      "method": "PUT",
+      "path": "/api/connections/managed/{name}/secret",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "connections_personal_break_glass": {
+      "method": "POST",
+      "path": "/api/connections/personal/{name}/break-glass",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "connections_personal_delete": {
+      "method": "DELETE",
+      "path": "/api/connections/personal/{name}",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "connections_personal_rotate": {
+      "method": "PUT",
+      "path": "/api/connections/personal/{name}/secret",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "deployments_list": {
+      "method": "GET",
+      "path": "/api/deployments",
+      "path_params": [],
+      "query_params": [
+        "bundle",
+        "target"
+      ],
+      "body": false
+    },
+    "deployments_record": {
+      "method": "POST",
+      "path": "/api/deployments",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "health": {
+      "method": "GET",
+      "path": "/api/health",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "lineage_columns": {
+      "method": "GET",
+      "path": "/api/lineage/columns",
+      "path_params": [],
+      "query_params": [
+        "catalog",
+        "schema",
+        "table",
+        "days"
+      ],
+      "body": false
+    },
+    "lineage_graph": {
+      "method": "GET",
+      "path": "/api/lineage",
+      "path_params": [],
+      "query_params": [
+        "catalog",
+        "schema",
+        "table",
+        "depth",
+        "days"
+      ],
+      "body": false
+    },
+    "lineage_read_tables": {
+      "method": "GET",
+      "path": "/api/lineage/read-tables",
+      "path_params": [],
+      "query_params": [
+        "days",
+        "limit"
+      ],
+      "body": false
+    },
+    "lineage_run_detail": {
+      "method": "GET",
+      "path": "/api/lineage/runs/{run_id}",
+      "path_params": [
+        "run_id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "me": {
+      "method": "GET",
+      "path": "/api/me",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "migrations_apply": {
+      "method": "POST",
+      "path": "/api/migrations/apply",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "migrations_approve": {
+      "method": "POST",
+      "path": "/api/migrations/approve",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "migrations_plan": {
+      "method": "POST",
+      "path": "/api/migrations/plan",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "model_endpoints_list": {
+      "method": "GET",
+      "path": "/api/model-endpoints",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "namespaces_list": {
+      "method": "GET",
+      "path": "/api/catalog/namespaces",
+      "path_params": [],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "notebooks_content": {
+      "method": "GET",
+      "path": "/api/notebooks/{group}/{name}/content",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [
+        "version"
+      ],
+      "body": false
+    },
+    "notebooks_delete": {
+      "method": "DELETE",
+      "path": "/api/notebooks/{group}/{name}",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "notebooks_list": {
+      "method": "GET",
+      "path": "/api/notebooks",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "notebooks_parameters": {
+      "method": "GET",
+      "path": "/api/notebooks/{group}/{name}/parameters",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [
+        "version"
+      ],
+      "body": false
+    },
+    "notebooks_publish": {
+      "method": "PUT",
+      "path": "/api/notebooks/{group}/{name}",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [
+        "dryRun"
+      ],
+      "body": true
+    },
+    "notebooks_usage": {
+      "method": "GET",
+      "path": "/api/notebooks/{group}/{name}/usage",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "notebooks_versions": {
+      "method": "GET",
+      "path": "/api/notebooks/{group}/{name}/versions",
+      "path_params": [
+        "group",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "openapi_document": {
+      "method": "GET",
+      "path": "/api/openapi.json",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_check": {
+      "method": "POST",
+      "path": "/api/pipelines/check",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "pipelines_create": {
+      "method": "POST",
+      "path": "/api/pipelines",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "pipelines_delete": {
+      "method": "DELETE",
+      "path": "/api/pipelines/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_get": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_list": {
+      "method": "GET",
+      "path": "/api/pipelines",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_pause": {
+      "method": "POST",
+      "path": "/api/pipelines/{namespace}/{name}/pause",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_preview_schedule": {
+      "method": "POST",
+      "path": "/api/pipelines/preview-schedule",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "pipelines_principals": {
+      "method": "GET",
+      "path": "/api/pipelines/principals",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_resume": {
+      "method": "POST",
+      "path": "/api/pipelines/{namespace}/{name}/resume",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_run_get": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_run_queries": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}/queries",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_run_retry": {
+      "method": "POST",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}/retry",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_run_stop": {
+      "method": "POST",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}/stop",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_run_task_logs": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id",
+        "task_id"
+      ],
+      "query_params": [
+        "try",
+        "token"
+      ],
+      "body": false
+    },
+    "pipelines_run_task_notebook": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/notebook",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id",
+        "task_id"
+      ],
+      "query_params": [
+        "download"
+      ],
+      "body": false
+    },
+    "pipelines_run_trigger": {
+      "method": "POST",
+      "path": "/api/pipelines/{namespace}/{name}/runs",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "pipelines_spec": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/spec",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_update": {
+      "method": "PUT",
+      "path": "/api/pipelines/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "pipelines_validate": {
+      "method": "POST",
+      "path": "/api/pipelines/validate",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "query_log_detail": {
+      "method": "GET",
+      "path": "/api/query-log/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "query_log_history": {
+      "method": "GET",
+      "path": "/api/query-log/{id}/history",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "query_log_list": {
+      "method": "GET",
+      "path": "/api/query-log",
+      "path_params": [],
+      "query_params": [
+        "scope",
+        "state",
+        "warehouse",
+        "q",
+        "from",
+        "to",
+        "limit",
+        "cursor"
+      ],
+      "body": false
+    },
+    "query_log_profile": {
+      "method": "GET",
+      "path": "/api/query-log/{id}/profile",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "query_log_usage": {
+      "method": "GET",
+      "path": "/api/query-log/usage",
+      "path_params": [],
+      "query_params": [
+        "scope",
+        "by",
+        "warehouse",
+        "from",
+        "to"
+      ],
+      "body": false
+    },
+    "query_run": {
+      "method": "POST",
+      "path": "/api/query",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "runs_list": {
+      "method": "GET",
+      "path": "/api/runs",
+      "path_params": [],
+      "query_params": [
+        "limit",
+        "state",
+        "kind",
+        "group",
+        "pipeline",
+        "notebook"
+      ],
+      "body": false
+    },
+    "saved_queries_create": {
+      "method": "POST",
+      "path": "/api/saved-queries",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "saved_queries_list": {
+      "method": "GET",
+      "path": "/api/saved-queries",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "saved_queries_remove": {
+      "method": "DELETE",
+      "path": "/api/saved-queries/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "saved_queries_share": {
+      "method": "POST",
+      "path": "/api/saved-queries/{id}/share",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "saved_queries_unshare": {
+      "method": "DELETE",
+      "path": "/api/saved-queries/{id}/share/{group}",
+      "path_params": [
+        "id",
+        "group"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "service_principals_list": {
+      "method": "GET",
+      "path": "/api/service-principals",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "stages_compare": {
+      "method": "GET",
+      "path": "/api/stages/compare",
+      "path_params": [],
+      "query_params": [
+        "peer"
+      ],
+      "body": false
+    },
+    "statements_cancel": {
+      "method": "DELETE",
+      "path": "/api/statements/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "statements_chunk_get": {
+      "method": "GET",
+      "path": "/api/statements/{id}/chunks/{n}",
+      "path_params": [
+        "id",
+        "n"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "statements_get": {
+      "method": "GET",
+      "path": "/api/statements/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [
+        "waitSeconds"
+      ],
+      "body": false
+    },
+    "statements_list": {
+      "method": "GET",
+      "path": "/api/statements",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "statements_submit": {
+      "method": "POST",
+      "path": "/api/statements",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "streams_delete": {
+      "method": "DELETE",
+      "path": "/api/streams/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "streams_list": {
+      "method": "GET",
+      "path": "/api/streams",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "streams_patch": {
+      "method": "PATCH",
+      "path": "/api/streams/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "streams_put": {
+      "method": "PUT",
+      "path": "/api/streams/{namespace}/{name}",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "streams_validate": {
+      "method": "POST",
+      "path": "/api/streams/validate",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "table_documentation_get": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}/documentation",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "table_documentation_update": {
+      "method": "PUT",
+      "path": "/api/catalog/tables/{ns}/{tbl}/documentation",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "table_history": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}/history",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "table_metadata": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "table_rollback": {
+      "method": "POST",
+      "path": "/api/catalog/tables/{ns}/{tbl}/rollback",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "tables_list": {
+      "method": "GET",
+      "path": "/api/catalog/namespaces/{ns}/tables",
+      "path_params": [
+        "ns"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "verified_queries_check": {
+      "method": "POST",
+      "path": "/api/verified-queries/{id}/check",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "verified_queries_check_all": {
+      "method": "POST",
+      "path": "/api/catalog/tables/{ns}/{tbl}/verified-queries/check",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "verified_queries_create": {
+      "method": "POST",
+      "path": "/api/catalog/tables/{ns}/{tbl}/verified-queries",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "verified_queries_delete": {
+      "method": "DELETE",
+      "path": "/api/verified-queries/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "verified_queries_list": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}/verified-queries",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "warehouse_info": {
+      "method": "GET",
+      "path": "/api/catalog/warehouse",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "warehouses_list": {
+      "method": "GET",
+      "path": "/api/warehouses",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "warehouses_start": {
+      "method": "POST",
+      "path": "/api/warehouses/{name}/start",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "workspace_get": {
+      "method": "GET",
+      "path": "/api/workspace",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "workspace_start": {
+      "method": "POST",
+      "path": "/api/workspace/start",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "workspace_stop": {
+      "method": "POST",
+      "path": "/api/workspace/stop",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    }
+  }
+}

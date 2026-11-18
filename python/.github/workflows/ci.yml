@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Library (pytest, ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "${{ matrix.python-version }}"
+
+      - name: Install the library and its test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,jupyter]"
+
+      - name: Run the tests
+        run: python -m pytest tests -q
+
+  image-cli-check:
+    name: Build the CLI image (no push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build ghcr.io/stardelt/stardelt-cli:dev (not pushed)
+        run: docker build --build-arg REVISION="${{ github.sha }}" -t ghcr.io/stardelt/stardelt-cli:dev -f image/Dockerfile .
+
+      - name: The image runs the maintenance command
+        run: |
+          docker run --rm ghcr.io/stardelt/stardelt-cli:dev maintenance run --help
+          docker run --rm ghcr.io/stardelt/stardelt-cli:dev maintenance run --help \
+            | grep -q 'usage: stardelt maintenance run'
+
+      - name: The image names the commit it was built from
+        run: |
+          got="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' ghcr.io/stardelt/stardelt-cli:dev)"
+          if [ "$got" != "${{ github.sha }}" ]; then
+            echo "revision label is '$got', expected '${{ github.sha }}'" >&2
+            exit 1
+          fi
+
+  image-cli:
+    name: Push the CLI image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push ghcr.io/stardelt/stardelt-cli:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: image/Dockerfile
+          build-args: REVISION=${{ github.sha }}
+          push: true
+          tags: ghcr.io/stardelt/stardelt-cli:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
