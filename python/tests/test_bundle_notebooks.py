@@ -110,10 +110,15 @@ def test_a_file_that_is_not_json_is_refused_before_any_request(tmp_path):
 def test_a_refusal_after_the_publish_still_lists_what_was_published(tmp_path):
     make(tmp_path, resources=RESOURCES, files=FILES)
     refused = FakeResponse(payload={"ok": False, "action": "create", "errors": [{"message": "no such schedule"}], "changes": [], "nextRuns": []})
-    code, out, err, _ = run(["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, NEW, STORED, refused)
+    code, out, err, _ = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, NEW, STORED, refused, FakeResponse(payload={"pipelines": []}),
+        FakeResponse(201, {"id": 3, "bundle": "sales-etl", "target": "prod", "status": "failed"}),
+    )
     assert code == 2
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8"}
+        {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8"},
+        {"action": "recorded", "id": 3},
     ]
     assert "explore: no such schedule" in err
 

@@ -708,6 +708,43 @@ def _blocked(target, names):
     ]
 
 
+def _record(nova, stamp, directory, target, status, touched):
+    """Record one deploy (``deployments_record``): the row on success, or a ``not-recorded`` row.
+
+    A record that cannot be written never fails the deploy: the caller prints the reason and keeps
+    the exit code it already has.
+    """
+    owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
+    try:
+        answer = nova.call("deployments_record", body={
+            "bundle": stamp["bundle"],
+            "ownerGroup": owner,
+            "target": target,
+            "revision": stamp.get("revision"),
+            "repository": stamp.get("repository"),
+            "status": status,
+            "pipelines": touched,
+        })
+    except api.StardeltApiError as err:
+        return {"action": "not-recorded", "reason": str(err)}
+    return {"action": "recorded", "id": answer["id"]}
+
+
+def _touched(nova, specs, done, stale):
+    """What this deploy wrote, with each pipeline's namespace: the record's ``pipelines`` field."""
+    if not specs and not stale:
+        return []
+    spaces = {p["name"]: p["namespace"] for p in nova.call("pipelines_list")["pipelines"]}
+    touched = []
+    for spec in specs:
+        row = next((r for r in done if r["name"] == spec["name"] and r["action"] in ("created", "updated")), None)
+        if row is not None and spec["name"] in spaces:
+            touched.append({"namespace": spaces[spec["name"]], "name": spec["name"], "action": row["action"]})
+    for space, name in stale:
+        touched.append({"namespace": space, "name": name, "action": "deleted"})
+    return touched
+
+
 def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False):
     """Plan, then (unless ``dry_run``) deploy ``target``: ``(problems, results)``.
 
@@ -720,8 +757,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     directory (``provenance``), which Nova stamps on it. Every deploy is recorded once in Nova's deployment record
     (``deployments_record``: the bundle, the target, the commit, the caller and the pipelines it wrote); a deploy whose
     record cannot be written still succeeds and prints ``{"action": "not-recorded", "reason": …}``. A write that fails
-    after an earlier one returns the rows already written and the sentence, and records nothing — a deploy that did
-    not finish is not recorded as applied. Only ``--prune``
+    after an earlier one returns the rows already written and the sentence, and records a row with status `failed` —
+    a deploy that did not finish is not recorded as applied. Only ``--prune``
     removes a pipeline the bundle no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
     uncommitted changes (``-dirty``); a ``development`` target still records it. A target with ``drift: block``
     refuses, for a plan and a deploy alike, a pipeline someone changed
@@ -801,12 +838,24 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         try:
             answer = _publish(nova, directory, spec, dry_run=False)
         except apply.ApplyError as err:
+            try:
+                touched = _touched(nova, specs, done, [])
+            except (api.StardeltApiError, KeyError) as listing_err:
+                done.append({"action": "not-recorded", "reason": str(listing_err)})
+            else:
+                done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, str(err))], done
         specs[position] = spec = _pinned(spec, answer)
         done.append({"action": "published", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{spec['notebook']['name']}", "objectVersion": answer["objectVersion"]})
         try:
             verdict = apply.apply(nova, spec, dry_run=True)
         except apply.ApplyError as err:
+            try:
+                touched = _touched(nova, specs, done, [])
+            except (api.StardeltApiError, KeyError) as listing_err:
+                done.append({"action": "not-recorded", "reason": str(listing_err)})
+            else:
+                done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, str(err))], done
         if verdict.get("modified"):
             changed_by_hand.add(spec["name"])
@@ -838,8 +887,20 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         try:
             answer = apply.apply(nova, spec)
         except apply.ApplyError as err:
+            try:
+                touched = _touched(nova, specs, done, [])
+            except (api.StardeltApiError, KeyError) as listing_err:
+                done.append({"action": "not-recorded", "reason": str(listing_err)})
+            else:
+                done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, str(err))], done
         except api.StardeltApiError as err:
+            try:
+                touched = _touched(nova, specs, done, [])
+            except (api.StardeltApiError, KeyError) as listing_err:
+                done.append({"action": "not-recorded", "reason": str(listing_err)})
+            else:
+                done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{spec['name']}: {err}")], done
         done.append({
             **answer,
@@ -851,37 +912,28 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         try:
             nova.call("streams_put", path={"namespace": namespace, "name": spec["name"]}, body=spec)
         except api.StardeltApiError as err:
+            try:
+                touched = _touched(nova, specs, done, [])
+            except (api.StardeltApiError, KeyError) as listing_err:
+                done.append({"action": "not-recorded", "reason": str(listing_err)})
+            else:
+                done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{spec['name']}: {err}")], done
         done.append({"action": "created" if row["action"] == "would-create" else "updated", "name": spec["name"]})
     for namespace, name in stale:
         try:
             nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
         except api.StardeltApiError as err:
+            try:
+                deleted = {r["name"] for r in done if r["action"] == "deleted"}
+                touched = _touched(nova, specs, done, [s for s in stale if s[1] in deleted])
+            except (api.StardeltApiError, KeyError) as listing_err:
+                done.append({"action": "not-recorded", "reason": str(listing_err)})
+            else:
+                done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name})
-    spaces = {p["name"]: p["namespace"] for p in nova.call("pipelines_list")["pipelines"]} if specs else {}
-    touched = []
-    for spec in specs:
-        row = next((r for r in done if r["name"] == spec["name"] and r["action"] in ("created", "updated")), None)
-        if row is not None and spec["name"] in spaces:
-            touched.append({"namespace": spaces[spec["name"]], "name": spec["name"], "action": row["action"]})
-    for space, name in stale:
-        touched.append({"namespace": space, "name": name, "action": "deleted"})
-    owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
-    try:
-        answer = nova.call("deployments_record", body={
-            "bundle": stamp["bundle"],
-            "ownerGroup": owner,
-            "target": target,
-            "revision": stamp.get("revision"),
-            "repository": stamp.get("repository"),
-            "status": "applied",
-            "pipelines": touched,
-        })
-    except api.StardeltApiError as err:
-        done.append({"action": "not-recorded", "reason": str(err)})
-    else:
-        done.append({"action": "recorded", "id": answer["id"]})
+    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale)))
     return [], done
 
 

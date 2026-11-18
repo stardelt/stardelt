@@ -125,12 +125,34 @@ def test_a_write_that_fails_reports_the_sentence_and_what_was_already_written(tm
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(503, {"error": "the scheduler is not reachable"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 9, "bundle": "sales-etl", "target": "prod", "status": "failed"}),
     )
     assert code == 2
     assert err == "stardelt: prod: nightly: the scheduler is not reachable (HTTP 503)\n"
     assert "Traceback" not in err
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "created", "name": "load"},
+        {"action": "recorded", "id": 9},
+    ]
+
+
+def test_a_failed_deploy_whose_record_is_refused_still_exits_2_with_its_own_sentence(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, _ = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(503, {"error": "the scheduler is not reachable"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(503, {"error": "database is down"}),
+    )
+    assert code == 2
+    assert err == "stardelt: prod: nightly: the scheduler is not reachable (HTTP 503)\n"
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "load"},
+        {"action": "not-recorded", "reason": "database is down (HTTP 503)"},
     ]
 
 
@@ -144,6 +166,16 @@ def test_one_refusal_means_nothing_is_written_and_the_sentence_is_shown(tmp_path
     assert err == "stardelt: prod: load: you are not a member of the group sales\n"
     assert [json.loads(line)["name"] for line in out.splitlines()] == ["nightly"], "what passed is still reported"
     assert [method for method, _ in calls(session)] == ["GET", "POST", "POST"], "no create, no update"
+
+
+def test_a_refused_deploy_records_nothing(tmp_path):
+    make(tmp_path)
+    refused = {"ok": False, "errors": [{"message": "you are not a member of the group sales"}], "changes": [], "nextRuns": []}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=refused), FakeResponse(payload=UPDATE)
+    )
+    assert code == 2 and "load: you are not a member of the group sales" in err
+    assert "POST /api/deployments" not in [f"{method} {url}" for method, url in calls(session)]
 
 
 def test_deploy_dry_run_is_a_plan_and_a_bundle_problem_stops_before_any_request(tmp_path):
@@ -254,6 +286,8 @@ def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(503, {"error": "the scheduler is not reachable"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 9, "bundle": "sales-etl", "target": "prod", "status": "failed"}),
     )
     assert code == 2
     assert err == "stardelt: prod: old: the scheduler is not reachable (HTTP 503)\n"
@@ -261,7 +295,11 @@ def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(
     assert [json.loads(line) for line in out.splitlines()] == [
         {"action": "created", "name": "load"},
         {"action": "updated", "name": "nightly"},
+        {"action": "recorded", "id": 9},
     ]
+    recorded = session.calls[-1][2]["json"]
+    assert recorded["status"] == "failed"
+    assert recorded["pipelines"] == [{"namespace": "stardelt", "name": "load", "action": "created"}]
 
 
 def test_a_development_target_prunes_only_the_callers_own_pipelines(tmp_path):
