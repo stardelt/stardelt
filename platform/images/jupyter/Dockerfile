@@ -1,0 +1,168 @@
+# stardelt's Jupyter single-user image — what a person gets when they open
+# Notebooks in Nova.
+#
+# Upstream `scipy-notebook` plus the client libraries a warehouse notebook needs,
+# so a new user can query the platform without a `pip install` in the first cell:
+#   - trino            Python client for the warehouse (Trino → Lakekeeper)
+#   - pyspark-client  the Spark Connect client only (no Spark jars; notebooks
+#                      never run Spark locally)
+#   - pandas, pyarrow  DataFrames and Arrow; scipy-notebook ships pandas but not
+#                      pyarrow, which the Spark/Arrow path needs
+#   - jupyterlab-git   Git panel in JupyterLab, so notebooks live in the user's
+#                      own repository (never in the image)
+#   - nbgitpuller      One-click clone of a repository into the user's home,
+#                      for training sessions (hub link generator)
+#   - stardelt-jupyterlab  The stardelt Graphite/Silver themes (Graphite the
+#                      default) and the top bar with the link back to Nova, the
+#                      user and the runtime (stardelt-python#64)
+#
+# Deliberately absent: `jupyterlab-sql`. Its last release (0.3.3, 2020) predates
+# JupyterLab 4, and it has no way to carry the per-user token — it would ship a
+# SQL UI that cannot authenticate to the warehouse.
+#
+# No credentials and no connection string live here. The hub copies the
+# signed-in user's Keycloak access token into the pod as `TRINO_TOKEN` at spawn
+# (helm-values/jupyterhub.yaml, `20-notebook-identity`); `TRINO_URL` comes from
+# the same chart values.
+#
+# Framing. Nova frames the notebook, and a single-user server executes
+# arbitrary code, so Jupyter Server's `frame-ancestors` list is a deliberate
+# choice: exactly `'self'` plus Nova's origin, which the hub passes at spawn
+# from the identity contract. The config file documents the mechanism.
+# Python 3.13 (3.13.18 in the 2026-11-16 base image). Keep both on the same
+# Python minor: Spark Connect UDFs fail otherwise — the Spark image installs its
+# own CPython 3.13 for the workers and must stay on this minor (platform#369).
+# The single-user image's Python minor. `scripts/check-python-parity.sh` compares it with the
+# Spark image's worker Python on every `make lint`; both move together or not at all.
+ARG STARDELL_PYTHON_MINOR=3.13
+FROM quay.io/jupyter/scipy-notebook:2026-11-16@sha256:9d1087eda0dadd6e98763b346fcaa34aa10153067092fac39380669265c3c268
+
+USER ${NB_UID}
+
+# `--upgrade-strategy only-if-needed` keeps the base image's conda packages
+# unless one of these genuinely needs a newer version. The build fails here, not
+# in a user's first cell, if an import is broken.
+# The base image ships `jupyterlab-git` 0.50.1, and upgrading it inside the
+# same `pip install` breaks its prebuilt frontend: pip installs the new
+# dependency (`jupyterlab-git-core`) before it uninstalls the old package, and
+# that late uninstall deletes the new `package.json`, so `labextension list`
+# no longer shows `@jupyterlab/git`. Uninstall first, in its own invocation.
+# The Spark workers run these exact versions of pandas, pyarrow and numpy
+# (images/spark/Dockerfile installs them into its own Python 3.13): a pandas UDF
+# pickles pandas objects on this side and rebuilds them there (platform#369).
+# The Spark Connect client is on the SAME Spark line as the server image
+# (apache/spark:4.1.4): a newer client reads the server's settings in the old
+# spelling -- `spark.sql.session.localRelationSizeLimit` comes back as `3221225472b`
+# -- and every createDataFrame dies with `invalid literal for int()` (platform#399).
+# scripts/check-spark-parity.sh fails the build when the two drift apart.
+# The base stays `2026-11-16` and is already Python 3.13 (the same minor the
+# Spark workers run, platform#369). The notebook UI is still taken from PyPI --
+# `notebook`, `jupyterlab` and `jupyter_server` are pinned here and move
+# together. JupyterLab 4.6.6 requires `jupyter-server>=2.19,<3` (PyPI
+# metadata), which is why 2.21.1 is pinned beside it; `notebook` 7.6.5 requires
+# `jupyterlab>=4.6.6,<4.7`, which is why the base's 7.2.2 (which requires
+# `jupyterlab<4.3`) is replaced rather than kept.
+RUN python3 -m pip uninstall -y jupyterlab-git \
+    && python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
+        pandas==2.2.3 \
+        pyarrow==18.1.0 \
+        notebook==7.6.5 \
+        jupyterlab==4.6.6 \
+        jupyter_server==2.21.1 \
+        pyspark-client==4.1.4 \
+        jupyterlab-git==0.55.0 \
+        nbgitpuller==1.3.0 \
+        papermill==2.7.0 \
+        trino==0.340.0 \
+        ipywidgets==8.1.5 \
+        sidecar==0.8.1 \
+    && python3 -c "import pandas, pyarrow, pyspark, trino; print('pandas', pandas.__version__, '| pyarrow', pyarrow.__version__, '| pyspark', pyspark.__version__, '| trino', trino.__version__)" \
+    && python3 -c "import jupyterlab_git, nbgitpuller; print('jupyterlab-git', jupyterlab_git.__version__, '| nbgitpuller', nbgitpuller.__version__)" \
+    && python3 -c "import papermill; print('papermill', papermill.__version__)" \
+    && python3 -c "import ipywidgets, sidecar; print('ipywidgets', ipywidgets.__version__, '| sidecar', sidecar.__version__)" \
+    && python3 -c "import jupyterlab, jupyter_server, notebook; print('notebook', notebook.__version__, '| jupyterlab', jupyterlab.__version__, '| jupyter_server', jupyter_server.__version__)" \
+    && git --version \
+    && { jupyter labextension list 2>&1 | tee /tmp/labext.txt | grep -i '@jupyterlab/git' || { echo '--- full labextension list ---'; cat /tmp/labext.txt; exit 1; }; } \
+    && jupyter server extension list 2>&1 | grep -i 'nbgitpuller'
+
+# `stardelt-jupyterlab` (stardelt-python#64): the `stardelt Graphite` (default)
+# and `stardelt Silver` themes, plus the top bar with the link back to Nova, the
+# user name and the runtime label, and the **Publish** button with the
+# `parameters` cell command (0.2.0). Installed from the `jupyterlab-v0.2.0`
+# release wheel; the labextension check fails the build here, not in a user's
+# first cell. The overrides file is what makes Graphite the theme a server opens
+# with: JupyterLab reads the selected theme from the settings directory, not
+# from the wheel.
+#
+# `STARDELT_RUNTIME` is the platform release the image belongs to, shown in the
+# top bar; `make build-jupyter-image` passes the current year.month and the
+# default keeps a bare `docker build` working. `STARDELT_NOVA_URL`, the link
+# target, comes from the hub's spawn environment (singleuser.extraEnv), not from
+# the image.
+ARG STARDELT_JUPYTERLAB_WHEEL=https://github.com/stardelt/stardelt-python/releases/download/jupyterlab-v0.2.0/stardelt_jupyterlab-0.2.0-py3-none-any.whl
+ARG STARDELT_RUNTIME=dev
+ENV STARDELT_RUNTIME=${STARDELT_RUNTIME}
+RUN python3 -m pip install --no-cache-dir "${STARDELT_JUPYTERLAB_WHEEL}" \
+    && jupyter labextension list > /tmp/labext-stardelt.txt 2>&1 \
+    && { grep -q '@stardelt/jupyterlab' /tmp/labext-stardelt.txt || { echo '--- full labextension list ---'; cat /tmp/labext-stardelt.txt; exit 1; }; } \
+    && mkdir -p "${CONDA_DIR}/share/jupyter/lab/settings" \
+    && printf '%s\n' '{ "@jupyterlab/apputils-extension:themes": { "theme": "stardelt Graphite" } }' \
+         > "${CONDA_DIR}/share/jupyter/lab/settings/overrides.json"
+
+# Pristine copy of the quickstart. The spawner's postStart hook copies missing
+# notebooks into the user's home (`cp -n`), so edits survive a restart and a
+# newer image replaces the source without touching the user's copy.
+COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
+
+# The stardelt notebook helper (`import stardelt`: sql, write_df, publish,
+# spark, and the connection() stub) has its own repository
+# (stardelt/stardelt-python) and is installed here as a **pinned release**.
+# Pure Python, MIT, versioned and tested there; the platform consumes one
+# release of it (platform#417).
+#
+# Pinned by commit SHA, not by tag: a moving tag is not an upgrade path — the
+# same rule the image pins follow (scripts/pin-image.sh). The SHA below is the
+# v0.4.1 release
+# (https://github.com/stardelt/stardelt-python/releases/tag/v0.4.1): it carries
+# `stardelt.notebook` (the native `spark` and `display`), the publish source
+# header (`X-Stardelt-Source`, the hand publish and a bundle deploy report the
+# notebook's commit) and a failed deploy that records a `failed` row. It reports
+# version 0.4.1.
+#
+# The Makefile holds the pin (STARDELT_LIB_REF) and passes it as a build arg;
+# scripts/check-stardelt-pin.sh fails the build when this default and the
+# Makefile's ref disagree. Installed rather than copied so every notebook
+# imports it with no sys.path tweak; the import check fails the build here, not
+# in a user's first cell.
+ARG STARDELT_LIB_REF=17a262fc5ff7caee24165b361192d4f0fb2a0a9a
+RUN python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
+        "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@${STARDELT_LIB_REF}" \
+    && python3 -c "import stardelt; print('stardelt', stardelt.__version__)" \
+    && python3 -c "import stardelt.notebook_run; print('stardelt.notebook_run: the notebook task wrapper is installed')" \
+    && python3 -c "import sql; print('jupysql', sql.__version__)"
+
+# `%sql` in the first cell (stardelt-nova#288): the `jupyter` extra above brings JupySQL, and this
+# system IPython config loads the library's magic into every kernel. JupySQL's usage statistics
+# stay off even if somebody imports it without the magic.
+ENV PLOOMBER_STATS_ENABLED=false
+COPY ipython_config.py /usr/local/etc/ipython/ipython_config.py
+# The build fails here, not in a user's first cell, when the config is not honoured.
+RUN python3 -c "from IPython.terminal.ipapp import TerminalIPythonApp as A; a = A(); a.initialize(['--no-banner']); assert {'stardelt.sqlmagic', 'stardelt.notebook'} <= set(a.shell.extension_manager.loaded)"
+
+# The single-user server's framing policy (Nova's origin, passed at spawn) —
+# see the file's docstring for why this exists and what happens without it.
+COPY jupyter_server_config.py /usr/local/etc/jupyter/jupyter_server_config.py
+
+# The demo's shop bundle, baked in (stardelt-platform#1101). The public demo's
+# notebook must not depend on a network clone at spawn: once a visitor has no
+# public egress, the clone fails silently and the demo loses its bundle. Pinned
+# by commit, like the library above; the archive is public, no credential.
+ARG STARDELT_DEMOS_REF=17acac27b896c0f776822c7037983e45cefff52c
+USER root
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/stardelt/stardelt-demos/archive/${STARDELT_DEMOS_REF}.tar.gz', '/tmp/demos.tar.gz')" \
+    && mkdir -p /opt/stardelt \
+    && tar -xzf /tmp/demos.tar.gz -C /opt/stardelt \
+    && mv "/opt/stardelt/stardelt-demos-${STARDELT_DEMOS_REF}" /opt/stardelt/stardelt-demos \
+    && test -f /opt/stardelt/stardelt-demos/examples/shop-bundle/bundle.yaml \
+    && rm /tmp/demos.tar.gz
+USER ${NB_UID}

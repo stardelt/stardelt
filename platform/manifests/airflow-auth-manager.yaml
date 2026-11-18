@@ -1,0 +1,72 @@
+# The Airflow auth manager the API server runs (platform#1047).
+#
+# The FAB provider only issues `/auth/token` JWTs when FAB's AUTH_TYPE is AUTH_DB
+# or AUTH_LDAP (`FabAuthManager.create_token`), and this platform runs
+# AUTH_TYPE=AUTH_OAUTH so people sign in through Keycloak. That gate is about the
+# interactive login form, not about the service users the platform provisions, so
+# a stock FabAuthManager lets nobody exchange a username and password for a token:
+# `nova-api` and `admin` both get 401 from Airflow, and Nova renders that as
+# "the scheduler did not answer" and "Could not read runs".
+#
+# `stardelt_fab_auth.py` lets the token endpoint check a local password for the
+# service users named in `STARDELT_TOKEN_USERS` (default `nova-api`) while people
+# sign in through OIDC. FAB stores the hash of an empty password for a user it
+# registers through OAuth, so the empty-password check and the allow-list both stay.
+#
+# The api-server mounts this ConfigMap at /opt/airflow/stardelt-auth
+# (helm-values/airflow.yaml, apiServer.extraVolumes/extraVolumeMounts and env).
+# Bump the `-v2` suffix when the module changes: a ConfigMap edit alone does not
+# roll the pod, while a new volume name does.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-auth-manager-v2
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt, stardelt.io/managed-by: platform }
+data:
+  stardelt_fab_auth.py: |
+    """The Airflow auth manager stardelt runs: FAB users for the API, Keycloak for people.
+
+    platform#1047. `FabAuthManager.create_token` asks the FAB user store for a
+    password only when FAB's AUTH_TYPE is AUTH_DB or AUTH_LDAP. The API server
+    runs AUTH_TYPE=AUTH_OAUTH so people sign in through Keycloak, so with the
+    stock manager no username and password can be exchanged for a token -- not
+    even for the service users the platform itself creates (`nova-api` for Nova,
+    `admin` from the airflow-admin Secret). Nova then sees 401 on every call and
+    shows "the scheduler did not answer"; the runs page shows "Could not read
+    runs" from the same 502.
+    """
+
+    import os
+    from typing import Any
+
+    from airflow.providers.fab.auth_manager.fab_auth_manager import FabAuthManager
+    from flask_appbuilder.const import AUTH_DB, AUTH_LDAP
+
+
+    class StardeltFabAuthManager(FabAuthManager):
+        """FAB auth manager that also exchanges a local password for an API token."""
+
+        def create_token(self, headers: dict[str, str], body: dict[str, Any]):
+            # Break-glass (STARDELT_AUTH_LOCAL_ONLY=1) runs AUTH_DB: the stock manager is right then.
+            if self.security_manager.auth_type in (AUTH_DB, AUTH_LDAP):
+                return super().create_token(headers, body)
+            username = body.get("username")
+            password = body.get("password")
+            if (
+                not isinstance(username, str)
+                or not isinstance(password, str)
+                or not username
+                or not password.strip("\x00")
+            ):
+                raise ValueError("Username and password must be provided")
+            # Only the platform's service users may trade a password for a token. A person
+            # signs in through OIDC; FAB stores the hash of an empty password for them.
+            allowed = {
+                name.strip()
+                for name in os.environ.get("STARDELT_TOKEN_USERS", "nova-api").split(",")
+                if name.strip()
+            }
+            if username not in allowed:
+                return None  # the route answers 401, as for a wrong password
+            return self.security_manager.auth_user_db(username, password, rotate_session_id=False)

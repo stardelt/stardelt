@@ -1,0 +1,54 @@
+# The dev seed's baseline catalogs (platform#309, layout decision platform#365; revised 2026-11-03
+# after platform#495): `warehouse` is the platform's technical/system catalog — administrators
+# only — and `shared` is the one shared area for every signed-in person. Domains create their own
+# catalogs (the use-case pattern: `mobility`, `retail`); there are no default bronze/silver/gold
+# layers, because a default layer is a shared write area, not a tenant boundary.
+#
+# This file is the baseline, not something every seed run applies: `make
+# seed-dev-access YES=1` creates groups, people and their Secret and leaves the Catalog
+# objects alone. Only `SEED_CATALOGS=1 make seed-dev-access YES=1` applies
+# this file (that is how a deleted baseline catalog comes back). The
+# differentiated permission fixtures — `finance`, `product`, `sandbox` — are opt-in
+# and live in `dev/seed/fixtures/permission-fixtures.yaml`:
+#
+#   make seed-permission-fixtures YES=1
+#   make unseed-permission-fixtures YES=1
+#
+# Verbs are groups, never people (design/multitenant-catalogs.md §5.1–§5.3);
+# `browse` is also the ability to address a catalog, `write` is Lakekeeper's
+# `modify`, `create` is `create_namespace`, and the owner group gets
+# `manage_grants` only — ownership is not a data verb (design §5.3).
+#
+# `lakehouseRef.name: main` is the Lakehouse every install has (the operator's
+# one-per-namespace rule).
+apiVersion: stardelt.io/v1alpha1
+kind: Catalog
+metadata:
+  name: warehouse
+  namespace: stardelt
+spec:
+  lakehouseRef: { name: main }
+  displayName: "Warehouse"
+  description: "The platform's technical/system catalog (Lakekeeper's warehouse of the same name). Administrators only: it holds platform metadata, not tenant data."
+  owner: stardelt-admins
+  grants:
+    - { group: stardelt-admins, verb: browse }
+    - { group: stardelt-admins, verb: select }
+    - { group: stardelt-admins, verb: write }
+    - { group: stardelt-admins, verb: create }
+---
+apiVersion: stardelt.io/v1alpha1
+kind: Catalog
+metadata:
+  name: shared
+  namespace: stardelt
+spec:
+  lakehouseRef: { name: main }
+  displayName: "Shared"
+  description: "One shared catalog for everyone; administrators own it. Not tenant-isolated by design — anyone may read and write here."
+  owner: stardelt-admins
+  grants:
+    - { group: stardelt-users, verb: browse }
+    - { group: stardelt-users, verb: select }
+    - { group: stardelt-users, verb: write }
+    - { group: stardelt-users, verb: create }

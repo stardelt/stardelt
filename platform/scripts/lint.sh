@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Lint the repository's shell scripts.
+#
+#   make lint
+#
+# Step 1 — `bash -n`: parse-only syntax check of every shell script under scripts/ and dev/.
+# Step 2 — `shellcheck`: same file set, only when ShellCheck is installed, so the target also
+#          works on a bare checkout. CI installs ShellCheck, so there it always runs.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# Discover shell scripts by .sh suffix or by a bash/sh shebang on the first line, so a script
+# added without a suffix is still checked and a README code block is not. Sorted for stable
+# output across machines.
+mapfile -t scripts < <(
+  find scripts dev -type f -print0 | while IFS= read -r -d '' file; do
+    case "$file" in
+      *.sh) printf '%s\n' "$file" ;;
+      *)
+        if head -n 1 -- "$file" | grep -qE '^#!.*\b(bash|sh|dash|ksh|zsh)\b'; then
+          printf '%s\n' "$file"
+        fi
+        ;;
+    esac
+  done | sort -u
+)
+
+if [ "${#scripts[@]}" -eq 0 ]; then
+  echo "lint: no shell scripts found under scripts/ or dev/" >&2
+  exit 1
+fi
+
+echo "› bash -n: ${#scripts[@]} script(s)"
+for script in "${scripts[@]}"; do
+  bash -n "$script"
+done
+
+if command -v shellcheck >/dev/null 2>&1; then
+  echo "› shellcheck $(shellcheck --version | awk '/^version:/ {print $2}')"
+  shellcheck "${scripts[@]}"
+else
+  echo "› shellcheck not installed — skipping (install ShellCheck for the full check)"
+fi
+
+# Cross-file pins that a single file cannot check: the notebook image the task pods run must be
+# the image the single-user pods run (platform#316).
+echo "› script: check-notebook-image-pin"
+bash scripts/check-notebook-image-pin.sh
+
+# The extra Trino catalogs are rendered from helm-values/catalog.properties.tmpl, which must stay
+# the identity overlay's `warehouse` block (platform#308): drift only shows up as a property
+# missing in one catalog at query time.
+echo "› script: check-catalog-template"
+bash scripts/check-catalog-template.sh
+
+# The policy paths the scripts ask and the paths Trino is configured with are one value
+# (platform#359): a replay that asks /v1/data/trino/batch while the engine asks
+# /v1/data/stardelt/batch would pass for the wrong reason.
+echo "› script: check-bridge-uri"
+bash scripts/check-bridge-uri.sh
+
+# The notebook's Spark Connect client and the platform's Spark server are one Spark
+# line (platform#399): a newer client mis-parses the server's settings and every
+# createDataFrame in every notebook dies with an opaque int() error.
+echo "› script: check-spark-parity"
+bash scripts/check-spark-parity.sh
+
+# The notebook's Python and the Spark workers' Python are one minor (platform#369):
+# the UDF pickle is only compatible within a minor.
+echo "› script: check-python-parity"
+bash scripts/check-python-parity.sh
+
+# The operator's Spark runtime catalogue and the Makefile path's spark-defaults.conf are one
+# set of settings (internal#161 slice 4a): the difference between them is exactly the block
+# SparkConnect owns, and check-spark-runtimes.sh names any other drift.
+echo "› script: check-spark-runtimes"
+bash scripts/check-spark-runtimes.sh
+
+# The notebook image installs the stardelt library from a pinned release
+# (platform#417): the Dockerfile's pin and the Makefile's must be the same
+# commit, and a commit — a moving tag is not an upgrade path.
+echo "› script: check-stardelt-pin"
+bash scripts/check-stardelt-pin.sh
+
+# The create-user Job makes the read-only `nova-api` user Nova signs in to Airflow with
+# (platform#476): a clean install without it answers 401 on every Pipelines call.
+echo "› script: check-airflow-users"
+bash scripts/check-airflow-users.sh
+
+# Per-group Superset roles scope dashboards and databases (platform#494).
+echo "› script: check-superset-roles"
+bash scripts/check-superset-roles.sh
+
+# OpenBao group policies sync (platform#483).
+echo "› script: check-openbao-groups"
+bash scripts/check-openbao-groups.sh
+
+echo "lint: OK"

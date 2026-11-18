@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "if": {
+    "required": ["superset"],
+    "properties": { "superset": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } }
+  },
+  "then": {
+    "required": ["airflow"],
+    "properties": {
+      "airflow": {
+        "required": ["enabled"],
+        "properties": {
+          "enabled": {
+            "const": false,
+            "description": "superset.enabled and airflow.enabled cannot both be true in one release: the Superset chart's bundled Redis and the Airflow chart define redis.serviceAccountName with different signatures. Enable one here and install the other as its own release (docs/install.md, 'Heavy components')."
+          }
+        }
+      }
+    }
+  }
+}

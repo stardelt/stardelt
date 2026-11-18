@@ -1,0 +1,169 @@
+# SeaweedFS — S3-compatible storage for the MVP.
+# Chart: seaweedfs/seaweedfs 4.25.1, appVersion 4.25.
+#
+# S3-compatible object store for the lakehouse. Backs Iceberg tables via
+# Trino + Lakekeeper.
+
+image:
+  tag: "4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+
+master:
+  replicas: 1
+  data:
+    type: persistentVolumeClaim
+    size: 1Gi
+  # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+  # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+  logs:
+    type: emptyDir
+  defaultReplication: "000"
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits:   { cpu: "1",   memory: "256Mi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+
+volume:
+  replicas: 1
+  # PVC so the Iceberg data files survive pod restarts. emptyDir wipes on
+  # pod restart, which orphans the Iceberg metadata pointing at the files
+  # and surfaces as FileNotFoundException on Trino reads.
+  dataDirs:
+    - name: data
+      type: persistentVolumeClaim
+      size: 20Gi
+      # Volume slots. The chart's default (0 → auto-configure, 7 on Linux) is a trap
+      # on a small install: once the slots are used up, the master cannot create a
+      # volume for a *new* collection, and writes to a new bucket block forever —
+      # the client sees a hang, the master log says "failed to find writable volumes
+      # … Not enough data nodes found", and buckets created earlier keep working.
+      maxVolumes: 100
+  resources:
+    requests: { cpu: "200m", memory: "512Mi" }
+    limits:   { cpu: "2",    memory: "2Gi"  }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+
+filer:
+  replicas: 1
+  data:
+    type: persistentVolumeClaim
+    size: 1Gi
+  # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+  # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+  logs:
+    type: emptyDir
+  # The filer keeps the metadata of every S3 key in memory-mapped stores; at 256Mi it was OOM-killed in a
+  # loop on the dev cluster (platform#230). 512Mi is the value that held with S3 traffic and the admin UI.
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits:   { cpu: "1",   memory: "512Mi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+
+s3:
+  enabled: true
+  replicas: 1
+  # Reloader restarts the S3 gateway when its identities change (helm-values/reloader.yaml).
+  podAnnotations:
+    secret.reloader.stakater.com/reload: "seaweedfs-s3-config"
+  # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+  # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+  logs:
+    type: emptyDir
+  port: 8333
+  enableAuth: true
+  # The S3 identities come from Secret `seaweedfs-s3-config`, written by
+  # scripts/s3-secrets.sh from the same key pair as `stardelt-s3-creds`.
+  existingConfigSecret: seaweedfs-s3-config
+  createBuckets:
+    - name: lakehouse
+      anonymousRead: false
+    # Destination for the catalog's continuous backups
+    # (manifests/cnpg-backup-schedule.yaml).
+    - name: backups
+      anonymousRead: false
+  # platform#1219: the gateway holds ~1.44 Mi of live Go heap per Mi it serves (measured, a forced GC
+  # freed nothing), so one 2.89 GB Iceberg scan needs ~5.5 Gi and OOM-killed a 1Gi container after
+  # ~700 MB. Keep in step with chart/values.yaml and the operator's values/seaweedfs.yaml (D44).
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "2",    memory: "5.5Gi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+
+# The object store's own web UI for cluster administrators (buckets, users, policies, file browser),
+# decision D28. ClusterIP only: there is no ingress and none may be added; reach it with
+# `make seaweedfs-admin`. Its login is the generated Secret `seaweedfs-admin-ui` (scripts/s3-secrets.sh).
+# It can read and change storage identities and every object, so it is exactly as sensitive as `kubectl`.
+admin:
+  enabled: true
+  secret:
+    existingSecret: seaweedfs-admin-ui
+    userKey: user
+    pwKey: password
+  resources:
+    requests: { cpu: "20m", memory: "64Mi" }
+    limits:   { cpu: "500m", memory: "256Mi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}

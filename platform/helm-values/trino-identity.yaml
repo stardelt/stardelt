@@ -1,0 +1,444 @@
+# Trino authentication overlay — the platform's "one identity" rule applied to
+# the query engine (master spec §7). Applied on top of helm-values/trino.yaml by
+# `make trino` / `make install-identity` **only when the platform has an IdP**
+# (the `stardelt-identity` ConfigMap exists); without that ConfigMap Trino stays
+# on the development default, where anyone can submit SQL.
+#
+#   helm upgrade --install trino trino/trino --version <pin> \
+#     -f helm-values/trino.yaml -f helm-values/trino-identity.yaml
+#
+# What it enforces, tested against Trino 480:
+#
+#   * Every statement needs credentials. OAUTH2 accepts the caller's **own**
+#     Keycloak access token — the browser flow, trino-cli, JDBC, and Nova's
+#     forwarded `Authorization: Bearer` — and names the query
+#     `current_user = sub` (platform#311, the Keycloak user id) of the token's
+#     subject. The rest of the platform is keyed on that id too: the catalog's
+#     role assignees are `oidc~<sub>`, the OPA bridge looks a person up as
+#     `oidc~<sub>`, and the group file in ConfigMap `trino-group-file` lists
+#     ids (CronJob access-sync, scripts/access-sync-job.py, platform#312).
+#     Query history shows an opaque id instead of a name, which is the
+#     deliberate trade of the design (Nova renders the name from its own
+#     session).
+#     Trino trusts audience `trino` (its own client id) plus
+#     `http-server.authentication.oauth2.additional-audiences`; the realm's
+#     `aud-trino` mapper on client `nova` is what makes a Nova-issued token
+#     valid here (chart/files/keycloak-realm.json).
+#   * PASSWORD keeps machine clients (Superset) working from one service
+#     account; users never see a password prompt.
+#   * Impersonation (#310) lets that one service account act for a person —
+#     and only for a person: Superset sends the signed-in user's Keycloak `sub`
+#     as `X-Trino-User`, and the `impersonation` rule under `accessControl` is
+#     the only grant (UUID principals only; no admin, no service account).
+#   * Anonymous requests get 401 with no query id.
+#
+# TLS (platform#80) — the in-cluster hole this closes. Until this overlay grew a
+# `https` block, `allow-insecure-over-http=true` meant a plain-HTTP request ran
+# **only the insecure authenticator**, which trusts the caller-supplied
+# `X-Trino-User`: any pod could POST SQL to trino:8080 as anybody and the Service
+# answered 200. The ingress was protected only because nginx sets
+# `X-Forwarded-Proto`, which `process-forwarded` turns into a secure request.
+#
+#   * `server.config.https` starts a second listener on 8443 with the PKCS12
+#     keystore cert-manager writes (manifests/trino-tls.yaml: a namespace-local
+#     CA, not Let's Encrypt — an HTTP-01 certificate cannot cover
+#     `trino.stardelt.svc.cluster.local`). That is the endpoint in-cluster
+#     clients use: Nova and the notebook pods carry the user's own token to it.
+#   * `allow-insecure-over-http=false` refuses a plain-HTTP statement before any
+#     authenticator runs (403, no query id), so the insecure authenticator is
+#     unreachable.
+#   * The HTTP listener stays on 8080 for two things, neither of them a user
+#     path: workers talk to the coordinator over it (internal communication uses
+#     the shared secret and never the user authenticators), and the ingress still
+#     terminates Let's Encrypt TLS and forwards with X-Forwarded-Proto. Changing
+#     the public path is not needed to close the in-cluster one.
+#
+# Why the properties are split the way they are:
+#
+#   * `server.config.authenticationType` renders `http-server.authentication.type`
+#     on the coordinator only, and `server.config.authenticationType` containing
+#     PASSWORD makes the chart generate `password-authenticator.properties`
+#     pointing at /etc/trino/auth/password/password.db.
+#   * Everything else goes through `server.coordinatorExtraConfig`: the chart's
+#     `additionalConfigProperties` is rendered into the **worker** configmap too,
+#     and a worker rejects UI/OAuth2/HTTPS keys it does not bind (startup fails
+#     with "Configuration property … was not used"). `server.config.https` is
+#     coordinator-only in the chart, which is why the listener lives there while
+#     the keystore password — a coordinator-only property too — is in
+#     coordinatorExtraConfig.
+#   * `additionalConfigProperties` keeps only what the worker also binds:
+#     the forwarded-header switch and the internal-communication secret.
+
+# Catalog sign-in (platform#283, step 2 of the catalog turn-on): the Iceberg REST
+# catalog authenticates as the service client svc-catalog-trino with the
+# client-credentials grant and sends Lakekeeper a bearer token on every catalog call.
+# Lakekeeper validates that token since platform#285 and refuses an anonymous call.
+#
+# Why the whole `warehouse` catalog is repeated here instead of one line added to
+# helm-values/trino.yaml: Helm replaces a map value instead of merging it, and Trino
+# refuses to load a catalog with `iceberg.rest-catalog.security=OAUTH2` and no
+# credential ("OAuth2 requires a credential or token", OAuth2SecurityConfig). The base
+# values are also the `install-core` path, which has no IdP, no Secret and therefore no
+# credential — one line there would crash-loop Trino on a cluster without identity.
+# Keep this block identical to the base one apart from the three OAuth2 lines.
+#
+# Scope: Iceberg requests `scope=catalog` by default, and this realm rejects it —
+# `400 invalid_scope: Invalid scopes: catalog` — just as it rejects `lakekeeper`: the
+# realm has a client scope for neither, so the exchange never returns a token and the
+# catalog cannot load (seen live on 2026-10-20). `openid` is a default scope of every
+# client in the realm and is accepted for client credentials (verified against the
+# live realm), and the token still carries `aud=lakekeeper` because client
+# `svc-catalog-trino` has an `aud-lakekeeper` audience mapper — the audience is what
+# the catalog will check, and the mapper puts it on the token whatever the scope is.
+catalogs:
+  warehouse: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://lakekeeper.stardelt.svc.cluster.local:8181/catalog
+    iceberg.rest-catalog.warehouse=warehouse
+    iceberg.rest-catalog.vended-credentials-enabled=false
+    # The caller's own identity: client id and secret come from Secret
+    # svc-catalog-trino via the coordinator's and worker's env (helm-values/trino.yaml);
+    # each Trino JVM does its own client-credentials exchange and refreshes the token
+    # before it expires. The endpoint is the realm's token endpoint, built from
+    # ConfigMap stardelt-identity's issuerUrl — no secret and no token in this file.
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.server-uri=${ENV:CATALOG_TOKEN_URL}
+    iceberg.rest-catalog.oauth2.credential=${ENV:CATALOG_CLIENT_ID}:${ENV:CATALOG_CLIENT_SECRET}
+    # Without this Iceberg asks for `scope=catalog`, which this realm does not have.
+    iceberg.rest-catalog.oauth2.scope=openid
+    fs.s3.enabled=true
+    s3.endpoint=http://seaweedfs-s3.stardelt.svc.cluster.local:8333
+    s3.region=us-east-1
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:S3_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:S3_SECRET_KEY}
+    # Single-replica SeaweedFS volume server can't sustain Trino's default
+    # parallel HTTP range requests (broken pipe / connection reset). Throttle
+    # both connection pool and the Iceberg metadata enumeration threads.
+    s3.max-connections=16
+    iceberg.split-manager-threads=4
+    iceberg.metadata.parallelism=2
+    # Worker-local file-system cache for object-store reads (platform#134).
+    # Trino 483+ (platform#1002): the directories, size and TTL moved out of the
+    # catalog into the node-level cache manager in helm-values/trino.yaml; a
+    # catalog only turns caching on. The measured win is recorded there.
+    fs.cache.enabled=true
+
+server:
+  config:
+    # PASSWORD first: tried before OAUTH2, so a Basic header from a service
+    # account is not parsed as a bearer token.
+    authenticationType: "PASSWORD,OAUTH2"
+    # In-cluster TLS listener. The keystore is mounted below from
+    # Secret trino-coordinator-tls; `make trino` waits for the Certificate to be
+    # Ready before it runs this upgrade, so the file exists on first start.
+    https:
+      enabled: true
+      port: 8443
+      keystore:
+        path: /etc/trino/tls/keystore.p12
+  coordinatorExtraConfig: |
+    http-server.https.keystore.key=${ENV:TRINO_TLS_KEYSTORE_PASSWORD}
+    # Refuse authentication over plain HTTP (see the header). Trino defaults this
+    # to false as soon as HTTPS is enabled, but stating it keeps the property that
+    # closes the hole visible to a reader of this file.
+    http-server.authentication.allow-insecure-over-http=false
+    web-ui.authentication.type=oauth2
+    # The web UI is Trino's redesigned UI at /ui; the previous UI stays off (default since 483).
+    http-server.authentication.oauth2.issuer=${ENV:TRINO_OIDC_ISSUER}
+    http-server.authentication.oauth2.client-id=trino
+    http-server.authentication.oauth2.client-secret=${ENV:TRINO_CLIENT_SECRET}
+    # The Keycloak user id (platform#311): the catalog's role assignees, the
+    # bridge's `adminUsers` and the group file are all keyed on it, and the
+    # group file has been written by access-sync by `sub` since platform#312
+    # (the rollback overlay helm-values/trino-identity-file-only.yaml keeps it
+    # and only takes the bridge out of the chain).
+    http-server.authentication.oauth2.principal-field=sub
+    http-server.authentication.oauth2.scopes=openid
+    # Validate access tokens locally against the realm JWKS (`exp`, `iss`, `aud`)
+    # instead of asking Keycloak's /userinfo, which would accept any valid token
+    # from the realm regardless of audience and would put a network round trip in
+    # front of every query.
+    http-server.authentication.oauth2.oidc.use-userinfo-endpoint=false
+    # Query guards (platform#54): coordinator-only, so they live here and not
+    # in additionalConfigProperties (rendered into the worker too). Restates
+    # helm-values/trino.yaml's coordinatorExtraConfig — Helm replaces strings,
+    # so without these two lines the overlay would drop them.
+    query.max-execution-time=10m
+    query.max-run-time=15m
+    # Two system access controls at once (platform#311, Trino 480): the file
+    # rules below (query visibility, table guards, the impersonation grant) and
+    # the OPA bridge over the catalog (who may browse/read/write which catalog,
+    # from the `Catalog` objects' grants). Trino loads every file in this list
+    # and a statement must be allowed by all of them, so the bridge can only
+    # remove access, never hand out what the file rules refuse.
+    #
+    # `access-control.properties` is the chart's own file (accessControl.type:
+    # configmap below renders it, `access-control.name=file` +
+    # `security.config-file=/etc/trino/access-control/rules.json`);
+    # `access-control-opa.properties` is the file added under
+    # coordinator.additionalConfigFiles. Both land in the coordinator ConfigMap,
+    # inside the directory mounted at /etc/trino.
+    #
+    # Fail-closed by design: if the bridge is unreachable every statement is
+    # denied. `make verify-catalog-permissions` and `make bridge-replay` are the
+    # gates `make catalog-enforce` runs before it applies this; the documented
+    # rollback is `make catalog-enforce-rollback`.
+    access-control.config-files=/etc/trino/access-control.properties,/etc/trino/access-control-opa.properties
+
+# The file rules: query visibility, the three engine catalogs, table guards.
+# File-based system access control (Trino 480, no custom plugin): rule order
+# matters, first match wins, and a section that exists denies every entry no
+# rule matches — which is why each section here ends with a catch-all.
+#
+# `queries` (platform#125) is query visibility — owner-only by default, admins
+# exempted. Members of `stardelt-admins` get everything; everyone else gets
+# `execute` only. Viewing and killing one's *own* queries needs no rule
+# (built-in: users always may). The `superset` service account falls in the
+# second rule and keeps exactly what it needs. The catch-all is load-bearing:
+# with no matching rule, query management is *denied*, so omitting it breaks
+# every query on the cluster.
+#
+# `catalogs` (platform#363) reserves the three catalogs that belong to the
+# engine, not to the platform, for administrators: `system` (Trino's metadata:
+# `runtime.nodes`, `runtime.queries`, `metadata.*`, `jdbc.*`), and the sample
+# connectors `tpch` and `tpcds`. Nobody's data lives there, so no grant can
+# express "who may read them"; the platform's catalogs are `warehouse`,
+# `shared`, and whatever a `Catalog` object creates.
+# Trino hides a catalog from `SHOW CATALOGS` when a person's catalog access is
+# `none`, and refuses a statement against it with `Access Denied: Cannot access
+# catalog …` — so an ordinary person no longer sees the three in the SQL editor,
+# Nova's catalog switcher, Superset or a notebook, and gets an engine refusal
+# instead of a query. Administrators keep all three (rule 1, `allow: all`),
+# which is where the documented smoke test `SELECT * FROM system.runtime.nodes`
+# now lives (`CALL system.runtime.kill_query` needs the bridge's
+# `KillQueryOwnedBy` rule, platform#398.). This layer and not the bridge
+# is the one that can do it: the bridge lets every catalog it does not manage
+# through (`allowUnmanagedCatalogs`, helm-values/lakekeeper.yaml), and both
+# authorizers must allow a statement, so a `none` here is the deny.
+# Rule 3 is load-bearing for the same reason as above: once a `catalogs` section
+# exists, a catalog no rule matches is DENIED, so without the catch-all every
+# managed catalog would disappear for everyone. It grants `all`, which is what
+# Trino grants when there is no `catalogs` section at all, so the managed
+# catalogs are unchanged and the bridge/Lakekeeper decides access to them.
+# Denying a catalog does NOT deny built-in functions (they resolve from
+# `system.builtin` without a catalog access check): `SELECT abs(-1)`, `now()`
+# and `SHOW FUNCTIONS` were part of the acceptance battery (platform#363).
+#
+# `tables` (platform#181) keeps cluster-wide engine internals away from
+# ordinary users even where a catalog is allowed: system.runtime.tasks lists
+# the tasks of *other* users' queries, and system.runtime.transactions and
+# .optimizer_rule_stats are cluster-wide too. Rule 1 lets administrators
+# through, rule 2 denies those three tables (`privileges: []`), rule 3 is the
+# catch-all — same load-bearing argument, and it grants what Trino grants when
+# there is no `tables` section, so data access is unchanged (the catalog and the
+# bridge decide that). `system.runtime.queries` stays available under the
+# `queries` rules (own queries only) for anyone the `catalogs` rule admits — an
+# administrator; Nova's query log reads its own store. The file holds no
+# `schemas`/`functions` section: with first-match-wins + default deny, anything
+# more risks denying data access, and the bridge already answers those.
+#
+# `rules` is a map of filename -> content (not a string): the chart ranges
+# over it into ConfigMap trino-access-control-volume-coordinator, mounted at
+# /etc/trino/access-control, with `security.config-file` pointing at it (see
+# the coordinator ConfigMap the chart renders). Committed: it names only the
+# group, no usernames. The membership itself lives in ConfigMap
+# `trino-group-file`, written by CronJob access-sync (platform#312) and never
+# committed.
+#
+# `impersonation` (#310) is what lets Superset act for a person instead of for
+# its service account: Superset keeps authenticating as `superset` (PASSWORD)
+# and sends the signed-in person as `X-Trino-User`, and this rule is the one
+# place that grants it. A rule list denies by default, so a name that does not
+# match stays refused — `select current_user` still works for `superset` itself
+# (no impersonation happens when the names are equal) and every other account
+# is denied. The pattern is deliberately narrow: only UUID-shaped principals,
+# i.e. a Keycloak `sub` — which is exactly what Superset sends and what Trino
+# itself uses as the principal after the identity turn-on. `admin`,
+# `stardelt-admins` and the service account itself cannot be impersonated
+# through it.
+accessControl:
+  type: configmap
+  rules:
+    rules.json: |-
+      {
+        "catalogs": [
+          {"group": "stardelt-admins", "allow": "all"},
+          {"catalog": "(system|tpch|tpcds)", "allow": "none"},
+          {"allow": "all"}
+        ],
+        "queries": [
+          {"group": "stardelt-admins", "allow": ["execute", "kill", "view"]},
+          {"allow": ["execute"]}
+        ],
+        "impersonation": [
+          {"original_user": "superset", "new_user": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "allow": true}
+        ],
+        "tables": [
+          {"group": "stardelt-admins", "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]},
+          {"catalog": "system", "schema": "runtime", "table": "(tasks|transactions|optimizer_rule_stats)", "privileges": []},
+          {"privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]}
+        ]
+      }
+
+initContainers:
+  coordinator:
+    - name: wait-for-idp
+      image: trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f
+      imagePullPolicy: IfNotPresent
+      # Pod Security `restricted` (platform#1190 follow-up, platform#1096 question 5): an init
+      # container inherits nothing from the chart's pod/container keys, so it needs its own block.
+      # The Trino image's user is already non-root; the pod-level runAsNonRoot covers admission.
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+      env:
+        - name: TRINO_OIDC_ISSUER
+          valueFrom:
+            configMapKeyRef:
+              name: stardelt-identity
+              key: issuerUrl
+              optional: true
+      command:
+        - /usr/bin/bash
+        - -c
+        - |
+          until /usr/bin/curl -fsS --max-time 5 \
+            "$TRINO_OIDC_ISSUER/.well-known/openid-configuration" >/dev/null; do
+            echo "waiting for $TRINO_OIDC_ISSUER"
+            sleep 3
+          done
+
+coordinator:
+  # The PKCS12 keystore cert-manager writes into Secret trino-coordinator-tls
+  # (key keystore.p12). The secret is mounted as a directory — a subPath file
+  # mount fails at container start when the image has no /etc/trino/tls yet
+  # ("not a directory" from runc), and the directory mount also lets the kubelet
+  # refresh the certificate after a renewal. Alongside the keystore the mount
+  # carries tls.key, which is the same key material the keystore already holds —
+  # no additional capability inside the pod. A certificate renewal does not
+  # restart the coordinator on its own (that would kill running queries), so pick
+  # it up with `kubectl -n stardelt rollout restart deploy/trino-coordinator`
+  # (cert-manager renews 30 days before expiry, so there is no hurry).
+  secretMounts:
+    - name: trino-tls
+      secretName: trino-coordinator-tls
+      path: /etc/trino/tls
+  # Group provider (platform#125): Trino cannot read groups from the OIDC
+  # token, so the file provider maps the principal -> groups. The file
+  # itself comes from ConfigMap `trino-group-file` (one `group:user,...` line
+  # per group), written by CronJob access-sync (platform#312) from the live
+  # realm: the `stardelt-admins` line the query rules read, and one `wh-<name>`
+  # line per SqlWarehouse, which is what the resource-group selectors match.
+  # Its strings are Keycloak user ids, matching `principal-field=sub`
+  # (platform#311).
+  # `file.refresh-period` picks a remounted file up with no restart; a
+  # coordinator restart (which drops running queries — pick a quiet moment) is
+  # only needed when this values file itself changes.
+  additionalConfigFiles:
+    # Resource groups (platform#313): the file manager, pointing at the file
+    # CronJob access-sync renders from the `SqlWarehouse` objects (platform#312)
+    # into ConfigMap `trino-warehouses`, mounted below at /etc/trino/warehouses.
+    #
+    # Why the file is ours and not the chart's: trino 1.45.0 renders
+    # `resource-groups.properties` only for `resourceGroups.type: configmap|properties`,
+    # and in both shapes it owns the JSON too (the `configmap` type points at
+    # /etc/trino/resource-groups/resource-groups.json, its own ConfigMap). Our file is
+    # written by the access-sync CronJob, so `resourceGroups` stays unset — with the
+    # chart's default `{}` it renders no file and no volume, verified with
+    # `helm template` — and the properties are one more file in the coordinator's
+    # config directory, exactly like `group-provider.properties` below.
+    #
+    # The file manager reads the file once at startup and never again (spike
+    # platform#273 R6), so a changed class needs a new coordinator: the pod template
+    # carries `configmap.reloader.stakater.com/reload: "trino-warehouses"` in
+    # helm-values/trino.yaml, and a coordinator restart ends the running queries.
+    # Only the coordinator gets this file: `resource-groups.*` is a coordinator
+    # property and a worker refuses keys it does not bind.
+    resource-groups.properties: |
+      resource-groups.configuration-manager=file
+      resource-groups.config-file=/etc/trino/warehouses/resource-groups.json
+    group-provider.properties: |
+      group-provider.name=file
+      file.group-file=/etc/trino/groups/groups.txt
+      file.refresh-period=30s
+    # The bridge authorizer file the switch (platform#311) loads through
+    # `access-control.config-files` in coordinatorExtraConfig above — before
+    # the switch it is mounted but not listed, so Trino ignores it (a
+    # properties file no one lists has no effect). Turning the bridge on
+    # before the engine principal is a `sub` would deny every query.
+    #
+    # The catalog's access control (platform#311): Trino asks the OPA bridge —
+    # a sidecar of the catalog on Service `lakekeeper-opa`, which answers from
+    # Lakekeeper's OpenFGA grants — before every catalog, schema, table, column
+    # and function operation. Trino 480 picks a plugin by
+    # `access-control.name`; the pair of URIs is the allow endpoint (one
+    # question) and the batch endpoint (a list of questions), both implemented
+    # by the bridge. The property is `batched-uri` — `opa.batch-uri` is not a
+    # Trino property and would be ignored, leaving the plugin to fail on the
+    # first batched filter Trino sends.
+    #
+    # `opa.policy.uri` and `opa.policy.batched-uri` are the stardelt front entry
+    # points (platform#359): `data.stardelt.allow` answers every single question,
+    # `data.stardelt.batch` the batched ones, and both are the chart's own rules
+    # whenever the catalog decision table (published by access-sync every 2
+    # minutes) cannot answer — that is the only difference from pointing at
+    # `/v1/data/trino/*` directly. The paths are the same strings
+    # `scripts/lib/bridge.sh` holds — `make lint` (scripts/check-bridge-uri.sh)
+    # fails if this file names another one, so the replay and the latency probe
+    # keep asking what the engine asks.
+    #
+    # Both files must allow a statement. The bridge's own rules (which catalogs
+    # a person may see, the ImpersonateUser row, the session-property and
+    # function rules) live in helm-values/lakekeeper.yaml under `OPABridge`, not
+    # here.
+    access-control-opa.properties: |
+      access-control.name=opa
+      opa.policy.uri=http://lakekeeper-opa.stardelt.svc.cluster.local:8282/v1/data/stardelt/allow
+      opa.policy.batched-uri=http://lakekeeper-opa.stardelt.svc.cluster.local:8282/v1/data/stardelt/batch
+  additionalVolumes:
+    - name: trino-groups
+      configMap: { name: trino-group-file }
+    # The resource-group document (platform#313): one directory mount, not a subPath
+    # file — a subPath mount never sees a ConfigMap update, and Reloader restarts the
+    # pod on change, so the new content is there when the new coordinator starts.
+    # `/etc/trino/warehouses` need not exist in the image (a ConfigMap directory mount
+    # creates it) and the file name matches `resource-groups.config-file` above.
+    - name: trino-warehouses
+      configMap: { name: trino-warehouses }
+    # Repeated from helm-values/trino.yaml: Helm replaces lists instead of
+    # merging them, so without this the identity overlay would drop the
+    # file-system cache mount (platform#134) and the coordinator would
+    # CrashLoop with "Cannot write to cache directory /var/trino/cache".
+    - name: trino-fscache
+      emptyDir: { sizeLimit: 12Gi }
+    # Repeated from helm-values/trino.yaml (platform#54): without this the
+    # overlay would drop the bounded heap-dump dir and dumps would land on
+    # the container overlay fs again.
+    - name: trino-dumps
+      emptyDir: { sizeLimit: 2Gi }
+  additionalVolumeMounts:
+    - { name: trino-groups, mountPath: /etc/trino/groups }
+    - { name: trino-warehouses, mountPath: /etc/trino/warehouses }
+    - { name: trino-fscache, mountPath: /var/trino/cache }
+    - { name: trino-dumps, mountPath: /dumps }
+
+# The service-account password file: `superset:<bcrypt>`, generated on the
+# cluster by scripts/identity-bootstrap.sh (never committed) and mounted by the
+# chart at /etc/trino/auth/password/password.db.
+auth:
+  passwordAuthSecret: trino-password-db
+
+additionalConfigProperties:
+  - http-server.process-forwarded=true
+  # Required as soon as an authenticator is enabled (Trino refuses to start
+  # without it) — a random value from Secret trino-internal-secret, shared by the
+  # coordinator and its workers.
+  - internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SHARED_SECRET}
+  # Node-level file-system cache (platform#1002). This list REPLACES the base
+  # one, so the cache-manager line must be repeated here; omitting it makes
+  # Iceberg refuse `fs.cache.enabled` or Trino ignore the cache file.
+  - cache-manager.config-files=etc/cache-manager-alluxio.properties

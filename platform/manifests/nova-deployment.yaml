@@ -1,0 +1,414 @@
+# stardelt Nova — UI + backend in one pod.
+# Image published by CI from stardelt-nova (ghcr.io/stardelt/nova); pin by digest
+# for reproducible installs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nova
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: nova, app.kubernetes.io/part-of: stardelt }
+---
+# Nova's only cluster permission: read the workloads in its own namespace, so the
+# UI can show what is actually deployed — including digest pins. It writes nothing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nova-workload-reader
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nova-workload-reader
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nova-workload-reader
+subjects:
+  - kind: ServiceAccount
+    name: nova
+    namespace: stardelt
+---
+# Nova lists `Pipeline` resources to show what is scheduled (J1, platform#254),
+# and Schedule creates, replaces (`PUT`, hence update not patch) and deletes them
+# (platform#270). It also reads `ServicePrincipal` resources to show which groups
+# have one, `Catalog` resources for the permission view, and `SqlWarehouse`
+# resources to show which compute class a person uses (nova#236).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nova-pipelines
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+rules:
+  - apiGroups: ["stardelt.io"]
+    resources: ["pipelines"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["stardelt.io"]
+    resources: ["serviceprincipals"]
+    # create: the administrator's "New team space" in Nova (internal#106 decision 3).
+    verbs: ["get", "list", "create"]
+  # Streams (nova#617 slice a): `patch` is the stop/start control (`spec.stopped`);
+  # `create` and `delete` are the team's own stream, written through Nova's streams API.
+  - apiGroups: ["stardelt.io"]
+    resources: ["streamapps"]
+    verbs: ["get", "list", "patch", "create", "delete"]
+  # Spark compute tiers (internal#161 slice 5a): the Compute page lists `SparkCluster`
+  # resources and Start/Stop patch `spec.state`; create and delete are the
+  # administrator's cluster form (slice 5, later ticket). Without this rule the route
+  # answers 502 "the cluster did not answer" (measured on the dev cluster 2026-11-09).
+  - apiGroups: ["stardelt.io"]
+    resources: ["sparkclusters"]
+    verbs: ["get", "list", "patch", "create", "delete"]
+  - apiGroups: ["stardelt.io"]
+    resources: ["catalogs"]
+    # create: the administrator's "New team space" in Nova (internal#106 decision 3).
+    verbs: ["get", "list", "patch", "create"]
+  - apiGroups: ["stardelt.io"]
+    resources: ["sqlwarehouses"]
+    # patch: the activity annotations (`stardelt.io/queries-in-flight`,
+    # `stardelt.io/last-query-at`) the engine's scaler reads (platform#131 step A).
+    # Metadata only — Nova never writes a SqlWarehouse spec or status.
+    verbs: ["get", "list", "patch"]
+  # Model endpoints (operator#609 slice b): Nova reads them and writes its probe into status.
+  - apiGroups: ["stardelt.io"]
+    resources: ["modelendpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["stardelt.io"]
+    resources: ["modelendpoints/status"]
+    verbs: ["patch"]
+  # Connections (nova#203): the list route reads the `Connection` resources to show each
+  # connection's sync state and, for an administrator, every group's connections; a group
+  # connection writes and deletes its resource. Without this rule the store half works and the
+  # page answers 502 "the cluster did not answer" — measured on the dev cluster 2026-11-01.
+  # `patch` is the break-glass notice (one annotation on the Connection): a break-glass read
+  # answers nothing unless that notice could be written (platform#473).
+  - apiGroups: ["stardelt.io"]
+    resources: ["connections"]
+    verbs: ["get", "list", "create", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nova-pipelines
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nova-pipelines
+subjects:
+  - kind: ServiceAccount
+    name: nova
+    namespace: stardelt
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nova
+  namespace: stardelt
+  labels:
+    app.kubernetes.io/name: nova
+    app.kubernetes.io/part-of: stardelt
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: nova }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: nova, app.kubernetes.io/part-of: stardelt }
+      # Rotating the catalog client must reach Nova: the token is cached until it
+      # expires and the client secret is process environment, so Reloader
+      # (helm-values/reloader.yaml) restarts the pod when the Secret changes.
+      annotations: { secret.reloader.stakater.com/reload: "svc-catalog-nova" }
+    spec:
+      serviceAccountName: nova
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      imagePullSecrets:
+        - name: ghcr-creds
+      containers:
+        - name: nova
+          image: ghcr.io/stardelt/nova:dev@sha256:dbf0ac36686995ef3c7b20ce9b9ebfffcee8fdfa19af74bd95c2ddc723b0ee08
+          # The reference is pinned by digest, so its content never changes and
+          # IfNotPresent keeps a cached image usable when GHCR is unreachable or
+          # the pull credential has expired — an `Always` policy turned both into
+          # an ImagePullBackOff that survived reboots. To take a new build, pin
+          # the new digest CI printed (or roll the deployment) instead.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8081
+              name: internal
+          env:
+            # The query engine's in-cluster TLS endpoint, published by the
+            # identity contract (ConfigMap stardelt-identity, key trinoUrl —
+            # `make install-identity` writes it, scripts/identity-bootstrap.sh).
+            # The TLS listener only exists when the platform has an IdP
+            # (manifests/trino-tls.yaml), so the key is optional: without it Nova
+            # falls back to its built-in http://…:8080 default, which is what a
+            # dev install without identity runs. Re-applying this manifest cannot
+            # silently point Nova at a listener that is not there.
+            - name: NOVA_TRINO_URL
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: trinoUrl, optional: true }
+            # The internal CA that signs the coordinator certificate
+            # (manifests/trino-tls.yaml). Nova adds it to its TLS roots on top of
+            # the public WebPKI roots — trust is widened by exactly one anchor,
+            # nothing is disabled. Absent on a dev install without an IdP.
+            - name: NOVA_TRINO_CA_PEM
+              valueFrom:
+                secretKeyRef: { name: trino-ca, key: tls.crt, optional: true }
+            - name: NOVA_LAKEKEEPER_URL
+              value: http://lakekeeper.stardelt.svc.cluster.local:8181
+            - name: NOVA_WAREHOUSE_NAME
+              value: warehouse
+            - name: NOVA_DEV_USER
+              value: stardelt-dev
+            # The hosted MCP endpoint (stardelt-nova#112). The switch lives in the identity
+            # ConfigMap for the same reason `authMode` does: re-applying this manifest must not
+            # turn a live feature off (`kubectl apply` prunes a hand-patched env entry).
+            # Off on a fresh install; turn it on with mcpEnabled=1 in that ConfigMap (see
+            # docs/identity.md). NOVA_MCP_AUDIENCE must be the same https://<nova host>/mcp that
+            # the realm client's `aud-mcp` mapper mints (scripts/keycloak-sync-mcp-client.sh).
+            - name: NOVA_MCP_ENABLED
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpEnabled, optional: true }
+            - name: NOVA_MCP_AUDIENCE
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpAudience, optional: true }
+            # The two allowlists (stardelt-nova#980). Same reason as the switch: the values live
+            # in the ConfigMap, so a re-apply cannot prune an administrator's restriction.
+            # Empty = every client / every group the audience accepts.
+            - name: NOVA_MCP_ALLOWED_CLIENTS
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpAllowedClients, optional: true }
+            - name: NOVA_MCP_ALLOWED_GROUPS
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpAllowedGroups, optional: true }
+            # The per-person write budget (stardelt-nova#984): 20 by default, 1-600. The
+            # same ConfigMap rule as the switch, so a re-apply cannot reset an
+            # administrator's value.
+            - name: NOVA_MCP_WRITES_PER_HOUR
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: mcpWritesPerHour, optional: true }
+            # ---- Sign-in (contract: docs/architecture/identity) --------------
+            # `dev` keeps the no-login behaviour (CI, `make demo`, the kind gate).
+            # To turn on SSO on a manifest install: run scripts/identity-bootstrap.sh
+            # once (it creates the realm + the two Secrets below), then set
+            # NOVA_AUTH_MODE=oidc and NOVA_PUBLIC_URL=https://<nova host> here or with
+            # `kubectl -n stardelt set env`. The other values come from the identity
+            # ConfigMap/Secret and are optional, so a dev install is unaffected.
+            # Both come from the platform's identity ConfigMap (created by
+            # `make install-identity` / the chart), so re-applying this manifest cannot
+            # turn sign-in off or blank the public origin. Absent ConfigMap = dev mode.
+            - name: NOVA_AUTH_MODE
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: authMode, optional: true }
+            - name: NOVA_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: publicUrl, optional: true }
+            - name: NOVA_OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: issuerUrl, optional: true }
+            - name: NOVA_OIDC_CLIENT_ID
+              value: "nova"
+            - name: NOVA_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: stardelt-oidc-clients, key: nova, optional: true }
+            - name: NOVA_SESSION_SECRET
+              valueFrom:
+                secretKeyRef: { name: stardelt-nova-session, key: session, optional: true }
+            - name: NOVA_OIDC_ADMIN_GROUP
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: adminGroup, optional: true }
+            # The public demo's shared sign-in (platform epic; `make public-demo`): Nova shows a banner and resets it nightly.
+            - name: NOVA_SHARED_ACCOUNTS
+              valueFrom:
+                configMapKeyRef: { name: stardelt-public-demo, key: sharedAccounts, optional: true }
+            # Catalog sign-in (platform#284, step 4 of the catalog turn-on): every
+            # call Nova makes to Lakekeeper carries a client-credentials token
+            # (stardelt-nova#222). The client is Secret svc-catalog-nova (KIND=service,
+            # platform#282); all three variables are read from that one Secret, so they
+            # appear and disappear together. That matters: Nova refuses to start on a
+            # partial setting rather than calling the catalog half-configured, and an
+            # optional `secretKeyRef` cannot make one variable conditional on another.
+            # `token-url` is written by `make sync-catalog-clients` for the same reason.
+            # Optional like the identity variables above: without an IdP the Secret does
+            # not exist, all three stay unset, and Nova calls Lakekeeper anonymously —
+            # the `install-core` shape, where the catalog has no issuer and stays
+            # anonymous too (platform#285).
+            - name: NOVA_CATALOG_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: svc-catalog-nova, key: client-id, optional: true } }
+            - name: NOVA_CATALOG_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: svc-catalog-nova, key: client-secret, optional: true } }
+            - name: NOVA_CATALOG_TOKEN_URL
+              valueFrom: { secretKeyRef: { name: svc-catalog-nova, key: token-url, optional: true } }
+            # Published notebooks (platform#290): Nova writes notebook versions into the
+            # versioned `notebooks` bucket with the platform S3 identity — the same Secret
+            # the object store and every other consumer already read, so there is no new
+            # identity and Nova's Role is unchanged (storage is reached over S3, not the
+            # Kubernetes API). The bucket is created and versioned by `make notebooks-bucket`
+            # (scripts/create-notebooks-bucket.sh); a missing bucket makes publishing fail,
+            # not Nova's start-up. The routes themselves land in stardelt-nova#225.
+            - name: NOVA_S3_URL
+              value: http://seaweedfs-s3.stardelt.svc.cluster.local:8333
+            - name: NOVA_S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: access-key } }
+            - name: NOVA_S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: secret-key } }
+            - name: NOVA_S3_NOTEBOOK_BUCKET
+              value: notebooks
+            # Forward the signed-in user's own access token to Trino (and later the
+            # catalog) instead of letting Nova act as a shared service account.
+            # This is master spec §7 on the query path: the token that signed the
+            # user in is the token Trino authenticates and audits. Trino only
+            # accepts it when it carries audience `trino` — the realm's aud-trino
+            # mapper on client `nova` (scripts/keycloak-sync-trino-client.sh).
+            # Over the in-cluster TLS listener this is the only way in: a
+            # plain-HTTP statement is refused before an authenticator runs
+            # (helm-values/trino-identity.yaml).
+            # Harmless without an IdP: with no session there is no token to send,
+            # and a Trino without authentication ignores the header.
+            - name: NOVA_FORWARD_IDENTITY
+              value: "1"
+            # Namespace whose workloads Nova reports (downward API).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            # External base domain for deep-linking platform apps in Nova.
+            # Comes from a ConfigMap so re-applying this manifest cannot wipe the
+            # domain the way an inline env value can; the dev playground creates
+            # it (dev/playground/README.md), and the umbrella chart sets the value
+            # directly from platform.baseDomain. Absent = Nova shows no links.
+            - name: NOVA_BASE_DOMAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: stardelt-platform-config
+                  key: baseDomain
+                  optional: true
+            # The stage this install is (stardelt-nova#533, stardelt-platform#638):
+            # Nova shows the name as a badge in the header and, for kind `prod`, an
+            # amber frame. Inline because this manifest is the dev cluster's source of
+            # truth; the umbrella chart emits the same names from `nova.stage`.
+            - name: NOVA_STAGE_NAME
+              value: "alpha"
+            - name: NOVA_STAGE_KIND
+              value: "dev"
+            # The state store (stardelt-nova#103): CloudNative-PG generates Secret
+            # `nova-pg-app` for the Cluster in manifests/nova-pg.yaml and its `uri` key is
+            # a complete postgresql:// URL. Deliberately NOT optional: a missing Secret
+            # keeps the new pod in CreateContainerConfigError (the old pod keeps serving)
+            # instead of starting a Nova that silently runs without its database, because
+            # an optional reference is read once, at container start. Apply
+            # manifests/nova-pg.yaml and wait for the Cluster before applying this file.
+            - name: NOVA_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: nova-pg-app, key: uri }
+            # Query-log collector (stardelt-nova#116): a second listener that no Ingress
+            # routes, reachable inside the cluster only (Service port `internal`). The bearer
+            # token is Secret `nova-events` (scripts/nova-events-token.sh), shared with Trino's
+            # event listener; optional, so without it the collector stays off.
+            - name: NOVA_INTERNAL_ADDR
+              value: "0.0.0.0:8081"
+            - name: NOVA_EVENTS_TOKEN
+              valueFrom: { secretKeyRef: { name: nova-events, key: token, optional: true } }
+            # Secret store (stardelt-nova#171, platform#240): the connections API signs in with the
+            # caller's token (audience `openbao`). The store itself is opt-in (`make openbao`;
+            # production installs use the customer's own store, decision D23), so the address is
+            # NOT hard-coded here: a URL for a store that was never installed makes Nova answer
+            # 502 "the secret store is unavailable: error sending request" and the Connections
+            # page shows a transport error, when the honest answer is 503 "the secret store is
+            # not configured". `make openbao` writes ConfigMap `stardelt-secret-store`; without
+            # it this reference is absent and every connection route answers 503.
+            - name: NOVA_SECRET_STORE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stardelt-secret-store
+                  key: url
+                  optional: true
+            - name: NOVA_SECRET_STORE_ROLE
+              value: platform-users
+            - name: NOVA_SECRET_STORE_MOUNT
+              value: secret
+            # Airflow (J1, platform#254): the Pipelines page reads runs and logs with the
+            # `nova-api` service user (Secret `airflow-nova-api`, key `password`, created by
+            # the #243 spike). The chart renders the same three values when
+            # `nova.airflow.url` is set — keep them here so a `kubectl apply` of this
+            # manifest cannot drop them from the live Deployment.
+            - name: NOVA_AIRFLOW_URL
+              value: http://airflow-api-server.stardelt.svc.cluster.local:8080
+            - name: NOVA_AIRFLOW_USER
+              value: nova-api
+            - name: NOVA_AIRFLOW_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-nova-api
+                  key: password
+            # Notebook servers (stardelt-nova#652 W3): Nova is the JupyterHub service
+            # `nova` — read the person's server state, start it, stop it, never
+            # `access:servers`. The token is generated by the hub chart into Secret
+            # `hub` (helm-values/jupyterhub.yaml, `hub.services.nova`); optional, so
+            # Nova also starts before `make install-notebooks` has run. The chart
+            # renders the same three values when `jupyterhub.enabled` — keep them
+            # here so a `kubectl apply` of this manifest cannot drop them.
+            - name: NOVA_JUPYTERHUB_API_URL
+              value: http://hub:8081/hub/api
+            - name: NOVA_JUPYTERHUB_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hub, key: hub.services.nova.apiToken, optional: true }
+            # Must equal the hub's `cull.timeout` (helm-values/jupyterhub.yaml): the
+            # culler is what actually stops an idle server, Nova only counts down.
+            - name: NOVA_WORKSPACE_IDLE_SECONDS
+              value: "3600"
+            # How often the model-endpoint probe re-checks every endpoint (stardelt-nova#609
+            # slice c2): seconds, 300 (5 min) to 604800 (7 days). A new endpoint is probed by
+            # the next one-minute round regardless. Nova's own default is 86400.
+            - name: NOVA_MODEL_PROBE_SECONDS
+              value: "86400"
+            # Days the stored model-call rows are kept (nova#890 slice 1): 0 keeps them and
+            # switches the hourly purge off; Nova's own default is 30. The chart's twin is
+            # `nova.modelCallRetentionDays`.
+            - name: NOVA_MODEL_CALL_RETENTION_DAYS
+              value: "30"
+            - name: RUST_LOG
+              value: info,tower_http=info
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "50m",  memory: "64Mi"  }
+            limits:   { cpu: "1",    memory: "256Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nova
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: nova }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: nova }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: internal
+      port: 8081
+      targetPort: internal

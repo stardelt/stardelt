@@ -1,0 +1,523 @@
+# Lakekeeper — Iceberg REST catalog.
+# Chart: lakekeeper/lakekeeper 0.14.0, appVersion 0.15.0.
+#
+# Decisions for the MVP:
+#   - bundled postgres OFF → use CNPG Cluster `lakekeeper-pg`
+#   - authorization through the external OpenFGA and the OPA sidecar (platform#304,
+#     authz 3/8); `install-core` (no IdP) overrides this back to `allowall`
+#   - authentication ON (platform#285): every request needs a valid bearer token
+#   - helmWait true so `helm upgrade --wait` blocks until migrations land
+#
+# Authorization must not change after bootstrapping: enabling OpenFGA on the
+# bootstrapped catalog locks every request out (403) until the catalog is
+# re-bootstrapped and the grants are written. `make catalog-authz` does that in
+# one idempotent run (scripts/catalog-authz-bootstrap.sh) — never apply this
+# file with a bare `helm upgrade`.
+
+helmWait: true
+
+postgresql:
+  enabled: false
+
+externalDatabase:
+  type: postgres
+  host_read:  lakekeeper-pg-rw.stardelt.svc.cluster.local
+  host_write: lakekeeper-pg-rw.stardelt.svc.cluster.local
+  port: 5432
+  database: lakekeeper
+  userSecret: lakekeeper-pg-app
+  userSecretKey: username
+  passwordSecret: lakekeeper-pg-app
+  passwordSecretKey: password
+
+authz:
+  backend: openfga
+  openfga:
+    # OpenFGA's gRPC port (platform#302). Its authorization model is written by
+    # the chart's migration Job during `helm upgrade`, so OpenFGA must be Ready
+    # first or the server fails with "Active authorization model ... not found".
+    endpoint: http://openfga.stardelt.svc.cluster.local:8081
+
+# The OPA bridge (platform#304): a sidecar in the catalog pod, exposed on TCP
+# 8282 by Service `lakekeeper-opa`, that answers Trino's authorization
+# questions. It signs in to Lakekeeper with `svc-catalog-bridge` and writes the
+# per-request decisions; its `project_admin` grant is a god credential (it can
+# change every grant in the project).
+OPABridge:
+  enabled: true
+  image:
+    tag: 1.22.2@sha256:951ed07a3a41f5b02f68bf6f94ba1c952642daa597c89420986fd597eb09e661
+  catalogs:
+    - trinoCatalog: warehouse
+      lakekeeperWarehouse: warehouse
+  allowUnmanagedCatalogs: true
+  # stardelt's additions to the chart's rules (platform#333, "The bridge
+  # contract" in docs/catalogs.md). The chart's policies answer catalog, schema and
+  # table questions from Lakekeeper's grants; three operations Trino 480 asks
+  # have no rule at all, and the bridge's default deny then breaks ordinary use:
+  #
+  #   * SetSystemSessionProperty — Trino asks before *any* `SET SESSION` (the
+  #     CLI, JDBC, Superset). Without a rule every session property is refused,
+  #     including `SET SESSION query_max_run_time`, which is not data.
+  #   * ShowFunctions/FilterFunctions on a *managed* catalog — `SHOW FUNCTIONS
+  #     FROM finance.seed` comes back empty because the function filter is
+  #     denied. A function list is metadata: it follows the same question as the
+  #     catalog itself (Lakekeeper's `get_config`, the `browse` verb), so a
+  #     person who may see a catalog may see its functions. The unmapped
+  #     catalogs (system, tpch, tpcds) are already allowed through
+  #     allowUnmanagedCatalogs — the engine's file rules are what reserve them
+  #     for administrators (platform#363), and both authorizers must allow.
+  #
+  # And one rule is not about a catalog at all: Impersonation (platform#310,
+  # #342) — the `superset` service account may act as one person (a Keycloak
+  # `sub`), and nobody else may act as anyone. Its request shape is pinned by a
+  # capture: Trino asks it while the session is created, so it carries no
+  # `queryId`.
+  #
+  # Every rule here is proved by `make bridge-replay`; the file is the "one
+  # small policy" the ticket allows, not a second policy layer.
+  #
+  # `stardelt.front.rego` (platform#359) is the front entry point Trino calls:
+  # `opa.policy.uri` => `/v1/data/stardelt/allow`, `opa.policy.batched-uri` =>
+  # `/v1/data/stardelt/batch` (helm-values/trino-identity.yaml). It exists because
+  # every question that reaches Lakekeeper costs ~0.15 s per distinct catalog, so
+  # `SHOW CATALOGS` cost 1 to 2 s cold and every query paid ~350 ms (PR #364,
+  # ticket #359). It answers the catalog-level questions (visibility and
+  # addressability) from the table access-sync publishes every 2 minutes, and
+  # gives the hot object-level operations an ALLOW fast path. Everything else —
+  # DDL, drops, renames, queries, session properties, impersonation — is the
+  # chart's own rule, unchanged; a table that is stale or a catalog with drift is
+  # not answered locally at all. The table can only ACCELERATE: every answer must
+  # equal this chart's (`make bridge-replay --differential`, and the CI harness in
+  # scripts/tests/test_bridge_policies.py).
+  customPolicies:
+    trino.stardelt.rego: |
+      package trino
+
+      # Trino asks this before applying any system session property.
+      allow if {
+      	input.action.operation == "SetSystemSessionProperty"
+      }
+
+      # A function question names its catalog on the schema (ShowFunctions) or
+      # on the function (FilterFunctions).
+      _function_catalog := input.action.resource.schema.catalogName
+      _function_catalog := input.action.resource.function.catalogName
+
+      allow if {
+      	input.action.operation in ["ShowFunctions", "FilterFunctions"]
+      	require_catalog_access_simple(_function_catalog, "get_config")
+      }
+
+      # Superset's service account may act as a person, only as a person (a
+      # Keycloak `sub`, platform#310 and #342). Trino asks this when the
+      # authenticated principal is not the name the client asks to run as:
+      # `superset` (PASSWORD) sends the signed-in person's `sub` as
+      # `X-Trino-User`. Nothing wider — every other asking principal (Nova and
+      # the notebooks forward the person's own token) and every target that is
+      # not a lowercase UUID stays denied. This is the rule the file authorizer
+      # applies until the switch (#311).
+      allow if {
+      	input.action.operation == "ImpersonateUser"
+      	input.context.identity.user == "superset"
+      	regex.match(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, input.action.resource.user.user)
+      }
+
+      # The catalog owner group may roll a table back (platform#444 decision: administrators
+      # and catalog managers). The chart's allow_table_procedure list has no
+      # ROLLBACK_TO_SNAPSHOT, and Lakekeeper's warehouse batch-check has no `manage_grants`
+      # action, so this is answered from the access table's `manage` list (the owner group's
+      # members, access-sync-job.py) plus `all` (administrators) — the same table the front
+      # policy reads. A missing or stale table leaves the rule undefined and the procedure
+      # denied.
+      allow_table_procedure if {
+      	input.action.operation == "ExecuteTableProcedure"
+      	input.action.resource.function.functionName == "ROLLBACK_TO_SNAPSHOT"
+      	table := input.action.resource.table.tableName
+      	is_metadata_table(table) == false
+      	catalog := input.action.resource.table.catalogName
+      	user := input.context.identity.user
+      	manage := {u | some u in data.stardelt.access.catalogs[catalog].manage}
+      	admins := {u | some u in data.stardelt.access.catalogs[catalog].all}
+      	user in (manage | admins)
+      	generated_at := data.stardelt.access.generatedAt
+      	is_number(generated_at)
+      	age := time.now_ns() - (generated_at * 1000000000)
+      	age < 360 * 1000000000
+      	age > -60 * 1000000000
+      }
+
+      # An administrator may cancel anyone's query (platform#398). Trino asks
+      # `KillQueryOwnedBy` with the target query's owner in `resource.user.user`;
+      # `system` is not a managed catalog, so the administrator list is read from any
+      # entry of the access table (every entry carries the same `all` list) and a
+      # missing or stale table denies rather than guesses.
+      #
+      # A person's own query is cancelled in Nova's Cancel button (`DELETE
+      # /v1/statement`), not here: the file authorizer refuses the `system` catalog to
+      # non-administrators before this rule is ever asked, so an owner clause cannot
+      # fire on any install path (platform#862).
+      allow if {
+      	input.action.operation == "KillQueryOwnedBy"
+      	user := input.context.identity.user
+      	some catalog
+      	user in data.stardelt.access.catalogs[catalog].all
+      	generated_at := data.stardelt.access.generatedAt
+      	is_number(generated_at)
+      	age := time.now_ns() - (generated_at * 1000000000)
+      	age < 360 * 1000000000
+      	age > -60 * 1000000000
+      }
+    stardelt.front.rego: |
+      package stardelt
+
+      import data.trino
+
+      # The front entry point (platform#359, architect decision 2026-10-21, D37).
+      #
+      # Trino is configured with `opa.policy.uri` = `/v1/data/stardelt/allow` and
+      # `opa.policy.batched-uri` = `/v1/data/stardelt/batch`
+      # (helm-values/trino-identity.yaml). Both answer from one table CronJob
+      # `access-sync` publishes after every tick (scripts/access-sync-job.py,
+      # `data.stardelt.access`):
+      #
+      #   {"generatedAt": <epoch seconds>,
+      #    "catalogs": {"<name>": {"drift": false,
+      #                            "all":    [<stardelt-admins subs>],
+      #                            "browse": [...], "select": [...],
+      #                            "write":  [...], "create": [...]}}}
+      #
+      # A list holds the exact string Trino puts in `input.context.identity.user`:
+      # the Keycloak `sub`, or a bare `STATIC_ASSIGNEES` principal (`superset`).
+      # Lakekeeper's verb implications are already applied there (modify implies
+      # select implies describe; create implies describe), so this file is a
+      # membership test and not a second copy of the model. `all` is every platform
+      # administrator, who holds `project_admin` in Lakekeeper — every verb.
+      #
+      # Why it exists: every question that reaches Lakekeeper costs ~0.15 s per
+      # distinct catalog (the engine's own measurement, PR #364), so `SHOW CATALOGS`
+      # cost 1 to 2 s cold. The table access-sync already computes every 2 minutes is
+      # the same information, so the catalog-level questions are answered here.
+      #
+      # THE TABLE IS AN ACCELERATOR, NEVER THE AUTHORITY:
+      #
+      #   * the catalog-level questions — visibility and addressability — are answered
+      #     from it in BOTH directions (that is the point: one answer, no round trip),
+      #     but only while it is fresh and the catalog carries no foreign grant;
+      #   * the object-level operations below get an ALLOW fast path only. A denial is
+      #     always Lakekeeper's: it also knows object ownership and any grant below
+      #     the catalog that access-sync does not manage;
+      #   * a stale table, a catalog the table does not list, or a catalog with drift
+      #     is not answered here at all — the chart's own rules answer it, exactly as
+      #     they did before this file existed.
+      #
+      # Nothing else changes, and every answer must equal the chart's: `make
+      # bridge-replay --differential` asks both paths on the live cluster and
+      # scripts/tests/test_bridge_policies.py proves the same in CI.
+
+      # Six minutes hard (the sync publishes every 2, so a normal table is at most
+      # ~2.5 minutes old). Past that the accelerator is ignored.
+      max_age_seconds := 360
+
+      # `generatedAt` comes from the sync pod's clock, the comparison from this one.
+      # One minute of skew is tolerated; a table stamped further in the future is not
+      # believed at all, so a wrong clock cannot pin an answer forever.
+      max_skew_seconds := 60
+
+      # The identity the decision is about. Trino always sends one; if a body does not
+      # carry one the local rules stay undefined and the chart's rules answer.
+      _user := input.context.identity.user
+
+      # The parts of the body the local rules look at, defaulted: `ExecuteQuery`
+      # and `ReadSystemInformation` carry no `resource` at all, and a rule body
+      # that passes `input.action.resource` to a function is *undefined* (not
+      # false) when the field is missing — which would poison the `not` in the
+      # fallback and deny a question the chart allows (the replay caught exactly
+      # that: every `ExecuteQuery` answered false).
+      _resource := object.get(object.get(input, "action", {}), "resource", {})
+
+      _filter_resources := object.get(object.get(input, "action", {}), "filterResources", [])
+
+      fresh if {
+      	generated_at := data.stardelt.access.generatedAt
+      	is_number(generated_at)
+      	age := time.now_ns() - (generated_at * 1000000000)
+      	age < max_age_seconds * 1000000000
+      	age > (0 - max_skew_seconds) * 1000000000
+      }
+
+      # The table can answer for this catalog: it is fresh, it lists the catalog, and
+      # every grant on the warehouse belongs to a group the sync manages.
+      local_known(catalog) if {
+      	fresh
+      	entry := data.stardelt.access.catalogs[catalog]
+      	entry.drift == false
+      }
+
+      # The four verbs the table holds. `browse` is Lakekeeper's `describe`.
+      _verbs := {"browse", "select", "write", "create"}
+
+      local_ok(user, catalog, verb) if {
+      	verb in _verbs
+      	local_known(catalog)
+      	user in data.stardelt.access.catalogs[catalog][verb]
+      }
+
+      local_ok(user, catalog, verb) if {
+      	verb in _verbs
+      	local_known(catalog)
+      	user in data.stardelt.access.catalogs[catalog].all
+      }
+
+      # The questions about a catalog itself.
+      _catalog_ops := {"AccessCatalog", "FilterCatalogs"}
+
+      # The object-level operations this file may ALLOW, and the verb the Lakekeeper
+      # action behind them needs (`get_metadata`/`list_namespaces`/`get_config` are
+      # `describe`, `read_data` is `select`, `write_data` is `modify`,
+      # `create_namespace`/`create_table`/`create_view` are `create`). Nothing that
+      # drops, renames or alters is here: those keep the chart's rules.
+      _object_verbs := {
+      	"SelectFromColumns": "select",
+      	"InsertIntoTable": "write",
+      	"CreateSchema": "create",
+      	"CreateTable": "create",
+      	"CreateView": "create",
+      	"ShowSchemas": "browse",
+      	"FilterSchemas": "browse",
+      	"ShowTables": "browse",
+      	"FilterTables": "browse",
+      	"ShowColumns": "browse",
+      	"FilterColumns": "browse",
+      }
+
+      resource_catalog(resource) := resource.catalog.name
+
+      resource_catalog(resource) := resource.table.catalogName
+
+      resource_catalog(resource) := resource.schema.catalogName
+
+      # The table decides this question in both directions. Only the catalog-level
+      # questions are ever decided here.
+      table_decides(operation, resource) if {
+      	operation in _catalog_ops
+      	local_known(resource_catalog(resource))
+      }
+
+      # The table says yes. At object level that is a fast path and nothing more: when
+      # it does not say yes, the chart's rules are asked.
+      table_allows(operation, resource) if {
+      	operation in _catalog_ops
+      	local_ok(_user, resource_catalog(resource), "browse")
+      }
+
+      table_allows(operation, resource) if {
+      	verb := _object_verbs[operation]
+      	local_ok(_user, resource_catalog(resource), verb)
+      }
+
+      # --- the single-question entry point --------------------------------------
+
+      default allow := false
+
+      allow if {
+      	table_allows(input.action.operation, _resource)
+      }
+
+      allow if {
+      	not table_decides(input.action.operation, _resource)
+      	trino.allow
+      }
+
+      # --- the batched entry point ----------------------------------------------
+
+      # FilterColumns with one table and its `columns` array answers column POSITIONS
+      # (the chart's own rule builds one resource per column), so it cannot be mapped
+      # back position for position: either the table is allowed and every column is,
+      # or the body goes upstream whole.
+      _columns_body if {
+      	input.action.operation == "FilterColumns"
+      	count(_filter_resources) == 1
+      	count(_filter_resources[0].table.columns) > 0
+      }
+
+      # The resources the table does not answer — the chart's rules get exactly these,
+      # with their body shape unchanged, and their answers are mapped back below.
+      _rest_indices contains index if {
+      	not _columns_body
+      	some index, resource in _filter_resources
+      	not table_allows(input.action.operation, resource)
+      	not table_decides(input.action.operation, resource)
+      }
+
+      _rest_order := [index | some index in sort(_rest_indices)]
+
+      _rest_resources := [resource |
+      	some index, resource in _filter_resources
+      	index in _rest_indices
+      ]
+
+      _upstream := {index |
+      	some position in trino.batch with input.action.filterResources as _rest_resources
+      	index := _rest_order[position]
+      }
+
+      batch contains index if {
+      	some index in _upstream
+      }
+
+      batch contains index if {
+      	not _columns_body
+      	some index, resource in _filter_resources
+      	table_allows(input.action.operation, resource)
+      }
+
+      batch contains index if {
+      	_columns_body
+      	table_allows(input.action.operation, _filter_resources[0])
+      	some index in numbers.range(0, count(_filter_resources[0].table.columns) - 1)
+      }
+
+      # `FilterColumns` with columns: when the table is allowed the list above
+      # answers every column. When it is not, the body goes to the chart's rule
+      # whole (its answer is column positions, which cannot be mapped back
+      # position for position). The replacement is always a list — empty when the
+      # table answered or when the body is another shape — because Rego may
+      # evaluate an expression before the guard that would skip it, and an empty
+      # body keeps that evaluation free of Lakekeeper calls.
+      default _columns_upstream_resources := []
+
+      _columns_upstream_resources := _filter_resources if {
+      	_columns_body
+      	not table_allows(input.action.operation, _filter_resources[0])
+      }
+
+      batch contains index if {
+      	_columns_body
+      	some index in trino.batch
+      		with input.action.filterResources as _columns_upstream_resources
+      }
+  resources:
+    requests: { cpu: "20m", memory: "48Mi" }
+    limits: { memory: "256Mi" }
+  # The chart's `lakekeeper.existingSecret` branch (0.11.0 and 0.12.0) emits
+  # `value: "1000"` and the next `- name:` without a newline, which makes the
+  # rendered Deployment invalid YAML. Until that is fixed upstream, the four
+  # credentials are mounted with `extraEnv` + `secretKeyRef` from the same Secret;
+  # nothing secret is written into values or the release.
+  lakekeeper:
+    existingSecret: ""
+    tokenEndpoint: ""
+    clientId: ""
+    clientSecret: ""
+    scope: ""
+  extraEnv:
+    - name: LAKEKEEPER_TOKEN_ENDPOINT
+      valueFrom: { secretKeyRef: { name: svc-catalog-bridge, key: token-url } }
+    - name: LAKEKEEPER_CLIENT_ID
+      valueFrom: { secretKeyRef: { name: svc-catalog-bridge, key: client-id } }
+    - name: LAKEKEEPER_CLIENT_SECRET
+      valueFrom: { secretKeyRef: { name: svc-catalog-bridge, key: client-secret } }
+    - name: LAKEKEEPER_SCOPE
+      valueFrom: { secretKeyRef: { name: svc-catalog-bridge, key: scope } }
+
+catalog:
+  image:
+    tag: v0.15.0@sha256:b02a882df48042020c473a79b980a643fcc883a6f9c21b74c5b7cc8eabeec9fe
+  replicas: 1
+  resources:
+    requests: { cpu: "50m",  memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "512Mi" }
+
+  # Pod Security `restricted` (platform#1096 question 5). Both keys are the chart's own and are
+  # distinct (camelCase) from the top-level ones: they reach the catalog Deployment, its
+  # `check-db` init container and the `lakekeeper-db-migration-<revision>` Job. The chart keeps
+  # `runAsUser: 65532` / `runAsGroup: 65534` from `catalog.image.uid/gid`; `restricted` needs
+  # runAsNonRoot and seccomp on top. The `opa` sidecar has no value key (hardcoded in the chart),
+  # so this pod stays a documented limit — see the ticket.
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+
+  # The IdP is not ready when the node is: Keycloak rebuilds its image for ~2 minutes and answers
+  # 503 on discovery, Lakekeeper exits on that ("Failed to parse openid configuration") and the
+  # kubelet's backoff turns a 2-minute restart into 5+ minutes of catalog outage (platform#516).
+  # `install-core` has no IdP, so the wait is a no-op when the ConfigMap key is absent.
+  extraInitContainers:
+    - name: wait-for-idp
+      image: trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f  # has bash + curl, unlike the distroless catalog
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        # The user must be numeric: `runAsNonRoot` is inherited from the pod-level block the
+        # `restricted` profile requires, and for an image whose USER is a name (`trino`) the
+        # kubelet cannot verify it and refuses the container — "container has runAsNonRoot and
+        # image has non-numeric user (trino), cannot verify user is non-root" (platform#1202).
+        runAsUser: 1000                   # uid(trino) in trinodb/trino:484
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+      env:
+        - name: OIDC_ISSUER
+          valueFrom:
+            configMapKeyRef:
+              name: stardelt-identity
+              key: issuerUrl
+              optional: true
+      command:
+        - /usr/bin/bash
+        - -c
+        - |
+          if [ -z "$OIDC_ISSUER" ]; then
+            echo "no identity provider configured"
+            exit 0
+          fi
+          # Five minutes at most: an outage longer than that should surface as the crash loop it
+          # already is today, not as an init container that never returns.
+          for _ in $(seq 1 100); do
+            if /usr/bin/curl -fsS --max-time 5 \
+              "$OIDC_ISSUER/.well-known/openid-configuration" >/dev/null; then
+              echo "identity provider answered at $OIDC_ISSUER"
+              exit 0
+            fi
+            echo "waiting for $OIDC_ISSUER"
+            sleep 3
+          done
+          echo "identity provider did not answer within 5 minutes; starting the catalog anyway" >&2
+
+  # Authentication (platform#285, step 5 of the catalog turn-on): the two settings
+  # the spike verified (platform#271, P1.1) — `LAKEKEEPER__OPENID_PROVIDER_URI` and
+  # `LAKEKEEPER__OPENID_AUDIENCE`. A request without a valid token is now 401; the
+  # authoriser stays `allowall`, so a valid token is required but not restricted.
+  #
+  # They are extra env vars, not `auth.oauth2.providerUri`, because the issuer is
+  # install-time state: it lives in ConfigMap `stardelt-identity` (`issuerUrl`),
+  # and Helm cannot read a ConfigMap in a values file. Every other component reads
+  # the identity contract the same way (Trino, Superset, JupyterHub, the bootstrap
+  # Job), and `optional: true` keeps `install-core` — which has no IdP — anonymous
+  # instead of failing. `LAKEKEEPER__OPENID_AUDIENCE` is `lakekeeper`, the
+  # `aud-lakekeeper` mapper on each `svc-catalog-*` client (platform#282).
+  podAnnotations:
+    # Reloader restarts the catalog when the identity contract appears or its issuer
+    # changes: the env ref below is unaffected by a ConfigMap update, so without this
+    # a release that enables identity would keep serving anonymously until a manual
+    # restart. Same mechanism as Airflow and Superset (helm-values/reloader.yaml).
+    configmap.reloader.stakater.com/reload: stardelt-identity
+  extraEnv:
+    - name: LAKEKEEPER__OPENID_PROVIDER_URI
+      valueFrom:
+        configMapKeyRef:
+          name: stardelt-identity
+          key: issuerUrl
+          optional: true
+    - name: LAKEKEEPER__OPENID_AUDIENCE
+      value: lakekeeper
+
+  # The chart adds a `metrics` port (9000) to the `lakekeeper` Service and the
+  # scrape annotations to the pod; the metrics server itself is always on (#607).
+  prometheus:
+    setScrapeAnnotations: true

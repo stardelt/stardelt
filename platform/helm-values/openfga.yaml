@@ -1,0 +1,105 @@
+# OpenFGA — the catalog's permission store (authz 1/8, platform#302).
+# Chart: openfga/openfga 0.4.1, appVersion v1.22.1. Licence: Apache-2.0.
+#
+# What it holds: relationship tuples — which subject (person, group, service
+# client) may `browse`, `select`, `create`, `modify` or manage grants on which
+# warehouse, namespace, table or view, plus the catalog's own roles.
+#
+# **It is load-bearing since the cut-over (platform#304).** Lakekeeper runs
+# `authz.backend: openfga` (helm-values/lakekeeper.yaml) and asks this store for
+# every catalog operation; the answer is fail-closed, so a store that cannot
+# answer turns a table read into `503 Authorization service is unavailable`.
+# Restarting this release is therefore a catalog outage, not a cosmetic event:
+# the liveness probe below must tolerate a slow host instead of killing the
+# process (platform#516, 2026-11-04).
+#
+# Database: CloudNative-PG Cluster `openfga-pg` (manifests/openfga-pg.yaml,
+# database `openfga`), not the chart's bundled Postgres subchart — this cluster
+# already runs CloudNative-PG and a second Postgres operator is the wrong shape
+# for one node. CNPG creates Secret `openfga-pg-app`; the chart reads the DSN
+# from its `uri` key.
+
+# Pod Security `restricted` (platform#1096 question 5). The image's own user is 65532
+# (`docker image inspect openfga/openfga:v1.22.1 --format '{{.Config.User}}'`), declared here
+# instead of left to the image default. `securityContext` is the chart key for the serving
+# container AND the `migrate-database` init container.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities: {drop: ["ALL"]}
+  seccompProfile: {type: RuntimeDefault}
+
+image:
+  repository: openfga/openfga
+  # Explicit, so a chart bump cannot silently move the application: 0.4.1's
+  # default tag is empty (it falls back to the chart's appVersion), and the
+  # image is the thing the catalog depends on. Lakekeeper 0.12.2 requires
+  # OpenFGA >= 1.11; #972 moves the store to the pair Lakekeeper 0.15 ships with.
+  tag: v1.22.1@sha256:b852071314f1fda1194d341a6ebac0a4f619b3cd87a6626d2ccc7048af4ec671
+
+replicaCount: 1
+
+datastore:
+  engine: postgres
+  # Secret name, not a URI: the chart renders a secretKeyRef on key `uri`.
+  uriSecret: openfga-pg-app
+  # Run `openfga migrate` as an init container of the serving pod. The chart
+  # default (`job`) waits on a Job through groundnuty/k8s-wait-for pulled from
+  # Docker Hub; Lakekeeper's own subchart values use `initContainer` too, and
+  # this needs no second registry and no cross-Job ordering.
+  migrationType: initContainer
+
+# Small on purpose: the store answers checks, it does not hold table data.
+# The #271 spike measured a running OpenFGA at ~50 MiB.
+# 512 Mi, not 192 Mi: the store was OOMKilled (exit 137) at 2026-11-04 21:05:26Z while its steady
+# state was 38 Mi — the burst came from every client reconnecting at once after a node-wide
+# restart (platform#516). A killed permission store denies every catalogue read (fail-closed),
+# which is strictly worse than a few hundred MiB of headroom on a 23 GiB node.
+resources:
+  requests: { cpu: "20m", memory: "128Mi" }
+  limits:   { cpu: "500m", memory: "512Mi" }
+
+# No liveness probe (platform#516). The failure mode we see is a node-wide stall: every pod on
+# the host times out at once and the process is merely starved. A liveness probe cannot tell
+# that from a hung process, so it kills a store that would have recovered — and because
+# Lakekeeper is fail-closed, the restart is a complete denial of reads for ~30 s. Measured
+# 2026-11-04 16:18:47Z: the container was killed by the probe (exit 137) with the 5-minute
+# budget from #518 already in place, and Lakekeeper answered 503 AuthorizationBackendError
+# until the new process was up.
+#
+# A crashed process is still restarted by the kubelet (restartPolicy: Always), and an OOM kill
+# still happens through the memory limit. Only the "hang" case loses its automatic restart, and
+# for that case readiness already removes the store from the Service — the same outage, without
+# the extra 30 s.
+#
+# Readiness stays at the chart's values on purpose: a store that cannot answer should leave
+# the Service, so Lakekeeper fails fast instead of waiting on a socket.
+livenessProbe:
+  enabled: false
+
+# Caches for checks (platform ticket, measured 2026-11-09: lists 0.2–0.6 s, table load up to 1 s,
+# all of it permission checks). A grant change is visible within the TTL; the cache controller
+# drops entries older than the latest tuple write, so a fresh grant usually shows at once.
+checkQueryCache:
+  enabled: true
+  limit: 10000
+  ttl: 10s
+extraEnvVars:
+  - { name: OPENFGA_CHECK_ITERATOR_CACHE_ENABLED, value: "true" }
+  - { name: OPENFGA_LIST_OBJECTS_ITERATOR_CACHE_ENABLED, value: "true" }
+  - { name: OPENFGA_CACHE_CONTROLLER_ENABLED, value: "true" }
+
+# No tracing; Prometheus metrics ON (the scrape target exists now,
+# stardelt/stardelt-platform#607): the chart adds a `metrics` Service port 2112,
+# and the ingress policy admits exactly a pod labelled
+# `app.kubernetes.io/name: prometheus` there — nothing else may read 2112.
+# The store is load-bearing since the cut-over, so restarts and 503s should be
+# visible before somebody notices through a dashboard.
+telemetry:
+  trace:
+    enabled: false
+  metrics:
+    enabled: true

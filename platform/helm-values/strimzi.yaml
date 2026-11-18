@@ -1,0 +1,16 @@
+# The Strimzi Kafka operator, pinned by digest (platform#1624).
+#
+# `image.tag` is the cluster operator Deployment. `topicOperator.image.tag` and
+# `userOperator.image.tag` are the `STRIMZI_DEFAULT_TOPIC_OPERATOR_IMAGE` /
+# `STRIMZI_DEFAULT_USER_OPERATOR_IMAGE` env values the operator creates those pods from, so the
+# chart's own images are pinned here and not only in the Kafka resource. Every other image the
+# chart names (`kafkaExporter`, `kafkaBridge`, `kafkaInit`) belongs to a workload this install does
+# not enable; do not add them.
+image:
+  tag: "1.3.1@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb"
+topicOperator:
+  image:
+    tag: "1.3.1@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb"
+userOperator:
+  image:
+    tag: "1.3.1@sha256:55f43849559a0d151be473c588c89e9d72649ecadf088c8b9d92d37654a5e5eb"

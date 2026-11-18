@@ -1,0 +1,233 @@
+# Catalog and SqlWarehouse access sync (authz 4/8 and 5/8, stardelt-platform#305,
+# #306; warehouses, #312): every `Catalog` object becomes a Lakekeeper warehouse,
+# the warehouse id lands in its status, and the catalog's `owner`/`grants` become
+# grants on that warehouse; every `SqlWarehouse` object becomes a Trino resource
+# group and a group in the file group provider.
+#
+# Part 2 (#306) adds the identity plumbing to part 1's loop: a Keycloak group becomes
+# a Lakekeeper role of the same name, the group's members are the role's assignees by
+# OIDC `sub` (`oidc~<sub>`, valid before a person has ever signed in), our verbs become
+# Lakekeeper relations (`browse`→`describe`, `select`→`select`, `write`→`write`,
+# `create`→`create`, `manage`→`manage_grants`; the owner group gets `manage_grants`
+# only), and the admin group's role holds `project_admin` on the project. The realm is
+# only read: client `trino-group-sync` (`view-users` on `realm-management`), the
+# read-only Keycloak client `make install-identity` converges. The job never logs a
+# subject, username, member or token — counts only.
+#
+# Part 3 (#312) is the warehouses: the objects become the coordinator's resource
+# groups in ConfigMap `trino-warehouses` (key `resource-groups.json`, loaded once — a
+# change restarts the coordinator, platform#313) and one `wh-<name>` line per warehouse in
+# ConfigMap `trino-group-file` (key `groups.txt`, re-read within 30 s), which also
+# carries the `stardelt-admins` line the query-visibility rules read. This CronJob is
+# the single writer of both files from that ticket on; it never creates them (the
+# Makefile does, and this Role has no `create` on ConfigMaps).
+#
+# The design (internal note `design/multitenant-catalogs.md` §4.2, §7.2 P2a) gives this
+# loop to the operator; the operator builds objects and Jobs only, has no HTTP client
+# and no `CATALOG_*` environment yet, so a CronJob does the work until the operator
+# absorbs it: stock `python:slim` image, the script on a ConfigMap volume that `make
+# access-sync` refreshes from `scripts/access-sync-job.py` on every apply (one source
+# of truth), and the Kubernetes API over the Pod's ServiceAccount — no kubectl in the
+# image.
+#
+# Identity and least privilege:
+#   * Lakekeeper: the management API authenticated as `svc-catalog-operator` (Secret
+#     `svc-catalog-operator`, keys client-id/client-secret/token-url; the realm has no
+#     `lakekeeper` scope, so the job asks for `openid`). That client holds
+#     `project_admin` on the bootstrapped project — the minimum that creates a
+#     warehouse — and nothing broader. Its secret is read from the API, never mounted
+#     and never logged.
+#   * Kubernetes: ServiceAccount `access-sync` may only `get` those three Secrets,
+#     `get/list` catalogs and sqlwarehouses, `patch` their `status` subresource, and
+#     `get/update/patch` the two ConfigMaps it converges. No create/delete anywhere:
+#     the CronJob never removes a warehouse or data, a Catalog deleted by a person
+#     leaves its warehouse behind (design §2.5) — the job then logs `orphan warehouse
+#     <name>` — and the ConfigMaps are the Makefile's to create.
+#   * Network: the catalog NetworkPolicy admits this pod on TCP 8181 by its
+#     `app.kubernetes.io/name: access-sync` label; Keycloak has no ingress policy, so
+#     the realm reads need nothing extra. Nothing else widens.
+#
+# Every 2 minutes; `concurrencyPolicy: Forbid` so runs never overlap,
+# `activeDeadlineSeconds: 110` so a hung run is gone before the next tick, and
+#
+# The Job waits for the identity provider first (wait-for-idp, platform#621's follow-up): a boot
+# that reaches this CronJob before Keycloak answers used to burn two failed ticks on every restart.
+# `backoffLimit: 1` so a failed tick is visible as a failed Job and retried once.
+#
+#   make access-sync       # create/refresh the script ConfigMap and apply this file
+#   make access-sync-now   # run one Job now, wait for it, print its log
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: access-sync
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: access-sync
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+rules:
+  # The catalog's own client (for a Lakekeeper token), the platform bucket's key pair
+  # (for the create body) and the read-only Keycloak client (for group members) —
+  # read-only, these three Secrets only.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["svc-catalog-operator", "stardelt-s3-creds", "stardelt-oidc-clients"]
+    verbs: ["get"]
+  # Read every Catalog and SqlWarehouse; the names are chosen by users, so no
+  # resourceNames here.
+  - apiGroups: ["stardelt.io"]
+    resources: ["catalogs", "sqlwarehouses"]
+    verbs: ["get", "list"]
+  # Status only: the sync never edits a spec (a spec is a person's input). It owns
+  # the SqlWarehouse status (`phase`, `renderedGroup`, `engine`, `Rendered`) and the
+  # Catalog status.
+  - apiGroups: ["stardelt.io"]
+    resources: ["catalogs/status", "sqlwarehouses/status"]
+    verbs: ["patch"]
+  # The two files the warehouse half converges (platform#312): `trino-warehouses`
+  # (the resource groups the coordinator loads) and `trino-group-file` (the file
+  # group provider). Converge in place, never create — the Makefile creates both.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["trino-warehouses", "trino-group-file"]
+    verbs: ["get", "update", "patch"]
+  # One engine, one replica count (platform#131 step A): read the worker Deployment and
+  # patch its `scale` subresource. `resourceNames` keeps this to the one Deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["trino-worker"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["trino-worker"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: access-sync
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+subjects:
+  - kind: ServiceAccount
+    name: access-sync
+    namespace: stardelt
+roleRef:
+  kind: Role
+  name: access-sync
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: access-sync
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+spec:
+  # 2 minutes: a new Catalog is Ready (or Invalid) within 2 minutes of being applied.
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 110
+      template:
+        metadata:
+          # The NetworkPolicy selects the pod by this label.
+          labels:
+            app.kubernetes.io/part-of: stardelt
+            app.kubernetes.io/name: access-sync
+        spec:
+          restartPolicy: Never
+          serviceAccountName: access-sync
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            # The IdP is not ready when the node is (platform#621/#622): Keycloak rebuilds its
+            # image for ~2 minutes after a boot and refuses the token endpoint until it is done.
+            # Twelve attempts with a 3 s connect timeout and a 3 s sleep stay inside the Job's
+            # `activeDeadlineSeconds: 110` (12 x 6 s = 72 s); if the IdP still does not answer the
+            # sync runs anyway and fails the way it does today.
+            - name: wait-for-idp
+              image: python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import os, sys, time, urllib.request
+                  issuer = os.environ.get("OIDC_ISSUER", "").rstrip("/")
+                  if not issuer:
+                      print("no identity provider configured")
+                      sys.exit(0)
+                  url = issuer + "/.well-known/openid-configuration"
+                  for _ in range(12):
+                      try:
+                          urllib.request.urlopen(url, timeout=3)
+                          print("identity provider answered at", issuer)
+                          sys.exit(0)
+                      except Exception as exc:
+                          print("waiting for", url, exc)
+                          time.sleep(3)
+                  print("identity provider did not answer; starting the sync anyway", file=sys.stderr)
+              env:
+                - name: OIDC_ISSUER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: stardelt-identity
+                      key: issuerUrl
+                      optional: true
+              resources:
+                requests: { cpu: "10m", memory: "32Mi" }
+                limits: { cpu: "100m", memory: "128Mi" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+          containers:
+            - name: sync
+              # stdlib only, no build of ours.
+              image: python:3.13.16-slim-bookworm@sha256:73aa5faee130c60da030e105ec971ccf57473fbd22ce73bd6fc9ba99a40b838d
+              command: ["python3", "/opt/job/job.py"]
+              env:
+                # Namespace-agnostic: the Pod reports where it runs.
+                - name: NAMESPACE
+                  valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+                - name: LAKEKEEPER_URL
+                  value: "http://lakekeeper:8181"
+                # Keycloak reads (groups and their members) through the Service: the
+                # realm's `trino-group-sync` client has `view-users`, never the master
+                # credential.
+                - name: KEYCLOAK_URL
+                  value: "http://keycloak:8080"
+                - name: REALM
+                  value: "stardelt"
+                # Always managed: its role exists, holds the group's members, and is a
+                # project_admin of the catalog's project.
+                - name: ADMIN_GROUP
+                  value: "stardelt-admins"
+                # Assignees with no Keycloak user (platform#9): `superset` is the
+                # PASSWORD account Superset's Trino connection uses, so the role has to
+                # contain it even though no user row exists.
+                - name: STATIC_ASSIGNEES
+                  value: '{"stardelt-users":["superset"]}'
+              volumeMounts:
+                - { name: job-script, mountPath: /opt/job, readOnly: true }
+              resources:
+                requests: { cpu: "50m", memory: "64Mi" }
+                limits: { cpu: "500m", memory: "256Mi" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+          volumes:
+            - name: job-script
+              configMap: { name: access-sync-script, defaultMode: 0444 }

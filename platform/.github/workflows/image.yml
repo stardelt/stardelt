@@ -1,0 +1,248 @@
+name: Image
+
+# Build and publish the images the platform runs that upstream does not ship:
+#   ghcr.io/stardelt/superset           baseline Superset + psycopg2-binary, trino
+#   ghcr.io/stardelt/jupyter-singleuser scipy-notebook + trino, pyspark, pandas,
+#                                       pyarrow and the warehouse quickstart
+#   ghcr.io/stardelt/spark              Apache Spark + the Iceberg runtime and
+#                                       AWS bundle
+#
+# On main this pushes `dev` plus an immutable `sha-<short>` tag. Pin the digest
+# (printed in the job summary) when rolling the cluster.
+#
+# Only the job whose directory changed runs (`scripts/changed-images.sh`); a change to this
+# workflow itself, a tag push or a workflow dispatch builds all three.
+#
+# Pull requests build without pushing.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths: ["images/**", ".github/workflows/image.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["images/**", ".github/workflows/image.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Which image directories changed
+    runs-on: ubuntu-latest
+    outputs:
+      superset: ${{ steps.diff.outputs.superset }}
+      jupyter: ${{ steps.diff.outputs.jupyter }}
+      spark: ${{ steps.diff.outputs.spark }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          names="$(bash scripts/changed-images.sh "$BEFORE" "$AFTER")"
+          for name in superset jupyter spark; do
+            if printf '%s\n' "$names" | grep -qx "$name"; then
+              echo "$name=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$name=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  superset:
+    needs: changes
+    if: needs.changes.outputs.superset == 'true'
+    name: Build and push ghcr.io/stardelt/superset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/stardelt/superset
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-,format=short
+            type=raw,value=dev,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: images/superset
+          file: images/superset/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Job summary
+        if: github.event_name != 'pull_request'
+        # Values go through env, not `${{ }}` inside the script: tag names are
+        # attacker-influenced strings and must never be spliced into shell source.
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ghcr.io/stardelt/superset"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo "digest: $DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  jupyter:
+    needs: changes
+    if: needs.changes.outputs.jupyter == 'true'
+    name: Build and push ghcr.io/stardelt/jupyter-singleuser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/stardelt/jupyter-singleuser
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-,format=short
+            type=raw,value=dev,enable={{is_default_branch}}
+
+      - name: Read the pinned stardelt library ref
+        id: lib
+        # The Makefile holds the pin (STARDELT_LIB_REF) and the image installs
+        # that release of the library (platform#417).
+        run: echo "ref=$(make -s print-stardelt-lib-ref)" >> "$GITHUB_OUTPUT"
+
+      - name: Platform release the image belongs to
+        id: runtime
+        # The top bar of `stardelt-jupyterlab` shows this (`STARDELT_RUNTIME`),
+        # and `make build-jupyter-image` passes the same year.month, so the CI
+        # build of `dev` and a local build say the same thing.
+        run: echo "label=$(date +%Y.%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: images/jupyter
+          file: images/jupyter/Dockerfile
+          build-args: |
+            STARDELT_LIB_REF=${{ steps.lib.outputs.ref }}
+            STARDELT_RUNTIME=${{ steps.runtime.outputs.label }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=jupyter
+          cache-to: type=gha,mode=max,scope=jupyter
+
+      - name: Job summary
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ghcr.io/stardelt/jupyter-singleuser"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo "digest: $DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  spark:
+    needs: changes
+    if: needs.changes.outputs.spark == 'true'
+    name: Build and push ghcr.io/stardelt/spark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/stardelt/spark
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-,format=short
+            type=raw,value=dev,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: images/spark
+          file: images/spark/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Job summary
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ghcr.io/stardelt/spark"
+            echo
+            echo '```'
+            echo "$TAGS"
+            echo "digest: $DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

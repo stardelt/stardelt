@@ -1,0 +1,69 @@
+name: Pin freshness
+on:
+  schedule: [{cron: "17 4 * * *"}]
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  pins:
+    name: The checked-in pins and the operator's two golden-value checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: stardelt/stardelt-operator
+          path: operator
+          fetch-depth: 0
+      - name: Compare
+        id: check
+        run: |
+          set +e
+          # `$?` after a pipeline is tee's status, not the check's: that is why the
+          # issue was never filed (found 2026-11-09; `false | tee` answers 0). Redirect,
+          # read the code, print. All three checks feed one issue: an operator whose golden
+          # values disagree is the same class of drift as an image pin that is behind.
+          python3 scripts/check_pin_freshness.py > "$RUNNER_TEMP/pins.txt" 2>&1
+          freshness=$?
+          OPERATOR_DIR=operator bash scripts/check-operator-pins.sh >> "$RUNNER_TEMP/pins.txt" 2>&1
+          operator=$?
+          # The operator image the platform pins is a build of one commit; that commit's
+          # NOVA_IMAGE is what an operator install renders. The check above reads the operator's
+          # origin/main instead, so both were green while an install rendered Nova one build
+          # behind (stardelt-operator#545).
+          OPERATOR_DIR=operator python3 scripts/check_golden_image.py >> "$RUNNER_TEMP/pins.txt" 2>&1
+          golden=$?
+          cat "$RUNNER_TEMP/pins.txt"
+          if [ "$freshness" -ne 0 ] || [ "$operator" -ne 0 ] || [ "$golden" -ne 0 ]; then
+            echo "code=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=0" >> "$GITHUB_OUTPUT"
+          fi
+      - name: File or refresh the issue
+        if: steps.check.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='Pins are stale: an image pin or the operator’s golden values disagree'
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "in:title \"Pins are stale\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pins.txt"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --label bug --label P2 --label ops --milestone "v0.4" --body-file "$RUNNER_TEMP/pins.txt"
+          fi
+      - name: Close the issue when all three checks pass
+        if: steps.check.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search 'in:title "Pins are stale"' --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            echo "no open pin issue"
+            exit 0
+          fi
+          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "All three checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\`, \`check-operator-pins.sh\` and \`check_golden_image.py\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
+          gh issue close "$number" --repo "$GITHUB_REPOSITORY"

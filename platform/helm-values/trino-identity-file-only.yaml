@@ -1,0 +1,77 @@
+# Trino identity overlay for the *pre-switch* state (platform#311).
+#
+#   helm upgrade --install trino trino/trino --version <pin> \
+#     --namespace stardelt --create-namespace --wait --timeout 10m \
+#     -f helm-values/trino.yaml -f helm-values/trino-identity.yaml \
+#     -f helm-values/trino-identity-file-only.yaml \
+#     $(bash scripts/render-catalogs.sh trino-args)
+#
+# `make catalog-enforce-rollback` renders exactly this: the file access control
+# alone. It is the recovery path, not a state to run in — without the bridge
+# Trino authorizes by the file rules only, so every person sees every *managed*
+# catalog (the three engine catalogs stay administrator-only, platform#363) and
+# the `Catalog` grants enforce nothing.
+#
+# Why an overlay and not an edit: `helm upgrade` is the only writer, both files
+# are tracked, and a rollback has to be one command that a person under pressure
+# can run. The only key that differs from helm-values/trino-identity.yaml is
+# `access-control.config-files` (the chart's own file only). The OPA properties
+# file stays in the ConfigMap (harmless: nothing loads it), so the same release
+# can be switched back on without another ConfigMap change.
+#
+# The principal stays `sub` (from helm-values/trino-identity.yaml) on purpose:
+# since platform#312 the group file is written by CronJob access-sync by `sub`
+# and there is no writer that produces usernames, so a rollback that changed the
+# principal would leave every group lookup matching nobody — an administrator
+# would silently lose the query visibility the `stardelt-admins` line grants.
+# The rollback takes the bridge out of the authorization path; it does not change
+# who the engine thinks a person is.
+#
+# `helm-values/trino.yaml` and `helm-values/trino-identity.yaml` are still
+# applied (values merge key by key), and `server.coordinatorExtraConfig` is a
+# string, so it is repeated here in full — a partial block would drop the
+# keystore password, the OAuth2 settings and the query guards.
+server:
+  coordinatorExtraConfig: |
+    http-server.https.keystore.key=${ENV:TRINO_TLS_KEYSTORE_PASSWORD}
+    http-server.authentication.allow-insecure-over-http=false
+    web-ui.authentication.type=oauth2
+    http-server.authentication.oauth2.issuer=${ENV:TRINO_OIDC_ISSUER}
+    http-server.authentication.oauth2.client-id=trino
+    http-server.authentication.oauth2.client-secret=${ENV:TRINO_CLIENT_SECRET}
+    http-server.authentication.oauth2.principal-field=sub
+    http-server.authentication.oauth2.scopes=openid
+    http-server.authentication.oauth2.oidc.use-userinfo-endpoint=false
+    query.max-execution-time=10m
+    query.max-run-time=15m
+    access-control.config-files=/etc/trino/access-control.properties
+
+initContainers:
+  coordinator:
+    - name: wait-for-idp
+      image: trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f
+      imagePullPolicy: IfNotPresent
+      # Pod Security `restricted` (platform#1190 follow-up, platform#1096 question 5): an init
+      # container inherits nothing from the chart's pod/container keys, so it needs its own block.
+      # The Trino image's user is already non-root; the pod-level runAsNonRoot covers admission.
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+      env:
+        - name: TRINO_OIDC_ISSUER
+          valueFrom:
+            configMapKeyRef:
+              name: stardelt-identity
+              key: issuerUrl
+              optional: true
+      command:
+        - /usr/bin/bash
+        - -c
+        - |
+          until /usr/bin/curl -fsS --max-time 5 \
+            "$TRINO_OIDC_ISSUER/.well-known/openid-configuration" >/dev/null; do
+            echo "waiting for $TRINO_OIDC_ISSUER"
+            sleep 3
+          done

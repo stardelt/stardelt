@@ -1,0 +1,49 @@
+# Read access to `Pipeline` and `ServicePrincipal` resources for the Airflow pods that run the
+# pipeline loader (scheduled jobs phase J0, platform#118; stardelt-demos dags/pipeline_loader.py).
+#
+# The dag-processor lists the resources to build one DAG per `Pipeline`; a KubernetesExecutor
+# task pod parses the same DAG file before it runs a task, so its ServiceAccount needs the same
+# read access. The loader also checks a pipeline's `runAs` against its `ServicePrincipal`
+# (owner group, ready, credentials Secret name) before it builds the DAG — platform#260.
+# The scheduler parses the bundle too (Airflow 3), so `airflow dags test` in the scheduler
+# pod — the command the runbook and several tickets use — needs the same read access
+# (platform#1170).
+# No access to Secrets: the credentials reach the task pod through a `secretKeyRef` the kubelet
+# resolves. Nothing here can create, change or delete anything, and the Role is limited to this
+# namespace. Applied by `make install` after the Airflow release.
+#
+# The loader also resolves a task's `connection` against the namespace's `Connection` resources
+# before it builds the DAG (`spec.tasks[].connection`, stardelt-platform#161). It reads the
+# resource (scope, owner group, secret key names), never the Secret: each `CONN_<NAME>_<KEY>`
+# is a `secretKeyRef` the kubelet resolves at pod start.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-pipeline-reader
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+rules:
+  - apiGroups: ["stardelt.io"]
+    resources: ["pipelines", "serviceprincipals", "connections"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-pipeline-reader
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+subjects:
+  - kind: ServiceAccount
+    name: airflow-dag-processor
+    namespace: stardelt
+  - kind: ServiceAccount
+    name: airflow-worker
+    namespace: stardelt
+  - kind: ServiceAccount
+    name: airflow-scheduler
+    namespace: stardelt
+roleRef:
+  kind: Role
+  name: airflow-pipeline-reader
+  apiGroup: rbac.authorization.k8s.io

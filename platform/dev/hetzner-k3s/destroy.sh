@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Delete the stardelt dev cluster and its playground DNS records.
+#
+# Deletes exactly what dev/hetzner-k3s/cluster.yaml describes (written by provision.sh)
+# and the DNS records for $INGRESS_HOST, and shows both first. On a terminal it asks
+# for confirmation; FORCE=1 skips the question. Without a terminal (scripts, CI) it
+# proceeds after printing the plan, as before.
+#
+# DNS is only removed once the cluster is gone (or when there is no cluster.yaml), so a
+# failed delete never leaves a live cluster without its hostname.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CF_ENV="${CF_ENV:-$HOME/.config/stardelt/cloudflare.env}"
+# Runtime paths, resolved via CF_ENV / HETZNER_ENV.
+# shellcheck source=/dev/null
+[ -f "$CF_ENV" ] && { set -a; . "$CF_ENV"; set +a; }
+HETZNER_ENV="${HETZNER_ENV:-$HOME/.config/stardelt/hetzner.env}"
+# shellcheck source=/dev/null
+[ -f "$HETZNER_ENV" ] && { set -a; . "$HETZNER_ENV"; set +a; }
+INGRESS_HOST="${INGRESS_HOST:-alpha.dev.stardelt.io}"
+# Which config to delete from. The dev cluster's cluster.yaml is the default; the
+# throwaway fresh-node wrapper points this at its own .fresh-*.yaml (platform#1018).
+CLUSTER_CONFIG="${CLUSTER_CONFIG:-$HERE/cluster.yaml}"
+DRY_RUN="${DRY_RUN:-0}"
+
+CFG="$CLUSTER_CONFIG"
+cluster=""
+if [ -f "$CFG" ]; then
+  if [ "$DRY_RUN" != 1 ]; then
+    command -v hetzner-k3s >/dev/null || { echo "hetzner-k3s not found" >&2; exit 1; }
+  fi
+  cluster="$(awk -F': *' '/^cluster_name:/ { print $2; exit }' "$CFG")"
+  if [ -z "$cluster" ]; then
+    echo "cannot read cluster_name from $CFG" >&2
+    exit 1
+  fi
+  if [ -n "${CLUSTER_NAME:-}" ] && [ "$CLUSTER_NAME" != "$cluster" ]; then
+    echo "refusing: CLUSTER_NAME is '$CLUSTER_NAME' but $CFG describes '$cluster'." >&2
+    exit 1
+  fi
+fi
+do_dns=0
+if [ -f "$CF_ENV" ] && [ -x "$HERE/../cloudflare-dns.sh" ]; then do_dns=1; fi
+# Deleting the records is opt-in: the name outlives this cluster. A stage that
+# took the name over (a home node, a replacement cluster) owns those records now,
+# and `make dev-down` on the retired node must not point DNS at nothing.
+remove_dns="${REMOVE_DNS:-0}"
+
+echo "About to delete:"
+if [ -n "$cluster" ]; then
+  echo "  - Hetzner cluster '$cluster' (config: $CFG) and everything on its disks"
+else
+  echo "  - no cluster (no $CFG)"
+fi
+if [ "$do_dns" = 1 ] && [ "$remove_dns" = 1 ]; then
+  echo "  - DNS A records ${INGRESS_HOST} and *.${INGRESS_HOST}"
+elif [ "$do_dns" = 1 ]; then
+  echo "  - DNS records for ${INGRESS_HOST}: KEPT (REMOVE_DNS=1 to delete them)"
+fi
+
+if [ "$DRY_RUN" = 1 ]; then
+  echo "would run: hetzner-k3s delete --config ${CFG} --force --quiet"
+  exit 0
+fi
+
+if [ "${FORCE:-0}" != 1 ] && [ -t 0 ]; then
+  read -r -p "Proceed? [y/N] " answer
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *) echo "aborted"; exit 1 ;;
+  esac
+fi
+
+if [ -n "$cluster" ]; then
+  echo "› deleting cluster '$cluster' (hetzner-k3s)"
+  if ! hetzner-k3s delete --config "$CFG" --force --quiet; then
+    echo "cluster delete failed — leaving DNS in place. Check the Hetzner console; once the" >&2
+    echo "cluster is really gone, run 'make dev-dns-down'." >&2
+    exit 1
+  fi
+else
+  echo "no cluster.yaml — nothing to delete (run provision.sh first)"
+fi
+
+if [ "$do_dns" = 1 ] && [ "$remove_dns" = 1 ]; then
+  echo "› removing DNS records for ${INGRESS_HOST}"
+  if ! NAME="$INGRESS_HOST" bash "$HERE/../cloudflare-dns.sh" delete; then
+    echo "DNS cleanup failed — the records still point at a released IP. Run 'make dev-dns-down'." >&2
+    exit 1
+  fi
+fi
+
+if [ "$do_dns" = 1 ] && [ "$remove_dns" != 1 ]; then
+  echo "› DNS records for ${INGRESS_HOST} left in place (REMOVE_DNS=1 to delete them)"
+fi

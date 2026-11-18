@@ -1,0 +1,1667 @@
+# stardelt platform — umbrella chart values.
+#
+# This is the declarative counterpart of `make install`: one release instead of
+# nine `helm upgrade --install` / `kubectl apply` steps. The per-component
+# sources of truth for the Makefile path stay `helm-values/*.yaml` and
+# `manifests/*.yaml`; the blocks below mirror them — keep both in sync when a
+# value changes (the version pins live in the root Makefile and in Chart.yaml).
+#
+# Layout rules:
+#   - one block per sub-chart, named after the dependency in Chart.yaml, with an
+#     `enabled` toggle that Chart.yaml uses as its condition;
+#   - core stack on by default (Postgres, SeaweedFS, Lakekeeper, Trino, Nova),
+#     heavy components off (Superset, Airflow, JupyterHub) — same shape as
+#     `make install-core`;
+#   - in-cluster addresses use short service names, which resolve inside the
+#     release namespace, so the chart is namespace-agnostic;
+#   - `fullnameOverride` keeps the core sub-chart object names identical to a
+#     `make install` deployment (`seaweedfs-s3`, `lakekeeper`, `trino`, ...), so
+#     Nova, `make pf` and the playground ingresses keep working, and single
+#     components can be disabled while the Makefile keeps managing them.
+#     The optional components are named partly from the release name
+#     (`stardelt-postgresql`, `stardelt-api-server`, ...) because their charts
+#     use `.Release.Name` directly — names, not configuration, differ there.
+#     A chart install therefore shares object names with `make install`: use one
+#     or the other per namespace, never both.
+
+# ===========================================================================
+# Platform settings — the knobs an administrator sets for their cluster.
+#
+# Everything below is optional and off by default: a stock cluster with a
+# default StorageClass and no ingress controller installs as-is, and you add
+# reachability when you want it. Nothing here is Hetzner-, k3s- or
+# ingress-nginx-specific.
+# ===========================================================================
+
+platform:
+  # Base domain for Nova's deep links and for the ingresses below, e.g.
+  # `example.com` → Nova at example.com, Trino at trino.example.com.
+  # Empty = Nova shows no external links (it still reports live status).
+  baseDomain: ""
+
+ingress:
+  # Render Ingress objects for the components this release installs.
+  # false = bring your own ingress (or use kubectl port-forward); the Services
+  # stay ClusterIP either way.
+  enabled: false
+  # IngressClass name, e.g. nginx, traefik, alb. Empty = the cluster default.
+  className: ""
+  # Extra annotations on every rendered Ingress. ingress-nginx, for one, allows a request body of
+  # 1 MiB unless told otherwise; Nova's notebook publish route takes up to 5 MiB, so give that
+  # path `nginx.ingress.kubernetes.io/proxy-body-size: "6m"` (a second Ingress for
+  # `/api/notebooks`, as dev/playground/ingress.yaml does) or set it here for the whole host.
+  annotations: {}
+  # Source ranges that may open a connection to the public endpoints (stardelt-platform#427). Empty =
+  # open to everyone. A list renders `nginx.ingress.kubernetes.io/whitelist-source-range` on every
+  # Ingress this chart renders (ingress-nginx; other controllers ignore it). Entries are CIDRs, at most 64.
+  # Always include the cluster's own egress address: pods that call the public names arrive through
+  # it. Do not also set this annotation under `annotations`.
+  allowedCidrs: []
+  tls:
+    # Requires cert-manager. Leave off when TLS terminates elsewhere (a cloud
+    # load balancer, an edge proxy, an existing Certificate).
+    enabled: false
+    # Name of a cert-manager ClusterIssuer; added as the per-Ingress annotation.
+    issuer: ""
+    # One secret per host; `{host}` expands to the hostname with dots → dashes.
+    secretNameTemplate: "{host}-tls"
+  # Per-service host overrides, e.g. { trino: sql.example.net }. Anything not
+  # listed is derived from platform.baseDomain and the service's subdomain.
+  hosts: {}
+  # Components whose own UI/API has no sign-in wired yet (trino, lakekeeper,
+  # superset, airflow, jupyterhub). Their Ingress is rendered only when listed
+  # here: exposing them bypasses the platform IdP. Nova is always rendered;
+  # Keycloak only when identity.mode=platform. Example: exposeUnauthenticated: [trino]
+  exposeUnauthenticated: []
+
+monitoring:
+  # Render the scrape objects and the starter alerts for the customer's Prometheus
+  # Operator: one ServiceMonitor per object-store role, one PodMonitor per
+  # CloudNative-PG cluster, and one PrometheusRule. Needs the
+  # monitoring.coreos.com/v1 CRDs: Helm does not check them, and `helm install`
+  # fails when the CRDs are absent — leave this off there.
+  enabled: false
+  # Added to every rendered object's labels. The customer's Prometheus selects by
+  # them, e.g. { release: kube-prometheus-stack }.
+  labels: {}
+
+# The Spark runtime catalogue (internal#161 slice 4a): the ConfigMap
+# `stardelt-spark-runtimes`, one runtime per entry. The image pair (Spark image + the notebook
+# image whose Python minor matches) is named by the runtime key; the content lives in
+# `chart/files/spark-runtimes.json`, so a digest bump is one file in both paths.
+sparkRuntimes:
+  enabled: true
+
+storage:
+  # StorageClass for the volumes this chart creates itself (the Postgres
+  # Cluster). Empty = the cluster default StorageClass, which is what most
+  # distributions provide — check with `kubectl get storageclass`.
+  #
+  # Sub-charts take their own key, because Helm cannot template a values file:
+  #   seaweedfs.master.data.storageClass / seaweedfs.volume.dataDirs[0].storageClass
+  #   seaweedfs.filer.data.storageClass
+  # All three default to "" (= cluster default) in this file.
+  #
+  # The notebook home is not templated here: `jupyterhub.singleuser.storage` carries no
+  # `dynamic.storageClass` on purpose — for KubeSpawner "" means *no class*, not the default,
+  # and the spawn fails (platform#786, #790). A named class is required if anyone overrides it.
+  className: ""
+
+images:
+  # Pull secrets for the stardelt-built images (Nova). Empty works: the published
+  # images are public. For a private registry or an air-gap mirror, use
+  # Kubernetes' own shape:
+  #   pullSecrets:
+  #     - name: my-registry-creds
+  #
+  # Sub-charts take their own key, so a private registry also needs:
+  #   trino.imagePullSecrets / lakekeeper.imagePullSecrets / superset.imagePullSecrets
+  #   global.imagePullSecrets        (SeaweedFS reads the Helm-standard global)
+  pullSecrets: []
+
+identity:
+  # Who authenticates users (docs: architecture/identity, the identity contract).
+  #   none     — nothing deployed, no ConfigMap; components keep their dev auth.
+  #   platform — deploy Keycloak (realm `stardelt`) at id.<platform.baseDomain>
+  #              (or ingress.hosts.keycloak) with its own CNPG Postgres, and
+  #              publish ConfigMap `stardelt-identity`. Needs platform.baseDomain
+  #              and the CNPG operator (cloudnative-pg above, or an existing one).
+  #   external — bring your own OIDC provider (Entra ID, Okta, a corporate
+  #              Keycloak): deploys nothing, only publishes `stardelt-identity`
+  #              from issuerUrl below. Register the clients there yourself.
+  mode: none
+  # Required for `external`; ignored for `platform` (derived from the host:
+  # https://id.<baseDomain>/realms/stardelt).
+  issuerUrl: ""
+  # `external` only: the provider's OAuth2 token endpoint — `token_endpoint` in
+  # <issuerUrl>/.well-known/openid-configuration. Required for `external`: neither Helm nor
+  # the operator can fetch an external discovery document (Helm has no HTTP; the operator's
+  # only transport is the API-server proxy, which cannot leave the cluster). Ignored for
+  # `platform`, which derives it from the Keycloak it deploys. Published as `tokenEndpoint`
+  # in ConfigMap `stardelt-identity` so no component builds the realm path itself (#611).
+  tokenEndpoint: ""
+  groupClaim: groups
+  adminGroup: stardelt-admins
+
+  keycloak:
+    # Equivalent to manifests/keycloak.yaml (+ scripts/identity-bootstrap.sh).
+    # Official image, Apache-2.0. Tag mirrors KEYCLOAK_VERSION in the Makefile
+    # (scripts/check-version-parity.sh).
+    image:
+      repository: quay.io/keycloak/keycloak
+      tag: "26.8.2"
+      pullPolicy: IfNotPresent
+    # Small single-node sizing (fits next to install-core on a cx33).
+    resources:
+      requests: { cpu: "100m", memory: "512Mi" }
+      limits:   { cpu: "1",    memory: "1Gi"   }
+    # The admin password, the realm `admin` user's password and the client
+    # secrets are generated on first install into Secrets keycloak-admin,
+    # stardelt-realm-admin and stardelt-oidc-clients, kept across upgrades
+    # (lookup) and on uninstall (helm.sh/resource-policy: keep). Nothing here
+    # holds a credential.
+    postgres:
+      instances: 1
+      # Pinned: without `imageName` a Cluster tracks the operator's default image
+      # and starts a major upgrade the next time the operator ships one.
+      image: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4
+      storage:
+        size: 1Gi
+      resources:
+        requests: { cpu: "50m",  memory: "128Mi" }
+        limits:   { cpu: "500m", memory: "256Mi" }
+
+# ===========================================================================
+# Core stack
+# ===========================================================================
+
+cloudnative-pg:
+  # CNPG operator. Reconciles the `postgres` Cluster below and installs the
+  # CNPG CRDs cluster-wide. Disable when the cluster already runs an operator
+  # (the Makefile-managed release `cnpg`, or a platform-wide install).
+  enabled: true
+
+postgres:
+  # Plain manifest (not a sub-chart): CNPG Cluster backing Lakekeeper's catalog
+  # metadata. Equivalent to manifests/cnpg-postgres.yaml.
+  # The Cluster is named `lakekeeper-pg` — that name is referenced from
+  # `lakekeeper.externalDatabase` below, so change both together.
+  enabled: true
+  instances: 1
+  # Pinned: without `imageName` a Cluster tracks the operator's default image and
+  # starts a major upgrade the next time the operator ships one.
+  image: ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2
+  storage:
+    size: 2Gi
+  # Continuous WAL archiving plus a daily base backup through the barman-cloud
+  # CNPG plugin into the platform's object store: `templates/cnpg-objectstore.yaml`
+  # renders ObjectStore/lakekeeper-pg-backups (equivalent to
+  # manifests/cnpg-postgres.yaml + manifests/cnpg-backup-schedule.yaml). Needs the
+  # destination bucket to exist: the bundled SeaweedFS creates `backups` below,
+  # but with `s3Credentials.create=false` (BYO S3) your store must already have
+  # it, and the credentials above must be allowed to write there.
+  #
+  # `postgres.image` — and its twins `identity.keycloak.postgres.image` and
+  # `nova.database.image` — pin the database image of the three Clusters this
+  # chart renders, matching the `spec.imageName` in `manifests/`.
+  backup:
+    # off = no spec.backup and no ScheduledBackup (no WAL archiving at all)
+    enabled: true
+    # Bucket under `s3Credentials.endpoint` that receives the WAL and base
+    # backups. Keep in sync with the `backups` entry in `seaweedfs.s3.createBuckets`.
+    bucket: backups
+    retentionPolicy: "14d"
+    # CloudNativePG cron, seconds first: 02:30 every day.
+    schedule: "0 30 2 * * *"
+  resources:
+    requests: { cpu: "50m", memory: "256Mi" }
+    limits:   { cpu: "1",   memory: "512Mi" }
+
+s3Credentials:
+  # Secret that every object-storage consumer reads: the SeaweedFS S3 endpoint
+  # plus access key / secret key / bucket / region. Generated on first install
+  # (random 48 characters), kept across upgrades and on uninstall. The same key pair
+  # is written to Secret `seaweedfs-s3-config`, which the SeaweedFS S3 gateway reads
+  # (`seaweedfs.s3.existingConfigSecret` below). Nothing here holds a credential.
+  #
+  # `create: false`: you provide BOTH Secrets yourself (see
+  # manifests/s3-credentials.example.yaml for the first; the second is
+  # `seaweedfs_s3_config` = {"identities":[{"name":"stardelt","credentials":
+  # [{"accessKey":"…","secretKey":"…"}],"actions":["Admin","Read","Write"]}]}).
+  create: true
+  # Renaming requires updating the secretKeyRef entries under `trino.env` and
+  # `airflow.extraEnv` too.
+  name: stardelt-s3-creds
+  # Leave empty to generate. Set both to choose your own.
+  accessKey: ""
+  secretKey: ""
+  # Rendered with `tpl`, so `{{ .Release.Namespace }}` expands.
+  endpoint: "http://seaweedfs-s3.{{ .Release.Namespace }}.svc.cluster.local:8333"
+  bucket: lakehouse
+  region: us-east-1
+
+seaweedfs:
+  # S3-compatible storage for the lakehouse (chart: seaweedfs 4.25.1).
+  enabled: true
+  # Keep the service names (`seaweedfs-s3`, ...) that the values below and the
+  # playground ingresses expect.
+  fullnameOverride: seaweedfs
+
+  global:
+    seaweedfs:
+      # The chart's swap/migration hook needs a cluster-scoped ClusterRole
+      # (`seaweedfs-rw-cr`) that grants `pods: delete` in a hardcoded namespace.
+      # Cluster-scoped means it can only exist once per cluster, so leaving it on
+      # makes a second SeaweedFS release (another namespace, another lakehouse)
+      # impossible to install. stardelt expects several instances to coexist, so
+      # the default is off; set it to true if you need the chart's migration hook
+      # and run a single instance.
+      createClusterRole: false
+
+  master:
+    replicas: 1
+    data:
+      type: persistentVolumeClaim
+      size: 1Gi
+      # Empty = the cluster's default StorageClass.
+      storageClass: ""
+    # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+    # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+    logs:
+      type: emptyDir
+    defaultReplication: "000"
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits:   { cpu: "1",   memory: "256Mi" }
+    # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+    # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+    podSecurityContext:
+      enabled: true
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+      seccompProfile: {type: RuntimeDefault}
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+
+  volume:
+    replicas: 1
+    # PVC so the Iceberg data files survive pod restarts. emptyDir wipes on
+    # pod restart, which orphans the Iceberg metadata pointing at the files
+    # and surfaces as FileNotFoundException on Trino reads.
+    dataDirs:
+      - name: data
+        type: persistentVolumeClaim
+        size: 20Gi
+        # Empty = the cluster's default StorageClass.
+        storageClass: ""
+        # Volume slots. The chart's default (0 → auto-configure, 7 on Linux) is a trap
+        # on a small install: once the slots are used up, the master cannot create a
+        # volume for a *new* collection, and writes to a new bucket block forever —
+        # the client sees a hang, the master log says "failed to find writable volumes
+        # … Not enough data nodes found", and buckets created earlier keep working.
+        maxVolumes: 100
+    resources:
+      requests: { cpu: "200m", memory: "512Mi" }
+      limits:   { cpu: "2",    memory: "2Gi"  }
+    # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+    # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+    podSecurityContext:
+      enabled: true
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+      seccompProfile: {type: RuntimeDefault}
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+
+  filer:
+    replicas: 1
+    data:
+      type: persistentVolumeClaim
+      size: 1Gi
+      # Empty = the cluster's default StorageClass.
+      storageClass: ""
+    # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+    # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+    logs:
+      type: emptyDir
+    # The filer keeps the metadata of every S3 key in memory-mapped stores; at 256Mi it was OOM-killed in a
+    # loop on the dev cluster (platform#230). 512Mi is the value that held with S3 traffic and the admin UI.
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits:   { cpu: "1",   memory: "512Mi" }
+    # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+    # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+    podSecurityContext:
+      enabled: true
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+      seccompProfile: {type: RuntimeDefault}
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+
+  s3:
+    enabled: true
+    replicas: 1
+    # Pod Security `baseline` refuses hostPath, and the chart defaults every component's
+    # log volume to one (platform#1096 question 5). Logs are disposable, not data.
+    logs:
+      type: emptyDir
+    port: 8333
+    enableAuth: true
+    # The S3 identities come from a Secret this chart writes (templates/s3-credentials.yaml)
+    # so the key pair matches `stardelt-s3-creds`; nothing is committed here.
+    existingConfigSecret: seaweedfs-s3-config
+    createBuckets:
+      - name: lakehouse
+        anonymousRead: false
+      # Destination for the catalog's continuous backups (`postgres.backup`
+      # above). Unused when `postgres.backup.enabled=false`. Renaming this means
+      # setting `postgres.backup.bucket` to the same name.
+      - name: backups
+        anonymousRead: false
+    # platform#1219: the gateway holds ~1.44 Mi of live Go heap per Mi it serves (measured, a forced GC
+    # freed nothing), so one 2.89 GB Iceberg scan needs ~5.5 Gi and OOM-killed a 1Gi container after
+    # ~700 MB. Keep in step with helm-values/seaweedfs.yaml and the operator's values/seaweedfs.yaml (D44).
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits:   { cpu: "2",    memory: "5.5Gi" }
+    # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+    # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+    podSecurityContext:
+      enabled: true
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+      seccompProfile: {type: RuntimeDefault}
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+
+lakekeeper:
+  # Iceberg REST catalog (chart: lakekeeper 0.11.0, appVersion 0.12.2).
+  enabled: true
+  fullnameOverride: lakekeeper
+
+  # helmWait true so `helm upgrade --wait` blocks until migrations land.
+  helmWait: true
+
+  # Bundled postgres OFF → use the `postgres` Cluster above.
+  postgresql:
+    enabled: false
+
+  externalDatabase:
+    type: postgres
+    host_read:  lakekeeper-pg-rw
+    host_write: lakekeeper-pg-rw
+    port: 5432
+    database: lakekeeper
+    userSecret: lakekeeper-pg-app
+    userSecretKey: username
+    passwordSecret: lakekeeper-pg-app
+    passwordSecretKey: password
+
+  # Bundled OpenFGA OFF → authz backend "allowall" (no real authz yet).
+  authz:
+    backend: allowall
+
+  internalOpenFGA: false
+
+  catalog:
+    replicas: 1
+    resources:
+      requests: { cpu: "50m",  memory: "256Mi" }
+      limits:   { cpu: "1",    memory: "512Mi" }
+
+    # Authentication (platform#285): the issuer comes from the identity contract
+    # (`stardelt-identity.issuerUrl`), which this chart also renders when
+    # identity.mode is not `none`; without it the two refs are absent and the
+    # catalog stays anonymous, like `install-core`. Same settings as
+    # helm-values/lakekeeper.yaml: token required, authorisation still allowall.
+    extraEnv:
+      - name: LAKEKEEPER__OPENID_PROVIDER_URI
+        valueFrom:
+          configMapKeyRef:
+            name: stardelt-identity
+            key: issuerUrl
+            optional: true
+      - name: LAKEKEEPER__OPENID_AUDIENCE
+        value: lakekeeper
+
+lakekeeperBootstrap:
+  # Plain manifest (not a sub-chart): Job that accepts the Lakekeeper terms of
+  # use and creates the default `warehouse` on S3. Idempotent: skips when
+  # already bootstrapped, skips warehouse creation on 409 Conflict.
+  # Equivalent to manifests/lakekeeper-bootstrap.yaml.
+  enabled: true
+  image: curlimages/curl:8.10.1
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 4
+
+trino:
+  # MPP SQL engine (chart: trino 1.45.0, appVersion 484).
+  #
+  # Catalog `warehouse` connects to Lakekeeper (REST Iceberg catalog) and
+  # reads/writes Parquet on SeaweedFS via its native S3 filesystem. Credentials
+  # come from the `stardelt-s3-creds` Secret via env-var substitution
+  # (`${ENV:S3_ACCESS_KEY}`).
+  enabled: true
+  fullnameOverride: trino
+
+  server:
+    workers: 1
+    config:
+      query:
+        # Memory budget (platform#54): per-node + headroom must stay well below
+        # the heap so a single query fails closed instead of OOM-killing the worker.
+        #   800MB + 600MB = 1400MB <= 2G (2048MB), leaving ~600MB for the engine
+        #   and unaccounted allocations. Mirrors helm-values/trino.yaml.
+        maxMemory: "800MB"
+    # Coordinator-only query guards (platform#54). The chart renders
+    # `additionalConfigProperties` into the worker ConfigMap too, and the worker
+    # rejects keys it does not bind — so coordinator-only properties live here.
+    coordinatorExtraConfig: |
+      query.max-execution-time=10m
+      query.max-run-time=15m
+
+  # Trino sits behind an ingress (ingress-nginx) that sets X-Forwarded-For; without
+  # this it answers 406 "Server configuration does not allow processing of the
+  # X-Forwarded-For header". `server.config` only renders known keys — extra
+  # properties must go through `additionalConfigProperties`.
+  #
+  # Authentication is opt-in and lives in helm-values/trino-identity.yaml, which
+  # `make trino` applies when a platform IdP is present (it is written for the
+  # per-component install, whose values are flat; the umbrella chart needs the
+  # same keys nested under `trino:` — tracked as a follow-up, together with the
+  # coordinator TLS listener in manifests/trino-tls.yaml that gives in-cluster
+  # clients an authenticated HTTPS endpoint, platform#80). The group file and the
+  # resource groups (CronJob access-sync, platform#167/#312) ride with that same
+  # follow-up: it converges ConfigMaps only the overlay consumes.
+  # Without the overlay, Trino accepts anonymous SQL, which is only acceptable
+  # for an unreachable dev stack.
+  additionalConfigProperties:
+    - http-server.process-forwarded=true
+    # Trino 483+ (platform#1002): node-level file-system cache manager; the
+    # chart renders this into the coordinator AND worker config.properties.
+    - cache-manager.config-files=etc/cache-manager-alluxio.properties
+
+  coordinator:
+    jvm:
+      maxHeapSize: "2G"
+      gcMethod:
+        type: UseG1GC
+    config:
+      query:
+        # Same per-node cap as the worker (platform#54, mirrors helm-values/trino.yaml).
+        maxMemoryPerNode: "800MB"
+      memory:
+        heapHeadroomPerNode: "600MB"
+    # HeapDumpPath (platform#54): the chart hardcodes +HeapDumpOnOutOfMemoryError,
+    # so redirect dumps to a bounded emptyDir instead of the overlay fs.
+    additionalJVMConfig:
+      - "-Xms1G"
+      - "-XX:HeapDumpPath=/dumps"
+    # Kubelet — not the JVM — is in charge (platform#54, mirrors helm-values/trino.yaml).
+    resources:
+      requests: { cpu: "500m", memory: "2300Mi" }
+      limits: { memory: "3000Mi" }
+    additionalExposedPorts: {}
+    # Worker-local file-system cache for object-store reads (platform#134).
+    # The directory must exist on the coordinator too, so it gets the mount.
+    additionalVolumes:
+      - name: trino-fscache
+        emptyDir: { sizeLimit: 12Gi }
+      # Bounded heap-dump dir (platform#54): 2Gi cap so a dump never fills the node.
+      - name: trino-dumps
+        emptyDir: { sizeLimit: 2Gi }
+    additionalVolumeMounts:
+      - { name: trino-fscache, mountPath: /var/trino/cache }
+      - { name: trino-dumps, mountPath: /dumps }
+    # Alluxio cache manager (Trino 483+, platform#1002): the chart writes this
+    # into the config directory; cache-manager.config-files above names it.
+    additionalConfigFiles:
+      cache-manager-alluxio.properties: |
+        cache-manager.name=alluxio
+        fs.cache.directories=/var/trino/cache
+        fs.cache.max-sizes=10GB
+        fs.cache.ttl=7d
+
+  worker:
+    jvm:
+      maxHeapSize: "2G"
+      gcMethod:
+        type: UseG1GC
+    config:
+      query:
+        # Per-node cap (platform#54): 800MB + 600MB headroom <= 2G heap.
+        maxMemoryPerNode: "800MB"
+      memory:
+        heapHeadroomPerNode: "600MB"
+    additionalJVMConfig:
+      - "-Xms1G"
+      - "-XX:HeapDumpPath=/dumps"
+    resources:
+      requests: { cpu: "500m", memory: "2300Mi" }
+      limits: { memory: "3000Mi" }
+    # Same cache volume as the coordinator (see above).
+    additionalVolumes:
+      - name: trino-fscache
+        emptyDir: { sizeLimit: 12Gi }
+      - name: trino-dumps
+        emptyDir: { sizeLimit: 2Gi }
+    additionalVolumeMounts:
+      - { name: trino-fscache, mountPath: /var/trino/cache }
+      - { name: trino-dumps, mountPath: /dumps }
+    # Same cache-manager file as the coordinator (platform#1002).
+    additionalConfigFiles:
+      cache-manager-alluxio.properties: |
+        cache-manager.name=alluxio
+        fs.cache.directories=/var/trino/cache
+        fs.cache.max-sizes=10GB
+        fs.cache.ttl=7d
+
+  # Pull S3 creds from the stardelt-s3-creds Secret so catalog properties can
+  # substitute ${ENV:S3_ACCESS_KEY} / ${ENV:S3_SECRET_KEY}, plus the three
+  # variables the OAuth2 overlay reads (helm-values/trino-identity.yaml):
+  # the confidential client secret, the coordinator/worker shared secret, and
+  # the issuer from the platform identity ConfigMap. Optional, so an install
+  # without an IdP renders the same pod.
+  env:
+    - name: S3_ACCESS_KEY
+      valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: access-key } }
+    - name: S3_SECRET_KEY
+      valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: secret-key } }
+    - name: TRINO_CLIENT_SECRET
+      valueFrom: { secretKeyRef: { name: stardelt-oidc-clients, key: trino, optional: true } }
+    - name: TRINO_INTERNAL_SHARED_SECRET
+      valueFrom: { secretKeyRef: { name: trino-internal-secret, key: shared-secret, optional: true } }
+    - name: TRINO_OIDC_ISSUER
+      valueFrom: { configMapKeyRef: { name: stardelt-identity, key: issuerUrl, optional: true } }
+
+  catalogs:
+    warehouse: |
+      connector.name=iceberg
+      iceberg.catalog.type=rest
+      iceberg.rest-catalog.uri=http://lakekeeper:8181/catalog
+      iceberg.rest-catalog.warehouse=warehouse
+      iceberg.rest-catalog.vended-credentials-enabled=false
+      fs.s3.enabled=true
+      s3.endpoint=http://seaweedfs-s3:8333
+      s3.region=us-east-1
+      s3.path-style-access=true
+      s3.aws-access-key=${ENV:S3_ACCESS_KEY}
+      s3.aws-secret-key=${ENV:S3_SECRET_KEY}
+      # Single-replica SeaweedFS volume server can't sustain Trino's default
+      # parallel HTTP range requests (broken pipe / connection reset). Throttle
+      # both connection pool and the Iceberg metadata enumeration threads.
+      s3.max-connections=16
+      iceberg.split-manager-threads=4
+      iceberg.metadata.parallelism=2
+      # Worker-local file-system cache for object-store reads (platform#134).
+      # Trino 483+ (platform#1002): the directories, size and TTL live in the
+      # node-level cache manager (cache-manager-alluxio.properties, via
+      # cache-manager.config-files in config.properties); a catalog only turns
+      # caching on. Measured on the dev cluster 2026-10-19 against a 38M-row /
+      # 0.66 GB full scan of nyc_taxi.yellow_trips: repeat scans drop from
+      # 154 S3 GETs + 660 MB to 1 GET + 0 MB, wall time 1.5-1.9s -> 1.2-1.7s.
+      # The win is S3 offload (the single-replica SeaweedFS volume server is
+      # the bottleneck the throttles above protect), not latency — Parquet
+      # decode dominates on one node. Best-effort local cache only: a pod
+      # restart or scale-to-zero (M-02) discards it with the emptyDir, and the
+      # next scan repopulates (cold scan is slower: 5.1s vs 3.2s uncached).
+      fs.cache.enabled=true
+
+nova:
+  # stardelt Nova — UI + backend in one pod. Equivalent to
+  # manifests/nova-deployment.yaml.
+  enabled: true
+  replicas: 1
+
+  image:
+    repository: ghcr.io/stardelt/nova
+    # `:dev` is a mutable tag; Always re-pulls. Pin by digest for reproducible installs.
+    tag: dev
+    pullPolicy: Always
+
+  # Per-component override of the global `images.pullSecrets` (platform
+  # settings at the top of this file). Unset = use the global default.
+  # imagePullSecrets:
+  #   - ghcr-creds
+
+  # Rendered with `tpl`, so `{{ .Release.Namespace }}` expands.
+  trinoURL: "http://trino.{{ .Release.Namespace }}.svc.cluster.local:8080"
+  lakekeeperURL: "http://lakekeeper.{{ .Release.Namespace }}.svc.cluster.local:8181"
+  warehouseName: warehouse
+  devUser: stardelt-dev
+  # Sign-ins shared by many people (a public demo), comma separated; empty = none.
+  sharedAccounts: ""
+  # The hosted MCP endpoint (stardelt-nova#112; design agent-access §4). Off by default.
+  # `audience` is the resource identifier a token must carry; empty means
+  # https://<nova public origin>/mcp, which is what the realm client `stardelt-mcp`'s
+  # `aud-mcp` mapper mints. Set it explicitly when nova.auth.publicUrl is overridden.
+  mcp:
+    enabled: false
+    audience: ""
+    # The guarded SQL tools' row cap and per-call timeout (`sql_read`/`sql_explain`).
+    # Nova clamps to 1-1000 rows and 1-300 s; empty = Nova's own default (200 rows / 60 s).
+    # The operator's CRD carries the same two knobs as `spec.mcp.maxRows` and
+    # `spec.mcp.queryTimeoutSeconds` (stardelt-operator#732).
+    maxRows: ""
+    queryTimeoutSeconds: ""
+    # The client ids (`azp`) allowed to call /mcp; empty = every client the audience accepts.
+    # Nova refuses a token without an `azp` once the list is set. The operator's CRD carries
+    # the same list as `spec.mcp.allowedClients`.
+    allowedClients: []
+    # The groups (`groups` claim) whose members may call /mcp; empty = every group the audience
+    # accepts. Nova refuses a caller whose token names none of them once the list is set. The
+    # operator's CRD carries the same list as `spec.mcp.allowedGroups` (stardelt-operator#742).
+    allowedGroups: []
+    # `tools/call`s one person may make per minute on /mcp; 1-600. Empty = Nova's own default (60).
+    # The operator's CRD carries the same knob as `spec.mcp.callsPerMinute` (stardelt-operator#738).
+    callsPerMinute: ""
+    # `tools/call`s of a write tool (`pipeline_start`) one person may make per hour; 1-600.
+    # Empty = Nova's own default (20). The reads keep `callsPerMinute`. The operator's CRD
+    # carries the same knob as `spec.mcp.writesPerHour` (stardelt-operator#753).
+    writesPerHour: ""
+    # Days the stored audit rows of /mcp tool calls are kept; 0-3650. Empty = Nova's own default (30);
+    # 0 keeps them and switches the hourly purge off — `0` is a value, not "unset": the template
+    # compares the rendered string against the empty string. The operator's CRD carries the same
+    # knob as `spec.mcp.auditRetentionDays` (stardelt-operator#740).
+    auditRetentionDays: ""
+  # Model endpoints whose API keys the kubelet projects into Nova (operator#609 slice c1).
+  # Each entry becomes the read-only file `/var/run/stardelt/models/<endpoint>/key`, so Nova
+  # never reads a Secret through the API and a rotated key arrives without a restart. The key
+  # is a key of the Connection's synced Secret `conn-<connection>`; a Secret that does not
+  # exist yet only leaves the file absent (the volume source is optional).
+  modelKeys: []
+  #   - endpoint: default
+  #     connection: llm-key
+  #     key: api-key
+  # How often the model-endpoint probe re-checks every endpoint, in seconds; 300-604800.
+  # A new endpoint is probed by the next one-minute round regardless. Nova's default is 86400.
+  modelProbeSeconds: 86400
+  # Days the stored model-call rows of Ask, the agent proxy and the probe are kept; 0-3650.
+  # Empty = Nova's own default (30); `0` keeps them and switches the hourly purge off — `0` is a
+  # value, not "unset": the template compares the rendered string against the empty string.
+  modelCallRetentionDays: ""
+  # Sign-in (contract: docs/architecture/identity).
+  #   dev  — no login; what CI and the Nova demo mode rely on.
+  #   oidc — Nova is a client of the IdP configured under `identity:` above.
+  #          Requires identity.mode=platform (Keycloak) or `external` + issuerUrl;
+  #          the render fails fast otherwise instead of crash-looping the pod.
+  auth:
+    mode: dev
+    # Nova's external origin; the IdP redirect URI is <publicUrl>/api/auth/callback.
+    # Defaults to https://<nova host> derived from platform.baseDomain.
+    publicUrl: ""
+    clientId: nova
+    scopes: "openid profile email"
+    # The public client a command line signs in with (`stardelt login`, device flow); Nova
+    # answers it at GET /api/auth/config. Empty = `stardelt-dev` (the client the platform's
+    # Keycloak ships) with identity.mode=platform, and none with an external IdP.
+    deviceClientId: ""
+    # Generated by the chart when identity.mode != none, and by
+    # scripts/identity-bootstrap.sh on the manifest path.
+    clientSecret:
+      name: stardelt-oidc-clients
+      key: nova
+    sessionSecret:
+      name: stardelt-nova-session
+      key: session
+  # External base domain for deep-linking platform apps in Nova.
+  # Empty = no links. The dev playground sets this to alpha.dev.stardelt.io.
+  baseDomain: ""
+  # The stage this install is, shown as a badge in Nova. Empty = no badge.
+  # kind: dev | test | prod. prod adds an amber frame in Nova.
+  stage:
+    name: ""
+    kind: dev
+  logLevel: info,tower_http=info
+
+  resources:
+    requests: { cpu: "50m",  memory: "64Mi"  }
+    limits:   { cpu: "1",    memory: "256Mi" }
+
+  # State store (stardelt-nova#103): a CNPG Cluster `nova-pg` (database `nova`) for saved
+  # queries and settings. Equivalent to manifests/nova-pg.yaml. The password is generated
+  # by the operator into Secret `nova-pg-app`; Nova gets NOVA_DATABASE_URL from its `uri`
+  # key. Backups follow `postgres.backup` above. false = no Cluster and no variable: Nova
+  # runs without a state store, exactly as before.
+  database:
+    enabled: true
+    # Pinned: without `imageName` a Cluster tracks the operator's default image
+    # and starts a major upgrade the next time the operator ships one.
+    image: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4
+    storage:
+      size: 1Gi
+    resources:
+      requests: { cpu: "50m",  memory: "128Mi" }
+      limits:   { cpu: "500m", memory: "256Mi" }
+
+  # The secret store Nova writes connection secrets to, with the signed-in person's own token.
+  # Empty: the Connections API answers 503 and Nova gets no extra permission.
+  secretStore:
+    url: ""
+    role: platform-users
+    mount: secret
+
+  # Published notebooks (platform#290): Nova writes notebook versions into the versioned
+  # `notebooks` bucket with the platform S3 identity (`s3Credentials` above — the same key
+  # pair the object store and every other consumer use; no new identity). The bucket is
+  # created and versioned by `make notebooks-bucket` (scripts/create-notebooks-bucket.sh).
+  s3:
+    notebookBucket: notebooks
+
+  # Airflow, to show pipeline runs and logs. Empty url switches the Pipelines API off (it answers 503) and Nova gets no extra permission.
+  airflow:
+    url: ""
+    user: nova-api
+    passwordSecret: { name: airflow-nova-api, key: password }
+
+  # The person's notebook server (JupyterHub, stardelt-nova#652 W3): Nova reads its
+  # state and starts or stops it through the hub API as the JupyterHub service
+  # `nova` (`jupyterhub.hub.services` above). `idleSeconds` is the idle timeout Nova
+  # shows ("idle stop in 47 min"); it must equal the hub's `cull.timeout` — the
+  # culler is what actually stops the server — or the countdown lies.
+  workspace:
+    idleSeconds: 3600
+
+# ===========================================================================
+# Heavy components — off by default, same as `make install-core`.
+# Enable with `--set <name>.enabled=true` or in your own values file.
+#
+# Superset and Airflow cannot both be `enabled` in the same release: the
+# Superset chart's bundled Redis and the Airflow chart define the same Helm
+# template names, so `helm template`/`helm install` fails with an error from the
+# Airflow chart (`redis.serviceAccountName`). Enable one here and install the
+# other as its own release.
+# ===========================================================================
+
+superset:
+  # BI / dashboards (chart: superset 0.15.5, appVersion 5.0.0).
+  #
+  # kind tuning:
+  #   - Single replica everywhere; celery-beat + websockets off.
+  #   - Bundled Postgres + Redis (Bitnami sub-charts) — could later migrate the
+  #     Postgres to CNPG to consolidate, kept bundled for MVP simplicity.
+  #   - bootstrapScript installs the `trino` python driver into the running pod
+  #     on each startup. For production, bake this into a custom image.
+  #   - Talisman / X-Frame-Options disabled so Nova can iframe Superset.
+  #     MVP-only: removes click-jacking protection.
+  #   - import_datasources.yaml pre-creates the Trino warehouse database
+  #     connection so SQL Lab works immediately after install.
+  # `fullnameOverride` gives Superset's own objects the same names as a
+  # `make install` deployment (`superset`, `superset-worker`, `Service/superset`).
+  # The bundled Bitnami Postgres/Redis are release-named instead
+  # (`stardelt-postgresql`, `stardelt-redis-master`).
+  #
+  # May not be enabled together with `airflow.enabled` — see the note above.
+  # (Rendering fails with a template error from the Airflow chart.)
+  enabled: false
+  fullnameOverride: superset
+
+  # Use the stardelt-owned image (images/superset/Dockerfile) which has
+  # psycopg2-binary + trino pre-installed in /app/.venv/. The chart's default
+  # bootstrap is fine; we just leave the marker file.
+  image:
+    repository: stardelt/superset
+    tag: dev
+    pullPolicy: IfNotPresent
+
+  bootstrapScript: |
+    #!/bin/bash
+    if [ ! -f ~/bootstrap ]; then echo "Running Superset" > ~/bootstrap; fi
+
+  # Allow iframe embedding from Nova (running on a different port locally).
+  configOverrides:
+    iframe_embedding: |
+      TALISMAN_ENABLED = False
+      # Flask-AppBuilder also sets X-Frame-Options via WTF_CSRF; suppress.
+      HTTP_HEADERS = {}
+      # Allow SameSite=None cookies if you ever want cross-site auth.
+      SESSION_COOKIE_SAMESITE = "Lax"
+      # ENABLE_PROXY_FIX so x-forwarded headers are honored when iframed.
+      ENABLE_PROXY_FIX = True
+
+    # Trino service-account password store (platform#278). The datasource URI
+    # carries no password; Superset asks this hook every time it builds an engine,
+    # so the credential lives only in Secret trino-password-db via the pod
+    # environment. Same block as helm-values/superset.yaml.
+    trino_password_store: |
+      import os
+
+      def _stardelt_password_store(url):
+          """The Trino service account's password comes from the environment, never from the stored URI.
+          The hook is global (every database goes through it), so it answers only for our Trino account."""
+          if url.drivername.startswith("trino") and url.username == "superset":
+              return os.environ.get("TRINO_SUPERSET_PASSWORD") or url.password
+          return url.password
+
+      SQLALCHEMY_CUSTOM_PASSWORD_STORE = _stardelt_password_store
+
+  # No secrets in this file: scripts/app-secrets.sh generates them per cluster
+  # (`make chart-install` runs it first) and keeps them across installs. The
+  # Superset chart has no `supersetSecretKeySecretName` field and writes
+  # `extraSecretEnv` values as literals, so the key goes through extraEnvRaw,
+  # which reaches every pod including the init Job.
+  extraEnvRaw:
+    - name: SUPERSET_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: superset-secret-key
+          key: secret-key
+    - name: SUPERSET_ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: superset-admin
+          key: password
+    # Superset's Trino service account (#79): SQLALCHEMY_CUSTOM_PASSWORD_STORE
+    # (configOverrides) reads it at connect time. `trino-password-db` comes from
+    # scripts/identity-bootstrap.sh, so it is optional like the identity entries —
+    # a platform installed without the IdP still starts (and needs no Trino
+    # credentials, because without the IdP Trino has no authentication).
+    - name: TRINO_SUPERSET_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: trino-password-db
+          key: superset-password
+          optional: true
+    - name: STARDELT_PUBLIC_URL
+      valueFrom:
+        configMapKeyRef:
+          name: stardelt-identity
+          key: publicUrl
+          optional: true
+
+  # Pre-import the Trino database connection on init. Credential-free on purpose:
+  # the URI carries no secret; the password is supplied at connect time by
+  # SQLALCHEMY_CUSTOM_PASSWORD_STORE (configOverrides above), from Secret
+  # trino-password-db (#278).
+  extraConfigs:
+    import_datasources.yaml: |
+      databases:
+      - database_name: Trino Warehouse
+        sqlalchemy_uri: trino://superset@trino.alpha.dev.stardelt.io:443/warehouse
+        tables: []
+
+  # init Job creates admin user + imports the datasource above. The chart's
+  # `init.adminUser.password` is a literal interpolated into the init script, so
+  # the script is overridden (a supported values field) to read the password from
+  # SUPERSET_ADMIN_PASSWORD, i.e. the superset-admin Secret. Username/profile are
+  # not credentials and stay here.
+  init:
+    adminUser:
+      username: admin
+      firstname: stardelt
+      lastname: Admin
+      email: admin@stardelt.local
+    initscript: |
+      #!/bin/sh
+      set -eu
+      echo "Upgrading DB schema..."
+      superset db upgrade
+      echo "Initializing roles..."
+      superset init
+      {{ if .Values.init.createAdmin }}
+      echo "Creating admin user..."
+      superset fab create-admin \
+                      --username {{ .Values.init.adminUser.username }} \
+                      --firstname {{ .Values.init.adminUser.firstname }} \
+                      --lastname {{ .Values.init.adminUser.lastname }} \
+                      --email {{ .Values.init.adminUser.email }} \
+                      --password "$SUPERSET_ADMIN_PASSWORD" \
+                      || true
+      {{- end }}
+      {{ if .Values.init.loadExamples }}
+      echo "Loading examples..."
+      superset load_examples
+      {{- end }}
+      if [ -f "{{ .Values.extraConfigMountPath }}/import_datasources.yaml" ]; then
+        echo "Importing database connections.... "
+        superset import_datasources -p {{ .Values.extraConfigMountPath }}/import_datasources.yaml
+      fi
+      # The password is supplied at connect time by SQLALCHEMY_CUSTOM_PASSWORD_STORE
+      # (configOverrides above); the URI above stays credential-free on purpose.
+    loadExamples: false
+
+  # Components
+  supersetNode:
+    replicas:
+      enabled: true
+      replicaCount: 1
+    # Reloader rolls the pods when the Trino service-account Secret changes
+    # (platform#278): a rotation needs only the new Secret.
+    podAnnotations:
+      secret.reloader.stakater.com/reload: trino-password-db
+    resources:
+      requests: { cpu: "100m", memory: "512Mi" }
+      limits:   { cpu: "2",    memory: "1Gi"  }
+
+  supersetWorker:
+    replicas:
+      enabled: true
+      replicaCount: 1
+    # Async queries and alerts build engines here: same Secret-triggered restart.
+    podAnnotations:
+      secret.reloader.stakater.com/reload: trino-password-db
+    # Default celery prefork concurrency = CPU count = 24+ on this host, which
+    # OOMs the worker pod (each prefork is a full Python process). Cap to 2.
+    command:
+      - "/bin/sh"
+      - "-c"
+      - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; celery --app=superset.tasks.celery_app:app worker --concurrency=2"
+    resources:
+      requests: { cpu: "100m", memory: "512Mi" }
+      limits:   { cpu: "2",    memory: "1Gi"  }
+
+  supersetCeleryBeat:
+    enabled: false
+
+  supersetWebsockets:
+    enabled: false
+
+  # Bundled deps
+  postgresql:
+    enabled: true
+    primary:
+      persistence:
+        size: 2Gi
+      resources:
+        requests: { cpu: "50m", memory: "256Mi" }
+        limits:   { cpu: "1",   memory: "512Mi" }
+
+  redis:
+    enabled: true
+    master:
+      persistence:
+        size: 1Gi
+      resources:
+        requests: { cpu: "50m", memory: "128Mi" }
+        limits:   { cpu: "1",   memory: "256Mi" }
+    replica:
+      replicaCount: 0
+
+  service:
+    type: ClusterIP
+    port: 8088
+
+airflow:
+  # helm does not run post-install hooks until every resource of the release is
+  # ready, and the Airflow pods wait for the migrations — so on a fresh database,
+  # installing with `--wait` (what `make install` and a GitOps toolkit do) deadlocks
+  # against these two Jobs as hooks. Upstream requires them off for waiters, and
+  # Job specs are immutable anyway, which makes the release un-reinstallable.
+  #   https://airflow.apache.org/docs/helm-chart/1.22.0/index.html
+  migrateDatabaseJob:
+    useHelmHooks: false
+    applyCustomEnv: false
+  createUserJob:
+    useHelmHooks: false
+    applyCustomEnv: false
+    # createUserJob.defaultUser has no Secret reference: the chart interpolates
+    # the literal password into the job args. Replace the args with the same
+    # command reading username and password from the airflow-admin Secret.
+    env:
+      - name: AIRFLOW_ADMIN_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: airflow-admin
+            key: username
+      - name: AIRFLOW_ADMIN_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: airflow-admin
+            key: password
+    args:
+      - "bash"
+      - "-c"
+      - |
+        exec airflow users create \
+          --role Admin \
+          --username "$AIRFLOW_ADMIN_USERNAME" \
+          --email admin@stardelt.local \
+          --firstname stardelt \
+          --lastname Admin \
+          --password "$AIRFLOW_ADMIN_PASSWORD"
+
+  # DAG-based orchestrator (chart: airflow 1.22.0, appVersion 3.2.2).
+  #
+  # kind tuning:
+  #   - executor: KubernetesExecutor — no celery, no redis, no workers
+  #   - bundled Postgres (Bitnami sub-chart) — single instance, low resources.
+  #     Could be migrated to CNPG later; bundled keeps this minimal for now.
+  #   - single replicas of api-server / scheduler / dag-processor / triggerer
+  #   - heavy resource trims for laptop-scale
+  #
+  # Names: the Airflow chart builds most object names from the release name
+  # (`stardelt-api-server`, `stardelt-scheduler`, `stardelt-postgresql`, ...), so
+  # they differ from a `make install` deployment (`airflow-api-server`, ...).
+  # Nothing in the chart depends on those names, only the playground ingress does.
+  #
+  # May not be enabled together with `superset.enabled` — see the note above.
+  enabled: false
+
+  executor: KubernetesExecutor
+
+  # stardelt-owned image with DAGs baked in
+  images:
+    airflow:
+      # Same image the manifest path uses: GHCR, tag `demo`, digest-pinned.
+      repository: ghcr.io/stardelt/airflow
+      tag: demo
+      digest: sha256:7691c902240ebdd377914f7e7718409a337f1c27b1ea35961dc11677b08a512b
+      pullPolicy: IfNotPresent
+
+  # No secrets in this file: scripts/app-secrets.sh generates them per cluster
+  # (`make chart-install` runs it first) and keeps them across installs. Chart
+  # fields and the key each one reads:
+  #   fernetKeySecretName          → `fernet-key`
+  #   apiSecretKeySecretName       → `api-secret-key`   (Airflow 3: [api] secret_key)
+  #   webserverSecretKeySecretName → `webserver-secret-key` (Airflow <3 only; the
+  #                                  chart ignores it on 3.x, kept so a rollback
+  #                                  still finds a stable key)
+  #   jwtSecretName                → `jwt-secret`
+  # Rotating the fernet key invalidates every connection Airflow encrypted in its
+  # metadata DB; rotating the API/JWT keys only ends sessions.
+  fernetKeySecretName: airflow-fernet-key
+  apiSecretKeySecretName: airflow-webserver-key
+  webserverSecretKeySecretName: airflow-webserver-key
+  jwtSecretName: airflow-jwt-secret
+
+  # DAGs come from the image, not gitSync
+  dags:
+    gitSync:
+      enabled: false
+    persistence:
+      enabled: false
+
+  # Logs in emptyDir — fine for kind, lost on pod restart
+  logs:
+    persistence:
+      enabled: false
+
+  # Stateful components turned off
+  redis:
+    enabled: false
+
+  # Celery workers — KubernetesExecutor doesn't use them; 0 replicas
+  workers:
+    replicas: 0
+    persistence:
+      enabled: false
+
+  # Bundled Postgres — single instance, small storage
+  postgresql:
+    enabled: true
+    primary:
+      persistence:
+        size: 2Gi
+      resources:
+        requests: { cpu: "50m",  memory: "256Mi" }
+        limits:   { cpu: "1",    memory: "512Mi" }
+
+  # Single-replica + smaller resources for each Airflow component
+  apiServer:
+    replicas: 1
+    service:
+      type: ClusterIP
+    resources:
+      requests: { cpu: "100m", memory: "384Mi" }
+      limits:   { cpu: "2",    memory: "1Gi"   }
+
+  scheduler:
+    replicas: 1
+    resources:
+      requests: { cpu: "100m", memory: "384Mi" }
+      limits:   { cpu: "2",    memory: "1Gi"   }
+
+  dagProcessor:
+    enabled: true
+    replicas: 1
+    resources:
+      requests: { cpu: "50m",  memory: "256Mi" }
+      limits:   { cpu: "1",    memory: "512Mi" }
+
+  triggerer:
+    enabled: true
+    replicas: 1
+    persistence:
+      enabled: false
+    resources:
+      requests: { cpu: "50m",  memory: "256Mi" }
+      limits:   { cpu: "1",    memory: "512Mi" }
+
+  # Plain-value envs on every Airflow container (including spawned K8s task pods).
+  env:
+    - name: CATALOG_URI
+      value: http://lakekeeper:8181/catalog
+    - name: CATALOG_WAREHOUSE
+      value: warehouse
+    - name: YEARS
+      value: "2023"
+
+  # Reloader restarts the long-running pods when the S3 key or the catalog client
+  # changes (helm-values/reloader.yaml); task pods read both when they start.
+  airflowPodAnnotations:
+    secret.reloader.stakater.com/reload: "stardelt-s3-creds,svc-catalog-airflow"
+
+  # Secret-backed envs use extraEnv (templated string accepting valueFrom).
+  extraEnv: |
+    - name: S3_ENDPOINT
+      valueFrom:
+        secretKeyRef:
+          name: stardelt-s3-creds
+          key: endpoint
+    - name: S3_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: stardelt-s3-creds
+          key: access-key
+    - name: S3_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: stardelt-s3-creds
+          key: secret-key
+    - name: S3_REGION
+      valueFrom:
+        secretKeyRef:
+          name: stardelt-s3-creds
+          key: region
+    # Catalog sign-in (platform#284, step 4 of the catalog turn-on): the loader DAG
+    # opens the Iceberg REST catalog itself (stardelt-demos dags/nyc_taxi_load.py), so
+    # every Airflow task pod gets the service client svc-catalog-airflow (KIND=service,
+    # platform#282) and the realm's token endpoint. Mirrors helm-values/airflow.yaml:
+    # all three from the one Secret (so they appear together), optional so an install
+    # without identity still starts Airflow and the DAG keeps anonymous properties.
+    - name: CATALOG_CLIENT_ID
+      valueFrom:
+        secretKeyRef:
+          name: svc-catalog-airflow
+          key: client-id
+          optional: true
+    - name: CATALOG_CLIENT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: svc-catalog-airflow
+          key: client-secret
+          optional: true
+    - name: CATALOG_TOKEN_URL
+      valueFrom:
+        secretKeyRef:
+          name: svc-catalog-airflow
+          key: token-url
+          optional: true
+
+# Notebooks in git — stardelt-level notebook settings (there is no `notebooks`
+# sub-chart; the servers themselves are configured under `jupyterhub` below).
+notebooks:
+  # CIDRs of the customer's *private* git servers (self-hosted GitLab / Gitea /
+  # GitHub Enterprise) that a single-user pod may reach, over HTTPS only.
+  # Rendered as one TCP/443 egress rule per entry on the single-user pods
+  # (chart/templates/notebooks-git-egress.yaml), additive to the chart's own
+  # NetworkPolicy. Public hosts (github.com, …) need no entry: the chart default
+  # `egressAllowRules.nonPrivateIPs: true` already lets user pods reach public
+  # IPs. A NetworkPolicy `ipBlock` takes CIDRs only, never hostnames — resolve
+  # the server once and list its ranges, e.g. `gitHosts: ["192.0.2.0/24"]`.
+  # Empty by default: user pods reach nothing private. Never list `0.0.0.0/0`
+  # here — that re-opens everything the default closed. The standalone install
+  # (`make install-notebooks`, helm-values/jupyterhub.yaml) carries the same
+  # rule as a documented `singleuser.networkPolicy.egress` entry.
+  gitHosts: []
+
+jupyterhub:
+  # Embedding in Nova. Nova's Notebooks page frames the hub, and the hub sends a
+  # signed-in person on to their own single-user server — the app that executes
+  # code and refuses framing hardest. Both get the same narrow exception: Nova's
+  # own origin, read from the identity contract (`stardelt-identity.publicUrl`)
+  # and never written out here; both keep their secure defaults (`frame-ancestors
+  # 'none'`) when identity.mode is none. The hub-side headers and the cookies
+  # that make a framed session work live in the `15-framing` entry below, which
+  # also hands the origin to each spawned server (the server takes its
+  # Content-Security-Policy from the image's jupyter_server_config.py).
+  #
+  # A notebook is not a dashboard: whoever controls the embedding origin can
+  # clickjack the hub and the server, which is why this is an explicit value
+  # rather than a default — and why it is exactly one origin, never `*`.
+  # Multi-user notebooks (chart: jupyterhub 4.4.5, appVersion 5.5.5).
+  #
+  # Sign-in is OIDC against the platform IdP — the realm's `jupyterhub` client
+  # (chart/files/keycloak-realm.json), redirect `/hub/oauth_callback`. No password is
+  # shipped: the issuer comes from ConfigMap `stardelt-identity` and the client secret
+  # from Secret `stardelt-oidc-clients` (key `jupyterhub`), both rendered above when
+  # identity.mode is not `none`. With identity.mode=none the hub starts and signs
+  # nobody in. Ephemeral per-user storage, small resources so it fits next to the core.
+  #
+  # Names come from JupyterHub's own default `fullnameOverride: ""`, which
+  # produces unprefixed objects (`hub`, `proxy-public`) — the same names a
+  # `make install` deployment creates, so the playground ingress keeps working.
+  # Do not set fullnameOverride here: the chart prefixes everything with it.
+  enabled: false
+
+  # The idle culler stops a server nobody uses (jupyterhub-idle-culler, on by
+  # default, upstream default 3600). This timeout is the number Nova counts down
+  # from, so it must equal `nova.workspace.idleSeconds` below.
+  cull:
+    timeout: 3600
+
+  hub:
+    # Values files are not templated, so the identity contract reaches the hub
+    # through the environment and `extraConfig` turns it into OIDC endpoints.
+    # `optional: true`: those objects exist only when identity.mode is not `none`,
+    # and a missing one must not keep the hub from starting.
+    extraEnv:
+      STARDELT_OIDC_ISSUER_URL:
+        valueFrom:
+          configMapKeyRef:
+            name: stardelt-identity
+            key: issuerUrl
+            optional: true
+      # Nova's own origin (`https://<nova host>`), the one origin allowed to
+      # frame the hub and the single-user servers. From the identity contract,
+      # never from this file.
+      STARDELT_NOVA_URL:
+        valueFrom:
+          configMapKeyRef:
+            name: stardelt-identity
+            key: publicUrl
+            optional: true
+      STARDELT_OIDC_CLIENT_SECRET:
+        valueFrom:
+          secretKeyRef:
+            name: stardelt-oidc-clients
+            key: jupyterhub
+            optional: true
+    extraConfig:
+      10-oidc: |
+        import json
+        import os
+        import urllib.request
+
+        # The endpoints come from the provider's discovery document
+        # (<issuer>/.well-known/openid-configuration), never written out here. The
+        # fallback below is the realm layout, used only while the provider is down.
+        _issuer = os.environ.get("STARDELT_OIDC_ISSUER_URL", "").rstrip("/")
+        if _issuer:
+            _endpoints = {
+                "authorize_url": _issuer + "/protocol/openid-connect/auth",
+                "token_url": _issuer + "/protocol/openid-connect/token",
+                "userdata_url": _issuer + "/protocol/openid-connect/userinfo",
+            }
+            try:
+                _url = _issuer + "/.well-known/openid-configuration"
+                with urllib.request.urlopen(_url, timeout=10) as _response:
+                    _document = json.load(_response)
+                _endpoints = {
+                    "authorize_url": _document["authorization_endpoint"],
+                    "token_url": _document["token_endpoint"],
+                    "userdata_url": _document["userinfo_endpoint"],
+                }
+            except Exception as _error:  # the hub must still start when the provider is down
+                print(f"stardelt: OIDC discovery at {_issuer} failed, keeping the realm-style endpoints: {_error}")
+            c.GenericOAuthenticator.authorize_url = _endpoints["authorize_url"]
+            c.GenericOAuthenticator.token_url = _endpoints["token_url"]
+            c.GenericOAuthenticator.userdata_url = _endpoints["userdata_url"]
+
+            # Keycloak must be told the public callback. Left to itself the hub
+            # advertises http://proxy-public/hub/oauth_callback — its internal
+            # service name, which Keycloak has not registered, so the login dies as
+            # invalid_redirect_uri before a code is issued. Host convention here is
+            # jupyter.<base>, and the base is the issuer host minus "id.".
+            _host = _issuer.split("://", 1)[-1].split("/", 1)[0] if _issuer else ""
+            _base = _host.split(".", 1)[1] if "." in _host else ""
+            _callback = os.environ.get("STARDELT_HUB_OAUTH_CALLBACK_URL", "")
+            if not _callback and _base:
+                _callback = "https://jupyter." + _base + "/hub/oauth_callback"
+            if _callback:
+                c.GenericOAuthenticator.oauth_callback_url = _callback
+
+        _secret = os.environ.get("STARDELT_OIDC_CLIENT_SECRET", "").strip()
+        if _secret:
+            c.GenericOAuthenticator.client_secret = _secret
+
+      # Framing + frame-compatible cookies, for the hub *and* for every spawned
+      # server. The origin is the identity contract's `publicUrl`; with no
+      # identity it is absent and the hub keeps `frame-ancestors 'none'`.
+      #
+      # The server half: JupyterHub does not set the server's headers, so the
+      # origin goes into the spawn environment and the image's
+      # jupyter_server_config.py turns it into the server's CSP.
+      #
+      # The cookie half: a frame is a third-party context for the app inside it;
+      # `SameSite=None; Secure` is what browsers then require. The hub reads its
+      # options from `tornado_settings`, the server's come from the spawner as
+      # JUPYTERHUB_COOKIE_OPTIONS.
+      15-framing: |
+        import os
+
+        _nova = os.environ.get("STARDELT_NOVA_URL", "").rstrip("/")
+        if _nova:
+            c.JupyterHub.tornado_settings = {
+                **c.JupyterHub.tornado_settings,
+                "headers": {
+                    **c.JupyterHub.tornado_settings.get("headers", {}),
+                    "Content-Security-Policy": (
+                        f"frame-ancestors 'self' {_nova}; "
+                        "report-uri /hub/security/csp-report"
+                    ),
+                },
+            }
+            c.KubeSpawner.environment = {
+                **(c.KubeSpawner.environment or {}),
+                "STARDELT_NOVA_ORIGIN": _nova,
+            }
+            _cookies = {"SameSite": "None", "Secure": True}
+            c.JupyterHub.tornado_settings["cookie_options"] = _cookies
+            c.Spawner.cookie_options = _cookies
+
+      # The signed-in user's own token, inside the spawned notebook: the
+      # access token JupyterHub keeps (auth_state) is copied into the pod's
+      # environment as TRINO_TOKEN, and the quickstart reads it. The token's
+      # 8-hour lifetime is a property of the realm's `jupyterhub` client
+      # (chart/files/keycloak-realm.json), not of this hook.
+      20-notebook-identity: |
+        def _trino_token(spawner, auth_state):
+            token = (auth_state or {}).get("access_token")
+            if token:
+                spawner.environment["TRINO_TOKEN"] = token
+
+        c.Authenticator.enable_auth_state = True
+        c.Spawner.auth_state_hook = _trino_token
+        # A fresh token before every (re)spawn, so a server restarted after the
+        # token aged out starts with the refresh token's new access token.
+        c.OAuthenticator.refresh_pre_spawn = True
+
+        # A hub user row that no longer validates — a username removed from
+        # Keycloak, or a NULL name left behind by the hub's SQLite database
+        # under concurrent writes — otherwise crashes the hub on *every* start
+        # (init_spawners iterates the row and dies on the missing name). This is
+        # JupyterHub's documented remedy: drop the invalid row and let the user
+        # sign in again.
+        c.Authenticator.delete_invalid_users = True
+
+      22-restricted: |
+        # PodSecurity "restricted" for the single-user pod (platform#1237). z2jh 4.4.5 has
+        # no value for the notebook container's securityContext, so KubeSpawner's
+        # `extra_container_config` (kubespawner 7.1.0, in the hub image) carries the three
+        # fields the chart leaves out. `extra_container_config` *replaces* the
+        # securityContext KubeSpawner builds from `singleuser.uid` and
+        # `singleuser.allowPrivilegeEscalation`, so both are restated from the same traits.
+        # Nothing functional is lost: the image runs as uid 1000 and needs no capability.
+        c.KubeSpawner.extra_container_config = {
+            "securityContext": {
+                "runAsUser": c.KubeSpawner.uid,
+                "runAsNonRoot": True,
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+                "seccompProfile": {"type": "RuntimeDefault"},
+            }
+        }
+
+      # Spark compute tiers (internal#161 slice 4c). A single-user pod says whose it is, so a
+      # per-SparkCluster ingress policy can admit exactly the owner's pods. The groups are
+      # JupyterHub's, built from the person's Keycloak `groups` claim. A name that cannot be
+      # a label segment is skipped and logged: the policy then admits nobody from that group,
+      # which fails closed instead of opening the Spark server.
+      26-spark-labels: |
+        import re
+
+        _LABEL_NAME = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+
+        def _label_segment(value):
+            return value if len(value) <= 63 and _LABEL_NAME.match(value) else None
+
+        def _stardelt_labels(spawner, pod):
+            # KubeSpawner hands a V1Pod, not a dict (platform#841).
+            if pod.metadata is None:
+                return pod
+            labels = pod.metadata.labels if pod.metadata.labels is not None else {}
+            pod.metadata.labels = labels
+            user = getattr(spawner.user, "name", "") or ""
+            if _label_segment(user):
+                labels["stardelt.io/user"] = user
+            else:
+                spawner.log.warning("notebook pod: username %r cannot be a label, skipped", user)
+            for group in getattr(spawner.user, "groups", None) or []:
+                name = getattr(group, "name", None) or ""
+                if _label_segment("group." + name):
+                    labels["stardelt.io/group." + name] = "true"
+                else:
+                    spawner.log.warning("notebook pod: group %r cannot be a label, skipped", name)
+            return pod
+
+        c.KubeSpawner.modify_pod_hook = _stardelt_labels
+
+      27-demo-mode: |
+        # A visitor gets a notebook, and it must not keep anything (epic#895 decision 10).
+        # `visitors` is the public demo's realm group and `demo` is ONE hub user, so every
+        # visitor lands in the same pod: the home is wiped on spawn by
+        # `singleuser.lifecycleHooks.postStart` when this flag is set.
+        def _demo_mode(spawner):
+            names = {group.name for group in spawner.user.groups}
+            if "visitors" in names and not names & {"stardelt-users", "stardelt-admins"}:
+                spawner.environment["DEMO_MODE"] = "1"
+
+        c.KubeSpawner.pre_spawn_hook = _demo_mode
+    config:
+      JupyterHub:
+        authenticator_class: generic-oauth
+      GenericOAuthenticator:
+        client_id: jupyterhub
+        # oauth_callback_url is set explicitly in `10-oidc` above: JupyterHub's
+        # derivation yields the internal service name, which Keycloak rejects.
+        login_service: Single sign-on
+        # One identity: /hub/login goes straight to Keycloak instead of a button.
+        auto_login: true
+        username_claim: preferred_username
+        scope: ["openid", "profile", "email"]
+        # The realm's `jupyterhub` client maps `groups` into userinfo (full path
+        # off); oauthenticator 17 gates on JupyterHub groups, hence manage_groups.
+        manage_groups: true
+        auth_state_groups_key: oauth_user.groups
+        # Default-closed: only listed groups sign in.
+        # Three groups may use notebooks: platform admins, `stardelt-users` (the realm's
+        # default group), and `visitors` — the public demo's group, whose server is
+        # disposable (`27-demo-mode` above, epic#895 decision 10).
+        allowed_groups: [stardelt-admins, stardelt-users, visitors]
+        admin_groups: ["stardelt-admins"]
+    resources:
+      requests: { cpu: "50m", memory: "256Mi" }
+      limits:   { cpu: "500m", memory: "512Mi" }
+    # Nova shows and controls the person's workspace (stardelt-nova#652 W3):
+    # state, start, stop. No access:servers — Nova can never open a server or run
+    # code in it. The chart generates the service token and stores it in Secret
+    # `hub` under the key `hub.services.nova.apiToken`; Nova reads exactly that
+    # key (chart/templates/nova.yaml, NOVA_JUPYTERHUB_API_TOKEN).
+    services:
+      nova: {}
+    # Prometheus text on /hub/metrics (#607); same value as helm-values/jupyterhub.yaml.
+    authenticatePrometheus: false
+    loadRoles:
+      nova-workspace:
+        description: Nova reads workspace state and starts or stops servers for the signed-in person
+        services: [nova]
+        scopes: ["read:servers", "servers", "read:users:activity", "read:users:name"]
+      # W2b (platform#831): a running server reads its OWN fresh token from
+      # /hub/api/users/<hub user>, so an expired TRINO_TOKEN no longer needs a
+      # restart. The spawner intersects the server's requested scopes with the
+      # owner's, so `user` must grant admin:auth_state!user as well, or the
+      # server scope is dropped at spawn. Never `inherit` on `server`: that is the
+      # `token` role and hands the server the owner's whole `self` set.
+      user:
+        scopes: [self, "admin:auth_state!user"]
+      server:
+        scopes:
+          - "users:activity!user"
+          - "access:servers!server"
+          - "admin:auth_state!user"
+          - "read:users!user"
+    # The chart's own hub NetworkPolicy (on by default) admits only pods labelled
+    # `hub.jupyter.org/network-access-hub: "true"` and the allowedIngressPorts on
+    # the hub's port. Two sources get TCP 8081 by their own pod label: Nova, a
+    # service rather than a spawner-connected pod, for the hub API
+    # (chart/templates/nova.yaml points Nova at http://hub:8081/hub/api); and the
+    # customer's Prometheus, for the unauthenticated `/hub/metrics` only.
+    networkPolicy:
+      ingress:
+        - from:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: nova
+          ports:
+            - port: 8081
+              protocol: TCP
+        # The customer's Prometheus in any namespace may read /hub/metrics (#607);
+        # same rule as helm-values/jupyterhub.yaml.
+        - from:
+            - namespaceSelector: {}
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: prometheus
+          ports:
+            - port: 8081
+              protocol: TCP
+
+  proxy:
+    service:
+      type: ClusterIP
+    chp:
+      resources:
+        requests: { cpu: "50m", memory: "128Mi" }
+        limits:   { cpu: "500m", memory: "256Mi" }
+    traefik:
+      resources:
+        requests: { cpu: "50m", memory: "128Mi" }
+        limits:   { cpu: "500m", memory: "256Mi" }
+
+  singleuser:
+    # stardelt's image (images/jupyter/Dockerfile): scipy-notebook + trino,
+    # pyspark-client, pandas, pyarrow, the git extensions (jupyterlab-git,
+    # nbgitpuller), and the warehouse quickstart under
+    # /opt/stardelt/notebooks. Built and published by CI (Image workflow); make
+    # the GHCR package public or keep ghcr-creds (ghcr-pull-secret.sh) available
+    # in the namespace.
+    image:
+      name: ghcr.io/stardelt/jupyter-singleuser
+      # The tag stays for readability; the digest is what the kubelet actually
+      # pulls. `make pin-images` only covers Deployments, so spawned single-user
+      # pods are pinned here by hand: after a merge publishes a new image,
+      # resolve `dev` again and bump the digest.
+      tag: "dev@sha256:3f42884742d0a06ab1b187ba2da97c8e29f07c0491be9c4d1c1265f8a18bab83"
+      pullSecrets:
+        - name: ghcr-creds
+    defaultUrl: /lab
+    # Where the notebook finds the warehouse. Public HTTPS rather than the
+    # in-cluster Service: over plain HTTP Trino only accepts its password
+    # authenticator, so a bearer token needs TLS (issue #80 adds TLS to the
+    # coordinator). Values files are not templated, so deployments on another
+    # domain override this.
+    extraEnv:
+      TRINO_URL: https://trino.alpha.dev.stardelt.io:443
+      # Nova's public origin, which the stardelt-jupyterlab top bar links back
+      # to (`◂ stardelt`). Public HTTPS like TRINO_URL: the single-user pod
+      # reaches Nova through the host, and values files are not templated, so
+      # deployments on another domain override this.
+      STARDELT_NOVA_URL: https://alpha.dev.stardelt.io
+      # The same Nova by its in-cluster Service, for the notebook's own HTTP calls
+      # (`stardelt.publish()`, `stardelt.api.Client`): a visitor's pod has no public
+      # egress (platform#1101). Keep in step with helm-values/jupyterhub.yaml.
+      STARDELT_NOVA_API_URL: http://nova.stardelt.svc.cluster.local:8080
+      # Spark Connect's ClusterIP endpoint for `stardelt.spark()`. Same value
+      # as the standalone helm-values/jupyterhub.yaml above: keep them in sync.
+      SPARK_REMOTE: sc://spark-connect.stardelt.svc.cluster.local:15002
+    # Seed the quickstart into the home directory on every spawn, never overwriting a
+    # user's edited copy (`cp -n`). A demo spawn (`DEMO_MODE=1`, `27-demo-mode`) is
+    # thrown away first: one shared person must not inherit another visitor's files.
+    # The shop bundle is baked into the notebook image (stardelt-platform#1101/#1129),
+    # so the spawn makes no network call: a visitor notebook with no public egress
+    # still has the shop sources. postStart always exits 0: a failing hook would
+    # make kubelet restart the container in a loop.
+    lifecycleHooks:
+      postStart:
+        exec:
+          command:
+            - bash
+            - -c
+            - |
+              if [ "${DEMO_MODE:-0}" = 1 ]; then
+                find "$HOME" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+              fi
+              cp -n /opt/stardelt/notebooks/*.ipynb "$HOME/" || true
+              if [ "${DEMO_MODE:-0}" = 1 ]; then
+                cp -a /opt/stardelt/stardelt-demos "$HOME/stardelt-demos" 2>/dev/null || true
+                printf '%s\n' \
+                  'This notebook is shared: the public demo signs everyone in as `demo`.' \
+                  'Files and kernels are visible to other visitors, and Start/Restart wipes this home.' \
+                  '' \
+                  '`stardelt-demos/` holds the bundle sources of the shop (examples/shop-bundle).' \
+                  > "$HOME/README.md"
+              fi
+    startTimeout: 300
+    memory:
+      limit: 1G
+      guarantee: 256M
+    cpu:
+      limit: 1
+      guarantee: 0.1
+    # A persistent home per person (claim-<user>, 2 GiB, the cluster's default
+    # StorageClass), so a stopped server keeps its files. Set
+    # `dynamic.storageClass: <name>` to pick a class (never ""), or `type: none` for throwaway servers.
+    storage:
+      type: dynamic
+      capacity: 2Gi
+    # The chart's default denies egress to every private address
+    # (`egressAllowRules.privateIPs: false`), which is right: a user pod has no
+    # business reaching arbitrary cluster-internal services. One private
+    # destination belongs to the notebook experience — Spark Connect, the second
+    # engine over the same Iceberg catalog (`manifests/spark.yaml`, ClusterIP-only
+    # because Spark Connect has no authentication of its own). The grant is by
+    # pod label and port, so it follows the Service and opens nothing else;
+    # `privateIPs: true` would open Trino, Lakekeeper, S3 and the Kubernetes API
+    # to every user pod for the same feature. The umbrella chart does not ship
+    # Spark (apply `manifests/spark.yaml` or enable it separately); when the
+    # pods are absent the rule simply matches nothing.
+    #
+    # Nova's API too (platform#1229): the public origin is unreachable from a
+    # visitor's pod, so the notebook calls the Service.
+    #
+    # Private git servers are not listed here: they come from the top-level
+    # `notebooks.gitHosts` value (rendered by
+    # chart/templates/notebooks-git-egress.yaml as TCP/443 rules), so the git
+    # grant stays a documented list and never an open-all.
+    networkPolicy:
+      egressAllowRules:
+        # Public egress is granted by manifests/notebook-public-egress.yaml to members only;
+        # a public-demo visitor's pod reaches no public address (platform#1101).
+        nonPrivateIPs: false
+      egress:
+        - to:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: spark-connect
+          ports:
+            - port: 15002
+              protocol: TCP
+        - to:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: nova
+          ports:
+            - port: 8080
+              protocol: TCP

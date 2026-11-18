@@ -1,0 +1,68 @@
+# Nova's state store (stardelt-nova#103): saved queries, personal settings and, later, the
+# query log. A CloudNative-PG Cluster of its own, so Nova never shares a database with the
+# catalog or the identity provider. Applied by `make install` / `make install-core` before
+# manifests/nova-deployment.yaml; the umbrella chart renders the same objects from
+# chart/templates/nova-pg.yaml.
+#
+# The operator generates the credentials: Secret `nova-pg-app` (keys username, password,
+# uri, ...) holds a random password. Nothing in git holds one. Nova reads the complete URL
+# from the `uri` key (NOVA_DATABASE_URL in nova-deployment.yaml).
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: nova-pg
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+spec:
+  instances: 1
+  # Pinned: without this an apply tracks the operator default, which silently
+  # starts a major upgrade the next time the operator ships one.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4
+  storage:
+    size: 1Gi
+  # Backup through the barman-cloud plugin (CloudNativePG 1.30; the native
+  # `barmanObjectStore` is removed in 1.32). The plugin reads
+  # ObjectStore/nova-pg-backups from `manifests/cnpg-objectstore.yaml`, installed
+  # with `cnpg/plugin-barman-cloud` by the backup-plugin step.
+  backup:
+    retentionPolicy: "14d"
+    target: prefer-standby
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      enabled: true
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: nova-pg-backups
+  bootstrap:
+    initdb:
+      database: nova
+      owner: nova
+  resources:
+    requests: { cpu: "50m", memory: "256Mi" }
+    limits: { cpu: "500m", memory: "2Gi" }
+  # 100 (the default) was filled by clients stuck in authentication during the
+  # 2026-10-31 outage; keep an explicit ceiling with headroom instead.
+  postgresql:
+    parameters:
+      max_connections: "150"
+  # PostgreSQL has to finish recovery before the instance manager can reach it.
+  # The default budget restarts it mid-recovery, which never converges.
+  probes:
+    startup:
+      failureThreshold: 120
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: nova-pg-daily
+  namespace: stardelt
+spec:
+  schedule: "0 0 3 * * *"       # 15 minutes after keycloak-pg-daily (02:45), 30 after lakekeeper-pg-daily (02:30)
+  immediate: true
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  cluster:
+    name: nova-pg

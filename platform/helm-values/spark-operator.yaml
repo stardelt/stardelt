@@ -1,0 +1,38 @@
+# The Kubeflow Spark Operator (D42): reconciles `SparkApplication` objects in the namespace it
+# watches — the runtime of a `StreamApp`. The same file the operator's streaming pillar carries
+# (stardelt-operator values/spark-operator.yaml, operator#293), so the two install paths cannot
+# drift. One controller replica on the dev node.
+#
+# The mutating webhook stays ON, as in the operator's copy: it copies a SparkApplication's
+# `spec.volumes` and driver/executor `volumeMounts` into the pods. With it off, a StreamApp's job
+# ConfigMap mounts nowhere and `local:///opt/job/stream.py` cannot be read (operator#314,
+# operator commit 3a008f0 "enable the Spark webhook"). The dev release already runs it enabled.
+#
+# The chart's default is `jobNamespaces: [default]`, so a controller that only sets the release
+# namespace never looks at the `StreamApp`s beside it (platform#608). The empty string means every
+# namespace, which is what a `StreamApp` needs: it is created in the platform namespace and the
+# operator path installs into the same one, so the name is not known when this file is written.
+#
+# The 2 Gi memory limit is not headroom for the controller itself: it runs `spark-submit` as a
+# child JVM for every application, and two submissions at once (a resubmit of both streams) went
+# over the old 512 Mi limit and the kubelet OOM-killed it every ~60 s (`exitCode: 137`,
+# `reason: OOMKilled`; 2026-11-08 14:40Z). The chart warns about exactly this ("increase memory
+# limits"). The request stays 256 Mi: the controller idles between submissions.
+spark:
+  jobNamespaces:
+    - ""
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 2Gi
+webhook:
+  enable: true
+image:
+  # Pinned by digest (platform#1623): the chart version pins the chart, not the image. The
+  # controller and the webhook run this one image, so one `tag` covers both Deployments.
+  tag: "2.5.2@sha256:57e146696e49ea1ef3cc199097dabff3d570d9638dc33155b9170293081c49c7"

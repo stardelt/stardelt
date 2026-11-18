@@ -1,0 +1,93 @@
+# Object-store backup: a copy of the lakehouse data outside its own bucket.
+#
+# The catalog's Postgres is covered by CloudNativePG (manifests/cnpg-postgres.yaml
+# streams the WAL into s3://backups/). That protects the *map*; this protects the
+# *territory* — restoring a catalog whose Parquet files are gone buys nothing.
+#
+# Mechanism: `aws s3 sync` in a CronJob, source bucket → archive bucket, over the S3
+# API with the credentials the platform already has. Deliberately no `--delete`: sync
+# pushes new and changed objects and leaves everything else, so an object removed from
+# the live bucket stays recoverable in the archive — that is what an archive is for.
+#
+#   kubectl apply -f manifests/object-store-backup.yaml
+#   kubectl -n stardelt create job --from=cronjob/lakehouse-backup lakehouse-backup-now
+#
+# Restore (per prefix, or the whole bucket by dropping the /smoke):
+#   kubectl -n stardelt create job --from=cronjob/lakehouse-restore-now   # see below
+#
+# Known limit, stated rather than hidden: the job uses one credential set, because
+# `aws s3 sync` speaks to one endpoint per invocation. The default destination is a
+# second bucket in the same store, which covers the realistic accidents (a dropped
+# bucket, a bad lifecycle rule, `aws s3 rm --recursive`) but not losing the store.
+# The off-cluster copy is manifests/offsite-backup.yaml (rclone to a second S3
+# destination from Secret backup-offsite); docs/backups.md → "Off-cluster copy".
+#
+# Correction (stardelt-docs#61): this comment used to say rclone "hangs against this
+# S3 endpoint". Re-verified 2026-10-18: rclone 1.68.2 and 1.75.2 both work against
+# this endpoint — small PUTs in 3-5 s, multipart uploads too; the hang was observed
+# with rclone 1.69.1 specifically. This job keeps `aws s3 sync` (one endpoint per
+# invocation); the two-endpoint copy runs as rclone 1.75.2 in offsite-backup.yaml.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lakehouse-backup
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+spec:
+  # 03:15 daily, after the catalog's base backup at 02:30: the data copy follows the
+  # metadata copy, so a restore always finds a catalog describing what is present.
+  schedule: "15 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels: { app.kubernetes.io/part-of: stardelt }
+        spec:
+          restartPolicy: Never
+          # Pod Security `restricted` (platform#1096 question 5): aws-cli runs as root
+          # by default; 65534 with HOME=/tmp is measured to list and sync the bucket
+          # (2026-11-13). HOME is set on the container below: the image has no
+          # writable home for that UID.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: s3-sync
+              image: amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  echo "› source:      s3://${SOURCE_BUCKET}"
+                  echo "› destination: s3://${DEST_BUCKET}"
+                  exec aws s3 sync "s3://${SOURCE_BUCKET}" "s3://${DEST_BUCKET}" \
+                    --endpoint-url "${AWS_ENDPOINT_URL}" --no-progress
+              env:
+                # One endpoint/credential set for both sides (see the limit above).
+                # Point these at your archive's S3 for an off-cluster copy.
+                - name: AWS_ENDPOINT_URL
+                  valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: endpoint } }
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: access-key } }
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: secret-key } }
+                - name: AWS_DEFAULT_REGION
+                  valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: region } }
+                - name: SOURCE_BUCKET
+                  valueFrom: { secretKeyRef: { name: stardelt-s3-creds, key: bucket } }
+                - name: DEST_BUCKET
+                  value: lakehouse-backup
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: "50m",  memory: "128Mi" }
+                limits:   { cpu: "1",    memory: "512Mi" }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
