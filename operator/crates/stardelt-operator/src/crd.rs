@@ -474,6 +474,7 @@ fn group_list_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::S
     kind = "PlatformInstance",
     status = "PlatformInstanceStatus",
     shortname = "platform",
+    printcolumn = r#"{"name":"Waiting","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].message"}"#,
     doc = "A stardelt platform instance."
 )]
 #[schemars(extend("x-kubernetes-validations" = [
@@ -776,6 +777,7 @@ pub struct ClusterOperation {
     namespaced,
     status = "LakehouseStatus",
     shortname = "lh",
+    printcolumn = r#"{"name":"Waiting","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].message"}"#,
     doc = "A managed Trino + catalog + Iceberg unit on object storage."
 )]
 pub struct LakehouseSpec {
