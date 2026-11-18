@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prove the live stardelt CRDs carry the schema of the operator checkout.
 #
-#   OPERATOR_DIR=../stardelt-operator bash scripts/verify-crds.sh
+#   OPERATOR_DIR=../operator bash scripts/verify-crds.sh
 #
 # Why: Helm applies chart/crds/ on `helm install` only, and the operator's image carries its
 # API. A merge that adds a field moves the binary but not the cluster unless the CRDs are
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-OPERATOR_DIR="${OPERATOR_DIR:-../stardelt-operator}"
+OPERATOR_DIR="${OPERATOR_DIR:-../operator}"
 # A platform checkout does not contain the operator's CRDs. `make step-verify` is the last thing an
 # upgrade runs, and a missing second checkout must not report a finished upgrade as failed; the
 # sibling check that reads the same checkout skips too (check-operator-pins.sh). A checkout that

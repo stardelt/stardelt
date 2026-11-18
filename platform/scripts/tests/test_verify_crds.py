@@ -1,7 +1,7 @@
 """verify-crds skips when there is no operator checkout (platform#1717).
 
 `make step-verify` ends every upgrade and runs `verify-crds`; a one-repository checkout (the
-quickstart clones only stardelt-platform) has no ../stardelt-operator, and that is a skip, not a
+quickstart clones only stardelt-platform) has no ../operator, and that is a skip, not a
 failed upgrade. A checkout without chart/crds still fails.
 """
 

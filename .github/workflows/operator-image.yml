@@ -1,19 +1,26 @@
-name: Image
+name: "operator / Image"
 
-# Build and publish ghcr.io/stardelt/nova.
+# Build and publish ghcr.io/stardelt/stardelt-operator.
 #
-# On main this pushes `dev` plus an immutable `sha-<short>` tag. Deployments
-# should pin the digest (the job summary prints it) — a moving tag is not a
-# reliable way to roll the cluster.
+# The package name matches the repository on purpose: GHCR ties push access to
+# the repository a package was *created* from. An older `ghcr.io/stardelt/operator`
+# package exists unlinked to any repository (it was pushed by hand), so a workflow
+# token cannot write to it — pushing here keeps the pipeline self-service.
+#
+# On main this pushes `dev` plus an immutable `sha-<short>` tag. Pin the digest
+# (printed in the job summary) when rolling the cluster; a moving tag is not a
+# reliable upgrade path.
 #
 # Pull requests build without pushing, so a broken Dockerfile fails the PR.
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["operator/v*"]
+    paths: ["operator/**", ".github/workflows/operator-image.yml"]
   pull_request:
     branches: [main]
+    paths: ["operator/**", ".github/workflows/operator-image.yml"]
   workflow_dispatch:
 
 permissions:
@@ -21,12 +28,16 @@ permissions:
   packages: write
 
 concurrency:
-  group: image-${{ github.ref }}
+  group: operator-image-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    working-directory: operator
+
 jobs:
-  nova:
-    name: Build and push ghcr.io/stardelt/nova
+  operator:
+    name: Build and push ghcr.io/stardelt/stardelt-operator
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -45,10 +56,10 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ghcr.io/stardelt/nova
+          images: ghcr.io/stardelt/stardelt-operator
           tags: |
             type=ref,event=branch
-            type=ref,event=tag
+            type=match,pattern=operator/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
@@ -56,8 +67,8 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: .
-          file: image/Dockerfile
+          context: operator
+          file: operator/image/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -68,13 +79,13 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           {
-            echo "### ghcr.io/stardelt/nova"
+            echo "### ghcr.io/stardelt/stardelt-operator"
             echo
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo "digest: ${{ steps.build.outputs.digest }}"
             echo '```'
             echo
-            echo "Pin it: \`kubectl -n stardelt set image deploy/nova nova=ghcr.io/stardelt/nova@${{ steps.build.outputs.digest }}\`"
+            echo "Pin it: \`kubectl -n stardelt set image deploy/stardelt-operator operator=ghcr.io/stardelt/stardelt-operator@${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Pin this image: ghcr.io/stardelt/nova@${{ steps.build.outputs.digest }}"
+          echo "Pin this image: ghcr.io/stardelt/stardelt-operator@${{ steps.build.outputs.digest }}"

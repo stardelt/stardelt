@@ -259,7 +259,7 @@ verify-airflow-runs: _context ## Every unpaused DAG's newest run: state, age, an
 # checkout's, so a merge that moved the binary but not the schema cannot pass silently
 # (operator#386 on 2026-11-08: the live platforminstances CRD had no clusterOperation).
 .PHONY: verify-crds
-verify-crds: _context ## The live CRD schemas match the operator checkout (needs ../stardelt-operator)
+verify-crds: _context ## The live CRD schemas match the operator checkout (needs ../operator)
 	@OPERATOR_DIR=$(OPERATOR_DIR) bash scripts/verify-crds.sh
 
 .PHONY: verify-pins
@@ -1333,9 +1333,9 @@ install-identity: deps _context ## Install the platform IdP (Keycloak) at id.$(B
 # ---------------------------------------------------------------------------
 # Control plane — the stardelt Operator (dev: from the sibling checkout).
 # ---------------------------------------------------------------------------
-OPERATOR_DIR ?= ../stardelt-operator
+OPERATOR_DIR ?= ../operator
 # The image is pinned in `helm-values/operator.yaml`; bump its digest after an operator merge.
-install-operator: _context ## Install the stardelt Operator (needs ../stardelt-operator)
+install-operator: _context ## Install the stardelt Operator (needs ../operator)
 	@test -f $(OPERATOR_DIR)/chart/Chart.yaml || { \
 	  echo "operator chart not found at $(OPERATOR_DIR)/chart — set OPERATOR_DIR"; exit 1; }
 	@helm upgrade --install stardelt-operator $(OPERATOR_DIR)/chart \

@@ -1,13 +1,19 @@
-name: CI
+name: "platform / CI"
 
 on:
   push:
     branches: ["main"]
+    paths: ["platform/**", ".github/workflows/platform-ci.yml", "operator/**"]
   pull_request:
     branches: ["main"]
+    paths: ["platform/**", ".github/workflows/platform-ci.yml", "operator/**"]
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: platform
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -89,7 +95,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/helm
-          key: helm-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: helm-${{ runner.os }}-${{ hashFiles('.github/workflows/platform-ci.yml') }}
 
       - name: Add helm repos
         run: |
@@ -464,7 +470,7 @@ jobs:
         with:
           repository: stardelt/stardelt-python
           ref: ${{ steps.pin.outputs.ref }}
-          path: stardelt-python
+          path: platform/stardelt-python
 
       - name: Set up Python
         uses: actions/setup-python@v7

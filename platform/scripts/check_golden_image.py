@@ -154,7 +154,7 @@ def nova_image_at(operator_dir: str, revision: str) -> tuple[str, str]:
     """
     if not operator_dir or not revision:
         return "", "no operator checkout or revision to read"
-    path = "%s:%s" % (revision, PROVISION_RS)
+    path = "%s:./%s" % (revision, PROVISION_RS)
     proc = _git(operator_dir, "cat-file", "-e", path)
     if proc.returncode != 0:
         _git(operator_dir, "fetch", "--quiet", "origin", revision)
@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--operator-dir",
         default=None,
-        help="the stardelt-operator checkout (default: $OPERATOR_DIR, else ../stardelt-operator)",
+        help="the stardelt-operator checkout (default: $OPERATOR_DIR, else ../operator)",
     )
     args = parser.parse_args(argv)
 

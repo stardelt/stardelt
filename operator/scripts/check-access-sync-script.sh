@@ -5,7 +5,7 @@
 # (platform#1539/#1549 was exactly that).
 #
 #   bash scripts/check-access-sync-script.sh
-#   PLATFORM_JOB=../stardelt-platform/scripts/access-sync-job.py bash scripts/check-access-sync-script.sh
+#   PLATFORM_JOB=../platform/scripts/access-sync-job.py bash scripts/check-access-sync-script.sh
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

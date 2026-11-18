@@ -1,4 +1,4 @@
-name: Image
+name: "platform / Image"
 
 # Build and publish the images the platform runs that upstream does not ship:
 #   ghcr.io/stardelt/superset           baseline Superset + psycopg2-binary, trino
@@ -18,11 +18,11 @@ name: Image
 on:
   push:
     branches: [main]
-    tags: ["v*"]
-    paths: ["images/**", ".github/workflows/image.yml"]
+    tags: ["platform/v*"]
+    paths: ["platform/images/**", ".github/workflows/platform-image.yml"]
   pull_request:
     branches: [main]
-    paths: ["images/**", ".github/workflows/image.yml"]
+    paths: ["platform/images/**", ".github/workflows/platform-image.yml"]
   workflow_dispatch:
 
 permissions:
@@ -30,8 +30,12 @@ permissions:
   packages: write
 
 concurrency:
-  group: image-${{ github.ref }}
+  group: platform-image-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: platform
 
 jobs:
   changes:
@@ -86,7 +90,7 @@ jobs:
           images: ghcr.io/stardelt/superset
           tags: |
             type=ref,event=branch
-            type=ref,event=tag
+            type=match,pattern=platform/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
@@ -94,8 +98,8 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: images/superset
-          file: images/superset/Dockerfile
+          context: platform/images/superset
+          file: platform/images/superset/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -144,7 +148,7 @@ jobs:
           images: ghcr.io/stardelt/jupyter-singleuser
           tags: |
             type=ref,event=branch
-            type=ref,event=tag
+            type=match,pattern=platform/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
@@ -165,8 +169,8 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: images/jupyter
-          file: images/jupyter/Dockerfile
+          context: platform/images/jupyter
+          file: platform/images/jupyter/Dockerfile
           build-args: |
             STARDELT_LIB_REF=${{ steps.lib.outputs.ref }}
             STARDELT_RUNTIME=${{ steps.runtime.outputs.label }}
@@ -216,7 +220,7 @@ jobs:
           images: ghcr.io/stardelt/spark
           tags: |
             type=ref,event=branch
-            type=ref,event=tag
+            type=match,pattern=platform/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
@@ -224,8 +228,8 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: images/spark
-          file: images/spark/Dockerfile
+          context: platform/images/spark
+          file: platform/images/spark/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

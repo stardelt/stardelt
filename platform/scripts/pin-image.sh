@@ -136,7 +136,7 @@ echo "    new:  $pinned"
 CRDS_DIR=""
 CRDS_TMP=""
 if [ "$APP" = "stardelt-operator" ] && [ "${APPLY_CRDS:-1}" = "1" ]; then
-  op_dir="${OPERATOR_DIR:-../stardelt-operator}"
+  op_dir="${OPERATOR_DIR:-../operator}"
   crds="$op_dir/chart/crds"
   if [ -d "$crds" ] && git -C "$op_dir" rev-parse --git-dir >/dev/null 2>&1; then
     head_rev=$(git -C "$op_dir" rev-parse HEAD)

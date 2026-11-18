@@ -1,4 +1,4 @@
-name: Golden pins
+name: "operator / Golden pins"
 
 # The golden image constants live in this repository; the pins they must equal live in
 # stardelt-platform. Once a day, file one ready ticket when the Nova golden lags
@@ -12,6 +12,13 @@ on:
 permissions:
   contents: read
   issues: write
+
+env:
+  PLATFORM_NOVA_FILE: ../platform/manifests/nova-deployment.yaml
+
+defaults:
+  run:
+    working-directory: operator
 
 jobs:
   golden-nova:
@@ -52,7 +59,7 @@ jobs:
           tail -n +3 "$report" > "$report.body"
           gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
             --body-file "$report.body" --label golden-nova --label ready-to-implement \
-            --label P2 --milestone v0.4
+            --label P2 --label area/operator --milestone v0.4
 
       - name: Fail when the check itself could not run
         if: steps.compare.outputs.status != '0' && steps.compare.outputs.status != '1'

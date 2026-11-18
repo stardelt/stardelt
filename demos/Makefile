@@ -2,7 +2,7 @@ SHELL       := /bin/bash
 NAMESPACE   ?= stardelt
 
 # Resolve sibling-repo paths (override with env vars if layout differs).
-PLATFORM_DIR ?= $${STARDELT_PLATFORM_DIR:-../stardelt-platform}
+PLATFORM_DIR ?= $${STARDELT_PLATFORM_DIR:-../platform}
 
 .PHONY: help deps pf logs airflow-trigger airflow-ui superset-ui
 
@@ -23,7 +23,7 @@ help:
 	@echo
 	@echo "Env vars:"
 	@echo "  NAMESPACE              — namespace to target (default: stardelt)"
-	@echo "  STARDELT_PLATFORM_DIR  — path to the stardelt-platform repo (default: ../stardelt-platform)"
+	@echo "  STARDELT_PLATFORM_DIR  — path to the stardelt-platform repo (default: ../platform)"
 
 deps:
 	@$(PLATFORM_DIR)/scripts/check-deps.sh

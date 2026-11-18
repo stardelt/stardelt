@@ -5,7 +5,7 @@
 # thing that may drift silently.
 #
 #   bash scripts/check-platform-pins.sh                     # compares against platform main
-#   PLATFORM_MAKEFILE=../stardelt-platform/Makefile bash scripts/check-platform-pins.sh
+#   PLATFORM_MAKEFILE=../platform/Makefile bash scripts/check-platform-pins.sh
 # The platform Makefile mixes := and ?=; both are read.
 set -euo pipefail
 

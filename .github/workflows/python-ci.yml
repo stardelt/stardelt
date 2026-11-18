@@ -1,13 +1,19 @@
-name: CI
+name: "python / CI"
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["python/v*"]
+    paths: ["python/**", ".github/workflows/python-ci.yml"]
   pull_request:
+    paths: ["python/**", ".github/workflows/python-ci.yml"]
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: python
 
 jobs:
   test:
@@ -80,8 +86,8 @@ jobs:
       - name: Build and push ghcr.io/stardelt/stardelt-cli:dev
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: image/Dockerfile
+          context: python
+          file: python/image/Dockerfile
           build-args: REVISION=${{ github.sha }}
           push: true
           tags: ghcr.io/stardelt/stardelt-cli:dev

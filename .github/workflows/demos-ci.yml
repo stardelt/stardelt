@@ -1,10 +1,16 @@
-name: CI
+name: "demos / CI"
 
 on:
   push:
     branches: [main]
+    paths: ["demos/**", ".github/workflows/demos-ci.yml"]
   pull_request:
     branches: [main]
+    paths: ["demos/**", ".github/workflows/demos-ci.yml"]
+
+defaults:
+  run:
+    working-directory: demos
 
 jobs:
   lint:
@@ -81,8 +87,8 @@ jobs:
       - name: Build and push ghcr.io/stardelt/airflow:demo
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: .
-          file: images/airflow/Dockerfile
+          context: demos
+          file: demos/images/airflow/Dockerfile
           push: true
           tags: ghcr.io/stardelt/airflow:demo
           cache-from: type=gha
@@ -104,7 +110,7 @@ jobs:
       - name: Build ghcr.io/stardelt/airflow:demo (not pushed)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: .
-          file: images/airflow/Dockerfile
+          context: demos
+          file: demos/images/airflow/Dockerfile
           push: false
           cache-from: type=gha

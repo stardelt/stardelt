@@ -25,13 +25,13 @@ if ! changed="$(git diff --name-only "$base" "$head" 2>/dev/null)"; then
   exit 0
 fi
 
-if printf '%s\n' "$changed" | grep -qx '.github/workflows/image.yml'; then
+if printf '%s\n' "$changed" | grep -qxE '\.github/workflows/(platform-)?image\.yml'; then
   printf '%s\n' "$all"
   exit 0
 fi
 
 for name in $all; do
-  if printf '%s\n' "$changed" | grep -q "^images/$name/"; then
+  if printf '%s\n' "$changed" | grep -qE "^(platform/)?images/$name/"; then
     printf '%s\n' "$name"
   fi
 done

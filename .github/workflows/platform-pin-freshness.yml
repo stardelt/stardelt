@@ -1,20 +1,23 @@
-name: Pin freshness
+name: "platform / Pin freshness"
 on:
   schedule: [{cron: "17 4 * * *"}]
   workflow_dispatch:
 permissions:
   contents: read
   issues: write
+defaults:
+  run:
+    working-directory: platform
+
 jobs:
   pins:
     name: The checked-in pins and the operator's two golden-value checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      # The operator is ../operator in this checkout; full history so check_golden_image.py can
+      # read NOVA_IMAGE at the commit the pinned operator image was built from.
       - uses: actions/checkout@v7
         with:
-          repository: stardelt/stardelt-operator
-          path: operator
           fetch-depth: 0
       - name: Compare
         id: check
@@ -26,13 +29,13 @@ jobs:
           # values disagree is the same class of drift as an image pin that is behind.
           python3 scripts/check_pin_freshness.py > "$RUNNER_TEMP/pins.txt" 2>&1
           freshness=$?
-          OPERATOR_DIR=operator bash scripts/check-operator-pins.sh >> "$RUNNER_TEMP/pins.txt" 2>&1
+          OPERATOR_DIR=../operator bash scripts/check-operator-pins.sh >> "$RUNNER_TEMP/pins.txt" 2>&1
           operator=$?
           # The operator image the platform pins is a build of one commit; that commit's
           # NOVA_IMAGE is what an operator install renders. The check above reads the operator's
           # origin/main instead, so both were green while an install rendered Nova one build
           # behind (stardelt-operator#545).
-          OPERATOR_DIR=operator python3 scripts/check_golden_image.py >> "$RUNNER_TEMP/pins.txt" 2>&1
+          OPERATOR_DIR=../operator python3 scripts/check_golden_image.py >> "$RUNNER_TEMP/pins.txt" 2>&1
           golden=$?
           cat "$RUNNER_TEMP/pins.txt"
           if [ "$freshness" -ne 0 ] || [ "$operator" -ne 0 ] || [ "$golden" -ne 0 ]; then
@@ -52,7 +55,7 @@ jobs:
             gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pins.txt"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
-              --label bug --label P2 --label ops --milestone "v0.4" --body-file "$RUNNER_TEMP/pins.txt"
+              --label bug --label P2 --label ops --label area/platform --milestone "v0.4" --body-file "$RUNNER_TEMP/pins.txt"
           fi
       - name: Close the issue when all three checks pass
         if: steps.check.outputs.code == '0'

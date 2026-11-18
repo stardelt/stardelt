@@ -5,7 +5,7 @@
 #
 #   bash scripts/check-golden-nova.sh            # 0 equal, 1 differ, 2 unreadable
 #   bash scripts/check-golden-nova.sh --report   # print the issue title and body, exit 0
-#   PLATFORM_NOVA_FILE=../stardelt-platform/manifests/nova-deployment.yaml bash …   # offline
+#   PLATFORM_NOVA_FILE=../platform/manifests/nova-deployment.yaml bash …   # offline
 #
 # Needs: bash, grep, curl (curl only when PLATFORM_NOVA_FILE is unset).
 set -euo pipefail

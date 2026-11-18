@@ -25,7 +25,7 @@ if [ "${#digest}" -ne 71 ] || [ "${digest#sha256:}" = "$digest" ]; then
   exit 2
 fi
 
-op_dir="${OPERATOR_DIR:-../stardelt-operator}"
+op_dir="${OPERATOR_DIR:-../operator}"
 if [ ! -f "$op_dir/chart/Chart.yaml" ]; then
   echo "› no operator chart at $op_dir/chart — the chart was not rendered (set OPERATOR_DIR)"
   exit 0

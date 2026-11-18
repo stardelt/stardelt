@@ -15,7 +15,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-OPERATOR_DIR="${OPERATOR_DIR:-../stardelt-operator}"
+OPERATOR_DIR="${OPERATOR_DIR:-../operator}"
 
 # name|platform file|operator file (relative to the operator checkout)[|line pattern]
 images=(
@@ -76,7 +76,7 @@ fail=0
 for image in "${images[@]}"; do
   IFS='|' read -r name platform_file operator_path pattern <<<"$image"
   operator_file="$tmpdir/$name.yaml"
-  if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:$operator_path" >"$operator_file"; then
+  if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:./$operator_path" >"$operator_file"; then
     cp "$OPERATOR_DIR/$operator_path" "$operator_file"
     note=" (working tree; no origin/main)"
   fi
@@ -119,7 +119,7 @@ shared_files=(
 for row in "${shared_files[@]}"; do
   IFS='|' read -r name platform_file operator_path <<<"$row"
   operator_file="$tmpdir/set-$name.yaml"
-  if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:$operator_path" >"$operator_file"; then
+  if [ -n "$note" ] || ! git -C "$OPERATOR_DIR" show "origin/main:./$operator_path" >"$operator_file"; then
     cp "$OPERATOR_DIR/$operator_path" "$operator_file"
   fi
   platform_set="$tmpdir/$name.platform"

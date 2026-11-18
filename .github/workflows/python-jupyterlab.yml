@@ -1,10 +1,10 @@
-name: JupyterLab extension
+name: "python / JupyterLab extension"
 
 on:
   push:
-    tags: ["jupyterlab-v*"]
+    tags: ["python/jupyterlab-v*"]
   pull_request:
-    paths: ["jupyterlab/**"]
+    paths: ["python/jupyterlab/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -12,6 +12,10 @@ concurrency:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: python
 
 jobs:
   test:
@@ -36,11 +40,11 @@ jobs:
           python -m pip install -U "jupyterlab>=4.0.0,<5" build
 
       - name: Install the JavaScript dependencies
-        working-directory: jupyterlab
+        working-directory: python/jupyterlab
         run: jlpm install
 
       - name: Build the extension
-        working-directory: jupyterlab
+        working-directory: python/jupyterlab
         run: |
           jlpm build
           python -m pip install ".[test]"
@@ -50,20 +54,20 @@ jobs:
           python -m pip install ..
 
       - name: Run the template's tests
-        working-directory: jupyterlab
+        working-directory: python/jupyterlab
         run: |
           jlpm run test
           pytest -q
 
       - name: Check that JupyterLab finds the extension
-        working-directory: jupyterlab
+        working-directory: python/jupyterlab
         run: |
           jupyter server extension list 2>&1 | grep -ie "stardelt_jupyterlab.*OK"
           jupyter labextension list 2>&1 | grep -ie "@stardelt/jupyterlab.*OK"
 
   release:
     name: Wheel on the GitHub release
-    if: startsWith(github.ref, 'refs/tags/jupyterlab-v')
+    if: startsWith(github.ref, 'refs/tags/python/jupyterlab-v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -86,7 +90,7 @@ jobs:
           python -m pip install -U "jupyterlab>=4.0.0,<5" build
 
       - name: Install the JavaScript dependencies
-        working-directory: jupyterlab
+        working-directory: python/jupyterlab
         run: jlpm install
 
       - name: Build the wheel
@@ -95,4 +99,4 @@ jobs:
       - name: Attach the wheel to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
-          files: jupyterlab/dist/stardelt_jupyterlab-*
+          files: python/jupyterlab/dist/stardelt_jupyterlab-*

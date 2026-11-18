@@ -1,0 +1,107 @@
+# One config for the whole repository; each component's entries point into its folder.
+version: 2
+updates:
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: cargo
+  directory: /operator
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: docker
+  directory: /operator/image
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: docker
+  directory: /platform/images/superset
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: cargo
+  directory: /nova
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: npm
+  directory: /nova/frontend
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: docker
+  directory: /nova/image
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch
+- package-ecosystem: docker
+  directory: /demos/images/airflow
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    minor-and-patch:
+      patterns:
+      - '*'
+      update-types:
+      - minor
+      - patch

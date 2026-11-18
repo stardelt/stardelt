@@ -1,17 +1,21 @@
-name: Pin rollup
+name: "platform / Pin rollup"
 on:
   schedule: [{ cron: "*/30 * * * *" }]
   # GitHub's scheduler on this repository fires the */30 cron about every eight hours
   # (measured 2026-11-09..11). A push to main that rebuilds an image must roll its pin
   # now, not eight hours later; the cron stays as a backstop.
   workflow_run:
-    workflows: ["Image"]
+    workflows: ["platform / Image"]
     types: [completed]
   workflow_dispatch:
 permissions:
   contents: write
   pull-requests: write
-concurrency: { group: pin-rollup, cancel-in-progress: true }
+concurrency: { group: platform-pin-rollup, cancel-in-progress: true }
+defaults:
+  run:
+    working-directory: platform
+
 jobs:
   rollup:
     # A PR build pushes no image, so it must not roll the pins. A push to main and a manual

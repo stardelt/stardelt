@@ -1,13 +1,25 @@
-name: CI
+name: "operator / CI"
 
 on:
   push:
     branches: [main]
+    paths: ["operator/**", ".github/workflows/operator-ci.yml", "platform/**"]
   pull_request:
     branches: [main]
+    paths: ["operator/**", ".github/workflows/operator-ci.yml", "platform/**"]
 
 permissions:
   contents: read
+
+env:
+  # The sibling component's files, read from this checkout instead of raw.githubusercontent.com.
+  PLATFORM_MAKEFILE: ../platform/Makefile
+  PLATFORM_JOB: ../platform/scripts/access-sync-job.py
+  PLATFORM_NOVA_FILE: ../platform/manifests/nova-deployment.yaml
+
+defaults:
+  run:
+    working-directory: operator
 
 jobs:
   check:

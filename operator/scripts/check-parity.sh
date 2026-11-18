@@ -6,7 +6,7 @@
 # `missing` or `not-planned` row must say which ticket or why.
 #
 #   bash scripts/check-parity.sh                            # compares against platform main
-#   PLATFORM_MAKEFILE=../stardelt-platform/Makefile bash scripts/check-parity.sh
+#   PLATFORM_MAKEFILE=../platform/Makefile bash scripts/check-parity.sh
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
