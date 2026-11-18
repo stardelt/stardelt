@@ -555,7 +555,7 @@
         "name"
       ],
       "query_params": [],
-      "body": false
+      "body": true
     },
     "pipelines_spec": {
       "method": "GET",
