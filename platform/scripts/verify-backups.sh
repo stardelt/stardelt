@@ -374,17 +374,33 @@ pod_spec="$(jq -n \
     }
   }')"
 
-info "listing $wal_uri from a one-shot $S3_CHECK_IMAGE pod"
-if ! probe_out="$(kubectl -n "$NAMESPACE" run "$pod_name" \
-  --rm --attach --quiet --restart=Never \
-  --image "$S3_CHECK_IMAGE" \
-  --pod-running-timeout=3m \
-  --overrides "$(printf '%s' "$pod_spec" | python3 scripts/probe-pod-spec.py --merge)" 2>&1)"; then
-  err "the in-cluster listing pod failed — bucket state unknown:"
-  printf '%s\n' "$probe_out" >&2
+# A one-shot pod can fail to start for a transient reason (scheduling, image pull,
+# apiserver blip). That is a retry, never a lower verdict: on 2026-11-17 the same
+# listing failed three times and passed two minutes later, and one UNVERIFIED/exit 3
+# failed step-verify after a successful upgrade (stardelt/stardelt#29).
+attempts=3
+started=0
+pod_out=""
+for attempt in $(seq 1 "$attempts"); do
+  info "listing $wal_uri from a one-shot $S3_CHECK_IMAGE pod (attempt $attempt/$attempts)"
+  kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found >/dev/null 2>&1 || true
+  if pod_out="$(kubectl -n "$NAMESPACE" run "$pod_name" \
+    --rm --attach --quiet --restart=Never \
+    --image "$S3_CHECK_IMAGE" \
+    --pod-running-timeout=3m \
+    --overrides "$(printf '%s' "$pod_spec" | python3 scripts/probe-pod-spec.py --merge)" 2>&1)"; then
+    started=1
+    break
+  fi
+  if [ "$attempt" -lt "$attempts" ]; then sleep 10; fi
+done
+if [ "$started" -ne 1 ]; then
+  err "the in-cluster listing pod failed after $attempts attempts — bucket state unknown:"
+  printf '%s\n' "$pod_out" >&2
   err "  (SKIP_OBJECTS=1 skips the bucket checks deliberately; fix the pod error if it is not expected.)"
   exit 1
 fi
+probe_out="$pod_out"
 
 listing="$(printf '%s\n' "$probe_out" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} ' || true)"
 
