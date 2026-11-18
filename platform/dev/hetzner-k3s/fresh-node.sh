@@ -11,18 +11,26 @@
 # (platform#1018).
 #
 # Environment: FRESH_NAME, FRESH_CONFIG, FRESH_KUBECONFIG, FRESH_NODE_TYPE,
-# FRESH_WAIT_SECONDS, KEEP_ON_FAILURE, NO_WAIT, DRY_RUN (passed through to provision.sh).
+# FRESH_WAIT_SECONDS, FRESH_INGRESS, FRESH_DOMAIN, LOCATION, KEEP_ON_FAILURE, NO_WAIT,
+# DRY_RUN (passed through to provision.sh).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Only a throwaway cluster may reach provision.sh/destroy.sh from here.
 FRESH_PATTERN='^stardelt-fresh-[a-z0-9-]+$'
 
+# `down` has to find the run it created: when the caller did not name one, it reads the
+# .fresh-*.yaml the earlier `up` left behind (do_down).
+FRESH_NAME_GIVEN=0; if [ -n "${FRESH_NAME+x}" ]; then FRESH_NAME_GIVEN=1; fi
+FRESH_KUBECONFIG_GIVEN=0; if [ -n "${FRESH_KUBECONFIG+x}" ]; then FRESH_KUBECONFIG_GIVEN=1; fi
+
 FRESH_NAME="${FRESH_NAME:-stardelt-fresh-$(date -u +%Y%m%d%H%M%S)}"
 FRESH_CONFIG="${FRESH_CONFIG:-$HERE/.fresh-${FRESH_NAME}.yaml}"
 FRESH_KUBECONFIG="${FRESH_KUBECONFIG:-$HOME/.kube/${FRESH_NAME}.yaml}"
-# 16 GB: the `demo` profile (Airflow + Superset) does not fit a 8 GB cx33.
-FRESH_NODE_TYPE="${FRESH_NODE_TYPE:-cx43}"
+# 16 GB: the `demo` profile (Airflow + Superset) does not fit an 8 GB node (cpx32).
+FRESH_NODE_TYPE="${FRESH_NODE_TYPE:-cpx42}"
 FRESH_WAIT_SECONDS="${FRESH_WAIT_SECONDS:-600}"
+# FRESH_INGRESS=0 skips Traefik + cert-manager (no load balancer, no cost).
+FRESH_INGRESS="${FRESH_INGRESS:-1}"
 KEEP_ON_FAILURE="${KEEP_ON_FAILURE:-0}"
 NO_WAIT="${NO_WAIT:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -44,7 +52,75 @@ refuse_foreign_name() {
   fi
 }
 
+# Teardown in the order the cloud controller needs: the load balancer (a Service) first,
+# then the volumes (PVs the CSI driver deletes), then this run's DNS record, then the
+# cluster itself — then the network/firewall a failed `up` can leave behind (issue #86).
+cloud_cleanup() {
+  local kc="$FRESH_KUBECONFIG"
+  if [ ! -f "$kc" ] || ! kubectl --kubeconfig "$kc" get nodes >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "› uninstalling traefik (the Hetzner load balancer goes with its Service)"
+  helm --kubeconfig "$kc" uninstall traefik -n traefik --wait --ignore-not-found \
+    || echo "  traefik uninstall failed (continuing)" >&2
+
+  echo "› deleting PVCs and waiting for the CSI driver to delete the volumes"
+  kubectl --kubeconfig "$kc" delete pvc --all -A --wait=true --timeout=5m \
+    || echo "  PVC delete did not finish (continuing)" >&2
+  local pvs=""
+  for _ in $(seq 1 30); do
+    pvs="$(kubectl --kubeconfig "$kc" get pv -o name 2>/dev/null || true)"
+    if [ -z "$pvs" ]; then break; fi
+    sleep 10
+  done
+  if [ -n "$pvs" ]; then
+    echo "warning: PersistentVolumes outlived the 5-minute wait — delete these volumes in the Hetzner console:" >&2
+    # shellcheck disable=SC2086 # kubectl -o name prints one name per line
+    printf '  %s\n' $pvs >&2
+  fi
+
+  local domain_file="$HERE/.fresh-${FRESH_NAME}.domain" domain
+  if [ -f "$domain_file" ]; then
+    domain="$(head -n 1 "$domain_file")"
+    if [ -n "$domain" ]; then
+      echo "› removing the DNS record for ${domain}"
+      NAME="$domain" bash "$HERE/../cloudflare-dns.sh" delete \
+        || echo "  DNS delete failed — remove ${domain} in Cloudflare by hand" >&2
+    fi
+    rm -f "$domain_file"
+  fi
+}
+
 do_down() {
+  # `up` names the cluster after the time it ran, so `down` without FRESH_NAME has to find
+  # that run in the .fresh-*.yaml it wrote instead of inventing a name that matches nothing.
+  if [ "$FRESH_NAME_GIVEN" != 1 ]; then
+    local found=()
+    shopt -s nullglob
+    found=("$HERE"/.fresh-*.yaml)
+    shopt -u nullglob
+    case "${#found[@]}" in
+      0)
+        echo "nothing to delete: no .fresh-*.yaml in dev/hetzner-k3s (${HERE})"
+        return 0
+        ;;
+      1)
+        FRESH_CONFIG="${found[0]}"
+        FRESH_NAME="$(awk -F': *' '/^cluster_name:/ { print $2; exit }' "$FRESH_CONFIG")"
+        echo "› found the run: ${FRESH_CONFIG} (${FRESH_NAME})"
+        if [ "$FRESH_KUBECONFIG_GIVEN" != 1 ]; then
+          FRESH_KUBECONFIG="$HOME/.kube/${FRESH_NAME}.yaml"
+        fi
+        ;;
+      *)
+        echo "several fresh-node runs found:" >&2
+        printf '  %s\n' "${found[@]}" >&2
+        echo "set FRESH_NAME=<one of the above>" >&2
+        return 1
+        ;;
+    esac
+  fi
   refuse_foreign_name "$FRESH_NAME" || exit 1
   if [ ! -f "$FRESH_CONFIG" ]; then
     echo "nothing to delete: ${FRESH_CONFIG} does not exist"
@@ -56,9 +132,18 @@ do_down() {
     echo "  ${FRESH_CONFIG} describes cluster '${name}' — not deleting it." >&2
     exit 1
   fi
-  CLUSTER_NAME="$name" CLUSTER_CONFIG="$FRESH_CONFIG" FORCE=1 REMOVE_DNS=0 DRY_RUN="$DRY_RUN" \
+  if [ "$DRY_RUN" != 1 ]; then
+    cloud_cleanup
+  fi
+  CLUSTER_NAME="$name" CLUSTER_CONFIG="$FRESH_CONFIG" FORCE=1 REMOVE_DNS=0 DNS_NOTE=0 DRY_RUN="$DRY_RUN" \
     bash "$HERE/destroy.sh"
   if [ "$DRY_RUN" != 1 ]; then
+    # A failed `up` can leave a private network or firewall behind: hetzner-k3s creates them
+    # before it creates the server, and its delete only removes them once the cluster exists.
+    if command -v hcloud >/dev/null 2>&1; then
+      hcloud network delete "$name" >/dev/null 2>&1 || true
+      hcloud firewall delete "$name" >/dev/null 2>&1 || true
+    fi
     rm -f "$FRESH_CONFIG" "$FRESH_KUBECONFIG"
   fi
 }
@@ -77,11 +162,72 @@ on_error() {
   exit "$status"
 }
 
+# Traefik (a Service with a Hetzner load balancer) + cert-manager, because provision.sh
+# turns both k3s addons off: without them an Ingress with `ingressClassName: traefik`
+# and cert-manager TLS has nothing to route through (issue #86).
+install_ingress() {
+  local kc="$FRESH_KUBECONFIG" lb_ip=""
+  echo "› installing traefik (load balancer in ${LOCATION:-nbg1}) and cert-manager"
+  helm repo add traefik https://traefik.github.io/charts --force-update >/dev/null
+  helm repo add jetstack https://charts.jetstack.io --force-update >/dev/null
+  helm --kubeconfig "$kc" upgrade --install traefik traefik/traefik \
+    -n traefik --create-namespace --wait \
+    --set "service.annotations.load-balancer\\.hetzner\\.cloud/location=${LOCATION:-nbg1}"
+  helm --kubeconfig "$kc" upgrade --install cert-manager jetstack/cert-manager \
+    -n cert-manager --create-namespace --set crds.enabled=true --wait
+  kubectl --kubeconfig "$kc" apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+EOF
+
+  for _ in $(seq 1 60); do
+    lb_ip="$(kubectl --kubeconfig "$kc" -n traefik get svc traefik \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+    if [ -n "$lb_ip" ]; then break; fi
+    sleep 5
+  done
+  if [ -z "$lb_ip" ]; then
+    echo "warning: traefik has no load balancer IP yet (check 'kubectl -n traefik get svc traefik')" >&2
+  fi
+
+  if [ -n "${FRESH_DOMAIN:-}" ] && [ -n "$lb_ip" ]; then
+    NAME="$FRESH_DOMAIN" IP="$lb_ip" bash "$HERE/../cloudflare-dns.sh" upsert
+    # The record this run owns: `down` removes exactly it again.
+    printf '%s\n' "$FRESH_DOMAIN" > "$HERE/.fresh-${FRESH_NAME}.domain"
+  fi
+  echo "base domain: ${FRESH_DOMAIN:-<none>} (load balancer ${lb_ip:-<none>})"
+}
+
 do_up() {
   refuse_foreign_name "$FRESH_NAME" || exit 1
   if [ -e "$FRESH_CONFIG" ]; then
     echo "refusing: ${FRESH_CONFIG} exists — run 'fresh-node.sh down' first" >&2
     exit 1
+  fi
+
+  # hetzner-k3s runs with use_agent: false and needs both halves of a passphrase-free key.
+  # Checking here fails before a server exists, not after it bills by the hour.
+  if [ "$DRY_RUN" != 1 ]; then
+    local key pub missing=""
+    key="${SSH_PRIVATE_KEY:-$HOME/.ssh/id_ed25519}"
+    pub="${SSH_PUBLIC_KEY:-$HOME/.ssh/id_ed25519.pub}"
+    if [ ! -f "$key" ]; then missing="$key"; fi
+    if [ ! -f "$pub" ]; then missing="${missing:+${missing} and }${pub}"; fi
+    if [ -n "$missing" ]; then
+      echo "no SSH key at ${missing}: set SSH_PUBLIC_KEY and SSH_PRIVATE_KEY (a key without passphrase; hetzner-k3s runs with use_agent: false)" >&2
+      exit 1
+    fi
   fi
 
   trap 'on_error $?' ERR
@@ -102,11 +248,17 @@ do_up() {
       --timeout="${FRESH_WAIT_SECONDS}s"
   fi
 
+  if [ "$FRESH_INGRESS" != 0 ]; then
+    install_ingress
+  else
+    echo "› ingress skipped (FRESH_INGRESS=0)"
+  fi
+
   echo
   echo "✓ fresh node ${FRESH_NAME}"
   echo "  export KUBECONFIG=\"${FRESH_KUBECONFIG}\""
   echo "  operator: helm upgrade --install stardelt-operator <operator repo>/chart -n stardelt --create-namespace"
-  echo "  delete:   bash dev/hetzner-k3s/fresh-node.sh down"
+  echo "  delete:   FRESH_NAME=${FRESH_NAME} bash dev/hetzner-k3s/fresh-node.sh down"
 }
 
 case "${1:-}" in

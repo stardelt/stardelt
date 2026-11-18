@@ -28,7 +28,7 @@ fi
 
 CLUSTER_NAME="${CLUSTER_NAME:-stardelt-dev}"
 K3S_VERSION="${K3S_VERSION:-v1.37.1+k3s1}"
-NODE_TYPE="${NODE_TYPE:-cx33}"          # 4 vCPU / 8 GB, ~EUR10/mo. cx43 = 16 GB if OOM.
+NODE_TYPE="${NODE_TYPE:-cpx32}"         # 4 vCPU / 8 GB; cpx42 = 16 GB for the demo profile.
 LOCATION="${LOCATION:-nbg1}"
 SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-$HOME/.ssh/id_ed25519.pub}"
 SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY:-$HOME/.ssh/id_ed25519}"
@@ -196,4 +196,4 @@ echo "  export KUBECONFIG=\"${KUBECONFIG_PATH}\""
 echo "  node IP: ${IP:-unknown}"
 echo
 echo "Next:  make install-core   # cheap: storage + catalog + query + Nova"
-echo "       make install        # full: + Airflow + Superset (needs cx43/16 GB)"
+echo "       make install        # full: + Airflow + Superset (needs cpx42/16 GB)"
