@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Rust)
+    runs-on: ubuntu-latest
+    # A throwaway PostgreSQL for the state-store tests (`cargo test -- --ignored`).
+    # `trust` is fine here: the service lives for this job and listens on the runner only.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: nova_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: fmt check
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: check
+        run: cargo check --all-targets
+
+      - name: test
+        run: cargo test
+
+      # The tests marked #[ignore] need a real PostgreSQL (backend/src/db.rs).
+      - name: test (state store, needs PostgreSQL)
+        env:
+          NOVA_TEST_DATABASE_URL: postgres://postgres@localhost:5432/nova_test
+        run: cargo test -- --ignored
+
+  frontend:
+    name: Frontend (Node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type-check
+        run: npx tsc -b --noEmit
+
+      - name: Vocabulary
+        run: npm run lint:vocab
+
+      - name: Build
+        run: npm run build
+
+  # Opens every page in a real browser (light and dark, desktop and phone width) against the
+  # backend with no cluster behind it, and fails on a rule from
+  # stardelt-internal/design/ui-conformance.md. Findings that have a ticket are listed in
+  # frontend/e2e/known.ts; a new finding fails the run.
+  ui-conformance:
+    name: UI conformance (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build the backend
+        run: cargo build
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build the frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Install the browser
+        working-directory: frontend
+        run: |
+          # `--with-deps` installs Chromium's shared libraries from the Ubuntu mirror; the
+          # runner image does not carry them (nova#830). The mirror sometimes fails to resolve
+          # and fails the job before any test runs, so retry. Do not drop `--with-deps`.
+          #
+          # A killed `timeout` leaves an orphan `apt-get` holding the dpkg frontend lock, so
+          # the next attempt would fail instantly on the lock instead of trying the network
+          # again (nova#834). Wait the lock out first, and give apt enough time for its own
+          # DNS retries: it spends minutes there before failing.
+          for attempt in 1 2 3; do
+            for _ in $(seq 1 12); do
+              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+              sleep 5
+            done
+            if timeout 600 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "playwright install attempt $attempt failed; retrying" >&2
+            sleep $((attempt * 20))
+          done
+          exit 1
+
+      - name: Run the suite
+        working-directory: frontend
+        run: npm run e2e

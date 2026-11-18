@@ -1,0 +1,467 @@
+import { useEffect, useRef, useState } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api'
+import { bindUser } from '../catalogCache'
+import { Icon } from './Icon'
+import { applyTheme, counterpart, themeLabel, useTheme } from '../theme'
+import { isAdmin } from '../roles'
+import { NAV_GROUPS } from '../nav'
+import AskPanel from './AskPanel'
+import CommandPalette from './CommandPalette'
+import ErrorBoundary from './ErrorBoundary'
+import StageBadge from './StageBadge'
+import StageCard from './StageCard'
+import UserMenu from './UserMenu'
+
+const titles: Record<string, string> = {
+  '/': 'Overview',
+  '/catalog': 'Catalog',
+  '/query': 'SQL editor',
+  '/data': 'Load & transfer',
+  '/connections': 'Connections',
+  '/queries': 'Query log',
+  '/pipelines': 'Pipelines',
+  '/runs': 'Runs',
+  '/deployments': 'Deployments',
+  '/admin/catalogs': 'Catalogs',
+  '/admin/agent-calls': 'Agent calls',
+  '/admin/models': 'Models',
+  '/lineage': 'Lineage',
+  '/streams': 'Streams',
+  '/dashboards': 'Dashboards',
+  '/notebooks': 'Notebooks',
+  '/platform': 'Platform',
+  '/settings': 'Platform settings',
+  '/preferences': 'Preferences',
+  '/profile': 'Profile',
+}
+
+/** The app detail route carries its own id, so the header can be specific. */
+function titleFor(pathname: string): string {
+  const app = pathname.match(/^\/apps\/([^/]+)$/)
+  if (app) return `${app[1]} — app detail`
+  const nameOf = (segment: string) => {
+    try {
+      return decodeURIComponent(segment)
+    } catch {
+      // A malformed escape is shown as it arrived; nothing here builds a URL from it.
+      return segment
+    }
+  }
+  // One run of a pipeline (#1111): the pipeline's name and the page's own.
+  const run = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)\/runs\/[^/]+$/)
+  if (run) return `${nameOf(run[1])} · Run`
+  // A pipeline's page is named after the pipeline, so the tab says which one.
+  const pipeline = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)$/)
+  if (pipeline) return `${nameOf(pipeline[1])} · Pipelines`
+  // Anything else that is not a known route is the catch-all, and says so.
+  return titles[pathname] ?? 'Not found'
+}
+
+function navClass({ isActive }: { isActive: boolean }) {
+  return [
+    'flex items-center gap-2.5 px-3 py-1.5 rounded-[10px] text-sm transition-colors',
+    isActive
+      ? 'bg-accent/15 text-text border border-accent/30'
+      : 'text-text-dim hover:text-text hover:bg-bg-soft border border-transparent',
+  ].join(' ')
+}
+
+
+/**
+ * The header's app switcher. `/platform` is an operator page (workloads, images), so a
+ * data engineer has no other way to reach Superset, Airflow or JupyterHub without
+ * knowing the hostname. The list is status-free on purpose: liveness is operator
+ * information, and this control is for everyone.
+ */
+function AppSwitcher() {
+  const [open, setOpen] = useState(false)
+  const wrapper = useRef<HTMLDivElement>(null)
+  const button = useRef<HTMLButtonElement>(null)
+  const location = useLocation()
+  const links = useQuery({ queryKey: ['app-links'], queryFn: api.links, staleTime: 60_000 })
+
+  // Moving to another page is a new context; the menu should not survive it.
+  useEffect(() => setOpen(false), [location.pathname])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        button.current?.focus()
+      }
+    }
+    const onClick = (e: MouseEvent) => {
+      if (wrapper.current && !wrapper.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onClick)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onClick)
+    }
+  }, [open])
+
+  const apps = links.data ?? []
+  // Nothing to offer (no base domain, or every app is down to zero entries): no button.
+  if (apps.length === 0) return null
+
+  return (
+    <div ref={wrapper} className="relative">
+      <button
+        ref={button}
+        type="button"
+        className="btn-ghost py-1.5 text-sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(v => !v)}
+      >
+        <Icon name="grid" className="w-4 h-4" />
+        Apps
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Open another app"
+          className="absolute right-0 top-full mt-1 z-50 min-w-[14rem] rounded-[12px] border border-border bg-bg-elev shadow-2xl p-1.5"
+        >
+          {apps.map(app => (
+            <a
+              key={app.id}
+              role="menuitem"
+              href={app.external_url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-between gap-6 px-3 py-2 rounded-[8px] text-sm hover:bg-bg-soft"
+            >
+              <span>{app.name}</span>
+              <span className="text-[11px] text-text-mute">{app.category}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function Shell() {
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // The catalog tree's browser cache belongs to this person (stardelt-nova#644).
+  useEffect(() => { if (me.data) bindUser(me.data.sub) }, [me.data])
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [q, setQ] = useState('')
+  const theme = useTheme()
+  const title = titleFor(location.pathname)
+  const admin = isAdmin(me.data)
+  const [navOpen, setNavOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  useEffect(() => { setNavOpen(false) }, [location.pathname])
+
+  // Ask is on when an endpoint may answer it: purpose `ask`, the probe found it
+  // reachable, and it answers in a JSON shape — the rule the backend applies to itself
+  // (`backend/src/ask.rs`, `ready_ask_endpoint`). Without one the button never shows.
+  const endpoints = useQuery({ queryKey: ['model-endpoints'], queryFn: api.modelEndpoints, staleTime: 60_000 })
+  // The endpoint list is an array or nothing; an answer that is neither leaves Ask off
+  // rather than taking the shell down with it.
+  const endpointRows = Array.isArray(endpoints.data) ? endpoints.data : []
+  const askEndpoint = endpointRows
+    .filter(e => e.purposes.includes('ask') && e.reachable === true && e.jsonOutput === true)
+    .sort((a, b) => a.name.localeCompare(b.name))[0]
+  const [askOpen, setAskOpen] = useState(false)
+  // A question handed to the panel by the ⌘K row; cleared once the panel has asked it.
+  const [askQuestion, setAskQuestion] = useState<string | null>(null)
+  useEffect(() => { if (!askEndpoint) setAskOpen(false) }, [askEndpoint])
+
+  // ⌘J / Ctrl+J opens Ask — when an endpoint can answer it, and never from a field where
+  // the person is typing a question.
+  useEffect(() => {
+    if (!askEndpoint) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'j') return
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+      e.preventDefault()
+      setAskOpen(v => !v)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [askEndpoint])
+
+  // ⌘K / Ctrl+K opens the page palette. The SQL editor owns Ctrl/⌘+Enter, so nothing
+  // else is bound here.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen(v => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // The navigation collapses to a 64 px icon rail, remembered per person like the theme.
+  // The browser copy is the first paint; the server value wins when the state store has one.
+  const NAV_KEY = 'stardelt-nova:nav'
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem(NAV_KEY) === 'collapsed' } catch { return false }
+  })
+  useEffect(() => {
+    void api.settings().then(s => {
+      if (s.nav === 'collapsed' || s.nav === 'expanded') setCollapsed(s.nav === 'collapsed')
+    }).catch(() => {})
+  }, [])
+  function toggleNav() {
+    const next = !collapsed
+    setCollapsed(next)
+    try { localStorage.setItem(NAV_KEY, next ? 'collapsed' : 'expanded') } catch { /* no store */ }
+    void api.putSetting('nav', next ? 'collapsed' : 'expanded').catch(() => {})
+  }
+
+  useEffect(() => {
+    const base = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
+    const stripped = base.replace(/^\[[^\]]+\] /, '')
+    document.title = me.data?.stage_name ? `[${me.data.stage_name}] ${stripped}` : stripped
+  }, [title, me.data?.stage_name])
+
+  // One button, four themes: it switches to the paired theme (dark blue ↔ light,
+  // graphite ↔ silver), never to an arbitrary third one.
+  const paired = counterpart(theme)
+  const darkTheme = theme === 'dark' || theme === 'graphite'
+
+  function toggleTheme() {
+    const next = paired
+    applyTheme(next)
+    // The toggle and the Preferences page write the same two places; a missing state
+    // store only means the choice stays in this browser.
+    void api.putSetting('theme', next).catch(() => {})
+  }
+
+  return (
+    <div className={[
+      'h-full grid grid-cols-1',
+      collapsed ? 'md:grid-cols-[64px_minmax(0,1fr)]' : 'md:grid-cols-[250px_minmax(0,1fr)]',
+    ].join(' ')}>
+      {me.data?.stage_kind === 'prod' && me.data?.stage_name && (
+        <div aria-hidden="true" className="fixed inset-x-0 top-0 h-[3px] bg-amber-500 z-50 pointer-events-none" />
+      )}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 btn-primary"
+        onClick={e => {
+          e.preventDefault()
+          document.getElementById('main')?.focus()
+        }}
+      >
+        Skip to content
+      </a>
+      {navOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} onSwitchTheme={toggleTheme}
+        askReady={askEndpoint != null}
+        onAsk={(q) => { setAskQuestion(q); setAskOpen(true) }} />
+      <aside
+        id="primary-nav"
+        className={[
+          'border-r border-border bg-bg-elev flex flex-col min-h-0',
+          'fixed inset-y-0 left-0 z-40 w-[250px] transition-transform',
+          'md:static md:z-auto md:translate-x-0 md:bg-bg-elev/50 md:backdrop-blur',
+          navOpen ? 'translate-x-0' : '-translate-x-full',
+          collapsed ? 'md:w-16' : 'md:w-[250px]',
+        ].join(' ')}
+      >
+        <div className={[
+          'p-5 flex items-center gap-2.5',
+          // 64 px cannot hold the 28 px brand and a 28 px toggle side by side, so the
+          // header stacks them in the rail; the expanded header keeps its row.
+          collapsed && 'md:flex-col md:justify-center md:gap-1 md:px-2 md:py-3',
+        ].filter(Boolean).join(' ')}>
+          {/* The brand asset, not a stand-in: `logo-wordmark.svg` is the same file the
+              favicon and the docs use, so the product and its documentation cannot drift. */}
+          {collapsed
+            ? <img src="/logo.svg" alt="stardelt" className="h-7 w-7" />
+            : <><img src="/logo-wordmark.svg" alt="stardelt" className="h-7 w-auto" />
+                <div className="text-[11px] text-text-mute leading-tight">Nova</div></>}
+          <button
+            type="button"
+            onClick={toggleNav}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            aria-expanded={!collapsed}
+            aria-controls="primary-nav"
+            title={collapsed ? `Expand navigation · stardelt v${__APP_VERSION__}` : 'Collapse navigation'}
+            className={['btn-ghost p-1.5 hidden md:inline-flex', collapsed ? '' : 'ml-auto'].join(' ')}
+          >
+            <Icon name={collapsed ? 'panel-left-open' : 'panel-left-close'} className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-3 pb-3">
+          <StageCard me={me.data} collapsed={collapsed} />
+        </div>
+
+        <nav className="px-3 pb-4 flex-1 min-h-0 overflow-y-auto">
+          {NAV_GROUPS
+            .filter(group => !group.admin || admin)
+            .map((group, index) => (
+            <div key={group.label} className={[
+              'mb-3',
+              collapsed && index > 0 ? 'md:border-t md:border-border md:pt-2' : '',
+            ].filter(Boolean).join(' ')}>
+              <div className={['label px-3 mb-1.5', collapsed && 'md:sr-only'].filter(Boolean).join(' ')}>{group.label}</div>
+              <div className="space-y-1">
+                {group.items.map(item => (
+                  <NavLink key={item.to} to={item.to} end={item.end} className={navClass} title={collapsed ? item.label : undefined}>
+                    <Icon name={item.icon} className="w-4 h-4 shrink-0" />
+                    <span className={collapsed ? 'md:sr-only' : ''}>{item.label}</span>
+                  </NavLink>
+                ))}
+                {/* User management is the IdP's job, not a Nova screen: Keycloak owns
+                    the realm and its console does it properly. The backend computes the
+                    URL from the configured issuer; absent (dev mode, non-Keycloak issuer)
+                    means no link, and non-admins never see this group. */}
+                {group.admin && admin && me.data?.admin_console_url && (
+                  <a
+                    href={me.data.admin_console_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Manage users in the platform identity provider"
+                    className={navClass({ isActive: false })}
+                  >
+                    <Icon name="users" className="w-4 h-4 shrink-0" />
+                    <span className={collapsed ? 'md:sr-only' : ''}>Users</span>
+                  </a>
+                )}
+              </div>
+            </div>
+            ))}
+        </nav>
+
+
+
+        {/* The project names itself: the version that is running, and where to read more
+            or report a problem. A person should not have to leave Nova to find them. */}
+        <footer className={['px-3 pb-3 pt-2 border-t border-border', collapsed && 'md:hidden'].filter(Boolean).join(' ')}>
+          <div className="px-2 text-[11px] text-text-mute">stardelt v{__APP_VERSION__}</div>
+          <div className="px-2 mt-1 flex flex-wrap gap-x-3 gap-y-1">
+            <a
+              href="https://stardelt.io"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-text-dim hover:text-text underline underline-offset-2 rounded-[4px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              Documentation
+            </a>
+            <a
+              href="https://github.com/stardelt"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-text-dim hover:text-text underline underline-offset-2 rounded-[4px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              Source
+            </a>
+          </div>
+        </footer>
+      </aside>
+
+      <div className="flex flex-col min-w-0 min-h-0">
+        <header className="h-14 shrink-0 border-b border-border bg-bg/30 backdrop-blur flex items-center gap-2 sm:gap-4 px-3 sm:px-6">
+          <button
+            type="button"
+            className="btn-ghost px-2.5 py-2 md:hidden"
+            aria-label="Open menu"
+            aria-controls="primary-nav"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen(true)}
+          >☰</button>
+          <div className="text-sm font-medium truncate min-w-0 mr-auto">{title}</div>
+          <form
+            className="relative hidden sm:block"
+            onSubmit={e => {
+              e.preventDefault()
+              if (q.trim()) navigate(`/catalog?q=${encodeURIComponent(q.trim())}`)
+            }}
+          >
+            <Icon name="search" className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-text-mute" />
+            <input
+              value={q}
+              onChange={e => setQ(e.target.value)}
+              placeholder="Search catalog…"
+              aria-label="Search catalog"
+              className="input pl-9 w-40 lg:w-64 py-1.5"
+            />
+          </form>
+          <span className="md:hidden"><StageBadge me={me.data} /></span>
+          {askEndpoint && (
+            <button
+              type="button"
+              className="btn-ghost py-1.5 text-sm"
+              aria-label="Ask about your data"
+              aria-expanded={askOpen}
+              aria-controls="ask-panel"
+              onClick={() => setAskOpen(v => !v)}
+            >
+              <Icon name="spark" className="w-4 h-4" />
+              <span className="hidden sm:inline">Ask</span>
+            </button>
+          )}
+          <AppSwitcher />
+          <UserMenu me={me.data} />
+          <button
+            onClick={toggleTheme}
+            title={`Switch to ${themeLabel(paired)}`}
+            className="btn-ghost px-2.5 py-2"
+            aria-label="Toggle theme"
+          >
+            {darkTheme ? <Icon name="sun" className="w-4 h-4" /> : <Icon name="moon" className="w-4 h-4" />}
+          </button>
+        </header>
+
+        <div className="flex flex-1 min-h-0">
+          <main id="main" tabIndex={-1} className="flex-1 min-h-0 min-w-0 overflow-auto p-3 sm:p-6 outline-none">
+            {me.data?.shared_account && (
+              <>
+                <div role="note" className="mb-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
+                  Public demo: everyone signs in as this account and can see what you type and save. Everything is deleted every night at 03:00 UTC. Please do not enter personal data.
+                </div>
+                <p className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-dim">
+                  <span>Like what you see? stardelt is free and open source.</span>
+                  <a
+                    href="https://github.com/stardelt/stardelt"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-text hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                  >
+                    <span aria-hidden="true">★</span> Star it on GitHub
+                  </a>
+                  <a href="https://stardelt.io/docs/getting-started/quickstart" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                    Install it yourself →
+                  </a>
+                </p>
+              </>
+            )}
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
+          </main>
+          {askOpen && askEndpoint && (
+            <AskPanel
+              endpoint={askEndpoint}
+              onClose={() => setAskOpen(false)}
+              initialQuestion={askQuestion ?? undefined}
+              onInitialQuestion={() => setAskQuestion(null)}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
