@@ -827,6 +827,20 @@ def _remote_for_cluster(cluster):
     return endpoint
 
 
+def _reachable(remote, timeout=3.0):
+    """Fail in seconds, not after PySpark's ~10 minutes of retries, when the endpoint refuses or is silent."""
+    import socket
+    parts = urlsplit(remote.replace("sc://", "http://", 1).split(";", 1)[0])
+    host, port = parts.hostname, parts.port or 15002
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+    except OSError as exc:
+        raise RuntimeError(
+            f"Spark is not reachable at {host}:{port} ({type(exc).__name__}). "
+            "Either the cluster is stopped or this notebook may not use Spark. %sql still works."
+        ) from None
+
+
 def _session(app_name="stardelt-notebook", cluster=None):
     """Open a Spark Connect session for bulk work, as the signed-in person.
 
@@ -870,6 +884,7 @@ def _session(app_name="stardelt-notebook", cluster=None):
     global _SPARK_SESSION, _SPARK_TOKEN, _SPARK_REMOTE
 
     remote = _remote_for_cluster(cluster)
+    _reachable(remote)
 
     names = _catalog_names()
     token = _token()
