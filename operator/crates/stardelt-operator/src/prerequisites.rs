@@ -76,7 +76,8 @@ impl S3Keys {
 /// The namespace the platform is installed into. Same floor as the platform repo's
 /// `manifests/namespace.yaml` (platform#1096 question 5): `baseline` is enforced, so no
 /// privileged, hostNetwork or hostPath pod; `restricted` is only warned and audited while
-/// the SeaweedFS pods and Lakekeeper's `opa` sidecar do not pass it (#1095).
+/// Lakekeeper's `opa` sidecar does not pass it (#1095). The four SeaweedFS pods pass
+/// `restricted` since operator#860 (uid/gid 65534, `emptyDir` logs).
 pub fn platform_namespace(name: &str) -> Namespace {
     Namespace {
         metadata: ObjectMeta {
