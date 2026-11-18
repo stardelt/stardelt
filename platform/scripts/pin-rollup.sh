@@ -11,6 +11,9 @@
 #                                          # keeps the branch and exits 0 — platform#648)
 #                                          # With PIN_TOKEN (platform#1069) the push triggers the PR
 #                                          # checks and auto-merge finishes the cycle.
+#                                          # When auto-merge is unavailable the job waits for the PR
+#                                          # checks and merges the roll itself, so the cycle needs
+#                                          # no person.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -294,8 +297,29 @@ fi
 if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
   pr_number="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // ""')"
   if [ -n "$pr_number" ]; then
-    gh pr merge "$pr_number" --auto --squash
-    echo "auto-merge armed on PR #$pr_number: it merges when the required checks pass"
+    # `gh pr merge --auto` is refused when main has no protected-branch rule
+    # ("Protected branch rules not configured", run 44334904654) and when the PR is
+    # already clean ("Pull request is in clean status", run 44337019887). Both mean
+    # nobody else will merge this roll: wait for the checks this push started, then
+    # merge it here.
+    if auto_out="$(gh pr merge "$pr_number" --auto --squash 2>&1)"; then
+      echo "auto-merge armed on PR #$pr_number: it merges when the required checks pass"
+    else
+      echo "auto-merge is not available; waiting for PR #$pr_number's checks (${auto_out//$'\n'/ })"
+      checks=""
+      for _ in $(seq 1 18); do
+        checks="$(gh pr checks "$pr_number" --json name --jq 'length' 2>/dev/null || true)"
+        [ -n "$checks" ] && [ "$checks" -gt 0 ] && break
+        sleep 10
+      done
+      if [ -z "$checks" ] || [ "$checks" -eq 0 ]; then
+        echo "no pull-request checks reported for PR #$pr_number after 3 minutes; leaving it open" >&2
+        exit 1
+      fi
+      gh pr checks "$pr_number" --watch --fail-fast --interval 15
+      gh pr merge "$pr_number" --squash --delete-branch
+      echo "merged PR #$pr_number: the roll is on main"
+    fi
   fi
 else
   echo "PIN_TOKEN not set: pushed with GITHUB_TOKEN, so checks will not run and the PR needs a manual merge (platform#648 fallback)" >&2
