@@ -463,6 +463,12 @@ when a values source cannot be resolved — an admin error that will not heal by
 `kubectl wait --for=condition=Ready` and GitOps health checks work. `lastTransitionTime`
 changes only when `Ready` flips.
 
+While the install is still converging the `Ready` condition's `message` names the components it
+waits for (the first three, in apply order, with their own message, then ` (+N more)`), so a
+`kubectl get` answers "what is it waiting for?" without a jsonpath into `.status.components`.
+Both kinds print it: the `WAITING` column of `kubectl get platforminstance` (or `lakehouses`)
+holds that message, and is empty once everything is ready.
+
 ```yaml
 apiVersion: stardelt.io/v1alpha1
 kind: Lakehouse

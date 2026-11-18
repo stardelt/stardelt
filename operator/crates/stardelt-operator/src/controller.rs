@@ -209,11 +209,14 @@ pub async fn apply_crds(client: &Client) -> anyhow::Result<()> {
 }
 
 /// The Ready condition for a phase. Keeps the previous transition time while the status is unchanged.
+/// `message` says what the install is waiting for, so `kubectl get` answers it without a jsonpath
+/// into `.status.components` (operator#293).
 fn ready_condition(
     phase: &str,
     generation: Option<i64>,
     previous: Option<&Condition>,
     now: &str,
+    message: Option<String>,
 ) -> Condition {
     let status = if phase == "Ready" { "True" } else { "False" };
     let last_transition_time = match previous {
@@ -224,7 +227,7 @@ fn ready_condition(
         type_: "Ready".into(),
         status: status.into(),
         reason: Some(phase.into()),
-        message: None,
+        message,
         last_transition_time,
         observed_generation: generation,
     }
@@ -787,6 +790,37 @@ fn phase(dry_run: bool, outcome: &PlanOutcome) -> &'static str {
     } else {
         "Progressing"
     }
+}
+
+/// The Ready condition's message: the components still waiting, first three, in apply order.
+fn waiting_message(outcome: &PlanOutcome) -> Option<String> {
+    let waiting: Vec<_> = outcome.components.iter().filter(|c| !c.ready).collect();
+    if waiting.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = waiting
+        .iter()
+        .take(3)
+        .map(|c| {
+            format!(
+                "{}: {}",
+                c.name,
+                c.message.as_deref().unwrap_or("not ready")
+            )
+        })
+        .collect();
+    let more = if waiting.len() > 3 {
+        format!(" (+{} more)", waiting.len() - 3)
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "waiting for {} of {} components — {}{}",
+        waiting.len(),
+        outcome.components.len(),
+        shown.join("; "),
+        more
+    ))
 }
 
 /// Write one Lakehouse status. A merge patch: conditions and components are
@@ -1447,6 +1481,7 @@ async fn write_stopped_status(ctx: &Context, lh: &Lakehouse) -> Result<Action, k
             lh.metadata.generation,
             previous,
             &now_rfc3339(),
+            None,
         )],
         observed_generation: lh.metadata.generation,
         components,
@@ -1483,6 +1518,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
                 lh.metadata.generation,
                 previous,
                 &now_rfc3339(),
+                None,
             )],
             observed_generation: lh.metadata.generation,
             components,
@@ -1524,6 +1560,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
                 lh.metadata.generation,
                 prev,
                 &now_rfc3339(),
+                None,
             )],
             observed_generation: lh.metadata.generation,
             components: vec![ComponentStatus {
@@ -1726,6 +1763,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
             lh.metadata.generation,
             prev,
             &now_rfc3339(),
+            waiting_message(&outcome),
         )],
         observed_generation: lh.metadata.generation,
         components: outcome.components,
@@ -1854,6 +1892,7 @@ async fn write_stopped_platform_status(
             instance.metadata.generation,
             previous,
             &now_rfc3339(),
+            None,
         )],
         observed_generation: instance.metadata.generation,
         components,
@@ -1904,6 +1943,7 @@ async fn reconcile_platform(
                 instance.metadata.generation,
                 prev,
                 &now_rfc3339(),
+                None,
             )],
             observed_generation: instance.metadata.generation,
             components,
@@ -2099,6 +2139,7 @@ async fn reconcile_platform(
         instance.metadata.generation,
         prev,
         &now,
+        waiting_message(&outcome),
     )];
     let previous_monitoring = instance.status.as_ref().and_then(|s| {
         s.conditions
@@ -2651,16 +2692,22 @@ mod tests {
 
     #[test]
     fn ready_condition_true_only_for_ready() {
-        assert_eq!(ready_condition("Ready", None, None, "t").status, "True");
+        assert_eq!(
+            ready_condition("Ready", None, None, "t", None).status,
+            "True"
+        );
         for phase in ["Planned", "Degraded", "Failed"] {
-            assert_eq!(ready_condition(phase, None, None, "t").status, "False");
+            assert_eq!(
+                ready_condition(phase, None, None, "t", None).status,
+                "False"
+            );
         }
     }
 
     #[test]
     fn ready_condition_keeps_time_when_unchanged() {
         let p = prev("True", "old");
-        let c = ready_condition("Ready", Some(3), Some(&p), "new");
+        let c = ready_condition("Ready", Some(3), Some(&p), "new", None);
         assert_eq!(c.last_transition_time.as_deref(), Some("old"));
         assert_eq!(c.observed_generation, Some(3));
     }
@@ -2668,9 +2715,50 @@ mod tests {
     #[test]
     fn ready_condition_moves_time_on_flip() {
         let p = prev("True", "old");
-        let c = ready_condition("Degraded", None, Some(&p), "new");
+        let c = ready_condition("Degraded", None, Some(&p), "new", None);
         assert_eq!(c.status, "False");
         assert_eq!(c.last_transition_time.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn the_ready_message_names_the_waiting_components() {
+        let component = |name: &str, ready: bool, message: Option<&str>| ComponentStatus {
+            name: name.into(),
+            ready,
+            message: message.map(str::to_string),
+            applied_hash: None,
+        };
+        let outcome = PlanOutcome {
+            components: vec![
+                component(
+                    "keycloak",
+                    false,
+                    Some("waiting for the Deployment to become ready"),
+                ),
+                component("trino", true, None),
+                component("lakekeeper", false, None),
+                component("seaweedfs", false, Some("Pending")),
+                component("superset", false, Some("CrashLoopBackOff")),
+            ],
+            values_resolved: true,
+        };
+        let message = waiting_message(&outcome).expect("four components are waiting");
+        assert!(
+            message.starts_with("waiting for 4 of 5 components — "),
+            "{message}"
+        );
+        assert_eq!(
+            message,
+            "waiting for 4 of 5 components — keycloak: waiting for the Deployment to become ready; \
+             lakekeeper: not ready; seaweedfs: Pending (+1 more)"
+        );
+        assert!(!message.contains("superset"));
+
+        let all_ready = PlanOutcome {
+            components: vec![component("trino", true, None)],
+            values_resolved: true,
+        };
+        assert_eq!(waiting_message(&all_ready), None);
     }
 
     #[test]
