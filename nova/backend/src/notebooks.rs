@@ -256,8 +256,12 @@ impl NotebookStore {
         body: Vec<u8>,
         uploaded_by: &str,
         sha256: &str,
+        source: Option<&NotebookSource>,
     ) -> Result<String, StoreError> {
         let uploaded_by = metadata_value(uploaded_by);
+        let source = source.map(|source| {
+            metadata_value(&serde_json::to_string(source).expect("a source serializes"))
+        });
         let mut action = self.bucket.put_object(Some(&self.credentials), key);
         // Signed headers: presigning covers them, so the gateway gets the metadata as
         // part of the same immutable object version.
@@ -270,17 +274,22 @@ impl NotebookStore {
         action
             .headers_mut()
             .insert("x-amz-meta-sha256", sha256.to_string());
+        if let Some(source) = source.as_ref() {
+            action
+                .headers_mut()
+                .insert("x-amz-meta-source", source.clone());
+        }
         let url = action.sign(PRESIGN_TTL);
-        let response = self
-            .send(
-                self.http
-                    .put(url)
-                    .header("content-type", NOTEBOOK_CONTENT_TYPE)
-                    .header("x-amz-meta-uploaded-by", uploaded_by.as_str())
-                    .header("x-amz-meta-sha256", sha256)
-                    .body(body),
-            )
-            .await?;
+        let mut request = self
+            .http
+            .put(url)
+            .header("content-type", NOTEBOOK_CONTENT_TYPE)
+            .header("x-amz-meta-uploaded-by", uploaded_by.as_str())
+            .header("x-amz-meta-sha256", sha256);
+        if let Some(source) = source.as_ref() {
+            request = request.header("x-amz-meta-source", source.as_str());
+        }
+        let response = self.send(request.body(body)).await?;
         version_id(&response).ok_or(StoreError::Unversioned)
     }
 
@@ -313,6 +322,10 @@ impl NotebookStore {
                 .map(|value| metadata_text(&value))
                 .unwrap_or_default(),
             sha256: text("x-amz-meta-sha256").unwrap_or_default(),
+            source: text("x-amz-meta-source").and_then(|value| {
+                // A value written by another tool must not break the listing.
+                serde_json::from_str::<NotebookSource>(&metadata_text(&value)).ok()
+            }),
         })
     }
 
@@ -509,6 +522,7 @@ impl NotebookStore {
                 uploaded_at: rfc3339_utc(&version.last_modified),
                 uploaded_by: head.uploaded_by,
                 sha256: head.sha256,
+                source: head.source,
             });
         }
         Ok(rows)
@@ -766,6 +780,7 @@ struct HeadObject {
     uploaded_at: String,
     uploaded_by: String,
     sha256: String,
+    source: Option<NotebookSource>,
 }
 
 struct ListedVersion {
@@ -816,6 +831,21 @@ pub struct NotebookParameter {
     pub default: String,
 }
 
+/// Where a published version came from, as the publisher reported it (stardelt-nova#819).
+/// A claim: Nova stores it and does not check it against a Git server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NotebookSource {
+    /// `https://host/org/repo`, without user, token, port or `.git`.
+    pub repository: String,
+    /// 7 to 64 lowercase hex digits.
+    pub commit: String,
+    /// The notebook's path from the repository root.
+    pub path: String,
+    /// `false` when the publisher reported uncommitted changes to this file.
+    pub clean: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedNotebook {
@@ -830,6 +860,8 @@ pub struct PublishedNotebook {
     /// `objectVersion` is that version.
     pub unchanged: bool,
     pub parameters: Vec<NotebookParameter>,
+    /// Where the version came from; null when the publisher sent no X-Stardelt-Source header.
+    pub source: Option<NotebookSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -866,6 +898,8 @@ pub struct NotebookVersion {
     pub uploaded_at: String,
     pub uploaded_by: String,
     pub sha256: String,
+    /// Where the version came from; null when the publisher sent no X-Stardelt-Source header.
+    pub source: Option<NotebookSource>,
 }
 
 /// `GET /api/notebooks/{group}/{name}/parameters`: the parameters of one pinned version
@@ -976,6 +1010,23 @@ fn metadata_value(value: &str) -> String {
 
 fn metadata_text(value: &str) -> String {
     percent_decode_str(value).decode_utf8_lossy().into_owned()
+}
+
+/// The `X-Stardelt-Source` header: a JSON object, at most 1024 bytes, so the object's user
+/// metadata stays under S3's 2 KiB beside `uploaded-by` and `sha256` (stardelt-nova#819).
+const MAX_SOURCE_HEADER_BYTES: usize = 1024;
+
+/// `^[0-9a-f]{7,64}$`: the commit shapes a publisher reports.
+fn valid_source_commit(commit: &str) -> bool {
+    (7..=64).contains(&commit.len())
+        && commit
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// The `repository` and `path` shapes: 1 to 512 characters.
+fn valid_source_text(value: &str) -> bool {
+    (1..=512).contains(&value.chars().count())
 }
 
 fn bad_name() -> Fail {
@@ -1210,7 +1261,7 @@ pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     operation_id = "notebooks_publish",
     path = "/api/notebooks/{group}/{name}",
     tag = "public",
-    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing — no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
+    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing — no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1254,6 +1305,50 @@ pub(crate) async fn publish(
     if !valid_name(&name) {
         return bad_name().into_response();
     }
+
+    // The header is read before `read_body` consumes the request (stardelt-nova#819 slice 1).
+    let source = match request.headers().get("x-stardelt-source") {
+        Some(value) => {
+            if value.as_bytes().len() > MAX_SOURCE_HEADER_BYTES {
+                return Fail::new(
+                    StatusCode::BAD_REQUEST,
+                    "the X-Stardelt-Source header is longer than 1024 bytes",
+                )
+                .into_response();
+            }
+            match value
+                .to_str()
+                .ok()
+                .and_then(|text| serde_json::from_str::<NotebookSource>(text).ok())
+            {
+                Some(source) => {
+                    if !valid_source_commit(&source.commit) {
+                        return Fail::new(
+                            StatusCode::BAD_REQUEST,
+                            "the source commit must be 7 to 64 lowercase hex digits",
+                        )
+                        .into_response();
+                    }
+                    if !valid_source_text(&source.repository) || !valid_source_text(&source.path) {
+                        return Fail::new(
+                            StatusCode::BAD_REQUEST,
+                            "the source repository and path must each be 1 to 512 characters",
+                        )
+                        .into_response();
+                    }
+                    Some(source)
+                }
+                None => {
+                    return Fail::new(
+                        StatusCode::BAD_REQUEST,
+                        "the X-Stardelt-Source header must be the JSON {repository, commit, path, clean}",
+                    )
+                    .into_response();
+                }
+            }
+        }
+        None => None,
+    };
 
     let body = match read_body(request).await {
         Ok(body) => body,
@@ -1303,6 +1398,7 @@ pub(crate) async fn publish(
             size,
             unchanged: true,
             parameters,
+            source: newest.source,
         })
         .into_response();
     }
@@ -1318,6 +1414,7 @@ pub(crate) async fn publish(
             size,
             unchanged: false,
             parameters,
+            source,
         })
         .into_response();
     }
@@ -1328,7 +1425,13 @@ pub(crate) async fn publish(
     }
 
     let version = match store
-        .put(&key, stored, &principal.identity.display_name, &sha256)
+        .put(
+            &key,
+            stored,
+            &principal.identity.display_name,
+            &sha256,
+            source.as_ref(),
+        )
         .await
     {
         Ok(version) => version,
@@ -1345,6 +1448,7 @@ pub(crate) async fn publish(
         size,
         unchanged: false,
         parameters,
+        source,
     })
     .into_response()
 }
@@ -1399,7 +1503,7 @@ pub(crate) async fn list(
     operation_id = "notebooks_versions",
     path = "/api/notebooks/{group}/{name}/versions",
     tag = "public",
-    description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1727,6 +1831,7 @@ pub(crate) mod fake {
         pub(crate) content_type: String,
         pub(crate) uploaded_by: String,
         pub(crate) sha256: String,
+        pub(crate) source: Option<String>,
         pub(crate) last_modified: String,
         pub(crate) seq: u64,
     }
@@ -1762,6 +1867,7 @@ pub(crate) mod fake {
                 content_type: NOTEBOOK_CONTENT_TYPE.into(),
                 uploaded_by: uploaded_by.to_string(),
                 sha256: sha256_hex(body),
+                source: None,
                 last_modified: modified(seq),
                 seq,
             });
@@ -1838,6 +1944,7 @@ pub(crate) mod fake {
                 content_type: header_text(&headers, "content-type").unwrap_or_default(),
                 uploaded_by: header_text(&headers, "x-amz-meta-uploaded-by").unwrap_or_default(),
                 sha256: header_text(&headers, "x-amz-meta-sha256").unwrap_or_default(),
+                source: header_text(&headers, "x-amz-meta-source"),
                 last_modified: modified(seq),
                 seq,
             });
@@ -1887,6 +1994,12 @@ pub(crate) mod fake {
                 "x-amz-meta-sha256",
                 HeaderValue::from_str(&object.sha256).expect("sha header"),
             );
+            if let Some(source) = object.source.as_ref() {
+                answer.insert(
+                    "x-amz-meta-source",
+                    HeaderValue::from_str(source).expect("source header"),
+                );
+            }
             return (StatusCode::OK, answer).into_response();
         }
 
@@ -2529,6 +2642,192 @@ mod tests {
         let (status, rows) = call(&app, "GET", "/notebooks", None, &[]).await;
         assert_eq!(status, StatusCode::OK, "{rows}");
         assert_eq!(rows[0]["uploadedBy"], "Jörg Müller");
+    }
+
+    /// Where one version came from, as a publisher sends it in `X-Stardelt-Source` (#819).
+    const SOURCE_A: &str = r#"{"repository":"https://github.com/acme/repo","commit":"0123456789abcdef0123456789abcdef01234567","path":"notebooks/report.ipynb","clean":true}"#;
+    const SOURCE_B: &str = r#"{"repository":"https://github.com/acme/repo","commit":"fedcba9876543210fedcba9876543210fedcba98","path":"notebooks/report.ipynb","clean":false}"#;
+
+    fn source_of(header: &str) -> Value {
+        serde_json::from_str(header).expect("a source object")
+    }
+
+    #[tokio::test]
+    async fn publish_stores_the_source_the_publisher_sent() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("src-alice", &["analytics"], false)));
+        let body = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+        let expected = source_of(SOURCE_A);
+
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/my%20notebook.ipynb",
+            Some(&body),
+            &[("X-Stardelt-Source", SOURCE_A)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["source"], expected);
+
+        // The same immutable object version carries it as S3 user metadata.
+        let object = s3.object("analytics/my notebook.ipynb");
+        let stored = object.source.expect("the source metadata header");
+        assert!(stored.is_ascii(), "S3 user metadata is US-ASCII");
+        let stored: Value =
+            serde_json::from_str(&metadata_text(&stored)).expect("stored source JSON");
+        assert_eq!(stored, expected);
+
+        let (status, versions) = call(
+            &app,
+            "GET",
+            "/notebooks/analytics/my%20notebook.ipynb/versions",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{versions}");
+        assert_eq!(versions[0]["objectVersion"], answer["objectVersion"]);
+        assert_eq!(versions[0]["source"], expected);
+    }
+
+    #[tokio::test]
+    async fn publish_without_the_source_header_answers_null() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("src-bob", &["analytics"], false)));
+
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/plain.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["source"], Value::Null);
+        assert!(s3.object("analytics/plain.ipynb").source.is_none());
+    }
+
+    #[tokio::test]
+    async fn publish_of_the_same_bytes_keeps_the_stored_source() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("src-carol", &["analytics"], false)));
+        let path = "/notebooks/analytics/same.ipynb";
+        let same = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+
+        let (status, first) = call(
+            &app,
+            "PUT",
+            path,
+            Some(&same),
+            &[("X-Stardelt-Source", SOURCE_A)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["source"], source_of(SOURCE_A));
+
+        // The source is metadata, not content: the same bytes report the stored version's source.
+        let (status, again) = call(
+            &app,
+            "PUT",
+            path,
+            Some(&same),
+            &[("X-Stardelt-Source", SOURCE_B)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(again["unchanged"], true);
+        assert_eq!(again["objectVersion"], first["objectVersion"]);
+        assert_eq!(again["source"], source_of(SOURCE_A));
+        assert_eq!(s3.objects().len(), 1, "nothing was stored");
+    }
+
+    #[tokio::test]
+    async fn a_bad_source_header_is_400() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("src-dave", &["analytics"], false)));
+
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/bad.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("X-Stardelt-Source", "nope")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(
+            answer["error"],
+            "the X-Stardelt-Source header must be the JSON {repository, commit, path, clean}"
+        );
+        assert!(s3.is_empty(), "nothing was stored");
+
+        // Over 1024 bytes: refused before the body is read, so the metadata stays small.
+        let long = format!(
+            r#"{{"repository":"https://github.com/acme/repo","commit":"0123456789abcdef0123456789abcdef01234567","path":"{}","clean":true}}"#,
+            "n".repeat(1000)
+        );
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/bad.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("X-Stardelt-Source", &long)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(
+            answer["error"],
+            "the X-Stardelt-Source header is longer than 1024 bytes"
+        );
+
+        // A repository over 512 characters is refused too.
+        let long_repository = format!(
+            r#"{{"repository":"https://github.com/{}","commit":"0123456789abcdef0123456789abcdef01234567","path":"notebooks/report.ipynb","clean":true}}"#,
+            "r".repeat(500)
+        );
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/bad.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("X-Stardelt-Source", &long_repository)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(
+            answer["error"],
+            "the source repository and path must each be 1 to 512 characters"
+        );
+        assert!(s3.is_empty(), "nothing was stored");
+    }
+
+    #[tokio::test]
+    async fn a_source_commit_that_is_not_hex_is_400() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("src-erin", &["analytics"], false)));
+        let header = r#"{"repository":"https://github.com/acme/repo","commit":"xyz","path":"notebooks/report.ipynb","clean":true}"#;
+
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/hex.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("X-Stardelt-Source", header)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(
+            answer["error"],
+            "the source commit must be 7 to 64 lowercase hex digits"
+        );
+        assert!(s3.is_empty(), "nothing was stored");
     }
 
     #[tokio::test]
