@@ -55,7 +55,7 @@ images:
     # would silently redeploy a different DAG image.
     repository: ghcr.io/stardelt/airflow
     tag: demo
-    digest: sha256:0f6d0a3988caf113940f17e3e17f4e9b8f3dd7bffb5b5411ed0c2dd2f6b2492d
+    digest: sha256:4c67f2a3342e04f837110cf88fea35facb7a45c770c90403a9335d9ffa33721b
     pullPolicy: IfNotPresent
 
 # No secrets in this file: scripts/app-secrets.sh generates them per cluster
@@ -320,7 +320,7 @@ env:
   - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_REPOSITORY
     value: ghcr.io/stardelt/airflow
   - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG
-    value: "demo@sha256:0f6d0a3988caf113940f17e3e17f4e9b8f3dd7bffb5b5411ed0c2dd2f6b2492d"
+    value: "demo@sha256:4c67f2a3342e04f837110cf88fea35facb7a45c770c90403a9335d9ffa33721b"
 
 # Secret-backed envs use extraEnv (templated string accepting valueFrom).
 extraEnv: |
@@ -437,7 +437,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:bbc6b7c724563f97b8f221fef951a357a1c018534eec980864e829d0edc9ecf9
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:6d502e3eb772e16719d9272ab7376ecac323aeb8fd93084cbdfae9ff470b0fe7
 
 # The internal CA that signs the query engine's certificate (Secret trino-ca, manifests/trino-tls.yaml),
 # mounted into every Airflow container, task pods included, so the pipeline loader can verify
