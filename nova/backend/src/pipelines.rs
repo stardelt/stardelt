@@ -4708,6 +4708,72 @@ fn not_ok(message: &str) -> ValidatePipelineResponse {
     }
 }
 
+/// The refusal a production stage gives a notebook schedule that no bundle deploy stamped
+/// (stardelt-nova#819 decision 3). One sentence, the same on every route.
+pub(crate) const PRODUCTION_NOTEBOOK: &str =
+    "In production a notebook comes from Git. Deploy it with a bundle.";
+
+/// Whether the body runs a notebook: the single-notebook form or any notebook task of a list.
+fn runs_a_notebook(
+    notebook: Option<&NotebookRequest>,
+    tasks: Option<&[PipelineTaskRequest]>,
+) -> bool {
+    notebook.is_some()
+        || tasks.is_some_and(|tasks| tasks.iter().any(|task| task.notebook.is_some()))
+}
+
+/// Whether a stored Pipeline resource runs a notebook task (`spec.tasks[*].kind == "notebook"`).
+fn resource_runs_a_notebook(resource: &Value) -> bool {
+    resource
+        .get("spec")
+        .and_then(|spec| spec.get("tasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|task| task.get("kind").and_then(Value::as_str) == Some("notebook"))
+        })
+}
+
+/// The production rule: a scheduled notebook needs a bundle deploy stamp. `has_stamp` is whether
+/// the pipeline will carry one after this request (the body's, or the stored one on an update).
+fn production_notebook_sentence(
+    stage_kind: &str,
+    has_schedule: bool,
+    runs_notebook: bool,
+    has_stamp: bool,
+) -> Option<&'static str> {
+    (stage_kind == "prod" && has_schedule && runs_notebook && !has_stamp)
+        .then_some(PRODUCTION_NOTEBOOK)
+}
+
+/// The update half of the production rule (#819 decision 3). The stamp may be on the stored
+/// resource: a form save sends no `provenance`, and `UpdatePipelineRequest` keeps what is
+/// stored. A read that fails here is not this rule's answer — `update_pipeline` reports it.
+async fn update_production_refusal(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    body: &UpdatePipelineRequest,
+) -> Option<Fail> {
+    if state.stage_kind != "prod" || body.schedule.is_none() {
+        return None;
+    }
+    if body.provenance.is_some() || !runs_a_notebook(body.notebook.as_ref(), body.tasks.as_deref())
+    {
+        return None;
+    }
+    let resources = resources(state)?;
+    let (_, stored) = load_actionable(&resources, who, namespace, name)
+        .await
+        .ok()?;
+    if deployment_of(&stored).is_some() || !resource_runs_a_notebook(&stored) {
+        return None;
+    }
+    Some(Fail::new(StatusCode::BAD_REQUEST, PRODUCTION_NOTEBOOK))
+}
+
 /// Run every rule of a create against `body` and say what would happen, writing nothing and
 /// taking no slot of the creation limit. A refusal of a rule is an answer (`ok: false`); an
 /// unreachable cluster or notebook store is still an error, as on create.
@@ -5703,7 +5769,7 @@ pub(crate) async fn preview(
     operation_id = "pipelines_create",
     path = "/api/pipelines",
     tag = "public",
-    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 201, description = "The resource as written", body = PipelineView),
@@ -5720,6 +5786,14 @@ pub(crate) async fn create(
     signed: SignedIn,
     ApiJson(body): ApiJson<CreatePipelineRequest>,
 ) -> Response {
+    if let Some(sentence) = production_notebook_sentence(
+        signed.state().stage_kind,
+        body.schedule.is_some(),
+        runs_a_notebook(body.notebook.as_ref(), body.tasks.as_deref()),
+        body.provenance.is_some(),
+    ) {
+        return Fail::new(StatusCode::BAD_REQUEST, sentence).into_response();
+    }
     answer_with(
         StatusCode::CREATED,
         create_pipeline(
@@ -5739,7 +5813,7 @@ pub(crate) async fn create(
     operation_id = "pipelines_validate",
     path = "/api/pipelines/validate",
     tag = "public",
-    description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
+    description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with `ok: false` at 200 (\"In production a notebook comes from Git. Deploy it with a bundle.\") unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 200, description = "The verdict: accepted (with the action) or the reason it is not", body = ValidatePipelineResponse),
@@ -5752,6 +5826,14 @@ pub(crate) async fn validate(
     signed: SignedIn,
     ApiJson(body): ApiJson<CreatePipelineRequest>,
 ) -> Response {
+    if let Some(sentence) = production_notebook_sentence(
+        signed.state().stage_kind,
+        body.schedule.is_some(),
+        runs_a_notebook(body.notebook.as_ref(), body.tasks.as_deref()),
+        body.provenance.is_some(),
+    ) {
+        return answer(Ok(not_ok(sentence)));
+    }
     answer(
         validate_pipeline(
             resources(signed.state()).as_ref(),
@@ -5769,7 +5851,7 @@ pub(crate) async fn validate(
     operation_id = "pipelines_update",
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -5791,6 +5873,11 @@ pub(crate) async fn update(
     Path((namespace, name)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdatePipelineRequest>,
 ) -> Response {
+    if let Some(fail) =
+        update_production_refusal(signed.state(), signed.identity(), &namespace, &name, &body).await
+    {
+        return fail.into_response();
+    }
     answer(
         update_pipeline(
             resources(signed.state()).as_ref(),
@@ -10167,6 +10254,209 @@ mod tests {
 
     async fn stored_pipeline(resources: &PipelineResources, name: &str) -> Option<Value> {
         resources.get(name).await.expect("memory read")
+    }
+
+    // -----------------------------------------------------------------------
+    // The production notebook rule (#819 decision 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn production_refuses_a_hand_scheduled_notebook() {
+        assert_eq!(
+            production_notebook_sentence("prod", true, true, false),
+            Some(PRODUCTION_NOTEBOOK)
+        );
+        assert_eq!(production_notebook_sentence("prod", true, true, true), None);
+        assert_eq!(
+            production_notebook_sentence("prod", false, true, false),
+            None
+        );
+        assert_eq!(
+            production_notebook_sentence("prod", true, false, false),
+            None
+        );
+        assert_eq!(production_notebook_sentence("dev", true, true, false), None);
+        assert_eq!(
+            production_notebook_sentence("test", true, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_notebook_task_list_is_a_notebook_body() {
+        let report = NotebookRequest {
+            name: "report.ipynb".into(),
+            object_version: "v1".into(),
+            params: BTreeMap::new(),
+        };
+        let mixed = [
+            pipeline_task("load", "insert into gold.report select 1", &[]),
+            PipelineTaskRequest {
+                name: "report".into(),
+                sql: String::new(),
+                notebook: Some(report.clone()),
+                depends_on: vec!["load".into()],
+            },
+        ];
+        assert!(runs_a_notebook(None, Some(&mixed)));
+        let sql_only = [pipeline_task("load", "select 1", &[])];
+        assert!(!runs_a_notebook(None, Some(&sql_only)));
+        assert!(runs_a_notebook(Some(&report), None));
+    }
+
+    #[test]
+    fn a_stored_notebook_task_list_runs_a_notebook() {
+        assert!(resource_runs_a_notebook(&json!({
+            "spec": { "tasks": [
+                { "name": "a", "kind": "notebook" },
+                { "name": "b", "kind": "sql" }
+            ] }
+        })));
+        assert!(!resource_runs_a_notebook(&json!({
+            "spec": { "tasks": [{ "name": "a", "kind": "sql" }] }
+        })));
+    }
+
+    #[tokio::test]
+    async fn production_refuses_a_notebook_schedule_without_a_bundle() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let mut state = test_state(None, airflow, store);
+        Arc::get_mut(&mut state).expect("a fresh state").stage_kind = "prod";
+        let namespace = crate::cluster::namespace();
+        let app = router().with_state(state).layer(Extension(principal(who(
+            "sub-ada",
+            &["analytics"],
+            false,
+        ))));
+
+        let hand = json!({
+            "name": "nightly",
+            "ownerGroup": "analytics",
+            "notebook": { "name": "report.ipynb", "objectVersion": "v1" },
+            "schedule": { "cron": "0 3 * * *", "timezone": "UTC" }
+        });
+        let post = |body: &Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/pipelines")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Without the stamp: 400 with exactly the sentence.
+        let response = app.clone().oneshot(post(&hand)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], PRODUCTION_NOTEBOOK);
+
+        // The validate route answers the same sentence as a refusal: 200, `ok: false`.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipelines/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(hand.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["errors"][0]["message"], PRODUCTION_NOTEBOOK);
+
+        // With the stamp the rule lets it through: this state has no cluster.
+        let mut stamped = hand.clone();
+        stamped["provenance"] =
+            json!({ "bundle": "shop", "target": "prod", "revision": "abc1234" });
+        let response = app.clone().oneshot(post(&stamped)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no cluster connection");
+
+        // A dev stage does not know the rule.
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let dev = router()
+            .with_state(test_state(None, airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))));
+        let response = dev.oneshot(post(&hand)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no cluster connection");
+
+        // The update half: an unstamped stored notebook schedule is refused, a stamped one is
+        // not. The stored resource is the stamp's second home.
+        let mut unstamped = nova_pipeline("nightly", "analytics");
+        unstamped["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "notebook",
+              "config": { "notebook": "report.ipynb", "objectVersion": "v1", "params": "{}" } }
+        ]);
+        let mut stamped = unstamped.clone();
+        stamped["metadata"]["labels"][BUNDLE_LABEL] = json!("shop");
+        stamped["metadata"]["labels"][TARGET_LABEL] = json!("prod");
+        let form = json!({
+            "notebook": { "name": "report.ipynb", "objectVersion": "v1" },
+            "schedule": { "cron": "0 3 * * *", "timezone": "UTC" }
+        });
+        for (stored, expected_sentence) in [(unstamped, true), (stamped, false)] {
+            let kube = fake_kube::start_with(
+                vec![stored],
+                vec![service_principal(
+                    "pipeline-analytics",
+                    "analytics",
+                    Some(true),
+                )],
+            )
+            .await;
+            let (store, _store_fake) = crate::secret_store::fake::start().await;
+            let (airflow, _airflow_fake) = fake_airflow::start().await;
+            let mut state = test_state(Some(kube), airflow, store);
+            Arc::get_mut(&mut state).expect("a fresh state").stage_kind = "prod";
+            let app = router().with_state(state).layer(Extension(principal(who(
+                "sub-ada",
+                &["analytics"],
+                false,
+            ))));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/pipelines/{namespace}/nightly"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(form.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            if expected_sentence {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(value["error"], PRODUCTION_NOTEBOOK);
+            } else {
+                assert_ne!(value["error"], PRODUCTION_NOTEBOOK, "{value}");
+            }
+        }
     }
 
     #[test]
