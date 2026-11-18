@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compare the operator's golden Nova image (provision.rs NOVA_IMAGE) with the digest
-# stardelt-platform pins in manifests/nova-deployment.yaml. The two live in different
-# repositories, so no CI sees both (stardelt-platform#759, operator#545).
+# the platform pins in manifests/nova-deployment.yaml. The two live in different folders
+# of stardelt/stardelt; the operator's CI passes PLATFORM_NOVA_FILE from this checkout
+# (stardelt-platform#759, operator#545).
 #
 #   bash scripts/check-golden-nova.sh            # 0 equal, 1 differ, 2 unreadable
 #   bash scripts/check-golden-nova.sh --report   # print the issue title and body, exit 0
