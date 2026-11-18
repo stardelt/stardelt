@@ -57,9 +57,11 @@ jobs:
           bash scripts/check-golden-nova.sh --report > "$report"
           title="$(sed -n '1s/^title: //p' "$report")"
           tail -n +3 "$report" > "$report.body"
+          milestone="$(gh api "repos/$GITHUB_REPOSITORY/milestones?state=open&per_page=100" \
+            --jq '[.[].title | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | first')"
           gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
             --body-file "$report.body" --label golden-nova --label ready-to-implement \
-            --label P2 --label area/operator --milestone v0.4
+            --label P2 --label area/operator --milestone "$milestone"
 
       - name: Fail when the check itself could not run
         if: steps.compare.outputs.status != '0' && steps.compare.outputs.status != '1'

@@ -54,8 +54,10 @@ jobs:
           if [ -n "$number" ]; then
             gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pins.txt"
           else
+            milestone="$(gh api "repos/$GITHUB_REPOSITORY/milestones?state=open&per_page=100" \
+              --jq '[.[].title | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(split(".") | map(tonumber)) | first')"
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
-              --label bug --label P2 --label ops --label area/platform --milestone "v0.4" --body-file "$RUNNER_TEMP/pins.txt"
+              --label bug --label P2 --label ops --label area/platform --milestone "$milestone" --body-file "$RUNNER_TEMP/pins.txt"
           fi
       - name: Close the issue when all three checks pass
         if: steps.check.outputs.code == '0'
