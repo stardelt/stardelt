@@ -151,6 +151,15 @@ class CheckOperatorPins(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(f"check-operator-pins: reading {op} origin/main {sha} (", done.stdout)
 
+    def test_an_operator_folder_in_this_work_tree_is_read_here(self):
+        """Since D49 both folders are one commit: the check reads this tree, not the base branch."""
+        op = REPO.parent / "operator"
+        if not op.is_dir():
+            self.skipTest("no operator folder next to platform/ (a platform-only checkout)")
+        done = self.run_script(op)
+        self.assertIn(f"check-operator-pins: reading {op} (working tree; one repository since D49)",
+                      done.stdout)
+
     def test_a_failure_names_the_revision_and_the_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:
             op = fake_operator(tmp)
