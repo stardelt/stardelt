@@ -8,6 +8,8 @@
 #   OPEN_PR=1 bash scripts/pin-rollup.sh  # CI: commit, force-push branch, open/refresh the PR
 #                                          # (a repository that forbids Actions from opening PRs
 #                                          # keeps the branch and exits 0 — platform#648)
+#                                          # With PIN_TOKEN (platform#1069) the push triggers the PR
+#                                          # checks and auto-merge finishes the cycle.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -187,9 +189,15 @@ trap 'rm -f "$body_file"' EXIT
   echo ""
   for c in "${changes[@]}"; do echo "- \`$c\`"; done
   echo ""
-  echo "## Verification (bot push suppresses pull-request checks)"
-  echo ""
-  echo "Pull-request checks do not run for pushes made with \`GITHUB_TOKEN\`, so the rollup ran these five checks itself. A reviewer can trust these results instead."
+  if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
+    echo "## Verification (also run by the required checks on this PR)"
+    echo ""
+    echo "The push was made with a user token, so the pull-request checks run on this PR. The rollup still ran these five checks itself: a red result stops the roll before the checks finish."
+  else
+    echo "## Verification (bot push suppresses pull-request checks)"
+    echo ""
+    echo "Pull-request checks do not run for pushes made with \`GITHUB_TOKEN\`, so the rollup ran these five checks itself. A reviewer can trust these results instead."
+  fi
   echo ""
   echo "\`helm lint chart\` renders the umbrella chart's templates with its sub-charts not fetched (a GitHub release download 504 blocks the roll; they are unrelated to a digest pin). The merge to \`main\` runs the full CI \`Helm lint\` job with every dependency."
   echo ""
@@ -266,8 +274,21 @@ else
   fi
 fi
 
-# The bot push suppresses the pull-request checks, so these two are the gate: a
-# red workflow is the only signal left. The PR body already carries both results.
+# With a user token the push triggers the pull-request checks, so auto-merge can
+# finish the cycle without an admin merge (platform#1069). Without it the workflow
+# falls back to GITHUB_TOKEN, no check reports, and a human merges.
+if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
+  pr_number="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // ""')"
+  if [ -n "$pr_number" ]; then
+    gh pr merge "$pr_number" --auto --squash
+    echo "auto-merge armed on PR #$pr_number: it merges when the required checks pass"
+  fi
+else
+  echo "PIN_TOKEN not set: pushed with GITHUB_TOKEN, so checks will not run and the PR needs a manual merge (platform#648 fallback)" >&2
+fi
+
+# These two also gate the roll: the PR body carries their results, and on a bot push
+# (no PIN_TOKEN) a red workflow is the only signal left.
 if [ "$helm_rc" -ne 0 ] || [ "$parity_rc" -ne 0 ]; then
   echo "rollup checks failed (helm lint chart: $helm_rc, version parity: $parity_rc)" >&2
   exit 1
