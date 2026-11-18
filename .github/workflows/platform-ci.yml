@@ -73,6 +73,29 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
 
   # ---------------------------------------------------------------------------
+  # The operator's golden values against this repository's pins (two install paths)
+  # ---------------------------------------------------------------------------
+  goldens:
+    name: Golden values (two install paths)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # check_golden_image.py reads provision.rs at the commit the pinned operator image was
+          # built from; a depth-1 checkout does not contain that commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: The operator's golden values equal this repository's pins
+        run: bash scripts/check-operator-pins.sh
+
+      - name: The pinned operator image ships this repository's Nova pin
+        run: python3 scripts/check_golden_image.py
+
+  # ---------------------------------------------------------------------------
   # helm template each chart with its values file
   # ---------------------------------------------------------------------------
   helm-lint:
