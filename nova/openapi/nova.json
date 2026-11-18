@@ -15235,6 +15235,13 @@
           "kind"
         ],
         "properties": {
+          "dependsOn": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The task names this task waits for (`tasks[].dependsOn`)."
+          },
           "kind": {
             "type": "string"
           },

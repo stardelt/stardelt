@@ -523,6 +523,17 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                         } else {
                             None
                         },
+                        depends_on: task
+                            .get("dependsOn")
+                            .and_then(Value::as_array)
+                            .map(|names| {
+                                names
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -2358,6 +2369,9 @@ pub struct TaskSpecView {
     /// The parameters a notebook task passes, parsed back from `config.params`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notebook_params: Option<BTreeMap<String, String>>,
+    /// The task names this task waits for (`tasks[].dependsOn`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 /// One pipeline in the list: the resource plus what Airflow says about it.
@@ -14306,6 +14320,7 @@ mod tests {
                 notebook: Some("report.ipynb".into()),
                 object_version: Some(version.into()),
                 notebook_params: Some(BTreeMap::new()),
+                depends_on: vec![],
             }],
             "the edit dialog gets the version and the parameters it must prefill"
         );
@@ -14323,6 +14338,7 @@ mod tests {
                 notebook: None,
                 object_version: None,
                 notebook_params: None,
+                depends_on: vec![],
             }]
         );
 
@@ -14340,8 +14356,24 @@ mod tests {
                 notebook: None,
                 object_version: None,
                 notebook_params: None,
+                depends_on: vec![],
             }]
         );
+    }
+
+    #[test]
+    fn task_specs_carry_the_dependencies() {
+        let spec = json!({
+            "tasks": [
+                { "name": "load", "kind": "sql", "sql": "insert into silver.orders select 1" },
+                { "name": "check", "kind": "sql",
+                  "sql": "select count(*) from silver.orders", "dependsOn": ["load"] }
+            ]
+        });
+        let tasks = task_specs(&spec, false);
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks[0].depends_on.is_empty(), "load waits for nothing");
+        assert_eq!(tasks[1].depends_on, vec!["load".to_string()]);
     }
 
     #[tokio::test]

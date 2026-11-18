@@ -41,17 +41,20 @@ const titles: Record<string, string> = {
 function titleFor(pathname: string): string {
   const app = pathname.match(/^\/apps\/([^/]+)$/)
   if (app) return `${app[1]} — app detail`
-  // A pipeline's page is named after the pipeline, so the tab says which one.
-  const pipeline = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)$/)
-  if (pipeline) {
-    let name = pipeline[1]
+  const nameOf = (segment: string) => {
     try {
-      name = decodeURIComponent(name)
+      return decodeURIComponent(segment)
     } catch {
       // A malformed escape is shown as it arrived; nothing here builds a URL from it.
+      return segment
     }
-    return `${name} · Pipelines`
   }
+  // One run of a pipeline (#1111): the pipeline's name and the page's own.
+  const run = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)\/runs\/[^/]+$/)
+  if (run) return `${nameOf(run[1])} · Run`
+  // A pipeline's page is named after the pipeline, so the tab says which one.
+  const pipeline = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)$/)
+  if (pipeline) return `${nameOf(pipeline[1])} · Pipelines`
   // Anything else that is not a known route is the catch-all, and says so.
   return titles[pathname] ?? 'Not found'
 }

@@ -701,6 +701,8 @@ export type PipelineTaskSpec = {
   notebook?: string | null
   objectVersion?: string | null
   notebookParams?: Record<string, string> | null
+  /** The task names this task waits for; absent when it waits for nothing. */
+  dependsOn?: string[]
 }
 
 /**

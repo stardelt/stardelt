@@ -179,7 +179,13 @@ export default function Runs() {
                     <RunStateBadge state={row.state} />
                   </td>
                   <td className="td px-3 whitespace-nowrap" title={when.title}>
-                    {when.text}
+                    <Link
+                      to={`/pipelines/${encodeURIComponent(row.namespace)}/${encodeURIComponent(row.name)}/runs/${encodeURIComponent(row.runId)}`}
+                      className="underline"
+                      aria-label={`Open run ${row.runId}`}
+                    >
+                      {when.text}
+                    </Link>
                   </td>
                   <td className="td px-3 tabular-nums">{runDuration(row.durationSeconds)}</td>
                   <td className="td px-3">{row.triggeredBy ?? row.type}</td>
