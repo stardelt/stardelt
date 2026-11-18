@@ -31,11 +31,12 @@ pub const JOB_PREFIX: &str = "maint-";
 /// The CLI image (stardelt/stardelt-python#62), pinned by digest: the digest is what runs and
 /// the `:dev` tag is kept for readability only, as in `values/*.yaml`.
 ///
-/// This is the build of stardelt-python `681e873` (PR #149, the native `spark`/`display`
-/// IPython extension), which also names its commit in `org.opencontainers.image.revision`:
+/// This is the build of `stardelt/stardelt` `2b707c40` (PR #89: the package declares
+/// stardelt/stardelt as its source after the D49 merge), which also names its commit in
+/// `org.opencontainers.image.revision`:
 /// `_fetch_token` posts with `verify=certifi.where()`, so the identity endpoint's public
 /// certificate verifies while the Trino connection keeps `REQUESTS_CA_BUNDLE` (operator#653).
-pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:dev@sha256:4bfa47918c5382c1d0e0e4828fa8c1fba689370efd2bc590d001710ee86d462e";
+pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:dev@sha256:343b6f81b6d7013e92cee28fff4f2f58761b72e318c5dbf7bca858b8a759d347";
 
 pub fn job_name(catalog: &str) -> String {
     format!("{JOB_PREFIX}{catalog}")
