@@ -1,0 +1,31 @@
+*.kubeconfig
+.env
+.env.local
+# Credential files must live outside the repo (~/.config/stardelt/); never stage a copy.
+*.env
+*.pem
+*.key
+*.log
+dev/hetzner-k3s/cluster.yaml
+
+# Umbrella chart dependencies — fetched by `make chart-deps`
+# (helm dependency update chart). Versions are pinned in chart/Chart.yaml.
+chart/charts/
+chart/Chart.lock
+
+# Python bytecode (notebook helper tests run locally too)
+__pycache__/
+
+# Rendered catalog properties for the extra Catalogs (scripts/render-catalogs.sh);
+# they are built per release from the live Catalog objects.
+.build/
+
+# Python build output (the stardelt library is built in its own repository now,
+# but a local `pip install -e .` anywhere in the tree leaves these behind)
+*.egg-info/
+
+# Trino baseline results (perf/baseline.py); tables for a release live in stardelt-internal.
+perf/results/
+
+# Throwaway fresh-node configs (dev/hetzner-k3s/fresh-node.sh); never committed.
+dev/hetzner-k3s/.fresh-*.yaml

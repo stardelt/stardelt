@@ -1,0 +1,56 @@
+{{- $mode := include "stardelt.identityMode" . }}
+{{- if eq $mode "external" }}
+{{- if not .Values.identity.issuerUrl }}
+{{- fail "identity.mode=external needs identity.issuerUrl (e.g. https://login.microsoftonline.com/<tenant>/v2.0)" }}
+{{- end }}
+{{- if not (hasPrefix "https://" .Values.identity.issuerUrl) }}
+{{- fail "identity.issuerUrl must be an https:// URL" }}
+{{- end }}
+{{- if not .Values.identity.tokenEndpoint }}
+{{- fail "identity.mode=external needs identity.tokenEndpoint (the token_endpoint of <issuerUrl>/.well-known/openid-configuration)" }}
+{{- end }}
+{{- if not (hasPrefix "https://" .Values.identity.tokenEndpoint) }}
+{{- fail "identity.tokenEndpoint must be an https:// URL" }}
+{{- end }}
+{{- end }}
+{{- if eq $mode "platform" }}
+{{- if not .Values.platform.baseDomain }}
+{{- fail "identity.mode=platform needs platform.baseDomain (Keycloak at id.<baseDomain>, client redirects on the app subdomains)" }}
+{{- end }}
+{{- end }}
+{{- if ne $mode "none" }}
+# The identity contract every building block reads (docs: architecture/identity).
+# Same keys whether the IdP is the platform Keycloak or an external provider.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stardelt-identity
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: stardelt
+    stardelt.io/identity-mode: {{ $mode }}
+data:
+  issuerUrl: {{ include "stardelt.issuerUrl" . | quote }}
+  tokenEndpoint: {{ include "stardelt.tokenEndpoint" . | quote }}
+  groupClaim: {{ .Values.identity.groupClaim | quote }}
+  adminGroup: {{ .Values.identity.adminGroup | quote }}
+  # Nova reads these two to switch sign-in on; the chart sets Nova's env directly, so
+  # they are here for parity with the manifest path (scripts/identity-bootstrap.sh).
+  authMode: {{ .Values.nova.auth.mode | quote }}
+  publicUrl: {{ .Values.nova.auth.publicUrl | default (printf "https://%s" (include "stardelt.appHost" (list . "nova" ""))) | quote }}
+---
+# Signs Nova's session cookie. Nova refuses to start below 32 bytes, so this is
+# generated rather than left to a human to invent; it is kept across upgrades and
+# uninstalls (like the other identity secrets), because rotating it logs everyone
+# out.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.nova.auth.sessionSecret.name }}
+  namespace: {{ .Release.Namespace }}
+  labels: { app.kubernetes.io/part-of: stardelt }
+  annotations: { helm.sh/resource-policy: keep }
+type: Opaque
+data:
+  {{ .Values.nova.auth.sessionSecret.key }}: {{ include "stardelt.secretValue" (list . .Values.nova.auth.sessionSecret.name .Values.nova.auth.sessionSecret.key) | quote }}
+{{- end }}

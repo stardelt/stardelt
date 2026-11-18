@@ -1,0 +1,582 @@
+"""``stardelt``: a thin command-line client for Nova's public API (shells, CI, agents).
+
+    export STARDELT_NOVA_URL=https://nova.example.com
+    stardelt login                                                   # once; asks Nova which identity provider; or: export STARDELT_TOKEN=... (CI)
+    stardelt whoami
+    stardelt sql "select 1 as x" --format json
+    stardelt apply -f pipeline.json            # create or update a pipeline; --dry-run writes nothing
+    stardelt apply -f pipelines/               # every .json, .yaml and .yml file of a directory, in name order
+    stardelt export NAMESPACE NAME > p.yaml    # a pipeline made in the interface, as a file `apply` accepts
+    stardelt bundle deploy DIR -t prod         # check a bundle target with Nova (`bundle plan`), then create or update its pipelines
+
+Results go to stdout; messages and errors go to stderr. The exit code is 0 for success,
+1 for an error, 2 for wrong usage and 3 when authentication is needed. A token is never
+printed.
+"""
+
+import argparse
+import csv
+import io
+import json
+import os
+import sys
+from pathlib import Path
+
+import requests
+
+from stardelt import __version__, api, apply, bundle, lineage, login, maintenance, mcp, runs, shortcuts, skill, statements
+
+OK, ERROR, USAGE, AUTH = 0, 1, 2, 3
+
+
+class _UsageError(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _UsageError(message)
+
+
+def _parser():
+    parser = _Parser(
+        prog="stardelt",
+        description="A thin client for Nova's public API.",
+        epilog="resources (stardelt RESOURCE VERB [VALUES...], same options as `api`):\n"
+        + shortcuts.summary(api.operations()),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--host", help="Nova's base URL (default: $STARDELT_NOVA_URL)")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("whoami", help="who Nova thinks you are (JSON)")
+    signin = commands.add_parser("login", help="sign in once with a code approved in a browser (device flow)")
+    signin.add_argument(
+        "--issuer", help="your identity provider's realm address (default: $STARDELT_ISSUER, else asked from Nova's address)"
+    )
+    signin.add_argument("--client-id", help=f"the public client to sign in with (default: {login.DEFAULT_CLIENT_ID})")
+    commands.add_parser("logout", help="forget the stored sign-in")
+    sql = commands.add_parser("sql", help="run one statement as you")
+    sql.add_argument("statement", nargs="?", help="the SQL text; or use -f")
+    sql.add_argument("-f", "--file", help="read the SQL text from this file, or from standard input when it is -")
+    sql.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    sql.add_argument(
+        "--max-rows", type=int, default=0, help="print at most N rows (0: all Nova returned)"
+    )
+    sql.add_argument(
+        "--long",
+        action="store_true",
+        help="run it as a statement: no request stays open, up to 100000 rows, Ctrl-C cancels it in the engine",
+    )
+    trigger = commands.add_parser("run", help="start a pipeline run now; --wait waits for its end")
+    trigger.add_argument("namespace")
+    trigger.add_argument("name")
+    trigger.add_argument("--wait", action="store_true", help="wait until the run ends; exit 0 only when it succeeded")
+    trigger.add_argument("--timeout", type=int, default=0, help="with --wait: give up after N seconds (0: no limit); the run is not stopped")
+    trigger.add_argument("--interval", type=int, default=5, help="with --wait: seconds between two looks (default 5)")
+    call = commands.add_parser("api", help="call any public operation by its operationId")
+    call.add_argument("operation", nargs="?", help="an operationId (see --list)")
+    call.add_argument("--list", action="store_true", dest="list_operations", help="list the operations")
+    call.add_argument("-p", "--path", action="append", default=[], metavar="NAME=VALUE")
+    call.add_argument("-q", "--query", action="append", default=[], metavar="NAME=VALUE")
+    call.add_argument("--body", help="the request body, as JSON; @FILE reads it from a file, @- from standard input")
+    call.add_argument(
+        "--format", choices=["json", "table"], default="json", help="json (default) or a table when the answer is a list"
+    )
+    deploy = commands.add_parser("apply", help="create or update a pipeline from a JSON or YAML file")
+    deploy.add_argument("-f", "--file", required=True, help="a pipeline as JSON or YAML, a directory of such files, or - for stdin")
+    deploy.add_argument("--dry-run", action="store_true", help="say what would happen; write nothing")
+    export = commands.add_parser("export", help="write a pipeline as a file that `apply` accepts (YAML by default)")
+    export.add_argument("namespace")
+    export.add_argument("name")
+    export.add_argument("--format", choices=["yaml", "json"], default="yaml", help="yaml (default) or json")
+    tree = commands.add_parser("lineage", help="where a table comes from and what depends on it (upstream and downstream)")
+    tree.add_argument("table", help="the table as catalog.schema.table")
+    tree.add_argument("--depth", type=int, default=2, help="how many hops each way (default 2)")
+    tree.add_argument("--days", type=int, default=30, help="the time window in days (default 30)")
+    which = tree.add_mutually_exclusive_group()
+    which.add_argument("--upstream", action="store_const", const="up", dest="direction", help="only the tables it is built from")
+    which.add_argument("--downstream", action="store_const", const="down", dest="direction", help="only the tables built from it")
+    tree.add_argument("--format", choices=["table", "json"], default="table")
+    server = commands.add_parser("mcp", help="a local MCP server over the public API")
+    server_commands = server.add_subparsers(dest="mcp_command", required=True)
+    serve = server_commands.add_parser("serve", help="serve the read-only tools on stdio, for an MCP client")
+    serve.add_argument(
+        "--allow", action="append", default=[], metavar="OPERATION_ID", help="also offer this operation (e.g. query_run)"
+    )
+    serve.add_argument("--no-sql", action="store_true", help="leave out the guarded SQL tools sql_read and sql_explain")
+    server_commands.add_parser("config", help="print how to register the server in an MCP client")
+    package = commands.add_parser("bundle", help="work with a bundle: a directory in Git that describes what a team publishes")
+    package_commands = package.add_subparsers(dest="bundle_command", required=True)
+    scaffold = package_commands.add_parser("init", help="write a small bundle that passes validate")
+    scaffold.add_argument("directory", nargs="?", default=".", help="where to write it (default: the current directory)")
+    scaffold.add_argument("--name", required=True, help="the bundle's name (lower-case letters, digits, dashes)")
+    scaffold.add_argument("--group", required=True, help="the group that owns the bundle's pipelines")
+    plan = package_commands.add_parser("plan", help="ask Nova what deploying one target would do; writes nothing")
+    plan.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    plan.add_argument("-t", "--target", required=True, help="the target to plan (a name under targets in bundle.yaml)")
+    plan.add_argument("--prune", action="store_true", help="also list the pipelines of this bundle target that the bundle no longer names; stream apps are not pruned yet")
+    plan.add_argument("--accept-drift", action="store_true", help="overwrite a pipeline changed after its last deploy even when the target says drift: block")
+    plan.add_argument("--diff", action="store_true", help="also show, on standard error, what each update would change (the deployed value against the bundle's)")
+    plan.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
+    ship = package_commands.add_parser("deploy", help="deploy one target: Nova checks every pipeline first, then they are created or updated")
+    ship.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    ship.add_argument("-t", "--target", required=True, help="the target to deploy (a name under targets in bundle.yaml)")
+    ship.add_argument("--dry-run", action="store_true", help="the same as `bundle plan`")
+    ship.add_argument("--prune", action="store_true", help="also remove the pipelines of this bundle target that the bundle no longer names; stream apps are not pruned yet")
+    ship.add_argument("--accept-drift", action="store_true", help="overwrite a pipeline changed after its last deploy even when the target says drift: block")
+    ship.add_argument("--diff", action="store_true", help="also show, on standard error, what each update changes (the deployed value against the bundle's)")
+    ship.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
+    approve = package_commands.add_parser(
+        "approve", help="approve a migration plan that a production deploy needs a second person for"
+    )
+    approve.add_argument("plan_id", help="the planId a refused deploy named; the plan's author cannot approve it")
+    show = package_commands.add_parser(
+        "summary", help="show what a deploy of one target left on the stage: commit, who, when, changed since"
+    )
+    show.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    show.add_argument("-t", "--target", required=True, help="the target to show (a name under targets in bundle.yaml)")
+    start = package_commands.add_parser(
+        "run", help="start the pipelines a deploy of one target left on the stage and wait for each; stops at the first that fails"
+    )
+    start.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    start.add_argument("-t", "--target", required=True, help="the target whose pipelines to run (a name under targets in bundle.yaml)")
+    start.add_argument("--only", metavar="NAME", help="run only this pipeline (its name in the bundle, without the dev- prefix)")
+    start.add_argument("--timeout", type=int, default=0, help="give up waiting for a run after N seconds (0: no limit); the run is not stopped")
+    start.add_argument("--interval", type=int, default=5, help="seconds between two looks at a run (default 5)")
+    remove = package_commands.add_parser(
+        "destroy", help="remove what a deploy of one target put on the stage; lists it first, removes only with --yes"
+    )
+    remove.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    remove.add_argument("-t", "--target", required=True, help="the target to empty (a name under targets in bundle.yaml)")
+    remove.add_argument("--yes", action="store_true", help="really remove the pipelines (without it: only list them)")
+    adopt = package_commands.add_parser(
+        "generate", help="write a pipeline that was made in the interface into the bundle: its file and its SQL file"
+    )
+    adopt.add_argument("namespace")
+    adopt.add_argument("name")
+    adopt.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    check = package_commands.add_parser("validate", help="check a bundle offline (no host, no sign-in)")
+    check.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    check.add_argument("-t", "--target", help="check this target only")
+    upkeep = commands.add_parser(
+        "maintenance", help="run a catalog's table maintenance through Trino (used by the operator's nightly job)"
+    )
+    upkeep_commands = upkeep.add_subparsers(dest="maintenance_command", required=True)
+    maintain = upkeep_commands.add_parser(
+        "run", help="optimize small files, expire snapshots and remove orphan files for every table of a catalog"
+    )
+    maintain.add_argument("--catalog", required=True, help="the catalog to maintain (a Trino catalog name)")
+    maintain.add_argument(
+        "--policy",
+        help="the maintenance policy as JSON (default: $STARDELT_MAINTENANCE_POLICY, else the CRD's defaults)",
+    )
+    advice = commands.add_parser("skill", help="print the agent skill (SKILL.md); with --write DIR install it")
+    advice.add_argument("--write", metavar="DIR", help="write DIR/stardelt/SKILL.md, for example .claude/skills")
+    nb = commands.add_parser("notebook", help="work with published notebooks")
+    nb_commands = nb.add_subparsers(dest="notebook_command", required=True)
+    pub = nb_commands.add_parser("publish", help="publish a notebook as a new version that a schedule can pin")
+    pub.add_argument("file", help="the .ipynb file")
+    pub.add_argument("--group", help="the owner group (default: your only group)")
+    pub.add_argument("--name", help="the name in Nova (default: the file name)")
+    return parser
+
+
+def _warn_if_modified(result, stderr):
+    """One warning for a pipeline that was changed after its last deploy: applying a file overwrites that change."""
+    if result.get("modified"):
+        stderr.write(f"stardelt: warning: {result['name']} was changed after its last deploy; deploying overwrites that change\n")
+
+
+def _pairs(items):
+    pairs = {}
+    for item in items:
+        name, found, value = item.partition("=")
+        if not found or not name:
+            raise ValueError(f"{item!r} is not NAME=VALUE")
+        pairs[name] = value
+    return pairs
+
+
+def _rows_of(answer):
+    """The list of objects inside an answer: the answer itself, or its one list-of-objects field."""
+    if isinstance(answer, dict):
+        lists = [v for v in answer.values() if isinstance(v, list) and v and all(isinstance(i, dict) for i in v)]
+        answer = lists[0] if len(lists) == 1 else None
+    if isinstance(answer, list) and answer and all(isinstance(i, dict) for i in answer):
+        return answer
+    return None
+
+
+def _cell(value):
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= 40 else text[:39] + "…"
+
+
+def _answer_table(rows, max_columns=8):
+    columns = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    columns = columns[:max_columns]
+    return _table(columns, [[_cell(row.get(c)) for c in columns] for row in rows])
+
+
+def _list_operations():
+    ops = api.operations()
+    width = max(len(i) for i in ops)
+    return "".join(f"{i.ljust(width)}  {o['method']:<6} {o['path']}\n" for i, o in sorted(ops.items()))
+
+
+def _table(columns, rows):
+    cells = [[("" if v is None else str(v)) for v in row] for row in rows]
+    widths = [max([len(c)] + [len(r[i]) for r in cells]) for i, c in enumerate(columns)]
+    lines = ["  ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip()]
+    lines += ["  ".join(v.ljust(w) for v, w in zip(r, widths)).rstrip() for r in cells]
+    return "\n".join(lines) + "\n"
+
+
+def _render(result, fmt, max_rows):
+    columns = [c["name"] for c in result.columns]
+    rows = result.rows[:max_rows] if max_rows > 0 else result.rows
+    if fmt == "json":
+        return json.dumps([dict(zip(columns, r)) for r in rows], default=str, ensure_ascii=False) + "\n"
+    if fmt == "csv":
+        out = io.StringIO()
+        writer = csv.writer(out, lineterminator="\n")
+        writer.writerow(columns)
+        writer.writerows(rows)
+        return out.getvalue()
+    return _table(columns, rows)
+
+
+def _login(args, environ, stderr, session):
+    http = session or requests.Session()
+    host = (args.host or environ.get("STARDELT_NOVA_URL", "")).strip()
+    issuer = (args.issuer or environ.get("STARDELT_ISSUER", "")).strip()
+    client_id = args.client_id or environ.get("STARDELT_CLIENT_ID", "")
+    if not issuer and not host:
+        stderr.write(
+            "stardelt: login needs --issuer (or STARDELT_ISSUER), or Nova's address (--host or STARDELT_NOVA_URL) "
+            "to ask it for the identity provider\n"
+        )
+        return USAGE
+    reaching = host
+    try:
+        if not issuer:
+            issuer, advertised = login.nova_sign_in(http, host)
+            client_id = client_id or advertised or ""
+        reaching = issuer
+        say = lambda line: stderr.write(f"stardelt: {line}\n")  # noqa: E731
+        creds = login.device_login(http, issuer, client_id or login.DEFAULT_CLIENT_ID, say)
+        if host:
+            creds["host"] = host
+        path = login.save(environ, creds)
+    except login.LoginError as err:
+        stderr.write(f"stardelt: {err}\n")
+        return AUTH
+    except requests.RequestException:
+        stderr.write(f"stardelt: cannot reach {reaching}\n")
+        return ERROR
+    stderr.write(f"stardelt: signed in; the sign-in is kept in {path}\n")
+    return OK
+
+
+def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=None):
+    environ = os.environ if environ is None else environ
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    stdin = sys.stdin if stdin is None else stdin
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--version"]:
+        stdout.write(f"stardelt {__version__}\n")
+        return OK
+    try:
+        args = _parser().parse_args(shortcuts.expand(arguments, api.operations()))
+    except (_UsageError, ValueError) as err:
+        stderr.write(f"stardelt: {err}\n")
+        return USAGE
+    except SystemExit as exit_:  # --help prints itself and exits 0
+        return exit_.code if isinstance(exit_.code, int) else OK
+
+    if args.command == "api" and args.list_operations:
+        stdout.write(_list_operations())
+        return OK
+    if args.command == "api" and not args.operation:
+        stderr.write("stardelt: api needs an operationId (or --list)\n")
+        return USAGE
+
+    if args.command == "mcp" and args.mcp_command == "config":
+        stdout.write(mcp.config_text((args.host or environ.get("STARDELT_NOVA_URL", "")).strip()))
+        return OK
+
+    if args.command == "bundle" and args.bundle_command == "init":
+        try:
+            written = bundle.init(args.directory, args.name, args.group)
+        except ValueError as err:
+            stderr.write(f"stardelt: {err}\n")
+            return USAGE
+        stderr.write(f"stardelt: wrote {', '.join(written)} in {args.directory}; now: stardelt bundle validate {args.directory}\n")
+        return OK
+
+    if args.command == "bundle" and args.bundle_command == "validate":
+        problems, warnings, resolved = bundle.validate(args.directory, args.target)
+        for warning in warnings:
+            stderr.write(f"stardelt: warning: {warning}\n")
+        for where, message in problems:
+            stderr.write(f"stardelt: {where}: {message}\n")
+        if problems:
+            return USAGE
+        for name, (mode, pipelines) in resolved.items():
+            stdout.write(f"{name} ({mode}): {', '.join(pipelines)}\n")
+        return OK
+
+    if args.command == "skill":
+        if args.write is None:
+            stdout.write(skill.text())
+            return OK
+        try:
+            stderr.write(f"stardelt: wrote {skill.write(args.write)}\n")
+        except OSError as err:
+            stderr.write(f"stardelt: {err}\n")
+            return ERROR
+        return OK
+
+    if args.command == "maintenance":
+        raw = args.policy if args.policy is not None else environ.get("STARDELT_MAINTENANCE_POLICY", "")
+        try:
+            policy = json.loads(raw) if raw.strip() else {}
+        except ValueError as err:
+            stderr.write(f"stardelt: the policy is not JSON: {err}\n")
+            return USAGE
+        if not isinstance(policy, dict):
+            stderr.write("stardelt: the policy must be a JSON object\n")
+            return USAGE
+        return maintenance.run(args.catalog, policy, out=stdout)
+
+    if args.command == "notebook":
+        try:
+            from stardelt.publish import publish
+
+            publish(args.file, group=args.group, name=args.name)
+        except (OSError, ValueError, RuntimeError) as err:
+            stderr.write(f"stardelt: {err}\n")
+            return ERROR
+        return OK
+
+    if args.command == "login":
+        return _login(args, environ, stderr, session)
+    if args.command == "logout":
+        stderr.write("stardelt: signed out\n" if login.forget(environ) else "stardelt: there was no stored sign-in\n")
+        return OK
+
+    body = None
+    if args.command == "api" and args.body is not None:
+        try:
+            raw = args.body
+            if args.body.startswith("@"):
+                raw = stdin.read() if args.body == "@-" else Path(args.body[1:]).read_text(encoding="utf-8")
+            body = json.loads(raw)
+        except OSError as err:
+            stderr.write(f"stardelt: {err}\n")
+            return USAGE
+        except ValueError as err:
+            stderr.write(f"stardelt: the body is not JSON: {err}\n")
+            return USAGE
+
+    specs = None
+    if args.command == "apply":
+        try:
+            specs = [apply.load(stdin.read())] if args.file == "-" else apply.load_path(args.file)
+        except (OSError, apply.ApplyError) as err:
+            stderr.write(f"stardelt: {err}\n")
+            return USAGE
+
+    text = None
+    if args.command == "sql":
+        if (args.statement is None) == (args.file is None):
+            stderr.write("stardelt: give the statement or -f FILE, not both and not neither\n")
+            return USAGE
+        try:
+            text = args.statement
+            if args.file is not None:
+                text = stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+        except OSError as err:
+            stderr.write(f"stardelt: {err}\n")
+            return USAGE
+        if not text.strip():
+            stderr.write("stardelt: the statement is empty\n")
+            return USAGE
+
+    stored = login.load(environ)
+    host = (args.host or environ.get("STARDELT_NOVA_URL", "") or (stored or {}).get("host") or "").strip()
+    if not host:
+        stderr.write("stardelt: no host: pass --host or set STARDELT_NOVA_URL\n")
+        return USAGE
+    http = session or requests.Session()
+    token = environ.get("STARDELT_TOKEN", "").strip()
+    if not token:
+        if stored is None:
+            stderr.write("stardelt: authentication needed: run `stardelt login` or set STARDELT_TOKEN\n")
+            return AUTH
+        token = lambda: login.fresh_token(environ, http)  # noqa: E731
+    nova = api.Client(base_url=host, token=token, session=http)
+
+    try:
+        if args.command == "whoami":
+            stdout.write(json.dumps(nova.me(), indent=2, ensure_ascii=False) + "\n")
+            return OK
+        if args.command == "lineage":
+            if args.depth < 1 or args.depth > 5 or args.days < 1 or args.days > 365:
+                stderr.write("stardelt: --depth is 1 to 5 and --days is 1 to 365\n")
+                return USAGE
+            try:
+                answer = lineage.graph(nova, args.table, depth=args.depth, days=args.days)
+            except lineage.TableRefError as err:
+                stderr.write(f"stardelt: {err}\n")
+                return USAGE
+            if args.format == "json":
+                stdout.write(json.dumps(answer, indent=2, ensure_ascii=False) + "\n")
+                return OK
+            found = lineage.rows(answer, args.direction)
+            if not found:
+                stderr.write(f"stardelt: no lineage for {args.table} in the last {args.days} days\n")
+                return OK
+            stdout.write(_table(["level", "dataset", "written by", "last write", "readers"], [
+                [row["level"], row["dataset"], row["job"], row["lastWrite"], row["readers"]] for row in found
+            ]))
+            for line in lineage.jobs(answer):
+                stderr.write(f"stardelt: job {line}\n")
+            return OK
+        if args.command == "apply":
+            for spec in specs:
+                result = apply.apply(nova, spec, args.dry_run)
+                stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                _warn_if_modified(result, stderr)
+            return OK
+        if args.command == "bundle" and args.bundle_command == "summary":
+            problems, rows = bundle.summary(nova, args.directory, args.target)
+            for row in rows:
+                stdout.write(json.dumps(row, ensure_ascii=False) + "\n")
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            if not problems and not rows:
+                stderr.write("stardelt: nothing is deployed from this bundle target\n")
+            return USAGE if problems else OK
+        if args.command == "bundle" and args.bundle_command == "run":
+            problems, results = bundle.run(nova, args.directory, args.target, only=args.only, timeout=args.timeout or None, interval=args.interval)
+            for result in results:
+                stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            ended_badly = [result for result in results if result["state"] != "success"]
+            if ended_badly:
+                stderr.write(f"stardelt: {ended_badly[0]['name']} ended {ended_badly[0]['state']}\n")
+            return USAGE if problems else (ERROR if ended_badly else OK)
+        if args.command == "bundle" and args.bundle_command == "destroy":
+            problems, results = bundle.destroy(nova, args.directory, args.target, confirm=args.yes)
+            for result in results:
+                stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            if not problems and not args.yes:
+                stderr.write("stardelt: nothing was removed; add --yes to remove what is listed\n" if results else "stardelt: nothing to remove\n")
+            return USAGE if problems else OK
+        if args.command == "bundle" and args.bundle_command == "generate":
+            try:
+                written = bundle.generate(nova, args.directory, args.namespace, args.name)
+            except bundle.GenerateError as err:
+                stderr.write(f"stardelt: {err}\n")
+                return USAGE
+            stderr.write(f"stardelt: wrote {', '.join(written)} in {args.directory}; now: stardelt bundle validate {args.directory}\n")
+            return OK
+        if args.command == "bundle" and args.bundle_command == "approve":
+            try:
+                answer = bundle.approve(nova, args.plan_id)
+            except api.StardeltApiError as err:
+                stderr.write(f"stardelt: {err}\n")
+                return USAGE
+            stdout.write(json.dumps(answer, ensure_ascii=False) + "\n")
+            return OK
+        if args.command == "bundle":  # plan or deploy: they talk to Nova
+            problems, results = bundle.deploy(
+                nova, args.directory, args.target, dry_run=args.bundle_command == "plan" or args.dry_run, prune=args.prune,
+                accept_drift=args.accept_drift, diff=args.diff, allow_breaking=args.allow_breaking,
+            )
+            shown = []
+            for result in results:
+                text = result.pop("diff", None)
+                stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                _warn_if_modified(result, stderr)
+                if text:
+                    shown.append(text)
+            for text in shown:
+                stderr.write(text + "\n")
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            return USAGE if problems else OK
+        if args.command == "export":
+            text, note = apply.export(nova, args.namespace, args.name, args.format)
+            stdout.write(text)
+            if note:
+                stderr.write(f"stardelt: note: {note}\n")
+            return OK
+        if args.command == "run":
+            run, tasks = runs.start(nova, args.namespace, args.name, args.wait, args.timeout or None, args.interval)
+            stdout.write(json.dumps(dict(run, tasks=tasks) if args.wait else run, indent=2, ensure_ascii=False) + "\n")
+            if args.wait and run["state"] != "success":
+                failed = [t["taskId"] for t in tasks if t["state"] == "failed"]
+                more = f"; failed tasks: {', '.join(failed)}" if failed else ""
+                stderr.write(f"stardelt: run {run['runId']} ended {run['state']}{more}\n")
+                return ERROR
+            return OK
+        if args.command == "mcp":
+            allowed = list(mcp.DEFAULT_TOOLS) + [n for n in args.allow if n not in mcp.DEFAULT_TOOLS]
+            log = lambda name, failed: stderr.write(f"stardelt-mcp: {name} {'error' if failed else 'ok'}\n")  # noqa: E731
+            mcp.serve(mcp.Server(nova, allowed, log=log, sql=not args.no_sql), stdin, stdout)
+            return OK
+        if args.command == "api":
+            answer = nova.call(
+                args.operation,
+                path=_pairs(args.path),
+                query=_pairs(args.query),
+                body=body,
+            )
+            rows = _rows_of(answer) if args.format == "table" else None
+            if rows is not None:
+                stdout.write(_answer_table(rows))
+            elif answer is not None:
+                stdout.write(json.dumps(answer, indent=2, ensure_ascii=False) + "\n")
+            return OK
+        result = statements.run(nova, text) if args.long else nova.query(text)
+        stdout.write(_render(result, args.format, args.max_rows))
+        if result.truncated:
+            stderr.write(f"stardelt: Nova cut the result at {len(result.rows)} rows\n")
+        return OK
+    except login.LoginError as err:
+        stderr.write(f"stardelt: {err}\n")
+        return AUTH
+    except (statements.StatementError, runs.RunError) as err:
+        stderr.write(f"stardelt: {err}\n")
+        return ERROR
+    except KeyboardInterrupt:
+        stderr.write("stardelt: interrupted\n")
+        return ERROR
+    except api.StardeltApiError as err:
+        if err.status == 401:
+            stderr.write(f"stardelt: authentication needed: {err}\n")
+            return AUTH
+        stderr.write(f"stardelt: {err}\n")
+        return ERROR
+    except requests.exceptions.JSONDecodeError:
+        stderr.write("stardelt: Nova's answer is not JSON\n")
+        return ERROR
+    except requests.RequestException:
+        stderr.write(f"stardelt: cannot reach {host}\n")
+        return ERROR
+    except ValueError as err:  # an unknown operation, a bad NAME=VALUE or a body that is not JSON
+        stderr.write(f"stardelt: {err}\n")
+        return USAGE

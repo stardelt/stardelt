@@ -37,15 +37,17 @@ Permissive licences only. No phone-home. No licence server.
 
 ## Where things live
 
-| Repository | What it is |
+The product is one repository. Each part has its own folder, its own build and its own CI workflows (`.github/workflows/<folder>-*.yml`).
+
+| Folder | What it is |
 |---|---|
-| [stardelt](https://github.com/stardelt/stardelt) | This page: releases, the install manifest, questions and reports |
-| [stardelt-nova](https://github.com/stardelt/stardelt-nova) | The interface and API |
-| [stardelt-operator](https://github.com/stardelt/stardelt-operator) | The Kubernetes operator and its resources |
-| [stardelt-platform](https://github.com/stardelt/stardelt-platform) | Helm values, manifests and the developer install |
-| [stardelt-python](https://github.com/stardelt/stardelt-python) | The Python package, command line and MCP server |
-| [stardelt-demos](https://github.com/stardelt/stardelt-demos) | Sample pipelines and the Airflow image |
-| [stardelt-docs](https://github.com/stardelt/stardelt-docs) | The documentation at stardelt.io |
+| [`nova/`](nova) | The interface and API |
+| [`operator/`](operator) | The Kubernetes operator and its resources |
+| [`platform/`](platform) | Helm values, manifests and the developer install |
+| [`python/`](python) | The Python package, command line and MCP server |
+| [`demos/`](demos) | Sample pipelines and the Airflow image |
+
+The documentation at stardelt.io lives in [stardelt-docs](https://github.com/stardelt/stardelt-docs). The old per-part repositories are archived. Their history is part of this repository.
 
 Not sure where something belongs? [Open an issue here](https://github.com/stardelt/stardelt/issues/new/choose).
 

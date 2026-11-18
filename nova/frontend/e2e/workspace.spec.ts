@@ -1,0 +1,183 @@
+import { expect, test, type Route } from '@playwright/test'
+
+// The "My workspace" card on the Notebooks page (stardelt-nova#653): the state of the caller's
+// own JupyterHub server with Start, Stop and Open. Every `/api/**` call is stubbed; the real
+// backend answers `unavailable` without hub credentials, which is the fourth case below.
+
+const json = (route: Route, body: unknown, status = 200) =>
+  route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+
+const ME = {
+  user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+  is_admin: false, groups: ['analytics'],
+}
+const JUPYTER = {
+  id: 'jupyterhub', name: 'JupyterHub', external_url: 'https://jupyter.example.test',
+  status: 'up', embed: {},
+}
+const STARTED = '2026-11-09T09:12:00Z'
+const inMinute = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString()
+
+type Stub = {
+  /** What each `GET /api/workspace` answers, in order; the last one repeats. */
+  views: unknown[]
+  /** What `/api/embeds` answers, when the hub should be down or absent. */
+  embeds?: unknown
+  /** Milliseconds `/api/embeds` takes to answer, to hold the card in its "not known yet" state. */
+  embedsDelay?: number
+  /** What `POST /api/workspace/start` answers, when it should answer at all. */
+  startAnswer?: unknown
+  startStatus?: number
+  /** What `POST /api/workspace/stop` answers. */
+  stopAnswer?: unknown
+}
+
+async function open(page: import('@playwright/test').Page, stub: Stub) {
+  const calls: string[] = []
+  let gets = 0
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('stardelt-nova:time', 'utc')
+    } catch { /* ignore */ }
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    const path = url.pathname
+    const method = route.request().method()
+    if (path === '/api/me') return json(route, ME)
+    if (path === '/api/embeds') {
+      if (stub.embedsDelay) await new Promise(resolve => setTimeout(resolve, stub.embedsDelay))
+      return json(route, stub.embeds ?? [JUPYTER])
+    }
+    if (path === '/api/notebooks') return json(route, [])
+    if (path === '/api/pipelines/principals') return json(route, { groups: [] })
+    if (path === '/api/pipelines') return json(route, { pipelines: [] })
+    if (path === '/api/workspace' && method === 'GET') {
+      calls.push('GET /api/workspace')
+      const view = stub.views[Math.min(gets, stub.views.length - 1)]
+      gets += 1
+      return json(route, view)
+    }
+    if (path === '/api/workspace/start' && method === 'POST') {
+      calls.push('POST /api/workspace/start')
+      // The next GET is the answer of the spawn.
+      gets = 0
+      stub.views = [stub.startAnswer ?? { state: 'starting', startedAt: null, lastActivity: null, idleStopAt: null }]
+      return json(route, stub.views[0], stub.startStatus ?? 202)
+    }
+    if (path === '/api/workspace/stop' && method === 'POST') {
+      calls.push('POST /api/workspace/stop')
+      gets = 0
+      stub.views = [stub.stopAnswer ?? { state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }]
+      return json(route, stub.views[0], 202)
+    }
+    return json(route, [])
+  })
+  await page.goto('/notebooks')
+  return { calls }
+}
+
+const card = (page: import('@playwright/test').Page) =>
+  page.getByRole('region', { name: 'My workspace' })
+
+test('a running workspace shows its idle stop and start time, with Open and Stop', async ({ page }) => {
+  await open(page, {
+    views: [{ state: 'running', startedAt: STARTED, lastActivity: new Date().toISOString(), idleStopAt: inMinute(47) }],
+  })
+  const workspace = card(page)
+  await expect(workspace).toContainText('running')
+  await expect(workspace).toContainText('idle stop in 47 min')
+  await expect(workspace).toContainText('started 09:12')
+  await expect(workspace.getByRole('link', { name: 'Open JupyterLab ↗' }))
+    .toHaveAttribute('href', 'https://jupyter.example.test/hub/')
+  await expect(workspace.getByRole('button', { name: 'Stop' })).toBeEnabled()
+  await expect(workspace.getByRole('button', { name: 'Start' })).toHaveCount(0)
+})
+
+test('a stopped workspace offers Start as a link to the hub spawn route', async ({ page }) => {
+  const { calls } = await open(page, {
+    views: [{ state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }],
+  })
+  const workspace = card(page)
+  await expect(workspace).toContainText('stopped')
+  await expect(workspace.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+  // The hub's own spawn route, not `POST /api/workspace/start`: only the hub can renew a
+  // stored sign-in that has aged out (nova#808).
+  const start = workspace.getByRole('link', { name: 'Start' })
+  await expect(start).toHaveAttribute('href', 'https://jupyter.example.test/hub/spawn')
+  await expect(start).toHaveAttribute('target', '_blank')
+  expect(calls).not.toContain('POST /api/workspace/start')
+})
+
+test('while starting the card polls every three seconds and then shows the running server', async ({ page }) => {
+  await open(page, {
+    views: [
+      { state: 'starting', startedAt: null, lastActivity: null, idleStopAt: null },
+      { state: 'running', startedAt: STARTED, lastActivity: new Date().toISOString(), idleStopAt: inMinute(60) },
+    ],
+  })
+  const workspace = card(page)
+  await expect(workspace).toContainText('starting')
+  // The 3 s poll (refetchInterval) is what turns a spawn into a running server.
+  await expect(workspace).toContainText('running', { timeout: 6_000 })
+  await expect(workspace.getByRole('button', { name: 'Stop' })).toBeEnabled()
+})
+
+test('Stop returns a running workspace to stopped', async ({ page }) => {
+  const { calls } = await open(page, {
+    views: [{ state: 'running', startedAt: STARTED, lastActivity: new Date().toISOString(), idleStopAt: inMinute(47) }],
+  })
+  const workspace = card(page)
+  await workspace.getByRole('button', { name: 'Stop' }).click()
+  expect(calls).toContain('POST /api/workspace/stop')
+  await expect(workspace).toContainText('stopped')
+})
+
+test('an installation without hub credentials keeps only the way in', async ({ page }) => {
+  await open(page, {
+    views: [{ state: 'unavailable', startedAt: null, lastActivity: null, idleStopAt: null }],
+  })
+  const workspace = card(page)
+  await expect(workspace.getByRole('link', { name: 'Open JupyterLab ↗' })).toBeVisible()
+  await expect(workspace.getByRole('button', { name: 'Start' })).toHaveCount(0)
+  await expect(workspace.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+  await expect(workspace).not.toContainText('running')
+})
+
+test('before the app list answers the card offers no Start at all (nova#829)', async ({ page }) => {
+  // `/api/workspace` answers first: the card knows the server is stopped, but not yet whether a
+  // hub is deployed. Nova's API start must not be offered in that window — on the public demo it
+  // reached the hub with a stored sign-in that had aged out, and the visitor saw a 403 relayed
+  // as an alert they could not act on.
+  const { calls } = await open(page, {
+    views: [{ state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }],
+    embedsDelay: 1_500,
+  })
+  const workspace = card(page)
+  await expect(workspace).toContainText('stopped')
+  // Sample the card while the app list is still unanswered: no button in it, so no API start.
+  for (let i = 0; i < 8; i++) {
+    expect(await page.locator('[aria-label="My workspace"] button').count()).toBe(0)
+    expect(await page.locator('button:has-text("Start")').count()).toBe(0)
+    await page.waitForTimeout(100)
+  }
+  // Once it answers, the hub's spawn route is the Start — a link, never a button.
+  await expect(workspace.getByRole('link', { name: 'Start' }))
+    .toHaveAttribute('href', 'https://jupyter.example.test/hub/spawn')
+  expect(calls).not.toContain('POST /api/workspace/start')
+})
+
+test('a refused Start says why in the card', async ({ page }) => {
+  // With the hub not up there is no spawn route to link to, so the card falls back to the
+  // API's Start — and must show its reason, e.g. this 409 (nova#808).
+  await open(page, {
+    views: [{ state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }],
+    embeds: [{ ...JUPYTER, status: 'down' }],
+    startStatus: 409,
+    startAnswer: { error: 'JupyterHub needs you to sign in again: open JupyterLab once, then Start' },
+  })
+  const workspace = card(page)
+  await workspace.getByRole('button', { name: 'Start' }).click()
+  await expect(workspace.getByRole('alert'))
+    .toHaveText('JupyterHub needs you to sign in again: open JupyterLab once, then Start')
+})

@@ -1,0 +1,22 @@
+image:
+  repository: ghcr.io/stardelt/stardelt-operator
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# GHCR packages are private; reference the pull secret when one is needed.
+imagePullSecrets: []
+
+# One replica reconciles at a time: it holds the Lease stardelt-operator-leader.
+# 2 adds a standby that takes over about 15 s after the leader's pod is gone.
+replicaCount: 1
+
+# RUST_LOG filter for the operator.
+logLevel: info
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

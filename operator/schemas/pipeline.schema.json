@@ -1,0 +1,414 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A pipeline: tasks with dependencies and an optional schedule, run on one engine.",
+  "properties": {
+    "spec": {
+      "description": "A pipeline: tasks with dependencies, an optional schedule, run by one engine.",
+      "properties": {
+        "concurrency": {
+          "default": "Forbid",
+          "description": "What happens when a run is due while the previous one is still running.",
+          "enum": [
+            "Allow",
+            "Forbid",
+            "Replace"
+          ],
+          "type": "string"
+        },
+        "engine": {
+          "default": "airflow",
+          "description": "Engine that orchestrates (and for `spark`, executes) the pipeline.",
+          "enum": [
+            "airflow",
+            "spark"
+          ],
+          "type": "string"
+        },
+        "notify": {
+          "description": "Who to tell when a run ends; names of destinations owned by `ownerGroup`. Optional:\na pipeline without it notifies nobody.",
+          "nullable": true,
+          "properties": {
+            "onFailure": {
+              "description": "Destinations told when the run fails, after the last retry.",
+              "items": {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "onRecovered": {
+              "description": "Destinations told on the first success after a failure.",
+              "items": {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "onSuccess": {
+              "description": "Destinations told when the run succeeds.",
+              "items": {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 5,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "ownerGroup": {
+          "description": "The group that owns the pipeline: its members see it, run it and pause it in Nova. Optional so\nthat existing pipelines keep working; a pipeline without an owner is visible to administrators only.",
+          "maxLength": 64,
+          "minLength": 1,
+          "nullable": true,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Values for `${params.<name>}` in task statements.",
+          "type": "object"
+        },
+        "publish": {
+          "default": "direct",
+          "description": "`direct` (default) or `wap`; `wap` needs a `quality` task with at least one check\n(nova#628 decision 1).",
+          "enum": [
+            "direct",
+            "wap"
+          ],
+          "type": "string"
+        },
+        "retries": {
+          "description": "Retry policy applied to every task.",
+          "nullable": true,
+          "properties": {
+            "attempts": {
+              "description": "Extra attempts after the first failure.",
+              "format": "int32",
+              "maximum": 10.0,
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "backoff": {
+              "description": "Wait between attempts, for example `5m`. Absent means one minute.",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "attempts"
+          ],
+          "type": "object"
+        },
+        "runAs": {
+          "description": "Service principal the tasks run as. Absent means the platform's default pipeline principal.\nBy convention the principal of the owner group, named `pipeline-<ownerGroup>`; Nova's Schedule\nwrites that name.",
+          "nullable": true,
+          "type": "string"
+        },
+        "schedule": {
+          "description": "Optional schedule; a pipeline without one runs on demand only.",
+          "nullable": true,
+          "properties": {
+            "cron": {
+              "description": "Five-field cron expression, for example `0 3 * * *`.",
+              "maxLength": 100,
+              "minLength": 9,
+              "type": "string"
+            },
+            "timezone": {
+              "description": "IANA time zone name, for example `Europe/Berlin`. Absent means UTC.",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "cron"
+          ],
+          "type": "object"
+        },
+        "tasks": {
+          "description": "Tasks of the pipeline; at least one, at most 30.",
+          "items": {
+            "description": "One task of a `Pipeline`. A task starts when every task in `dependsOn` has succeeded.\n\nA `notebook` task names its source in `config`: `notebook` is the `.ipynb`\nfile name and `objectVersion` the immutable published version; `params` is a\nJSON object string that papermill passes to the notebook. Nothing else is\naccepted, so a typo cannot silently become a default.",
+            "properties": {
+              "checks": {
+                "description": "A `quality` task's assertions; empty on every other kind.",
+                "items": {
+                  "description": "One SQL assertion of a `quality` task: the check passes when the query returns no rows.",
+                  "properties": {
+                    "name": {
+                      "description": "Unique within the task; the run page names the check by it.",
+                      "maxLength": 63,
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "type": "string"
+                    },
+                    "severity": {
+                      "default": "error",
+                      "description": "`error` fails the run; `warn` records the rows and lets the run publish.",
+                      "enum": [
+                        "error",
+                        "warn"
+                      ],
+                      "type": "string"
+                    },
+                    "sql": {
+                      "description": "The assertion; it passes when it returns zero rows. `${table}` is the branch-qualified\ntable during the audit (nova#628 decision 2).",
+                      "maxLength": 20000,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "sql"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              "config": {
+                "additionalProperties": {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "description": "Task-specific parameters of the other kinds (model path, gate threshold, …).",
+                "maxProperties": 32,
+                "type": "object"
+              },
+              "connection": {
+                "description": "The `Connection` whose secret fields this task receives as `CONN_<NAME>_<KEY>`: the name\nupper-cased with `-` written as `_`. The credentials reach the pod through `secretKeyRef`s\nand are never part of the resource, the DAG or a log. A `sql` task runs inside the engine\nand cannot name one.",
+                "maxLength": 40,
+                "minLength": 1,
+                "nullable": true,
+                "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$",
+                "type": "string"
+              },
+              "dependsOn": {
+                "description": "Names of the tasks that must succeed first.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              "kind": {
+                "description": "What a pipeline task does — the task contract behind `Pipeline`\n(master spec §5, plugs 6, 7 and 12). `sql` and `notebook` run today\n(scheduled jobs phases J0 and J1); `python`, `dbt` and `quality` are\naccepted so manifests can be written ahead of their runtimes.",
+                "enum": [
+                  "sql",
+                  "notebook",
+                  "python",
+                  "dbt",
+                  "quality"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "description": "Unique within the pipeline; becomes the task id in the engine.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                "type": "string"
+              },
+              "sql": {
+                "description": "The statement of a `sql` task. `${run.date}`, `${run.id}` and\n`${params.<name>}` are expanded when the task runs, not in the resource.",
+                "maxLength": 100000,
+                "minLength": 1,
+                "nullable": true,
+                "type": "string"
+              },
+              "warehouse": {
+                "description": "Warehouse that runs a `sql` task; absent means the default warehouse.",
+                "nullable": true,
+                "type": "string"
+              },
+              "writes": {
+                "description": "The tables a `sql` task writes, as `catalog.schema.table`. Only these get an audit\nbranch when `spec.publish: wap`; a read leaves them alone (nova#628 decision 3).",
+                "items": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object",
+            "x-kubernetes-validations": [
+              {
+                "message": "a notebook task needs config.notebook (a .ipynb file name) and config.objectVersion (the published version)",
+                "rule": "self.kind != 'notebook' || (has(self.config) && 'notebook' in self.config && self.config['notebook'].matches('^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\\\.ipynb$') && 'objectVersion' in self.config && self.config['objectVersion'].matches('^\\\\S{1,128}$'))"
+              },
+              {
+                "message": "notebook tasks accept only notebook, objectVersion and params",
+                "rule": "self.kind != 'notebook' || !has(self.config) || self.config.all(k, k in ['notebook', 'objectVersion', 'params'])"
+              },
+              {
+                "message": "notebook params must be a JSON object string of at most 4096 characters",
+                "rule": "self.kind != 'notebook' || !has(self.config) || !('params' in self.config) || self.config['params'].size() <= 4096"
+              },
+              {
+                "message": "a sql task cannot name a connection: it runs inside the engine",
+                "rule": "self.kind != 'sql' || !has(self.connection)"
+              },
+              {
+                "message": "only a sql task declares writes",
+                "rule": "!has(self.writes) || self.kind == 'sql'"
+              },
+              {
+                "message": "writes must be catalog.schema.table",
+                "rule": "self.kind != 'sql' || !has(self.writes) || self.writes.all(w, w.matches('^[^ .]+[.][^ .]+[.][^ .]+$'))"
+              },
+              {
+                "message": "only a quality task declares checks",
+                "rule": "!has(self.checks) || self.kind == 'quality'"
+              }
+            ]
+          },
+          "maxItems": 30,
+          "minItems": 1,
+          "type": "array"
+        },
+        "timeout": {
+          "description": "Longest a whole run may take, for example `2h`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "viewers": {
+          "description": "Groups that may READ the pipeline in Nova — list it, open it, see its runs — and\nnothing else. Running, pausing, resuming and deleting stay with `ownerGroup`.\nAbsent means the owner group only, which is what every pipeline had before this field.",
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "task names must be unique",
+          "rule": "self.tasks.all(t, self.tasks.exists_one(u, u.name == t.name))"
+        },
+        {
+          "message": "dependsOn must name other tasks of this pipeline",
+          "rule": "self.tasks.all(t, !has(t.dependsOn) || t.dependsOn.all(d, d != t.name && self.tasks.exists(u, u.name == d)))"
+        },
+        {
+          "message": "a sql task needs a sql statement",
+          "rule": "self.tasks.all(t, t.kind != 'sql' || has(t.sql))"
+        },
+        {
+          "message": "publish: wap needs a quality task with at least one check",
+          "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.exists(t, t.kind == 'quality' && has(t.checks) && size(t.checks) > 0)"
+        },
+        {
+          "message": "publish: wap needs a task that writes at least one table",
+          "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.exists(t, has(t.writes) && size(t.writes) > 0)"
+        },
+        {
+          "message": "notify needs an ownerGroup: only a pipeline's owner group can name destinations",
+          "rule": "!has(self.notify) || has(self.ownerGroup)"
+        }
+      ]
+    },
+    "status": {
+      "nullable": true,
+      "properties": {
+        "conditions": {
+          "default": [],
+          "items": {
+            "properties": {
+              "lastTransitionTime": {
+                "nullable": true,
+                "type": "string"
+              },
+              "message": {
+                "nullable": true,
+                "type": "string"
+              },
+              "observedGeneration": {
+                "format": "int64",
+                "nullable": true,
+                "type": "integer"
+              },
+              "reason": {
+                "nullable": true,
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "type"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "observedGeneration": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "phase": {
+          "default": "",
+          "type": "string"
+        },
+        "runs": {
+          "default": [],
+          "items": {
+            "description": "Last-known run of a pipeline. Intentionally minimal: the authoritative history\nbelongs to the engine adapter (Airflow / Spark); this is the operator's view.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "startedAt": {
+                "nullable": true,
+                "type": "string"
+              },
+              "state": {
+                "description": "Free-form until the adapters land (`queued` | `running` | `succeeded` | `failed`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "state"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "spec"
+  ],
+  "title": "Pipeline",
+  "type": "object"
+}

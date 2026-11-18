@@ -1,0 +1,3990 @@
+//! Sign-in for Nova: `NOVA_AUTH_MODE=dev` (default, no login) or `oidc`.
+//!
+//! Nova is only ever an OIDC *client* (contract: stardelt-docs
+//! `docs/architecture/identity.md`). In `oidc` mode it
+//!
+//! - discovers the provider from `NOVA_OIDC_ISSUER` and caches its JWKS, refetching
+//!   when a token names an unknown `kid` (rate-limited);
+//! - runs the authorization-code flow with PKCE (S256), `state` and `nonce`
+//!   (`/api/auth/login` → IdP → `/api/auth/callback`);
+//! - keeps tokens in an in-memory, server-side session store; the browser only holds a
+//!   signed, `HttpOnly` cookie carrying a random session id;
+//! - refreshes the access token **before use** while the session lives: a stored token
+//!   with less than its refresh window left is exchanged at the IdP's token endpoint
+//!   (the refresh token from sign-in, the client credentials from config), and the
+//!   identity is re-derived from the refreshed claims. One sign-in therefore outlives
+//!   many access tokens, and a group change takes effect within one token lifetime
+//!   instead of at the end of the 8-hour session;
+//! - accepts `Authorization: Bearer <access token>` for programmatic access, validated
+//!   against the same issuer, audience and keys (a caller's own token: Nova has nothing
+//!   to refresh there);
+//! - protects every `/api/*` route except `/api/health` and `/api/auth/*`.
+//!
+//! **Single replica.** Sessions survive a restart when the state store is on
+//! (`NOVA_DATABASE_URL`); a scratch that has no token left is refreshed on its first
+//! request. More than one replica still needs slice d.
+//!
+//! Tokens never appear in a URL, a log line or an error message; `Secret` redacts its
+//! `Debug` output and no token-holding type derives `Debug`.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::{
+    Json, Router,
+    extract::{Query, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::Next,
+    response::{IntoResponse, Redirect, Response},
+    routing::{get, post},
+};
+use axum_extra::extract::cookie::{Cookie, Key, SameSite, SignedCookieJar};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tracing::{info, warn};
+use url::Url;
+
+use crate::{seal, session_store};
+
+pub const SESSION_COOKIE: &str = "nova_session";
+pub const LOGIN_COOKIE: &str = "nova_login";
+const LOGIN_COOKIE_PATH: &str = "/api/auth";
+/// Absolute session lifetime (a workday), independent of the access token's: the session
+/// refreshes its token for as long as it lasts and dies at the cap either way.
+const SESSION_TTL: Duration = Duration::from_secs(8 * 60 * 60);
+const LOGIN_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_PENDING_LOGINS: usize = 10_000;
+const MAX_SESSIONS: usize = 100_000;
+/// How long before expiry a token is refreshed. Sized down to half the token's own life
+/// for realms that issue short tokens (see `Credentials::refresh_window`).
+const REFRESH_SKEW: Duration = Duration::from_secs(60);
+/// Access token lifetime assumed when the token endpoint reports neither `expires_in`
+/// nor a decodable `exp` (Keycloak's default realm value).
+const DEFAULT_ACCESS_TTL: Duration = Duration::from_secs(300);
+/// A token with an unknown `kid` triggers a JWKS refetch at most this often.
+const JWKS_MIN_REFRESH: Duration = Duration::from_secs(30);
+const CLOCK_LEEWAY_SECS: u64 = 60;
+const MIN_SESSION_SECRET_BYTES: usize = 32;
+const ALLOWED_ALGS: &[Algorithm] = &[
+    Algorithm::RS256,
+    Algorithm::RS384,
+    Algorithm::RS512,
+    Algorithm::PS256,
+    Algorithm::PS384,
+    Algorithm::PS512,
+    Algorithm::ES256,
+    Algorithm::ES384,
+    Algorithm::EdDSA,
+];
+
+// ---------------------------------------------------------------------------
+// Secrets
+// ---------------------------------------------------------------------------
+
+/// A credential that must never be printed. `Debug` is redacted on purpose.
+#[derive(Clone)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// How Nova decides who you are.
+#[derive(Debug)]
+pub enum AuthMode {
+    /// No login; `/api/me` reports `NOVA_DEV_USER`. The default, forever.
+    Dev,
+    Oidc(Box<OidcConfig>),
+}
+
+/// Which claims carry roles and which values make an admin.
+#[derive(Clone, Debug)]
+pub struct ClaimConfig {
+    /// `NOVA_OIDC_GROUP_CLAIM`, default `groups`.
+    pub group_claim: String,
+    /// `NOVA_OIDC_ADMIN_GROUP`, default `stardelt-admins`. `None` turns the group
+    /// mechanism off (an explicitly empty environment variable); an installation whose
+    /// IdP decides administrators elsewhere then reports `admin_group: null`.
+    pub admin_group: Option<String>,
+    /// `NOVA_OIDC_ADMIN_ROLE`, default = the admin group. Matched against `roles`;
+    /// `None` as for `admin_group`.
+    pub admin_role: Option<String>,
+}
+
+impl Default for ClaimConfig {
+    fn default() -> Self {
+        Self {
+            group_claim: "groups".into(),
+            admin_group: Some("stardelt-admins".into()),
+            admin_role: Some("stardelt-admins".into()),
+        }
+    }
+}
+
+impl ClaimConfig {
+    /// Why this caller is an administrator, and the configured value behind it: the role
+    /// first (the precedence `is_admin` uses), then the group. A caller who is not an
+    /// administrator still gets the configured precedence — the Profile page shows it only
+    /// for administrators — and `None` is reserved for "neither is configured" (#213).
+    pub fn admin_source(
+        &self,
+        roles: &[String],
+        groups: &[String],
+    ) -> Option<(&'static str, &str)> {
+        if let Some(role) = self.admin_role.as_deref()
+            && roles.iter().any(|r| r == role)
+        {
+            return Some(("role", role));
+        }
+        if let Some(group) = self.admin_group.as_deref()
+            && has_group(groups, group)
+        {
+            return Some(("group", group));
+        }
+        self.admin_role
+            .as_deref()
+            .map(|role| ("role", role))
+            .or_else(|| self.admin_group.as_deref().map(|group| ("group", group)))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OidcConfig {
+    /// As configured; discovery must report the same issuer (modulo a trailing `/`).
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: Secret,
+    pub scopes: String,
+    /// Accepted `aud` values for bearer access tokens; default the client id.
+    pub audiences: Vec<String>,
+    /// Nova's external origin, e.g. `https://nova.example.com` (no trailing slash).
+    pub public_url: String,
+    pub claims: ClaimConfig,
+    pub session_secret: Secret,
+    /// The public client a command line signs in with (device flow); `GET /api/auth/config`
+    /// tells it to the client. `None` when `NOVA_OIDC_DEVICE_CLIENT_ID` is unset or blank.
+    pub device_client_id: Option<String>,
+}
+
+impl OidcConfig {
+    pub fn redirect_uri(&self) -> String {
+        format!("{}/api/auth/callback", self.public_url)
+    }
+    /// Cookies are `Secure` whenever Nova is served over HTTPS.
+    pub fn secure_cookies(&self) -> bool {
+        self.public_url.starts_with("https://")
+    }
+}
+
+fn is_loopback(u: &Url) -> bool {
+    matches!(
+        u.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("[::1]") | Some("::1")
+    )
+}
+
+impl AuthMode {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Parse the auth configuration. Any problem in `oidc` mode is an error: Nova
+    /// refuses to start rather than run with a half-configured login.
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let var = |k: &str| {
+            get(k)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let required =
+            |k: &str| var(k).ok_or_else(|| format!("{k} is required when NOVA_AUTH_MODE=oidc"));
+
+        match var("NOVA_AUTH_MODE").as_deref() {
+            None | Some("dev") => return Ok(AuthMode::Dev),
+            Some("oidc") => {}
+            Some(other) => {
+                return Err(format!(
+                    "NOVA_AUTH_MODE must be `dev` or `oidc`, got `{other}`"
+                ));
+            }
+        }
+
+        let issuer = required("NOVA_OIDC_ISSUER")?;
+        let issuer_url =
+            Url::parse(&issuer).map_err(|e| format!("NOVA_OIDC_ISSUER is not a URL: {e}"))?;
+        if issuer_url.scheme() != "https"
+            && !(issuer_url.scheme() == "http" && is_loopback(&issuer_url))
+        {
+            return Err(
+                "NOVA_OIDC_ISSUER must be https:// (plain http is only accepted for localhost)"
+                    .into(),
+            );
+        }
+
+        let client_id = required("NOVA_OIDC_CLIENT_ID")?;
+        let client_secret = Secret::new(required("NOVA_OIDC_CLIENT_SECRET")?);
+
+        let session_secret = required("NOVA_SESSION_SECRET")?;
+        if session_secret.len() < MIN_SESSION_SECRET_BYTES {
+            return Err(format!(
+                "NOVA_SESSION_SECRET must be at least {MIN_SESSION_SECRET_BYTES} bytes (e.g. `openssl rand -base64 48`)"
+            ));
+        }
+
+        let public_url = required("NOVA_PUBLIC_URL")?;
+        let parsed =
+            Url::parse(&public_url).map_err(|e| format!("NOVA_PUBLIC_URL is not a URL: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(
+                "NOVA_PUBLIC_URL must be an http(s) origin, e.g. https://nova.example.com".into(),
+            );
+        }
+        if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(
+                "NOVA_PUBLIC_URL must be an origin without a path, e.g. https://nova.example.com"
+                    .into(),
+            );
+        }
+        let public_url = parsed.origin().ascii_serialization();
+
+        let scopes = var("NOVA_OIDC_SCOPES").unwrap_or_else(|| "openid profile email".into());
+        if !scopes.split_whitespace().any(|s| s == "openid") {
+            return Err("NOVA_OIDC_SCOPES must include `openid`".into());
+        }
+
+        let audiences = var("NOVA_OIDC_AUDIENCES")
+            .map(|a| {
+                a.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| vec![client_id.clone()]);
+
+        // An administrator mechanism is on by default; an explicitly empty value turns
+        // it off, which is the configuration that reports `admin_group: null` (#213).
+        let raw = |k: &str| get(k).map(|v| v.trim().to_string());
+        let admin_group = match raw("NOVA_OIDC_ADMIN_GROUP").as_deref() {
+            None => Some("stardelt-admins".to_string()),
+            Some("") => None,
+            Some(group) => Some(group.to_string()),
+        };
+        let claims = ClaimConfig {
+            group_claim: var("NOVA_OIDC_GROUP_CLAIM").unwrap_or_else(|| "groups".into()),
+            admin_role: match raw("NOVA_OIDC_ADMIN_ROLE").as_deref() {
+                None => admin_group.clone(),
+                Some("") => None,
+                Some(role) => Some(role.to_string()),
+            },
+            admin_group,
+        };
+
+        Ok(AuthMode::Oidc(Box::new(OidcConfig {
+            issuer,
+            client_id,
+            client_secret,
+            scopes,
+            audiences,
+            public_url,
+            claims,
+            session_secret: Secret::new(session_secret),
+            device_client_id: var("NOVA_OIDC_DEVICE_CLIENT_ID"),
+        })))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Every variant's message is safe to log and to show: none carries a token.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("not signed in")]
+    Unauthenticated,
+    #[error("invalid token: {0}")]
+    InvalidToken(&'static str),
+    #[error("token signed by an unknown key")]
+    UnknownKey,
+    #[error("identity provider unavailable: {0}")]
+    ProviderUnavailable(String),
+    #[error("identity provider misconfigured: {0}")]
+    Misconfigured(String),
+    #[error("internal error: {0}")]
+    Internal(&'static str),
+    #[error("this view is for platform administrators")]
+    Forbidden,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        let msg = self.to_string();
+        match self {
+            AuthError::Unauthenticated | AuthError::InvalidToken(_) | AuthError::UnknownKey => {
+                let challenge = if matches!(self, AuthError::Unauthenticated) {
+                    "Bearer"
+                } else {
+                    "Bearer error=\"invalid_token\""
+                };
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::WWW_AUTHENTICATE, challenge)],
+                    Json(serde_json::json!({
+                        "error": "unauthenticated",
+                        "detail": msg,
+                        "login": "/api/auth/login",
+                    })),
+                )
+                    .into_response()
+            }
+            AuthError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "detail": msg,
+                    "hint": "membership is decided by the identity provider's admin group",
+                })),
+            )
+                .into_response(),
+            AuthError::ProviderUnavailable(_) | AuthError::Misconfigured(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
+            AuthError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Claims → identity
+// ---------------------------------------------------------------------------
+
+/// Who the caller is, as the IdP says. `sub` is the only field to persist.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Identity {
+    pub sub: String,
+    /// `preferred_username` → `email` → `upn` → `name` → `sub`.
+    pub display_name: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub groups: Vec<String>,
+    pub roles: Vec<String>,
+    /// Entra put a reference instead of the groups (too many to fit the token).
+    pub groups_overage: bool,
+    pub is_admin: bool,
+}
+
+/// What a resource server needs beyond the identity: the token's granted scopes and the
+/// client it was issued to (`azp`, OIDC Core 2 §2). `None` when the IdP sets no `azp`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BearerFacts {
+    pub scopes: Vec<String>,
+    pub client_id: Option<String>,
+}
+
+fn claim_str(claims: &Value, key: &str) -> Option<String> {
+    claims
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// A claim holding a list of strings; a single string counts as a one-item list.
+fn claim_list(claims: &Value, key: &str) -> Vec<String> {
+    match claims.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// The token's granted scopes. Keycloak (RFC 6749) sends `scope` as one space-separated
+/// string; Entra sends `scp` the same way, and an IdP may send an array. Unknown = none.
+pub fn claim_scopes(claims: &Value) -> Vec<String> {
+    for key in ["scope", "scp"] {
+        match claims.get(key) {
+            Some(Value::String(s)) => {
+                return s.split_whitespace().map(str::to_string).collect();
+            }
+            Some(Value::Array(_)) => return claim_list(claims, key),
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
+/// Entra ID "group overage": when a user is in more groups than fit the token, Entra
+/// omits the group claim and sets `_claim_names.groups` (or `hasgroups: true`).
+/// Nova does not call Graph to resolve it; it treats the user as having no groups.
+fn groups_overage(claims: &Value, group_claim: &str) -> bool {
+    let names = claims.get("_claim_names");
+    let named = |k: &str| names.and_then(|n| n.get(k)).is_some();
+    let hasgroups = matches!(claims.get("hasgroups"), Some(Value::Bool(true)))
+        || claims.get("hasgroups").and_then(Value::as_str) == Some("true");
+    named(group_claim) || named("groups") || hasgroups
+}
+
+/// Group names match exactly, or with Keycloak's leading `/` (full group path).
+fn has_group(groups: &[String], wanted: &str) -> bool {
+    groups
+        .iter()
+        .any(|g| g == wanted || g.strip_prefix('/') == Some(wanted))
+}
+
+/// Admin decision. Precedence: the `roles` claim (Entra app roles) is checked first
+/// against `admin_role`, then the configured group claim against `admin_group`;
+/// either grants admin. An overage never grants anything. An unset mechanism (empty
+/// `NOVA_OIDC_ADMIN_GROUP` / `NOVA_OIDC_ADMIN_ROLE`) grants nothing.
+pub fn is_admin(roles: &[String], groups: &[String], cfg: &ClaimConfig) -> bool {
+    cfg.admin_role
+        .as_deref()
+        .is_some_and(|role| roles.iter().any(|r| r == role))
+        || cfg
+            .admin_group
+            .as_deref()
+            .is_some_and(|group| has_group(groups, group))
+}
+
+pub fn identity_from_claims(claims: &Value, cfg: &ClaimConfig) -> Result<Identity, AuthError> {
+    let sub = claim_str(claims, "sub").ok_or(AuthError::InvalidToken("missing sub"))?;
+    let email = claim_str(claims, "email");
+    let name = claim_str(claims, "name");
+    let display_name = claim_str(claims, "preferred_username")
+        .or_else(|| email.clone())
+        .or_else(|| claim_str(claims, "upn"))
+        .or_else(|| name.clone())
+        .unwrap_or_else(|| sub.clone());
+
+    let overage = groups_overage(claims, &cfg.group_claim);
+    let groups = if overage {
+        warn!(
+            sub = %sub,
+            claim = %cfg.group_claim,
+            "group overage in token (too many groups for the IdP to include) — treating as no groups; \
+             use app roles or a group filter on the IdP app registration"
+        );
+        Vec::new()
+    } else {
+        claim_list(claims, &cfg.group_claim)
+    };
+    let roles = claim_list(claims, "roles");
+    let is_admin = is_admin(&roles, &groups, cfg);
+
+    Ok(Identity {
+        sub,
+        display_name,
+        email,
+        name,
+        groups,
+        roles,
+        groups_overage: overage,
+        is_admin,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// JWT verification
+// ---------------------------------------------------------------------------
+
+/// What a token must satisfy beyond its signature.
+pub struct Expect<'a> {
+    pub issuer: &'a str,
+    pub audiences: &'a [String],
+    pub client_id: &'a str,
+    /// The token is an ID token: `typ: ID` is expected, `nonce` (when we sent one) must
+    /// match, and with several audiences `azp` must be us. `false` for an access token,
+    /// where `typ: ID` instead means someone is passing an ID token as a credential.
+    pub id_token: bool,
+    /// `Some` for an ID token from our own code exchange: the `nonce` we sent. A refresh
+    /// response carries no nonce, which is not a mismatch.
+    pub nonce: Option<&'a str>,
+}
+
+fn jwt_reason(e: &jsonwebtoken::errors::Error) -> &'static str {
+    use jsonwebtoken::errors::ErrorKind as K;
+    match e.kind() {
+        K::ExpiredSignature => "expired",
+        K::ImmatureSignature => "not yet valid",
+        K::InvalidIssuer => "wrong issuer",
+        K::InvalidAudience => "wrong audience",
+        K::InvalidSignature => "bad signature",
+        K::InvalidAlgorithm | K::InvalidAlgorithmName => "algorithm not allowed",
+        K::MissingRequiredClaim(_) => "missing required claim",
+        _ => "malformed",
+    }
+}
+
+fn select_key<'k>(keys: &'k [Jwk], kid: Option<&str>) -> Result<&'k Jwk, AuthError> {
+    let signing = |k: &&Jwk| !matches!(k.common.public_key_use, Some(PublicKeyUse::Encryption));
+    match kid {
+        Some(kid) => keys
+            .iter()
+            .filter(signing)
+            .find(|k| k.common.key_id.as_deref() == Some(kid))
+            .ok_or(AuthError::UnknownKey),
+        None => {
+            let mut it = keys.iter().filter(signing);
+            match (it.next(), it.next()) {
+                (Some(only), None) => Ok(only),
+                _ => Err(AuthError::UnknownKey),
+            }
+        }
+    }
+}
+
+/// Verify signature, `iss`, `aud`, `exp`/`nbf` (with leeway) and, for ID tokens,
+/// `nonce` and `azp`. Returns the claims.
+pub fn verify_jwt(token: &str, keys: &[Jwk], expect: &Expect<'_>) -> Result<Value, AuthError> {
+    let header = decode_header(token).map_err(|_| AuthError::InvalidToken("malformed"))?;
+    if !ALLOWED_ALGS.contains(&header.alg) {
+        return Err(AuthError::InvalidToken("algorithm not allowed"));
+    }
+    let jwk = select_key(keys, header.kid.as_deref())?;
+    if let Some(key_alg) = jwk.common.key_algorithm
+        && key_alg.to_string() != format!("{:?}", header.alg)
+    {
+        return Err(AuthError::InvalidToken("algorithm does not match key"));
+    }
+    let key = DecodingKey::from_jwk(jwk).map_err(|_| AuthError::InvalidToken("unusable key"))?;
+
+    let mut v = Validation::new(header.alg);
+    v.algorithms = vec![header.alg];
+    v.set_issuer(&[expect.issuer]);
+    v.set_audience(expect.audiences);
+    v.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    v.leeway = CLOCK_LEEWAY_SECS;
+    v.validate_nbf = true;
+
+    let claims = decode::<Value>(token, &key, &v)
+        .map_err(|e| AuthError::InvalidToken(jwt_reason(&e)))?
+        .claims;
+
+    if expect.id_token {
+        if let Some(nonce) = expect.nonce
+            && claims.get("nonce").and_then(Value::as_str) != Some(nonce)
+        {
+            return Err(AuthError::InvalidToken("nonce mismatch"));
+        }
+        // OIDC Core 3.1.3.7: with several audiences, `azp` must be us.
+        let multi_aud = claims
+            .get("aud")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.len() > 1);
+        match claims.get("azp").and_then(Value::as_str) {
+            Some(azp) if azp != expect.client_id => {
+                return Err(AuthError::InvalidToken("wrong authorized party"));
+            }
+            None if multi_aud => return Err(AuthError::InvalidToken("missing azp")),
+            _ => {}
+        }
+    } else if claims.get("typ").and_then(Value::as_str) == Some("ID") {
+        // Keycloak marks ID tokens `typ: ID`; they are not API credentials.
+        return Err(AuthError::InvalidToken("ID token used as access token"));
+    }
+    Ok(claims)
+}
+
+// ---------------------------------------------------------------------------
+// Provider: discovery + JWKS cache
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Discovery {
+    pub issuer: String,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub jwks_uri: String,
+    #[serde(default)]
+    pub end_session_endpoint: Option<String>,
+    #[serde(default)]
+    pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
+}
+
+impl Discovery {
+    /// Check a discovery document against the configured issuer.
+    pub fn validate(&self, configured_issuer: &str) -> Result<(), AuthError> {
+        if self.issuer.trim_end_matches('/') != configured_issuer.trim_end_matches('/') {
+            return Err(AuthError::Misconfigured(format!(
+                "discovery reports issuer `{}`, but NOVA_OIDC_ISSUER is `{}` (for Entra ID use \
+                 https://login.microsoftonline.com/<tenant-id>/v2.0)",
+                self.issuer, configured_issuer
+            )));
+        }
+        let insecure_ok = Url::parse(&self.issuer).is_ok_and(|u| is_loopback(&u));
+        for (name, ep) in [
+            ("authorization_endpoint", &self.authorization_endpoint),
+            ("token_endpoint", &self.token_endpoint),
+            ("jwks_uri", &self.jwks_uri),
+        ] {
+            let u = Url::parse(ep)
+                .map_err(|_| AuthError::Misconfigured(format!("discovery {name} is not a URL")))?;
+            if u.scheme() != "https" && !(insecure_ok && u.scheme() == "http") {
+                return Err(AuthError::Misconfigured(format!(
+                    "discovery {name} is not https"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// RFC 8414: absent means `client_secret_basic`. Prefer `post` when offered — it
+    /// avoids the form-encoding pitfalls of secrets in a Basic header.
+    fn use_secret_post(&self) -> bool {
+        self.token_endpoint_auth_methods_supported
+            .as_ref()
+            .is_some_and(|m| m.iter().any(|x| x == "client_secret_post"))
+    }
+}
+
+#[derive(Default)]
+struct JwksCache {
+    keys: Arc<Vec<Jwk>>,
+    fetched_at: Option<Instant>,
+}
+
+pub struct Provider {
+    http: reqwest::Client,
+    issuer: String,
+    discovery: tokio::sync::RwLock<Option<Arc<Discovery>>>,
+    jwks: tokio::sync::RwLock<JwksCache>,
+}
+
+impl Provider {
+    pub fn new(http: reqwest::Client, issuer: String) -> Self {
+        Self {
+            http,
+            issuer,
+            discovery: tokio::sync::RwLock::new(None),
+            jwks: tokio::sync::RwLock::new(JwksCache::default()),
+        }
+    }
+
+    /// The discovery document, fetched once and cached. A failed fetch is retried on
+    /// the next call; until then sign-in and bearer access fail (closed).
+    pub async fn discovery(&self) -> Result<Arc<Discovery>, AuthError> {
+        if let Some(d) = self.discovery.read().await.as_ref() {
+            return Ok(d.clone());
+        }
+        let mut slot = self.discovery.write().await;
+        if let Some(d) = slot.as_ref() {
+            return Ok(d.clone());
+        }
+        let url = format!(
+            "{}/.well-known/openid-configuration",
+            self.issuer.trim_end_matches('/')
+        );
+        let doc: Discovery = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| AuthError::ProviderUnavailable(format!("discovery at {url}: {e}")))?
+            .json()
+            .await
+            .map_err(|e| {
+                AuthError::Misconfigured(format!("discovery at {url} is not valid: {e}"))
+            })?;
+        doc.validate(&self.issuer)?;
+        let doc = Arc::new(doc);
+        *slot = Some(doc.clone());
+        Ok(doc)
+    }
+
+    async fn fetch_jwks(&self, jwks_uri: &str) -> Result<Vec<Jwk>, AuthError> {
+        #[derive(Deserialize)]
+        struct RawSet {
+            keys: Vec<Value>,
+        }
+        let raw: RawSet = self
+            .http
+            .get(jwks_uri)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| AuthError::ProviderUnavailable(format!("JWKS: {e}")))?
+            .json()
+            .await
+            .map_err(|e| AuthError::ProviderUnavailable(format!("JWKS is not valid: {e}")))?;
+        // Skip keys this library cannot parse (e.g. exotic encryption keys) instead of
+        // rejecting the whole set.
+        Ok(raw
+            .keys
+            .into_iter()
+            .filter_map(|k| serde_json::from_value::<Jwk>(k).ok())
+            .collect())
+    }
+
+    /// Cached keys; `refresh` refetches unless the cache is younger than
+    /// `JWKS_MIN_REFRESH` (so random `kid`s cannot hammer the IdP).
+    async fn keys(&self, disc: &Discovery, refresh: bool) -> Result<Arc<Vec<Jwk>>, AuthError> {
+        {
+            let c = self.jwks.read().await;
+            if let Some(at) = c.fetched_at
+                && (!refresh || at.elapsed() < JWKS_MIN_REFRESH)
+            {
+                return Ok(c.keys.clone());
+            }
+        }
+        let mut c = self.jwks.write().await;
+        if let Some(at) = c.fetched_at
+            && at.elapsed() < JWKS_MIN_REFRESH
+        {
+            return Ok(c.keys.clone());
+        }
+        let keys = Arc::new(self.fetch_jwks(&disc.jwks_uri).await?);
+        c.keys = keys.clone();
+        c.fetched_at = Some(Instant::now());
+        Ok(keys)
+    }
+
+    /// Verify a JWT from this provider, refetching the JWKS once on an unknown `kid`.
+    async fn verify_with(
+        &self,
+        disc: &Discovery,
+        token: &str,
+        expect: &Expect<'_>,
+    ) -> Result<Value, AuthError> {
+        let keys = self.keys(disc, false).await?;
+        match verify_jwt(token, &keys, expect) {
+            Err(AuthError::UnknownKey) => {
+                let keys = self.keys(disc, true).await?;
+                verify_jwt(token, &keys, expect)
+            }
+            other => other,
+        }
+    }
+
+    /// Verify an access token presented to Nova as a credential: `aud` must be one of
+    /// `audiences`, and an ID token is refused.
+    pub async fn verify(
+        &self,
+        token: &str,
+        audiences: &[String],
+        client_id: &str,
+    ) -> Result<Value, AuthError> {
+        let disc = self.discovery().await?;
+        let expect = Expect {
+            issuer: &disc.issuer,
+            audiences,
+            client_id,
+            id_token: false,
+            nonce: None,
+        };
+        self.verify_with(&disc, token, &expect).await
+    }
+
+    /// Verify an ID token issued to this client: signature, `iss`, `aud` = the client,
+    /// `exp` and, when we sent one, `nonce`. `nonce: None` is a refresh response — it
+    /// carries no nonce, and requiring one would reject every refresh.
+    pub async fn verify_id_token(
+        &self,
+        token: &str,
+        client_id: &str,
+        nonce: Option<&str>,
+    ) -> Result<Value, AuthError> {
+        let disc = self.discovery().await?;
+        let audiences = [client_id.to_string()];
+        let expect = Expect {
+            issuer: &disc.issuer,
+            audiences: &audiences,
+            client_id,
+            id_token: true,
+            nonce,
+        };
+        self.verify_with(&disc, token, &expect).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bearer validation (a trait so the middleware can be tested without an IdP)
+// ---------------------------------------------------------------------------
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait BearerValidator: Send + Sync {
+    fn validate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>>;
+    /// Validate against an audience list other than the browser's (the MCP resource).
+    fn validate_for<'a>(
+        &'a self,
+        token: &'a str,
+        _audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+        self.validate(token)
+    }
+
+    /// Like `validate_for`, also returning the token's granted scopes (`scope`/`scp`).
+    /// The default carries none, which is what a validator that does not read claims gets.
+    fn validate_for_scopes<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, Vec<String>), AuthError>> {
+        Box::pin(async move { Ok((self.validate_for(token, audiences).await?, Vec::new())) })
+    }
+
+    /// Like `validate_for_scopes`, also naming the client the token was issued to.
+    /// The default carries no client id; a validator that reads claims overrides it.
+    fn validate_for_facts<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+        Box::pin(async move {
+            let (identity, scopes) = self.validate_for_scopes(token, audiences).await?;
+            Ok((
+                identity,
+                BearerFacts {
+                    scopes,
+                    client_id: None,
+                },
+            ))
+        })
+    }
+}
+
+struct OidcBearer {
+    provider: Arc<Provider>,
+    audiences: Vec<String>,
+    client_id: String,
+    claims: ClaimConfig,
+}
+
+impl BearerValidator for OidcBearer {
+    fn validate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, &self.audiences, &self.client_id)
+                .await?;
+            identity_from_claims(&claims, &self.claims)
+        })
+    }
+
+    fn validate_for<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, audiences, &self.client_id)
+                .await?;
+            identity_from_claims(&claims, &self.claims)
+        })
+    }
+
+    fn validate_for_scopes<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, Vec<String>), AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, audiences, &self.client_id)
+                .await?;
+            let identity = identity_from_claims(&claims, &self.claims)?;
+            Ok((identity, claim_scopes(&claims)))
+        })
+    }
+
+    fn validate_for_facts<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, audiences, &self.client_id)
+                .await?;
+            let identity = identity_from_claims(&claims, &self.claims)?;
+            Ok((
+                identity,
+                BearerFacts {
+                    scopes: claim_scopes(&claims),
+                    client_id: claim_str(&claims, "azp"),
+                },
+            ))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions and in-flight logins (in memory, single replica)
+// ---------------------------------------------------------------------------
+
+/// Tokens from the code exchange or a refresh, kept server-side and never returned.
+///
+/// No `Debug` on purpose (it holds `Secret`s). The only way a token leaves the process
+/// is the `Authorization` header `upstream_authorization` builds for an upstream service.
+struct TokenSet {
+    access_token: Secret,
+    /// Kept for a future end-session call; Nova deliberately does not put it in a URL.
+    #[allow(dead_code)]
+    id_token: Option<Secret>,
+    refresh_token: Option<Secret>,
+}
+
+impl TokenSet {
+    /// What to store from a token response: the previous value of anything the response
+    /// omits (the ID token is optional on a refresh, and not every IdP rotates the
+    /// refresh token).
+    fn from_response(response: TokenResponse, previous: Option<&TokenSet>) -> Self {
+        Self {
+            access_token: Secret::new(response.access_token),
+            id_token: response
+                .id_token
+                .map(Secret::new)
+                .or_else(|| previous.and_then(|p| p.id_token.clone())),
+            refresh_token: response
+                .refresh_token
+                .map(Secret::new)
+                .or_else(|| previous.and_then(|p| p.refresh_token.clone())),
+        }
+    }
+}
+
+/// A session's mutable state: replaced on every successful refresh.
+struct Credentials {
+    identity: Identity,
+    tokens: TokenSet,
+    /// When `tokens.access_token` stops being accepted by Trino and the catalog.
+    ///
+    /// `Instant`, not `SystemTime`: the only question ever asked is "how much longer",
+    /// and a monotonic clock cannot be stepped by NTP. The token's own `exp` is read
+    /// once, to size the lifetime — it is never compared against our clock.
+    expires_at: Instant,
+    /// The lifetime the IdP reported, kept to size the refresh window.
+    lifetime: Duration,
+}
+
+impl Credentials {
+    fn new(identity: Identity, tokens: TokenSet, lifetime: Duration) -> Self {
+        Self {
+            identity,
+            tokens,
+            expires_at: Instant::now() + lifetime,
+            lifetime,
+        }
+    }
+
+    /// Refresh *before use*: true once the stored token is inside its refresh window.
+    /// There is no timer and no background task, and a request that still has plenty of
+    /// token left never calls the token endpoint.
+    fn needs_refresh(&self) -> bool {
+        self.expires_at.saturating_duration_since(Instant::now()) <= self.refresh_window()
+    }
+
+    /// A minute, but never more than half the token's own life: a realm that issues 60 s
+    /// tokens refreshes half-way through them instead of on every single request.
+    fn refresh_window(&self) -> Duration {
+        REFRESH_SKEW.min(self.lifetime / 2)
+    }
+}
+
+/// A session's credentials as they live in the state store: sealed, never plain text.
+/// No `Debug` on purpose — it holds the tokens.
+#[derive(Serialize, Deserialize)]
+struct StoredCredentials {
+    identity: Identity,
+    access_token: String,
+    id_token: Option<String>,
+    refresh_token: Option<String>,
+    /// When `access_token` stops being accepted, in Unix seconds.
+    access_expires_unix: u64,
+    /// The lifetime the IdP reported, in seconds — it sizes the refresh window after a load.
+    lifetime_secs: u64,
+}
+
+impl StoredCredentials {
+    fn from_credentials(c: &Credentials) -> Self {
+        let remaining = c
+            .expires_at
+            .saturating_duration_since(Instant::now())
+            .as_secs();
+        Self {
+            identity: c.identity.clone(),
+            access_token: c.tokens.access_token.expose().to_string(),
+            id_token: c.tokens.id_token.as_ref().map(|s| s.expose().to_string()),
+            refresh_token: c
+                .tokens
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose().to_string()),
+            access_expires_unix: unix_now() + remaining,
+            lifetime_secs: c.lifetime.as_secs(),
+        }
+    }
+
+    /// An access token that ended while Nova was down comes back with zero remaining, so
+    /// the first request after the restart refreshes it (`needs_refresh`).
+    fn into_credentials(self) -> Credentials {
+        let remaining = self.access_expires_unix.saturating_sub(unix_now());
+        Credentials {
+            identity: self.identity,
+            tokens: TokenSet {
+                access_token: Secret::new(self.access_token),
+                id_token: self.id_token.map(Secret::new),
+                refresh_token: self.refresh_token.map(Secret::new),
+            },
+            expires_at: Instant::now() + Duration::from_secs(remaining),
+            lifetime: Duration::from_secs(self.lifetime_secs),
+        }
+    }
+}
+
+struct Session {
+    /// Absolute session deadline (`SESSION_TTL`). A refresh never moves it — the point
+    /// of refreshing is that one sign-in outlives many access tokens, not that it lives
+    /// forever.
+    expires: Instant,
+    /// The same deadline as wall clock (Unix seconds), so `/api/me` can tell the browser
+    /// when it must sign in again. Recorded once, at sign-in, from the same deadline.
+    expires_unix: u64,
+    /// One lock per session for everything mutable. It is what makes "exactly one
+    /// refresh per expiring session" true under concurrent requests: Keycloak rotates
+    /// refresh tokens, so spending one twice would invalidate the session. The lock is
+    /// held across the token endpoint call on purpose; only this session waits, other
+    /// sessions are unaffected.
+    credentials: tokio::sync::Mutex<Credentials>,
+}
+
+#[derive(Default)]
+pub struct SessionStore {
+    inner: Mutex<HashMap<String, Arc<Session>>>,
+}
+
+impl SessionStore {
+    fn insert(&self, credentials: Credentials) -> Result<String, AuthError> {
+        let id = random_token(32)?;
+        let mut m = self
+            .inner
+            .lock()
+            .map_err(|_| AuthError::Internal("session store"))?;
+        let now = Instant::now();
+        m.retain(|_, s| s.expires > now);
+        if m.len() >= MAX_SESSIONS {
+            return Err(AuthError::Internal("too many sessions"));
+        }
+        m.insert(
+            id.clone(),
+            Arc::new(Session {
+                expires: now + SESSION_TTL,
+                expires_unix: unix_now() + SESSION_TTL.as_secs(),
+                credentials: tokio::sync::Mutex::new(credentials),
+            }),
+        );
+        Ok(id)
+    }
+
+    /// Put a session loaded from the state store under the id its cookie carries: no new
+    /// id and no new deadline (both are the stored session's).
+    fn insert_loaded(
+        &self,
+        id: String,
+        expires: Instant,
+        expires_unix: u64,
+        credentials: Credentials,
+    ) -> Option<Arc<Session>> {
+        let mut m = self.inner.lock().ok()?;
+        let now = Instant::now();
+        m.retain(|_, s| s.expires > now);
+        if m.len() >= MAX_SESSIONS {
+            return None;
+        }
+        let session = Arc::new(Session {
+            expires,
+            expires_unix,
+            credentials: tokio::sync::Mutex::new(credentials),
+        });
+        m.insert(id, session.clone());
+        Some(session)
+    }
+
+    /// The live session for this cookie, if any. Expired sessions are dropped here
+    /// rather than by a sweeper task.
+    fn find(&self, id: &str) -> Option<Arc<Session>> {
+        let mut m = self.inner.lock().ok()?;
+        if m.get(id).is_some_and(|s| s.expires <= Instant::now()) {
+            m.remove(id);
+        }
+        m.get(id).cloned()
+    }
+
+    fn remove(&self, id: &str) {
+        if let Ok(mut m) = self.inner.lock() {
+            m.remove(id);
+        }
+    }
+}
+
+/// Seconds since the Unix epoch: the one wall-clock fact a session records, for the
+/// browser's "you sign in again then" (#213). Durations are still measured on `Instant`.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// How long the access token in a token response is good for, and where that number
+/// comes from: `expires_in`, else the token's own `exp`, else a conservative default.
+fn access_token_lifetime(response: &TokenResponse) -> Duration {
+    let seconds = expires_in_secs(response.expires_in.as_ref())
+        .or_else(|| access_token_exp(&response.access_token));
+    match seconds {
+        Some(seconds) => Duration::from_secs(seconds),
+        None => {
+            warn!(
+                "the token endpoint reported neither `expires_in` nor a decodable `exp`; \
+                 assuming a {DEFAULT_ACCESS_TTL:?} access token"
+            );
+            DEFAULT_ACCESS_TTL
+        }
+    }
+}
+
+/// RFC 6749 says `expires_in` is a number; IdPs that send a string exist.
+fn expires_in_secs(value: Option<&Value>) -> Option<u64> {
+    match value? {
+        Value::Number(n) => n.as_u64().or_else(|| n.as_f64().map(|f| f.max(0.0) as u64)),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// `exp` of an access token, in seconds from now. The signature is deliberately not
+/// verified: the token came from the IdP's token endpoint seconds ago over TLS, and this
+/// only schedules the next refresh. Nothing here is logged.
+fn access_token_exp(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    claims
+        .get("exp")?
+        .as_u64()
+        .map(|exp| exp.saturating_sub(jsonwebtoken::get_current_timestamp()))
+}
+
+struct PendingLogin {
+    verifier: Secret,
+    nonce: String,
+    return_to: String,
+    created: Instant,
+}
+
+#[derive(Default)]
+struct PendingStore {
+    inner: Mutex<HashMap<String, PendingLogin>>,
+}
+
+impl PendingStore {
+    fn insert(&self, state: String, p: PendingLogin) -> Result<(), AuthError> {
+        let mut m = self
+            .inner
+            .lock()
+            .map_err(|_| AuthError::Internal("login store"))?;
+        m.retain(|_, p| p.created.elapsed() < LOGIN_TTL);
+        if m.len() >= MAX_PENDING_LOGINS {
+            return Err(AuthError::ProviderUnavailable(
+                "too many sign-ins in flight".into(),
+            ));
+        }
+        m.insert(state, p);
+        Ok(())
+    }
+
+    /// One-shot: a `state` can complete at most one login.
+    fn take(&self, state: &str) -> Option<PendingLogin> {
+        let p = self.inner.lock().ok()?.remove(state)?;
+        (p.created.elapsed() < LOGIN_TTL).then_some(p)
+    }
+}
+
+fn random_token(bytes: usize) -> Result<String, AuthError> {
+    let mut buf = vec![0u8; bytes];
+    getrandom::fill(&mut buf).map_err(|_| AuthError::Internal("no randomness"))?;
+    Ok(URL_SAFE_NO_PAD.encode(buf))
+}
+
+/// RFC 7636 S256: BASE64URL(SHA256(verifier)).
+pub fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// Only same-origin relative paths: `/x`, never `//host`, `/\host`, `https://…`, or a
+/// path back into `/api/auth/`. Anything else becomes `/`.
+pub fn safe_return_to(raw: Option<&str>) -> String {
+    let Some(p) = raw else { return "/".into() };
+    let ok = p.starts_with('/')
+        && !p.starts_with("//")
+        && !p.contains('\\')
+        && !p.chars().any(|c| c.is_control())
+        && p.len() <= 2048
+        && !p.starts_with("/api/auth/");
+    if ok { p.to_string() } else { "/".into() }
+}
+
+// ---------------------------------------------------------------------------
+// Auth state, cookies, middleware
+// ---------------------------------------------------------------------------
+
+/// Who made this request and how. Inserted into request extensions by the middleware.
+#[derive(Clone, Debug)]
+pub struct Principal {
+    pub identity: Identity,
+    /// `session` (browser cookie) or `bearer` (Authorization header).
+    pub via: &'static str,
+    /// The token this principal presented. It is passed upstream **only** when
+    /// `NOVA_FORWARD_IDENTITY` is on, and never logged or returned — `Secret` redacts.
+    pub access_token: Option<Secret>,
+}
+
+/// What `/api/me` reports beyond the identity (#213): why this caller is an
+/// administrator, and when the sign-in behind the request ends. Inserted into request
+/// extensions by `require_auth`, next to the `Principal`; no other route reads it, and
+/// it never carries a token.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeFacts {
+    /// `"group"` or `"role"`: which configured value decided this caller's admin
+    /// status. `None` when neither is configured.
+    pub admin_by: Option<&'static str>,
+    /// The group name or role value `admin_by` refers to.
+    pub admin_group: Option<String>,
+    /// Unix seconds at which the browser session can no longer be renewed. `None` for
+    /// a bearer call, which has no session; never the access token's own `exp`.
+    pub session_expires_at: Option<u64>,
+}
+
+pub struct AuthState {
+    pub config: OidcConfig,
+    pub provider: Arc<Provider>,
+    bearer: Arc<dyn BearerValidator>,
+    sessions: SessionStore,
+    pending: PendingStore,
+    key: Key,
+    /// The state store (`NOVA_DATABASE_URL`); `None` keeps sessions in memory only.
+    db: Option<sqlx::PgPool>,
+    /// Seals a session's tokens before they reach the state store.
+    sealer: seal::Sealer,
+}
+
+impl AuthState {
+    pub fn new(config: OidcConfig, http: reqwest::Client, db: Option<sqlx::PgPool>) -> Arc<Self> {
+        let provider = Arc::new(Provider::new(http, config.issuer.clone()));
+        let bearer = Arc::new(OidcBearer {
+            provider: provider.clone(),
+            audiences: config.audiences.clone(),
+            client_id: config.client_id.clone(),
+            claims: config.claims.clone(),
+        });
+        Self::with_validator(config, provider, bearer, db)
+    }
+
+    pub fn with_validator(
+        config: OidcConfig,
+        provider: Arc<Provider>,
+        bearer: Arc<dyn BearerValidator>,
+        db: Option<sqlx::PgPool>,
+    ) -> Arc<Self> {
+        // `from_lookup` guarantees >= 32 bytes, which `derive_from` requires.
+        let key = Key::derive_from(config.session_secret.expose().as_bytes());
+        let sealer = seal::Sealer::from_secret(config.session_secret.expose().as_bytes());
+        Arc::new(Self {
+            config,
+            provider,
+            bearer,
+            sessions: SessionStore::default(),
+            pending: PendingStore::default(),
+            key,
+            db,
+            sealer,
+        })
+    }
+
+    /// Seal a session's credentials for the row its id hashes to.
+    fn seal_credentials(&self, session_id: &str, creds: &Credentials) -> Option<Vec<u8>> {
+        let plain = serde_json::to_vec(&StoredCredentials::from_credentials(creds)).ok()?;
+        self.sealer
+            .seal(&plain, session_store::id_hash(session_id).as_bytes())
+            .ok()
+    }
+
+    /// Write a session through to the state store: best effort, never a reason to fail a
+    /// sign-in or a request (the in-memory session works without the store).
+    async fn persist_session(&self, session_id: &str, creds: &Credentials, expires_unix: u64) {
+        let Some(sealed) = self.seal_credentials(session_id, creds) else {
+            return;
+        };
+        session_store::save(
+            self.db.as_ref(),
+            &session_store::id_hash(session_id),
+            &sealed,
+            expires_unix as i64,
+            unix_now() as i64,
+        )
+        .await;
+    }
+
+    fn jar(&self, headers: &HeaderMap) -> SignedCookieJar {
+        SignedCookieJar::from_headers(headers, self.key.clone())
+    }
+
+    fn cookie(&self, name: &'static str, value: String, path: &'static str) -> Cookie<'static> {
+        Cookie::build((name, value))
+            .path(path)
+            .http_only(true)
+            .same_site(SameSite::Lax)
+            .secure(self.config.secure_cookies())
+            .build()
+    }
+
+    fn removal(name: &'static str, path: &'static str) -> Cookie<'static> {
+        Cookie::build((name, "")).path(path).build()
+    }
+
+    /// Bearer first (an invalid bearer is a 401, never a fallback to the cookie),
+    /// then the session cookie.
+    pub async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(Principal, MeFacts), AuthError> {
+        if let Some(authz) = headers.get(header::AUTHORIZATION) {
+            let value = authz.to_str().map_err(|_| AuthError::Unauthenticated)?;
+            let token = match value.split_once(' ') {
+                Some((scheme, t))
+                    if scheme.eq_ignore_ascii_case("bearer") && !t.trim().is_empty() =>
+                {
+                    t.trim()
+                }
+                _ => return Err(AuthError::Unauthenticated),
+            };
+            let identity = self.bearer.validate(token).await?;
+            // A bearer call has no session: there is nothing to end, so no session end —
+            // and never the token's own `exp`.
+            let facts = self.me_facts(&identity, None);
+            return Ok((
+                Principal {
+                    identity,
+                    via: "bearer",
+                    access_token: Some(Secret(token.to_string())),
+                },
+                facts,
+            ));
+        }
+        let jar = self.jar(headers);
+        let id = jar.get(SESSION_COOKIE).ok_or(AuthError::Unauthenticated)?;
+        let (identity, access_token, session_expires_at) =
+            self.session_credentials(id.value()).await?;
+        let facts = self.me_facts(&identity, session_expires_at);
+        Ok((
+            Principal {
+                identity,
+                via: "session",
+                access_token,
+            },
+            facts,
+        ))
+    }
+
+    /// The MCP endpoint's bearer check: `Authorization: Bearer` only (never the session
+    /// cookie), validated against `audiences` instead of the browser's.
+    pub async fn authenticate_bearer_for(
+        &self,
+        headers: &HeaderMap,
+        audiences: &[String],
+    ) -> Result<Principal, AuthError> {
+        Ok(self
+            .authenticate_bearer_for_scopes(headers, audiences)
+            .await?
+            .0)
+    }
+
+    /// The same check, also returning the token's granted scopes. `/mcp` requires one.
+    pub async fn authenticate_bearer_for_scopes(
+        &self,
+        headers: &HeaderMap,
+        audiences: &[String],
+    ) -> Result<(Principal, Vec<String>), AuthError> {
+        let (principal, facts) = self
+            .authenticate_bearer_for_facts(headers, audiences)
+            .await?;
+        Ok((principal, facts.scopes))
+    }
+
+    /// The MCP endpoint's bearer check with the token's scopes and client (`azp`).
+    pub async fn authenticate_bearer_for_facts(
+        &self,
+        headers: &HeaderMap,
+        audiences: &[String],
+    ) -> Result<(Principal, BearerFacts), AuthError> {
+        let value = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AuthError::Unauthenticated)?;
+        let Some((scheme, token)) = value.split_once(' ') else {
+            return Err(AuthError::Unauthenticated);
+        };
+        if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
+            return Err(AuthError::Unauthenticated);
+        }
+        let token = token.trim();
+        let (identity, facts) = self.bearer.validate_for_facts(token, audiences).await?;
+        Ok((
+            Principal {
+                identity,
+                via: "bearer",
+                access_token: Some(Secret(token.to_string())),
+            },
+            facts,
+        ))
+    }
+
+    /// What `/api/me` reports beyond the identity: the administrator decision and, for a
+    /// browser session, the end of the session's absolute lifetime. `session_end` is
+    /// already Unix seconds.
+    fn me_facts(&self, identity: &Identity, session_end: Option<u64>) -> MeFacts {
+        let source = self
+            .config
+            .claims
+            .admin_source(&identity.roles, &identity.groups);
+        MeFacts {
+            admin_by: source.map(|(by, _)| by),
+            admin_group: source.map(|(_, value)| value.to_string()),
+            session_expires_at: session_end,
+        }
+    }
+
+    /// The identity, access token and session end behind a session cookie, refreshing the
+    /// token first when it is inside its refresh window.
+    ///
+    /// Every session-cookie request goes through here, so `/api/me`, the admin check and
+    /// the token forwarded to Trino and the catalog all see the same, current identity.
+    async fn session_credentials(
+        &self,
+        id: &str,
+    ) -> Result<(Identity, Option<Secret>, Option<u64>), AuthError> {
+        let session = match self.sessions.find(id) {
+            Some(session) => session,
+            // A restart emptied the map; the state store may still have the session.
+            None => self
+                .load_session(id)
+                .await
+                .ok_or(AuthError::Unauthenticated)?,
+        };
+        // The absolute deadline is fixed at sign-in; a refresh never moves it.
+        let ends_at = Some(session.expires_unix);
+        let mut creds = session.credentials.lock().await;
+        if creds.needs_refresh() {
+            if let Err(reason) = self.refresh_session(&mut creds).await {
+                // Any failure means the IdP will not vouch for this session any more
+                // (revoked, or the refresh token is spent). Drop it and answer like any
+                // other signed-out request, so the browser gets a clean sign-in instead
+                // of a loop of 500s.
+                drop(creds);
+                self.sessions.remove(id);
+                session_store::delete(self.db.as_ref(), &session_store::id_hash(id)).await;
+                info!(reason = %reason, "session refresh failed — signing the session out");
+                return Err(AuthError::Unauthenticated);
+            }
+            info!(
+                sub = %creds.identity.sub,
+                admin = creds.identity.is_admin,
+                "refreshed the session's access token"
+            );
+            // The refresh rotated the tokens; the row must carry the new ones or a
+            // restart would replay the spent refresh token.
+            let expires_unix = session.expires_unix;
+            self.persist_session(id, &creds, expires_unix).await;
+        }
+        Ok((
+            creds.identity.clone(),
+            Some(creds.tokens.access_token.clone()),
+            ends_at,
+        ))
+    }
+
+    /// The session behind `id` from the state store when it is not in memory: the restart
+    /// case. A value that does not open (another secret, or a new layout) is deleted and the
+    /// request signs in again, exactly as when the cookie key changes.
+    async fn load_session(&self, id: &str) -> Option<Arc<Session>> {
+        let hash = session_store::id_hash(id);
+        let now = unix_now() as i64;
+        let stored = session_store::load(self.db.as_ref(), &hash, now).await?;
+        let parsed = self
+            .sealer
+            .open(&stored.sealed, hash.as_bytes())
+            .ok()
+            .and_then(|plain| serde_json::from_slice::<StoredCredentials>(&plain).ok());
+        let Some(creds) = parsed else {
+            session_store::delete(self.db.as_ref(), &hash).await;
+            return None;
+        };
+        let remaining = (stored.expires_at - now).max(0) as u64;
+        self.sessions.insert_loaded(
+            id.to_string(),
+            Instant::now() + Duration::from_secs(remaining),
+            stored.expires_at as u64,
+            creds.into_credentials(),
+        )
+    }
+
+    /// Exchange the session's refresh token at the IdP and replace its identity and
+    /// tokens. The caller holds the session's credential lock, so the refresh token is
+    /// spent at most once per expiring session.
+    ///
+    /// The error is a reason safe to log; it never contains a token.
+    async fn refresh_session(&self, creds: &mut Credentials) -> Result<(), String> {
+        let Some(refresh_token) = creds.tokens.refresh_token.clone() else {
+            return Err("the session holds no refresh token".into());
+        };
+        let disc = self.provider.discovery().await.map_err(|e| e.to_string())?;
+        let answer = token_request(
+            self,
+            &disc,
+            vec![
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.expose()),
+            ],
+        )
+        .await?;
+        // Identity first: it needs the tokens the response just carried, before they are
+        // merged with the stored set.
+        let identity = self.identity_of_refresh(&answer).await?;
+        let lifetime = access_token_lifetime(&answer);
+        let tokens = TokenSet::from_response(answer, Some(&creds.tokens));
+        creds.identity = identity;
+        creds.tokens = tokens;
+        creds.expires_at = Instant::now() + lifetime;
+        creds.lifetime = lifetime;
+        Ok(())
+    }
+
+    /// The identity a refresh describes: the new ID token, or — when the IdP sends none
+    /// — the new access token. Both are verified.
+    ///
+    /// If neither can be verified and turned into an identity, the refresh *fails*: Nova
+    /// will not keep serving an identity it can no longer prove, which is what makes a
+    /// demotion take effect instead of lingering for the life of the session.
+    async fn identity_of_refresh(&self, answer: &TokenResponse) -> Result<Identity, String> {
+        let claims = match answer.id_token.as_deref() {
+            // No nonce: a refresh response carries none, and demanding one would reject
+            // every refresh.
+            Some(id_token) => self
+                .provider
+                .verify_id_token(id_token, &self.config.client_id, None)
+                .await
+                .map_err(|e| format!("refreshed ID token rejected: {e}"))?,
+            None => self
+                .provider
+                .verify(
+                    &answer.access_token,
+                    &self.config.audiences,
+                    &self.config.client_id,
+                )
+                .await
+                .map_err(|e| format!("refreshed access token rejected: {e}"))?,
+        };
+        identity_from_claims(&claims, &self.config.claims).map_err(|e| e.to_string())
+    }
+}
+
+/// The state of [`require_auth`]: the identity provider, plus the app state the person
+/// directory (`people::touch`) writes through. One value because `from_fn_with_state`
+/// takes a single state type.
+#[derive(Clone)]
+pub struct AuthContext {
+    pub auth: Arc<AuthState>,
+    pub app: Arc<crate::AppState>,
+}
+
+/// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
+pub async fn require_auth(
+    State(ctx): State<AuthContext>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    match ctx.auth.authenticate(req.headers()).await {
+        Ok((principal, facts)) => {
+            // The directory is best effort and must not add latency to the request: the
+            // token's identity is copied into a task and the request goes on.
+            let identity = principal.identity.clone();
+            req.extensions_mut().insert(principal);
+            req.extensions_mut().insert(facts);
+            let app = ctx.app.clone();
+            tokio::spawn(async move {
+                crate::people::touch(&app, &identity).await;
+            });
+            next.run(req).await
+        }
+        Err(e) => {
+            if matches!(e, AuthError::Unauthenticated) {
+                if !matches!(
+                    *req.method(),
+                    axum::http::Method::GET
+                        | axum::http::Method::HEAD
+                        | axum::http::Method::OPTIONS
+                ) {
+                    tracing::warn!(
+                        target: "audit",
+                        method = %req.method(),
+                        path = %crate::audit::original_path(&req),
+                        "refused: not signed in"
+                    );
+                }
+            } else {
+                warn!(reason = %e, path = %crate::audit::original_path(&req), "rejected API request");
+            }
+            e.into_response()
+        }
+    }
+}
+
+/// Admin-only routes (`/api/apps`, `/api/workloads`, engine details).
+///
+/// The operator surface is not data-engineering work, and an analyst has no business
+/// reading the service inventory or the workload list — so this is enforced here, on the
+/// way in, and not only by hiding navigation in the SPA. The decision itself is the same
+/// one `/api/me` reports (`is_admin`), so the UI and the API cannot drift apart.
+///
+/// Only mounted in `oidc` mode: in `dev` there is no IdP and the single user is the
+/// operator, which is what CI and `make demo` depend on.
+pub async fn require_admin(req: Request, next: Next) -> Response {
+    // `require_auth` inserts a `Principal` (identity + how it arrived), not the bare
+    // `Identity` — reading the wrong type silently refuses everyone, which is exactly
+    // what happened the first time this shipped.
+    let principal = req.extensions().get::<Principal>().cloned();
+    if principal
+        .as_ref()
+        .map(|p| p.identity.is_admin)
+        .unwrap_or(false)
+    {
+        return next.run(req).await;
+    }
+    // The audit layer sits inside this one, so a refusal is recorded here — with the
+    // actor when we know it, which is the case that matters.
+    match &principal {
+        Some(p) => warn!(
+            target: "audit",
+            actor = %p.identity.display_name,
+            sub = %p.identity.sub,
+            via = p.via,
+            path = %crate::audit::original_path(&req),
+            "refused: not an administrator"
+        ),
+        None => {
+            warn!(target: "audit", path = %crate::audit::original_path(&req), "refused: no principal")
+        }
+    }
+    AuthError::Forbidden.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct LoginParams {
+    return_to: Option<String>,
+    login_hint: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CallbackParams {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+/// The token endpoint's answer. No `Debug`: it holds tokens.
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    id_token: Option<String>,
+    refresh_token: Option<String>,
+    /// Seconds until `access_token` expires; `Value` because RFC 6749 says a number and
+    /// the wild sends strings (see `expires_in_secs`).
+    #[serde(default)]
+    expires_in: Option<Value>,
+}
+
+fn no_store<R: IntoResponse>(r: R) -> Response {
+    let mut resp = r.into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Plain-text failure page. The reason is ours (or a sanitized IdP error code), never
+/// IdP-provided free text and never a token.
+fn login_failed(reason: &str) -> Response {
+    warn!(reason = %reason, "sign-in failed");
+    no_store((
+        StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!("Sign-in failed: {reason}.\n\nTry again: /api/auth/login\n"),
+    ))
+}
+
+/// The RFC 6749 `error` code, cut to a safe alphabet (`invalid_client`,
+/// `invalid_grant`): never the endpoint's message, which can echo anything.
+pub(crate) fn sanitize_code(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect()
+}
+
+/// The OIDC `login_hint` we pass on: a sign-in name of 1–64 characters from
+/// `[A-Za-z0-9._@-]`. Anything else is dropped silently (never echoed).
+pub(crate) fn safe_login_hint(raw: Option<&str>) -> Option<&str> {
+    let s = raw?.trim();
+    let ok = (1..=64).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-'));
+    ok.then_some(s)
+}
+
+async fn login(
+    State(auth): State<Arc<AuthState>>,
+    Query(q): Query<LoginParams>,
+    headers: HeaderMap,
+) -> Response {
+    let disc = match auth.provider.discovery().await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(reason = %e, "sign-in unavailable");
+            return no_store(e);
+        }
+    };
+    let (state, nonce, verifier) = match (random_token(32), random_token(32), random_token(48)) {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        _ => return no_store(AuthError::Internal("no randomness")),
+    };
+    let mut url = match Url::parse(&disc.authorization_endpoint) {
+        Ok(u) => u,
+        Err(_) => return no_store(AuthError::Misconfigured("authorization_endpoint".into())),
+    };
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &auth.config.client_id)
+        .append_pair("redirect_uri", &auth.config.redirect_uri())
+        .append_pair("scope", &auth.config.scopes)
+        .append_pair("state", &state)
+        .append_pair("nonce", &nonce)
+        .append_pair("code_challenge", &pkce_challenge(&verifier))
+        .append_pair("code_challenge_method", "S256");
+
+    if let Some(hint) = safe_login_hint(q.login_hint.as_deref()) {
+        url.query_pairs_mut().append_pair("login_hint", hint);
+    }
+
+    if let Err(e) = auth.pending.insert(
+        state.clone(),
+        PendingLogin {
+            verifier: Secret::new(verifier),
+            nonce,
+            return_to: safe_return_to(q.return_to.as_deref()),
+            created: Instant::now(),
+        },
+    ) {
+        return no_store(e);
+    }
+    // Bind the flow to this browser: the callback must present the same `state`.
+    let jar = auth
+        .jar(&headers)
+        .add(auth.cookie(LOGIN_COOKIE, state, LOGIN_COOKIE_PATH));
+    no_store((jar, Redirect::to(url.as_str())))
+}
+
+/// POST the token endpoint with this client's credentials attached. One place, so the
+/// code exchange and the refresh cannot drift apart on how the client authenticates
+/// (`client_secret_post`, or HTTP Basic when the IdP does not offer it).
+///
+/// The failure is a reason safe to log: the IdP's error *code* only, never its body and
+/// never a token.
+async fn token_request(
+    auth: &AuthState,
+    disc: &Discovery,
+    mut form: Vec<(&str, &str)>,
+) -> Result<TokenResponse, String> {
+    let mut req = auth.provider.http.post(&disc.token_endpoint);
+    if disc.use_secret_post() {
+        form.push(("client_id", &auth.config.client_id));
+        form.push(("client_secret", auth.config.client_secret.expose()));
+    } else {
+        // RFC 6749 §2.3.1: form-encode id and secret before Basic.
+        let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+        req = req.basic_auth(
+            enc(&auth.config.client_id),
+            Some(enc(auth.config.client_secret.expose())),
+        );
+    }
+    let resp = req
+        .form(&form)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| "the identity provider's token endpoint could not be reached".to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        // Only the RFC 6749 error code is surfaced — never the body.
+        let code = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("error").and_then(Value::as_str).map(sanitize_code))
+            .unwrap_or_default();
+        return Err(format!("the token endpoint returned {status} {code}"));
+    }
+    resp.json::<TokenResponse>()
+        .await
+        .map_err(|_| "the token endpoint answered with an unexpected body".to_string())
+}
+
+async fn exchange_code(
+    auth: &AuthState,
+    disc: &Discovery,
+    code: &str,
+    verifier: &Secret,
+) -> Result<TokenResponse, String> {
+    let redirect_uri = auth.config.redirect_uri();
+    token_request(
+        auth,
+        disc,
+        vec![
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("code_verifier", verifier.expose()),
+        ],
+    )
+    .await
+}
+
+async fn callback(
+    State(auth): State<Arc<AuthState>>,
+    Query(q): Query<CallbackParams>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(err) = q.error.as_deref() {
+        return login_failed(&format!(
+            "the identity provider refused the sign-in ({})",
+            sanitize_code(err)
+        ));
+    }
+    let (Some(code), Some(state)) = (q.code.as_deref(), q.state.as_deref()) else {
+        return login_failed("missing code or state");
+    };
+    let jar = auth.jar(&headers);
+    if jar
+        .get(LOGIN_COOKIE)
+        .map(|c| c.value().to_string())
+        .as_deref()
+        != Some(state)
+    {
+        return login_failed("state does not match this browser (start again from the login page)");
+    }
+    let Some(pending) = auth.pending.take(state) else {
+        return login_failed("sign-in expired or already used");
+    };
+    let disc = match auth.provider.discovery().await {
+        Ok(d) => d,
+        Err(e) => return login_failed(&e.to_string()),
+    };
+    let tokens = match exchange_code(&auth, &disc, code, &pending.verifier).await {
+        Ok(t) => t,
+        Err(reason) => return login_failed(&reason),
+    };
+    let Some(id_token) = tokens.id_token.as_deref() else {
+        return login_failed("the identity provider returned no ID token (is `openid` in scope?)");
+    };
+    let claims = match auth
+        .provider
+        .verify_id_token(id_token, &auth.config.client_id, Some(&pending.nonce))
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => return login_failed(&format!("ID token rejected: {e}")),
+    };
+    let identity = match identity_from_claims(&claims, &auth.config.claims) {
+        Ok(i) => i,
+        Err(e) => return login_failed(&e.to_string()),
+    };
+    // A fresh session id on every login (no fixation); drop any previous session.
+    if let Some(old) = jar.get(SESSION_COOKIE) {
+        auth.sessions.remove(old.value());
+    }
+    let lifetime = access_token_lifetime(&tokens);
+    let stored = TokenSet::from_response(tokens, None);
+    info!(
+        sub = %identity.sub,
+        admin = identity.is_admin,
+        token_ttl_secs = lifetime.as_secs(),
+        "signed in"
+    );
+    let sid = match auth
+        .sessions
+        .insert(Credentials::new(identity, stored, lifetime))
+    {
+        Ok(s) => s,
+        Err(e) => return no_store(e),
+    };
+    // Persist the new session so a rollout keeps this browser signed in. The row's
+    // deadline is the session's own absolute deadline, never the token's.
+    session_store::purge_expired(auth.db.as_ref(), unix_now() as i64).await;
+    if let Some(session) = auth.sessions.find(&sid) {
+        let expires_unix = session.expires_unix;
+        let creds = session.credentials.lock().await;
+        auth.persist_session(&sid, &creds, expires_unix).await;
+    }
+    let jar = jar
+        .remove(AuthState::removal(LOGIN_COOKIE, LOGIN_COOKIE_PATH))
+        .add(auth.cookie(SESSION_COOKIE, sid, "/"));
+    no_store((jar, Redirect::to(&pending.return_to)))
+}
+
+/// Logout is local *and* at the IdP. A form POST (top-level navigation), answered
+/// with 303 to the IdP's end-session endpoint. `id_token_hint` is deliberately not
+/// sent — tokens never go into URLs — so `client_id` identifies us instead.
+async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Response {
+    if let Some(origin) = headers.get(header::ORIGIN)
+        && origin.to_str().ok() != Some(auth.config.public_url.as_str())
+    {
+        return (StatusCode::FORBIDDEN, "cross-origin logout refused").into_response();
+    }
+    let jar = auth.jar(&headers);
+    let sid = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let signed_out = sid.as_deref().and_then(|id| {
+        let identity = auth
+            .sessions
+            .find(id)
+            .and_then(|sess| sess.credentials.try_lock().ok().map(|c| c.identity.clone()));
+        auth.sessions.remove(id);
+        identity
+    });
+    if let Some(id) = sid.as_deref() {
+        session_store::delete(auth.db.as_ref(), &session_store::id_hash(id)).await;
+    }
+    if let Some(id) = signed_out {
+        tracing::info!(
+            target: "audit",
+            actor = %id.display_name,
+            sub = %id.sub,
+            method = "POST",
+            path = "/api/auth/logout",
+            "signed out"
+        );
+    }
+    let jar = jar.remove(AuthState::removal(SESSION_COOKIE, "/"));
+    let target = match auth.provider.discovery().await {
+        Ok(d) => d
+            .end_session_endpoint
+            .as_deref()
+            .and_then(|ep| Url::parse(ep).ok())
+            .map(|mut u| {
+                u.query_pairs_mut()
+                    .append_pair("client_id", &auth.config.client_id)
+                    .append_pair(
+                        "post_logout_redirect_uri",
+                        &format!("{}/", auth.config.public_url),
+                    );
+                u.to_string()
+            })
+            .unwrap_or_else(|| "/".into()),
+        Err(e) => {
+            warn!(reason = %e, "signed out locally only: identity provider unreachable");
+            "/".into()
+        }
+    };
+    no_store((jar, Redirect::to(&target)))
+}
+
+/// `GET /api/auth/config`: what a client needs to start a sign-in of its own.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConfig {
+    /// `oidc` (sign-in is required) or `dev` (Nova answers without one).
+    pub mode: &'static str,
+    /// The identity provider's realm address; `null` in `dev` mode.
+    pub issuer: Option<String>,
+    /// The public client a command line signs in with (device flow); `null` when none is set up.
+    pub device_client_id: Option<String>,
+}
+
+/// How to sign in from a command line. Outside sign-in like the rest of `/api/auth/*`: it names
+/// the identity provider and the public client, never a secret.
+#[utoipa::path(
+    get,
+    operation_id = "auth_config",
+    path = "/api/auth/config",
+    tag = "public",
+    description = "How to sign in from a command line: the identity provider's address and the public client for the device flow. It answers without sign-in and carries no secret.",
+    responses(
+        (status = 200, description = "The sign-in mode and, in `oidc` mode, the issuer and the device client", body = AuthConfig),
+    )
+)]
+pub(crate) async fn config(State(auth): State<Arc<AuthState>>) -> Json<AuthConfig> {
+    Json(AuthConfig {
+        mode: "oidc",
+        issuer: Some(auth.config.issuer.clone()),
+        device_client_id: auth.config.device_client_id.clone(),
+    })
+}
+
+/// `/api/auth/*` in `oidc` mode.
+pub fn router<S: Clone + Send + Sync + 'static>(auth: Arc<AuthState>) -> Router<S> {
+    Router::new()
+        .route("/login", get(login))
+        .route("/callback", get(callback))
+        .route("/logout", post(logout))
+        .route("/config", get(config))
+        .with_state(auth)
+}
+
+/// `/api/auth/*` in `dev` mode: there is nobody to sign in, so both just go home.
+pub fn dev_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    async fn dev_login(Query(q): Query<LoginParams>) -> Redirect {
+        Redirect::to(&safe_return_to(q.return_to.as_deref()))
+    }
+    Router::new()
+        .route("/login", get(dev_login))
+        .route("/logout", post(|| async { Redirect::to("/") }))
+        .route(
+            "/config",
+            get(|| async {
+                Json(AuthConfig {
+                    mode: "dev",
+                    issuer: None,
+                    device_client_id: None,
+                })
+            }),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// The `Authorization` header Nova should send upstream for this caller, if any.
+///
+/// One place, one rule: forward only when the platform asked for it *and* somebody is
+/// signed in *and* holds a token. In `dev` mode there is no token to forward, which is
+/// the honest answer — the catalog then sees Nova's service connection, as before.
+pub fn upstream_authorization(forward: bool, caller: Option<&Principal>) -> Option<String> {
+    if !forward {
+        return None;
+    }
+    let token = caller?.access_token.as_ref()?;
+    Some(format!("Bearer {}", token.expose()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn principal_with_token(token: Option<&str>) -> Principal {
+        Principal {
+            identity: Identity {
+                sub: "s".into(),
+                display_name: "u".into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: false,
+            },
+            via: "session",
+            access_token: token.map(Secret::new),
+        }
+    }
+
+    /// The rule in one place: forward only when asked, only for somebody signed in, and
+    /// never a token that is not there. `dev` mode has no token, which is the honest answer.
+    #[test]
+    fn upstream_authorization_is_gated() {
+        let signed_in = principal_with_token(Some("tok"));
+        assert_eq!(
+            upstream_authorization(true, Some(&signed_in)).as_deref(),
+            Some("Bearer tok")
+        );
+        // Off by default: the platform has to ask.
+        assert_eq!(upstream_authorization(false, Some(&signed_in)), None);
+        // Nobody signed in (dev mode, or an anonymous call).
+        assert_eq!(upstream_authorization(true, None), None);
+        // Signed in without a token (a dev session).
+        let no_token = principal_with_token(None);
+        assert_eq!(upstream_authorization(true, Some(&no_token)), None);
+    }
+
+    #[test]
+    fn forwarded_tokens_are_redacted_in_debug_output() {
+        let p = principal_with_token(Some("super-secret-token"));
+        let rendered = format!("{p:?}");
+        assert!(!rendered.contains("super-secret-token"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+    }
+
+    /// The admin middleware must read the extension type `require_auth` actually inserts.
+    /// It shipped reading `Identity` instead of `Principal`, which refused *everyone*
+    /// including administrators — a bug no other test could see, because the mismatch is
+    /// invisible until a request flows through both layers.
+    #[tokio::test]
+    async fn admin_layer_allows_admins_only() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        fn ident(admin: bool) -> Identity {
+            Identity {
+                sub: "s".into(),
+                display_name: "u".into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: admin,
+            }
+        }
+
+        async fn status_for(identity: Option<Identity>) -> StatusCode {
+            let app = Router::new()
+                .route("/x", get(|| async { StatusCode::OK }))
+                .layer(axum::middleware::from_fn(require_admin))
+                // Applied last = outermost, so the extension exists before the check runs —
+                // the same order `main` builds.
+                .layer(axum::middleware::from_fn(
+                    move |mut req: Request<Body>, next: Next| {
+                        let identity = identity.clone();
+                        async move {
+                            if let Some(identity) = identity {
+                                req.extensions_mut().insert(Principal {
+                                    identity,
+                                    via: "session",
+                                    access_token: None,
+                                });
+                            }
+                            next.run(req).await
+                        }
+                    },
+                ));
+            app.oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+
+        assert_eq!(status_for(Some(ident(true))).await, StatusCode::OK);
+        assert_eq!(status_for(Some(ident(false))).await, StatusCode::FORBIDDEN);
+        assert_eq!(status_for(None).await, StatusCode::FORBIDDEN);
+    }
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    // Test-only RSA key (generated for these tests, never used anywhere else).
+    const TEST_KEY_DER: &[u8] = include_bytes!("testdata/test-rsa-pkcs1.der");
+    const TEST_KEY_N: &str = include_str!("testdata/test-rsa-n.txt");
+    const ISS: &str = "https://login.microsoftonline.com/tid/v2.0";
+    const CLIENT: &str = "nova";
+
+    fn now() -> u64 {
+        jsonwebtoken::get_current_timestamp()
+    }
+
+    fn jwks() -> Vec<Jwk> {
+        vec![
+            serde_json::from_value(json!({
+                "kty": "RSA", "use": "sig", "kid": "k1",
+                "n": TEST_KEY_N.trim(), "e": "AQAB",
+                // Entra adds fields like these; they must not break parsing.
+                "x5t": "ignored", "issuer": ISS
+            }))
+            .unwrap(),
+        ]
+    }
+
+    fn sign(claims: &Value, kid: Option<&str>) -> String {
+        let mut h = Header::new(Algorithm::RS256);
+        h.kid = kid.map(str::to_string);
+        encode(&h, claims, &EncodingKey::from_rsa_der(TEST_KEY_DER)).unwrap()
+    }
+
+    fn base_claims() -> Value {
+        json!({ "iss": ISS, "aud": CLIENT, "sub": "u-123", "exp": now() + 300, "nonce": "n0" })
+    }
+
+    fn aud() -> Vec<String> {
+        vec![CLIENT.to_string()]
+    }
+
+    /// An ID-token expectation: `nonce` is `Some` for a code exchange, `None` for a
+    /// refresh response (which carries no nonce, and `id_token=true` says an ID token is
+    /// still what we expect).
+    fn expect_id_token<'a>(aud: &'a [String], nonce: Option<&'a str>) -> Expect<'a> {
+        Expect {
+            issuer: ISS,
+            audiences: aud,
+            client_id: CLIENT,
+            id_token: true,
+            nonce,
+        }
+    }
+
+    /// An access-token expectation: `typ: ID` is refused.
+    fn expect_access<'a>(aud: &'a [String]) -> Expect<'a> {
+        Expect {
+            issuer: ISS,
+            audiences: aud,
+            client_id: CLIENT,
+            id_token: false,
+            nonce: None,
+        }
+    }
+
+    // --- JWT validation --------------------------------------------------
+
+    #[test]
+    fn valid_id_token_passes() {
+        let a = aud();
+        let c = verify_jwt(
+            &sign(&base_claims(), Some("k1")),
+            &jwks(),
+            &expect_id_token(&a, Some("n0")),
+        )
+        .unwrap();
+        assert_eq!(c["sub"], "u-123");
+    }
+
+    #[test]
+    fn rejects_wrong_iss_aud_exp_nonce_kid() {
+        let a = aud();
+        let keys = jwks();
+        let check = |claims: Value, kid: Option<&str>, nonce: Option<&str>| {
+            verify_jwt(&sign(&claims, kid), &keys, &expect_id_token(&a, nonce))
+        };
+        let mut c = base_claims();
+        c["iss"] = json!("https://evil.example/v2.0");
+        assert!(matches!(
+            check(c, Some("k1"), Some("n0")),
+            Err(AuthError::InvalidToken("wrong issuer"))
+        ));
+        let mut c = base_claims();
+        c["aud"] = json!("someone-else");
+        assert!(matches!(
+            check(c, Some("k1"), Some("n0")),
+            Err(AuthError::InvalidToken("wrong audience"))
+        ));
+        let mut c = base_claims();
+        c["exp"] = json!(now() - 3600);
+        assert!(matches!(
+            check(c, Some("k1"), Some("n0")),
+            Err(AuthError::InvalidToken("expired"))
+        ));
+        assert!(matches!(
+            check(base_claims(), Some("k1"), Some("other")),
+            Err(AuthError::InvalidToken("nonce mismatch"))
+        ));
+        assert!(matches!(
+            check(base_claims(), Some("k9"), Some("n0")),
+            Err(AuthError::UnknownKey)
+        ));
+        let mut c = base_claims();
+        c.as_object_mut().unwrap().remove("sub");
+        assert!(check(c, Some("k1"), Some("n0")).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_signature_and_hmac() {
+        let a = aud();
+        let token = sign(&base_claims(), Some("k1"));
+        let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+        let mut sig = URL_SAFE_NO_PAD.decode(&parts[2]).unwrap();
+        sig[0] ^= 0xff;
+        parts[2] = URL_SAFE_NO_PAD.encode(sig);
+        assert!(verify_jwt(&parts.join("."), &jwks(), &expect_id_token(&a, Some("n0"))).is_err());
+
+        // HS256 signed with the public modulus as a "secret": the classic key-confusion attack.
+        let mut h = Header::new(Algorithm::HS256);
+        h.kid = Some("k1".into());
+        let forged = encode(
+            &h,
+            &base_claims(),
+            &EncodingKey::from_secret(TEST_KEY_N.as_bytes()),
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_jwt(&forged, &jwks(), &expect_id_token(&a, Some("n0"))),
+            Err(AuthError::InvalidToken("algorithm not allowed"))
+        ));
+    }
+
+    #[test]
+    fn id_token_with_foreign_azp_rejected_and_id_token_not_a_bearer() {
+        let a = aud();
+        let mut c = base_claims();
+        c["azp"] = json!("other-client");
+        assert!(
+            verify_jwt(
+                &sign(&c, Some("k1")),
+                &jwks(),
+                &expect_id_token(&a, Some("n0"))
+            )
+            .is_err()
+        );
+        let mut c = base_claims();
+        c["typ"] = json!("ID");
+        assert!(verify_jwt(&sign(&c, Some("k1")), &jwks(), &expect_access(&a)).is_err());
+
+        // A refreshed ID token has no nonce, and is still an ID token: `typ: ID` passes
+        // (this is what `Provider::verify_id_token(_, _, None)` relies on).
+        let mut c = base_claims();
+        c["typ"] = json!("ID");
+        c.as_object_mut().unwrap().remove("nonce");
+        assert!(verify_jwt(&sign(&c, Some("k1")), &jwks(), &expect_id_token(&a, None)).is_ok());
+    }
+
+    #[test]
+    fn kidless_token_uses_single_key() {
+        let a = aud();
+        assert!(
+            verify_jwt(
+                &sign(&base_claims(), None),
+                &jwks(),
+                &expect_id_token(&a, Some("n0"))
+            )
+            .is_ok()
+        );
+    }
+
+    // --- claims ------------------------------------------------------------
+
+    #[test]
+    fn keycloak_groups_with_full_path() {
+        let cfg = ClaimConfig::default();
+        let c = json!({ "sub": "kc-1", "preferred_username": "admin",
+                        "email": "admin@example.com", "groups": ["/stardelt-admins", "/analysts"] });
+        let id = identity_from_claims(&c, &cfg).unwrap();
+        assert_eq!(id.display_name, "admin");
+        assert!(id.is_admin);
+        assert!(!id.groups_overage);
+        assert_eq!(id.groups.len(), 2);
+    }
+
+    #[test]
+    fn entra_app_roles_grant_admin_without_groups() {
+        let cfg = ClaimConfig {
+            admin_role: Some("Nova.Admin".into()),
+            ..ClaimConfig::default()
+        };
+        let c = json!({ "sub": "e-1", "upn": "ada@contoso.com", "name": "Ada", "roles": ["Nova.Admin"] });
+        let id = identity_from_claims(&c, &cfg).unwrap();
+        assert!(id.is_admin);
+        assert_eq!(id.display_name, "ada@contoso.com");
+        assert_eq!(id.roles, vec!["Nova.Admin"]);
+    }
+
+    #[test]
+    fn entra_group_object_id_as_admin_group() {
+        let gid = "8f1c2b7e-0000-4000-8000-000000000001";
+        let cfg = ClaimConfig {
+            admin_group: Some(gid.into()),
+            admin_role: Some("unused".into()),
+            ..ClaimConfig::default()
+        };
+        let c = json!({ "sub": "e-2", "groups": [gid] });
+        assert!(identity_from_claims(&c, &cfg).unwrap().is_admin);
+    }
+
+    #[test]
+    fn entra_overage_is_no_groups_not_admin() {
+        let cfg = ClaimConfig::default();
+        let c = json!({
+            "sub": "e-3", "preferred_username": "bob@contoso.com",
+            "groups": ["stardelt-admins"], // must be ignored once overage is flagged
+            "_claim_names": { "groups": "src1" },
+            "_claim_sources": { "src1": { "endpoint": "https://graph.microsoft.com/..." } }
+        });
+        let id = identity_from_claims(&c, &cfg).unwrap();
+        assert!(id.groups_overage);
+        assert!(id.groups.is_empty());
+        assert!(!id.is_admin);
+
+        let c = json!({ "sub": "e-4", "hasgroups": true });
+        assert!(identity_from_claims(&c, &cfg).unwrap().groups_overage);
+        // Roles still work during an overage.
+        let c = json!({ "sub": "e-5", "hasgroups": true, "roles": ["stardelt-admins"] });
+        assert!(identity_from_claims(&c, &cfg).unwrap().is_admin);
+    }
+
+    #[test]
+    fn display_fallbacks_and_sub_required() {
+        let cfg = ClaimConfig::default();
+        let id = identity_from_claims(&json!({ "sub": "s", "email": "e@x" }), &cfg).unwrap();
+        assert_eq!(id.display_name, "e@x");
+        let id = identity_from_claims(&json!({ "sub": "s", "name": "N" }), &cfg).unwrap();
+        assert_eq!(id.display_name, "N");
+        let id = identity_from_claims(&json!({ "sub": "s" }), &cfg).unwrap();
+        assert_eq!(id.display_name, "s");
+        assert!(!id.is_admin);
+        assert!(identity_from_claims(&json!({ "email": "e@x" }), &cfg).is_err());
+    }
+
+    #[test]
+    fn custom_group_claim() {
+        let cfg = ClaimConfig {
+            group_claim: "nova_groups".into(),
+            ..ClaimConfig::default()
+        };
+        let c = json!({ "sub": "s", "nova_groups": "stardelt-admins", "groups": [] });
+        assert!(identity_from_claims(&c, &cfg).unwrap().is_admin);
+    }
+
+    #[test]
+    fn group_to_admin_mapping() {
+        let cfg = ClaimConfig::default();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(is_admin(&[], &s(&["stardelt-admins"]), &cfg));
+        assert!(is_admin(&[], &s(&["/stardelt-admins"]), &cfg));
+        assert!(is_admin(&s(&["stardelt-admins"]), &[], &cfg));
+        assert!(!is_admin(
+            &[],
+            &s(&["stardelt-admins-x", "/a/stardelt-admins"]),
+            &cfg
+        ));
+        assert!(!is_admin(&[], &s(&["STARDELT-ADMINS"]), &cfg));
+        assert!(!is_admin(&[], &[], &cfg));
+    }
+
+    // --- return_to / PKCE ----------------------------------------------------
+
+    #[test]
+    fn return_to_only_same_origin_paths() {
+        for ok in ["/", "/catalog", "/query?sql=select%201#x", "/apps/trino"] {
+            assert_eq!(safe_return_to(Some(ok)), ok);
+        }
+        for bad in [
+            "https://evil.example/",
+            "//evil.example",
+            "/\\evil.example",
+            "\\\\evil",
+            "evil",
+            "javascript:alert(1)",
+            "/api/auth/login",
+            "/a\nb",
+            "",
+        ] {
+            assert_eq!(safe_return_to(Some(bad)), "/", "{bad:?}");
+        }
+        assert_eq!(safe_return_to(None), "/");
+    }
+
+    #[test]
+    fn pkce_rfc7636_vector() {
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    // --- config ----------------------------------------------------------------
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| m.get(k).cloned()
+    }
+
+    const FULL: &[(&str, &str)] = &[
+        ("NOVA_AUTH_MODE", "oidc"),
+        ("NOVA_OIDC_ISSUER", ISS),
+        ("NOVA_OIDC_CLIENT_ID", CLIENT),
+        ("NOVA_OIDC_CLIENT_SECRET", "s3cret"),
+        ("NOVA_SESSION_SECRET", "0123456789abcdef0123456789abcdef!"),
+        ("NOVA_PUBLIC_URL", "https://nova.example.com/"),
+    ];
+
+    #[test]
+    fn auth_config_device_client_is_optional() {
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut pairs = FULL.to_vec();
+            pairs.extend_from_slice(extra);
+            let Ok(AuthMode::Oidc(c)) = AuthMode::from_lookup(env(&pairs)) else {
+                panic!()
+            };
+            c.device_client_id
+        };
+        assert_eq!(with(&[]), None);
+        assert_eq!(with(&[("NOVA_OIDC_DEVICE_CLIENT_ID", "  ")]), None);
+        assert_eq!(
+            with(&[("NOVA_OIDC_DEVICE_CLIENT_ID", " stardelt-dev ")]).as_deref(),
+            Some("stardelt-dev")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_names_the_issuer_without_sign_in() {
+        let app = app(test_auth());
+        let (status, body) = call(&app, "/api/auth/config", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({ "mode": "oidc", "issuer": ISS, "deviceClientId": null })
+        );
+        assert!(!body.contains("s3cret"), "no secret in the answer: {body}");
+    }
+
+    #[tokio::test]
+    async fn auth_config_in_dev_mode_names_no_issuer() {
+        let app = Router::new().nest("/api", Router::new().nest("/auth", dev_router()));
+        let (status, body) = call(&app, "/api/auth/config", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({ "mode": "dev", "issuer": null, "deviceClientId": null })
+        );
+    }
+
+    #[test]
+    fn config_defaults_and_fail_closed() {
+        assert!(matches!(AuthMode::from_lookup(env(&[])), Ok(AuthMode::Dev)));
+        assert!(matches!(
+            AuthMode::from_lookup(env(&[("NOVA_AUTH_MODE", "dev")])),
+            Ok(AuthMode::Dev)
+        ));
+        assert!(AuthMode::from_lookup(env(&[("NOVA_AUTH_MODE", "off")])).is_err());
+
+        let Ok(AuthMode::Oidc(c)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        assert_eq!(c.public_url, "https://nova.example.com");
+        assert_eq!(
+            c.redirect_uri(),
+            "https://nova.example.com/api/auth/callback"
+        );
+        assert!(c.secure_cookies());
+        assert_eq!(c.scopes, "openid profile email");
+        assert_eq!(c.audiences, vec![CLIENT]);
+        assert_eq!(c.claims.group_claim, "groups");
+        assert_eq!(c.claims.admin_role.as_deref(), Some("stardelt-admins"));
+        assert_eq!(c.claims.admin_group.as_deref(), Some("stardelt-admins"));
+        assert!(!format!("{c:?}").contains("s3cret"));
+
+        for missing in [
+            "NOVA_OIDC_ISSUER",
+            "NOVA_OIDC_CLIENT_ID",
+            "NOVA_OIDC_CLIENT_SECRET",
+            "NOVA_SESSION_SECRET",
+            "NOVA_PUBLIC_URL",
+        ] {
+            let v: Vec<_> = FULL
+                .iter()
+                .copied()
+                .filter(|(k, _)| *k != missing)
+                .collect();
+            let e = AuthMode::from_lookup(env(&v)).unwrap_err();
+            assert!(e.contains(missing), "{e}");
+        }
+        let with = |k: &'static str, val: &'static str| {
+            let mut v: Vec<_> = FULL.iter().copied().filter(|(x, _)| *x != k).collect();
+            v.push((k, val));
+            AuthMode::from_lookup(env(&v))
+        };
+        assert!(with("NOVA_SESSION_SECRET", "short").is_err());
+        assert!(with("NOVA_OIDC_ISSUER", "http://id.example.com/realms/stardelt").is_err());
+        assert!(with("NOVA_OIDC_ISSUER", "http://localhost:8081/realms/stardelt").is_ok());
+        assert!(with("NOVA_OIDC_SCOPES", "profile email").is_err());
+        assert!(with("NOVA_PUBLIC_URL", "https://nova.example.com/sub").is_err());
+    }
+
+    /// `NOVA_OIDC_ADMIN_GROUP` and `NOVA_OIDC_ADMIN_ROLE` are on by default and are
+    /// turned off by an explicitly empty value — the configuration that makes `/api/me`
+    /// report `admin_group: null` (#213). Unset still means the default.
+    #[test]
+    fn an_empty_admin_setting_turns_the_mechanism_off() {
+        let claims_for = |pairs: &[(&'static str, &'static str)]| {
+            let mut v: Vec<_> = FULL.to_vec();
+            v.extend_from_slice(pairs);
+            let Ok(AuthMode::Oidc(c)) = AuthMode::from_lookup(env(&v)) else {
+                panic!()
+            };
+            c.claims
+        };
+
+        let claims = claims_for(&[("NOVA_OIDC_ADMIN_GROUP", ""), ("NOVA_OIDC_ADMIN_ROLE", "")]);
+        assert_eq!(claims.admin_group, None);
+        assert_eq!(claims.admin_role, None);
+
+        let claims = claims_for(&[("NOVA_OIDC_ADMIN_ROLE", "")]);
+        assert_eq!(claims.admin_group.as_deref(), Some("stardelt-admins"));
+        assert_eq!(claims.admin_role, None);
+
+        // The role's default is the group value, so turning the group off turns both off
+        // unless a role is named.
+        let claims = claims_for(&[("NOVA_OIDC_ADMIN_GROUP", "")]);
+        assert_eq!(claims.admin_group, None);
+        assert_eq!(claims.admin_role, None);
+
+        let claims = claims_for(&[
+            ("NOVA_OIDC_ADMIN_GROUP", ""),
+            ("NOVA_OIDC_ADMIN_ROLE", "Nova.Admin"),
+        ]);
+        assert_eq!(claims.admin_group, None);
+        assert_eq!(claims.admin_role.as_deref(), Some("Nova.Admin"));
+    }
+
+    #[test]
+    fn discovery_issuer_must_match() {
+        let d = Discovery {
+            issuer: ISS.into(),
+            authorization_endpoint: "https://login.microsoftonline.com/tid/oauth2/v2.0/authorize"
+                .into(),
+            token_endpoint: "https://login.microsoftonline.com/tid/oauth2/v2.0/token".into(),
+            jwks_uri: "https://login.microsoftonline.com/tid/discovery/v2.0/keys".into(),
+            end_session_endpoint: None,
+            token_endpoint_auth_methods_supported: Some(vec!["client_secret_post".into()]),
+        };
+        assert!(d.validate(ISS).is_ok());
+        assert!(d.validate(&format!("{ISS}/")).is_ok());
+        assert!(
+            d.validate("https://login.microsoftonline.com/other/v2.0")
+                .is_err()
+        );
+        assert!(d.use_secret_post());
+        let d = Discovery {
+            token_endpoint: "http://plain.example/token".into(),
+            ..d
+        };
+        assert!(d.validate(ISS).is_err());
+    }
+
+    // --- token refresh -------------------------------------------------------
+
+    /// An in-process OIDC provider for the refresh path: discovery, JWKS, and a token
+    /// endpoint that answers `grant_type=refresh_token` the way a real one does — it
+    /// checks the client credentials, rotates the refresh token and carries the group
+    /// claim. Counts what it was asked for.
+    struct FakeIdp {
+        base: String,
+        refreshes: AtomicUsize,
+        /// Status a refresh answers with (`200` refreshes normally).
+        refresh_status: AtomicU16,
+        /// Latency before answering a refresh, so two concurrent requests really race.
+        refresh_delay_ms: AtomicU64,
+        /// `expires_in` in its responses.
+        expires_in: AtomicU64,
+        /// Whether a refresh response carries an ID token.
+        id_token: AtomicBool,
+        /// Answer with tokens Nova cannot verify (neither an ID token nor a signed
+        /// access token).
+        unverifiable: AtomicBool,
+        /// `groups` in the tokens it issues.
+        groups: Mutex<Vec<String>>,
+    }
+
+    impl FakeIdp {
+        async fn start() -> Arc<Self> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let idp = Arc::new(Self {
+                base: format!("http://{}", listener.local_addr().unwrap()),
+                refreshes: AtomicUsize::new(0),
+                refresh_status: AtomicU16::new(200),
+                refresh_delay_ms: AtomicU64::new(0),
+                expires_in: AtomicU64::new(300),
+                id_token: AtomicBool::new(true),
+                unverifiable: AtomicBool::new(false),
+                groups: Mutex::new(vec!["stardelt-admins".to_string()]),
+            });
+            let router = Router::new()
+                .route("/.well-known/openid-configuration", get(disc))
+                .route("/jwks", get(|| async { Json(json!({ "keys": jwks() })) }))
+                .route("/token", post(token))
+                .with_state(idp.clone());
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            idp
+        }
+
+        fn refusals(&self) -> usize {
+            self.refreshes.load(Ordering::SeqCst)
+        }
+
+        fn set_groups(&self, groups: &[&str]) {
+            *self.groups.lock().unwrap() = groups.iter().map(|g| g.to_string()).collect();
+        }
+
+        /// An ID token as Keycloak signs one: `typ: ID`, aud = the client, groups.
+        fn id_token(&self, sub: &str) -> String {
+            sign(
+                &json!({ "iss": &self.base, "aud": CLIENT, "sub": sub, "typ": "ID",
+                         "exp": now() + 300, "groups": self.groups.lock().unwrap().clone() }),
+                Some("k1"),
+            )
+        }
+
+        /// An access token as Keycloak signs one: `typ: Bearer`, the audience mapper's
+        /// `aud` list would add more, groups included.
+        fn access_token(&self, sub: &str) -> String {
+            sign(
+                &json!({ "iss": &self.base, "aud": CLIENT, "sub": sub, "typ": "Bearer",
+                         "exp": now() + 300, "groups": self.groups.lock().unwrap().clone() }),
+                Some("k1"),
+            )
+        }
+    }
+
+    async fn disc(State(idp): State<Arc<FakeIdp>>) -> Json<Value> {
+        let b = &idp.base;
+        Json(json!({
+            "issuer": b,
+            "authorization_endpoint": format!("{b}/authorize"),
+            "token_endpoint": format!("{b}/token"),
+            "jwks_uri": format!("{b}/jwks"),
+            "end_session_endpoint": format!("{b}/logout"),
+            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+        }))
+    }
+
+    async fn token(
+        State(idp): State<Arc<FakeIdp>>,
+        axum::Form(f): axum::Form<HashMap<String, String>>,
+    ) -> Response {
+        // The client authenticates the same way it does for the code exchange.
+        let authed = f.get("client_id").map(String::as_str) == Some(CLIENT)
+            && f.get("client_secret").map(String::as_str) == Some("s3cret");
+        match (f.get("grant_type").map(String::as_str), authed) {
+            (Some("refresh_token"), true) => {}
+            (Some("refresh_token"), false) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "invalid_client"})),
+                )
+                    .into_response();
+            }
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "unsupported_grant_type"})),
+                )
+                    .into_response();
+            }
+        }
+        idp.refreshes.fetch_add(1, Ordering::SeqCst);
+        let delay = idp.refresh_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        let status = StatusCode::from_u16(idp.refresh_status.load(Ordering::SeqCst)).unwrap();
+        if !status.is_success() {
+            return (status, Json(json!({"error": "invalid_grant"}))).into_response();
+        }
+        let mut body = json!({
+            "token_type": "Bearer",
+            "expires_in": idp.expires_in.load(Ordering::SeqCst),
+            // Rotated, as Keycloak does: a second spend of "r1" would be refused.
+            "refresh_token": "r2",
+        });
+        if idp.unverifiable.load(Ordering::SeqCst) {
+            body["access_token"] = json!("opaque");
+        } else {
+            body["access_token"] = json!(idp.access_token("kc-42"));
+            if idp.id_token.load(Ordering::SeqCst) {
+                body["id_token"] = json!(idp.id_token("kc-42"));
+            }
+        }
+        (StatusCode::OK, Json(body)).into_response()
+    }
+
+    /// Auth state as `main` builds it in `oidc` mode, pointed at the fake provider.
+    fn auth_for_idp_with_pool(idp: &FakeIdp, db: Option<sqlx::PgPool>) -> Arc<AuthState> {
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.issuer = idp.base.clone();
+        AuthState::new(*cfg, reqwest::Client::new(), db)
+    }
+
+    fn auth_for_idp(idp: &FakeIdp) -> Arc<AuthState> {
+        auth_for_idp_with_pool(idp, None)
+    }
+
+    /// The bug this fixes: the stored access token runs out mid-session; the next request
+    /// refreshes it, and the identity comes from the refreshed claims.
+    #[tokio::test]
+    async fn refreshes_before_use_and_rederives_the_identity() {
+        let idp = FakeIdp::start().await;
+        let auth = auth_for_idp(&idp);
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42", "preferred_username": "analyst",
+                    "groups": ["stardelt-admins"] }),
+            "the-old-access-token",
+            Some("r1"),
+            Duration::ZERO,
+        );
+        // Taken out of the admin group since that token was issued.
+        idp.set_groups(&[]);
+        let session_expires = auth.sessions.find(&sid).unwrap().expires;
+        let headers = cookie_map(&auth, &sid);
+
+        let (p, _) = auth.authenticate(&headers).await.unwrap();
+        assert_eq!(p.via, "session");
+        assert_eq!(p.identity.sub, "kc-42");
+        assert!(p.identity.groups.is_empty());
+        assert!(!p.identity.is_admin, "the demotion must take effect");
+        assert_ne!(
+            p.access_token.as_ref().unwrap().expose(),
+            "the-old-access-token"
+        );
+
+        // One refresh, its rotated refresh token stored, its lifetime respected.
+        let new_token = p.access_token.unwrap().expose().to_string();
+        assert_eq!(idp.refusals(), 1);
+        {
+            let s = auth.sessions.find(&sid).unwrap();
+            let creds = s.credentials.lock().await;
+            assert_eq!(creds.tokens.refresh_token.as_ref().unwrap().expose(), "r2");
+            assert_eq!(creds.tokens.access_token.expose(), new_token);
+            assert_eq!(creds.lifetime, Duration::from_secs(300));
+        }
+        // A request with a fresh token spends nothing.
+        let (again, _) = auth.authenticate(&headers).await.unwrap();
+        assert_eq!(again.access_token.unwrap().expose(), new_token);
+        assert_eq!(idp.refusals(), 1);
+        // A refresh does not extend the session: the 8 h cap is the 8 h cap.
+        assert_eq!(auth.sessions.find(&sid).unwrap().expires, session_expires);
+    }
+
+    /// Concurrent requests on one expiring session spend the refresh token **once**:
+    /// Keycloak rotates it, so spending it twice would invalidate the session. Real
+    /// tasks on a multi-threaded runtime, which is how requests actually arrive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_requests_spend_the_refresh_token_once() {
+        let idp = FakeIdp::start().await;
+        idp.refresh_delay_ms.store(150, Ordering::SeqCst);
+        let auth = auth_for_idp(&idp);
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "the-old-access-token",
+            Some("r1"),
+            Duration::ZERO,
+        );
+        let headers = cookie_map(&auth, &sid);
+
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let auth = auth.clone();
+            let headers = headers.clone();
+            tasks.push(tokio::spawn(async move {
+                auth.authenticate(&headers)
+                    .await
+                    .unwrap()
+                    .0
+                    .access_token
+                    .unwrap()
+                    .expose()
+                    .to_string()
+            }));
+        }
+        let mut tokens = Vec::new();
+        for task in tasks {
+            tokens.push(task.await.unwrap());
+        }
+        assert_eq!(idp.refusals(), 1, "the refresh token must be spent once");
+        assert!(tokens.iter().all(|t| *t == tokens[0]), "{tokens:?}");
+        assert_ne!(tokens[0], "the-old-access-token");
+    }
+
+    /// A refused refresh (revoked session, spent refresh token) drops the session and
+    /// answers exactly like any other signed-out request, so the browser signs in again
+    /// instead of looping on a 500.
+    #[tokio::test]
+    async fn refresh_failure_drops_the_session_with_the_sign_in_401() {
+        let idp = FakeIdp::start().await;
+        idp.refresh_status
+            .store(StatusCode::BAD_REQUEST.as_u16(), Ordering::SeqCst);
+        let auth = auth_for_idp(&idp);
+        let app = app(auth.clone());
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "the-old-access-token",
+            Some("r1"),
+            Duration::ZERO,
+        );
+        let headers = cookie_header(&auth, &sid);
+
+        let (status, body) = call(&app, "/api/me", &headers).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({
+                "detail": "not signed in",
+                "error": "unauthenticated",
+                "login": "/api/auth/login",
+            })
+        );
+        assert_eq!(idp.refusals(), 1);
+        // The session is gone, so the next request does not ask the IdP again.
+        assert!(auth.sessions.find(&sid).is_none());
+        assert_eq!(
+            call(&app, "/api/me", &headers).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(idp.refusals(), 1);
+    }
+
+    /// A session that never got a refresh token cannot outlive its access token: it is
+    /// signed out, and the IdP is not asked for something it never issued.
+    #[tokio::test]
+    async fn a_session_without_a_refresh_token_is_signed_out() {
+        let idp = FakeIdp::start().await;
+        let auth = auth_for_idp(&idp);
+        let app = app(auth.clone());
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "the-old-access-token",
+            None,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            call(&app, "/api/me", &cookie_header(&auth, &sid)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(idp.refusals(), 0);
+        assert!(auth.sessions.find(&sid).is_none());
+    }
+
+    #[tokio::test]
+    async fn me_in_dev_mode_reports_the_stage() {
+        let app = Router::new().route("/api/me", get(crate::me)).with_state(
+            crate::router_tests::test_state_with_stage(Some("prod-eu".into()), "prod"),
+        );
+        let (status, body) = call(&app, "/api/me", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["stage_kind"], "prod");
+        assert_eq!(body["stage_name"], "prod-eu");
+    }
+
+    /// An IdP that sends no ID token on a refresh still refreshes the identity: the
+    /// access token carries the same claims and is verified the same way.
+    #[tokio::test]
+    async fn refreshed_identity_falls_back_to_the_access_token() {
+        let idp = FakeIdp::start().await;
+        idp.id_token.store(false, Ordering::SeqCst);
+        let auth = auth_for_idp(&idp);
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42", "groups": ["stardelt-admins"] }),
+            "the-old-access-token",
+            Some("r1"),
+            Duration::ZERO,
+        );
+        idp.set_groups(&[]);
+
+        let (p, _) = auth.authenticate(&cookie_map(&auth, &sid)).await.unwrap();
+        assert_eq!(p.identity.sub, "kc-42");
+        assert!(!p.identity.is_admin);
+        assert_eq!(idp.refusals(), 1);
+    }
+
+    /// A refresh response Nova cannot verify is a failed refresh, not a reason to keep
+    /// serving the old identity.
+    #[tokio::test]
+    async fn an_unverifiable_refresh_response_fails_closed() {
+        let idp = FakeIdp::start().await;
+        idp.unverifiable.store(true, Ordering::SeqCst);
+        let auth = auth_for_idp(&idp);
+        let app = app(auth.clone());
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "the-old-access-token",
+            Some("r1"),
+            Duration::ZERO,
+        );
+        let (status, _) = call(&app, "/api/me", &cookie_header(&auth, &sid)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(auth.sessions.find(&sid).is_none());
+    }
+
+    /// The number the IdP reports is what schedules the next refresh — not a constant.
+    #[tokio::test]
+    async fn the_reported_lifetime_schedules_the_next_refresh() {
+        let idp = FakeIdp::start().await;
+        idp.expires_in.store(45, Ordering::SeqCst);
+        let auth = auth_for_idp(&idp);
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "the-old-access-token",
+            Some("r1"),
+            Duration::ZERO,
+        );
+        auth.authenticate(&cookie_map(&auth, &sid)).await.unwrap();
+
+        let s = auth.sessions.find(&sid).unwrap();
+        let creds = s.credentials.lock().await;
+        assert_eq!(creds.lifetime, Duration::from_secs(45));
+        let remaining = creds.expires_at.saturating_duration_since(Instant::now());
+        assert!(
+            remaining > Duration::from_secs(40) && remaining <= Duration::from_secs(45),
+            "{remaining:?}"
+        );
+    }
+
+    /// Where the lifetime comes from, and how the refresh window is sized: a minute, but
+    /// never more than half the token's life, so short-lived tokens are not refreshed on
+    /// every request.
+    #[test]
+    fn the_refresh_window_sizes_itself_to_the_token() {
+        let ttl = |expires_in: Option<Value>, access_token: &str| {
+            access_token_lifetime(&TokenResponse {
+                access_token: access_token.to_string(),
+                id_token: None,
+                refresh_token: None,
+                expires_in,
+            })
+        };
+        assert_eq!(ttl(Some(json!(300)), "opaque"), Duration::from_secs(300));
+        // RFC 6749 says a number; a string happens in the wild.
+        assert_eq!(ttl(Some(json!("120")), "opaque"), Duration::from_secs(120));
+        // No `expires_in`: the access token's own `exp` is used. The clock is read once to build
+        // the token and again to measure it, and signing takes a few milliseconds in between: when
+        // a second ticks over meanwhile, the answer is 89, which is the same answer.
+        let from_exp = ttl(None, &sign(&json!({ "exp": now() + 90 }), Some("k1")));
+        assert!(
+            (Duration::from_secs(89)..=Duration::from_secs(90)).contains(&from_exp),
+            "{from_exp:?}"
+        );
+        // Neither: a conservative default, not a refresh per request.
+        assert_eq!(ttl(Some(json!(null)), "opaque"), DEFAULT_ACCESS_TTL);
+        assert_eq!(ttl(None, "opaque"), DEFAULT_ACCESS_TTL);
+
+        fn creds(lifetime: Duration, remaining: Duration) -> Credentials {
+            let mut c = Credentials::new(
+                identity_from_claims(&json!({ "sub": "s" }), &ClaimConfig::default()).unwrap(),
+                TokenSet {
+                    access_token: Secret::new("a"),
+                    id_token: None,
+                    refresh_token: None,
+                },
+                lifetime,
+            );
+            c.expires_at = Instant::now() + remaining;
+            c
+        }
+        // A 5-minute token: refreshed with a minute left.
+        assert_eq!(
+            creds(Duration::from_secs(300), Duration::from_secs(300)).refresh_window(),
+            Duration::from_secs(60)
+        );
+        assert!(!creds(Duration::from_secs(300), Duration::from_secs(61)).needs_refresh());
+        assert!(creds(Duration::from_secs(300), Duration::from_secs(59)).needs_refresh());
+        assert!(creds(Duration::from_secs(300), Duration::ZERO).needs_refresh());
+        // A 60-second token (the realm setting used to verify this by hand): refreshed
+        // half-way through, not on every request.
+        assert_eq!(
+            creds(Duration::from_secs(60), Duration::from_secs(60)).refresh_window(),
+            Duration::from_secs(30)
+        );
+        assert!(!creds(Duration::from_secs(60), Duration::from_secs(31)).needs_refresh());
+        assert!(creds(Duration::from_secs(60), Duration::from_secs(29)).needs_refresh());
+    }
+
+    // --- session cookie + middleware ----------------------------------------
+
+    struct MockValidator;
+    impl BearerValidator for MockValidator {
+        fn validate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>> {
+            Box::pin(async move {
+                match token {
+                    "good" => identity_from_claims(
+                        &json!({ "sub": "bearer-user" }),
+                        &ClaimConfig::default(),
+                    ),
+                    "idp-down" => Err(AuthError::ProviderUnavailable("down".into())),
+                    _ => Err(AuthError::InvalidToken("bad signature")),
+                }
+            })
+        }
+
+        /// The MCP resource's own audience: a token is good only for `stardelt-mcp`.
+        fn validate_for<'a>(
+            &'a self,
+            token: &'a str,
+            audiences: &'a [String],
+        ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+            Box::pin(async move {
+                if token == "good" && audiences.len() == 1 && audiences[0] == "stardelt-mcp" {
+                    identity_from_claims(&json!({ "sub": "mcp-user" }), &ClaimConfig::default())
+                } else {
+                    Err(AuthError::InvalidToken("wrong audience"))
+                }
+            })
+        }
+    }
+
+    fn test_auth() -> Arc<AuthState> {
+        let Ok(AuthMode::Oidc(cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
+        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator), None)
+    }
+
+    /// The MCP endpoint's bearer check: the header only, and only for its own audience.
+    #[tokio::test]
+    async fn mcp_bearer_rejects_another_audience() {
+        let auth = test_auth();
+        let mcp = ["stardelt-mcp".to_string()];
+
+        // No `Authorization` header: unauthenticated, never a fallback to the cookie.
+        let no_token = HeaderMap::new();
+        assert!(matches!(
+            auth.authenticate_bearer_for(&no_token, &mcp).await,
+            Err(AuthError::Unauthenticated)
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer good".parse().unwrap());
+        let principal = auth
+            .authenticate_bearer_for(&headers, &mcp)
+            .await
+            .expect("a token for the MCP audience");
+        assert_eq!(principal.identity.sub, "mcp-user");
+        assert_eq!(principal.via, "bearer");
+
+        // The browser audience is not the MCP audience.
+        let nova = ["nova".to_string()];
+        assert!(matches!(
+            auth.authenticate_bearer_for(&headers, &nova).await,
+            Err(AuthError::InvalidToken(_))
+        ));
+    }
+
+    fn session_for(auth: &AuthState, sub: &str) -> String {
+        session_with(
+            auth,
+            json!({ "sub": sub }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        )
+    }
+
+    /// A session as the callback creates it, with the token's remaining life under the
+    /// test's control (`Duration::ZERO` = the token is already inside the refresh window,
+    /// which is the state that triggers a refresh).
+    fn session_with(
+        auth: &AuthState,
+        claims: Value,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        remaining: Duration,
+    ) -> String {
+        let identity = identity_from_claims(&claims, &auth.config.claims).unwrap();
+        let mut creds = Credentials::new(
+            identity,
+            TokenSet {
+                access_token: Secret::new(access_token),
+                id_token: Some(Secret::new("i")),
+                refresh_token: refresh_token.map(Secret::new),
+            },
+            Duration::from_secs(300),
+        );
+        creds.expires_at = Instant::now() + remaining;
+        auth.sessions.insert(creds).unwrap()
+    }
+
+    /// The `Cookie` header a browser would send for this session id.
+    fn cookie_header(auth: &AuthState, sid: &str) -> Vec<(header::HeaderName, String)> {
+        vec![(
+            header::COOKIE,
+            set_cookie_for(auth, sid.to_string())
+                .split(';')
+                .next()
+                .unwrap()
+                .to_string(),
+        )]
+    }
+
+    /// The same cookie for a direct `authenticate` call (which wants a `HeaderMap`).
+    fn cookie_map(auth: &AuthState, sid: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in cookie_header(auth, sid) {
+            h.insert(k, v.parse().unwrap());
+        }
+        h
+    }
+
+    /// Set-Cookie value (`name=value; attrs`) for a session id, as the browser gets it.
+    fn set_cookie_for(auth: &AuthState, sid: String) -> String {
+        let jar = SignedCookieJar::new(auth.key.clone()).add(auth.cookie(SESSION_COOKIE, sid, "/"));
+        let resp = (jar, "").into_response();
+        resp.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn session_cookie_roundtrip_and_tamper() {
+        let auth = test_auth();
+        let set = set_cookie_for(&auth, "sid-1".into());
+        assert!(set.contains("HttpOnly"));
+        assert!(set.contains("SameSite=Lax"));
+        assert!(set.contains("Secure"));
+        assert!(set.contains("Path=/"));
+        let pair = set.split(';').next().unwrap().to_string();
+        assert!(!pair.ends_with("=sid-1"), "value must be signed");
+
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, pair.parse().unwrap());
+        assert_eq!(auth.jar(&h).get(SESSION_COOKIE).unwrap().value(), "sid-1");
+
+        // Tampered value, or plain unsigned value: rejected.
+        let tampered = pair.replace("sid-1", "sid-2");
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, tampered.parse().unwrap());
+        assert!(auth.jar(&h).get(SESSION_COOKIE).is_none());
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, "nova_session=sid-1".parse().unwrap());
+        assert!(auth.jar(&h).get(SESSION_COOKIE).is_none());
+
+        // A different secret cannot read it.
+        let other = Key::derive_from(b"a-completely-different-secret-of-32b!");
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, pair.parse().unwrap());
+        assert!(
+            SignedCookieJar::from_headers(&h, other)
+                .get(SESSION_COOKIE)
+                .is_none()
+        );
+    }
+
+    fn app(auth: Arc<AuthState>) -> Router {
+        let context = AuthContext {
+            auth: auth.clone(),
+            app: crate::router_tests::test_state(),
+        };
+        let protected = Router::new()
+            .route(
+                "/me",
+                get(|axum::Extension(p): axum::Extension<Principal>| async move { p.identity.sub }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth));
+        let api = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .merge(protected)
+            .nest("/auth", router(auth));
+        Router::new().nest("/api", api)
+    }
+
+    async fn call(
+        app: &Router,
+        uri: &str,
+        headers: &[(header::HeaderName, String)],
+    ) -> (StatusCode, String) {
+        let mut req = HttpRequest::builder().uri(uri);
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn middleware_allow_deny() {
+        let auth = test_auth();
+        let app = app(auth.clone());
+
+        assert_eq!(call(&app, "/api/health", &[]).await.0, StatusCode::OK);
+        assert_eq!(call(&app, "/api/me", &[]).await.0, StatusCode::UNAUTHORIZED);
+
+        let bearer = |t: &str| vec![(header::AUTHORIZATION, format!("Bearer {t}"))];
+        assert_eq!(
+            call(&app, "/api/me", &bearer("good")).await,
+            (StatusCode::OK, "bearer-user".into())
+        );
+        assert_eq!(
+            call(&app, "/api/me", &bearer("forged")).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, "/api/me", &bearer("idp-down")).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let basic = vec![(header::AUTHORIZATION, "Basic Zm9vOmJhcg==".to_string())];
+        assert_eq!(
+            call(&app, "/api/me", &basic).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let sid = session_for(&auth, "cookie-user");
+        let pair = set_cookie_for(&auth, sid.clone())
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let cookie = vec![(header::COOKIE, pair.clone())];
+        assert_eq!(
+            call(&app, "/api/me", &cookie).await,
+            (StatusCode::OK, "cookie-user".into())
+        );
+
+        // Invalid bearer does not fall back to a valid cookie.
+        let both = vec![
+            (header::COOKIE, pair.clone()),
+            (header::AUTHORIZATION, "Bearer forged".to_string()),
+        ];
+        assert_eq!(
+            call(&app, "/api/me", &both).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Unsigned cookie with a real session id is not accepted.
+        let raw = vec![(header::COOKIE, format!("nova_session={sid}"))];
+        assert_eq!(
+            call(&app, "/api/me", &raw).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // After the session is gone, the cookie is worthless.
+        auth.sessions.remove(&sid);
+        assert_eq!(
+            call(&app, "/api/me", &cookie).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    // --- `/api/me` beyond the identity (#213) ---------------------------------
+
+    /// The real `/api/me` behind the real `require_auth`: what a browser gets.
+    fn me_app(auth: Arc<AuthState>) -> Router {
+        let context = AuthContext {
+            auth,
+            app: crate::router_tests::test_state(),
+        };
+        Router::new()
+            .route("/api/me", get(crate::me))
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth))
+            .with_state(crate::router_tests::test_state())
+    }
+
+    /// Auth state with a claim configuration of the test's choosing.
+    fn auth_with_claims(claims: ClaimConfig) -> Arc<AuthState> {
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.claims = claims;
+        let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
+        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator), None)
+    }
+
+    /// The JSON body of a 200 from `/api/me`.
+    async fn me_json(app: &Router, headers: &[(header::HeaderName, String)]) -> Value {
+        let (status, body) = call(app, "/api/me", headers).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).expect("the answer is JSON")
+    }
+
+    #[tokio::test]
+    async fn me_in_oidc_mode_reports_the_admin_group_and_how_it_is_decided() {
+        // A group decides it (the default configuration): the matched group is named.
+        let auth = test_auth();
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-1", "groups": ["/stardelt-admins"] }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["is_admin"], true);
+        assert_eq!(me["admin_by"], "group");
+        assert_eq!(me["admin_group"], "stardelt-admins");
+
+        // A role decides it: the role's value is named and `admin_by` says so.
+        let auth = auth_with_claims(ClaimConfig {
+            admin_role: Some("Nova.Admin".into()),
+            ..ClaimConfig::default()
+        });
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "e-1", "roles": ["Nova.Admin"] }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["is_admin"], true);
+        assert_eq!(me["admin_by"], "role");
+        assert_eq!(me["admin_group"], "Nova.Admin");
+
+        // Neither configured: nobody is an administrator because of a claim, and the two
+        // fields are null rather than a name nobody configured.
+        let auth = auth_with_claims(ClaimConfig {
+            admin_group: None,
+            admin_role: None,
+            ..ClaimConfig::default()
+        });
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "e-2", "groups": ["stardelt-admins"], "roles": ["Nova.Admin"] }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["is_admin"], false);
+        assert_eq!(me["admin_by"], Value::Null);
+        assert_eq!(me["admin_group"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn me_in_oidc_mode_reports_the_session_end_for_a_browser_session_and_null_for_a_bearer_call()
+     {
+        let auth = test_auth();
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-1" }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let stored = auth.sessions.find(&sid).unwrap().expires_unix;
+        let now = unix_now();
+
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["via"], "session");
+        assert_eq!(me["session_expires_at"].as_u64(), Some(stored));
+        // The end of the session, not the end of the access token: the token here has
+        // 300 s left, the session its 8 h lifetime.
+        assert!(
+            stored >= now + SESSION_TTL.as_secs() - 5 && stored <= now + SESSION_TTL.as_secs() + 5,
+            "session end {stored} is not ~{}s from {now}",
+            SESSION_TTL.as_secs()
+        );
+
+        // A bearer call has no session, so there is no end to report — and the access
+        // token's own `exp` is never used in its place.
+        let bearer = [(header::AUTHORIZATION, "Bearer good".to_string())];
+        let me = me_json(&me_app(auth.clone()), &bearer).await;
+        assert_eq!(me["via"], "bearer");
+        assert_eq!(me["session_expires_at"], Value::Null);
+    }
+
+    /// `dev` mode keeps the pre-OIDC answer: no administrator decision, no session, and not
+    /// the oidc-only keys (`skip_serializing_if` territory — a separate struct). The one
+    /// exception is `shared_account` (stardelt-nova#725): the public-demo banner reads it, so
+    /// it is always there and always `false` here — a shared account is a fact about an
+    /// oidc sign-in name (`NOVA_SHARED_ACCOUNTS`), and `dev` mode has no IdP.
+    #[tokio::test]
+    async fn me_in_dev_mode_has_the_old_keys_and_shared_account_false() {
+        let app = Router::new()
+            .route("/api/me", get(crate::me))
+            .with_state(crate::router_tests::test_state());
+        let (status, body) = call(&app, "/api/me", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("the answer is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "admin_console_url",
+                "auth_mode",
+                "demo",
+                "peers",
+                "shared_account",
+                "stage_kind",
+                "stage_name",
+                "user",
+                "warehouse"
+            ],
+            "{body}"
+        );
+        assert_eq!(value["auth_mode"], "static-dev");
+        assert_eq!(value["shared_account"], false);
+    }
+
+    /// The answer holds claims, never credentials: a session whose access token is
+    /// `tok-canary-7f3a` never serialises it.
+    #[tokio::test]
+    async fn me_never_contains_a_token() {
+        let auth = test_auth();
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-1" }),
+            "tok-canary-7f3a",
+            None,
+            Duration::from_secs(300),
+        );
+        let (status, body) = call(
+            &me_app(auth.clone()),
+            "/api/me",
+            &cookie_header(&auth, &sid),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains("tok-canary-7f3a"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn callback_requires_matching_state_cookie() {
+        let auth = test_auth();
+        let app = app(auth);
+        let (status, body) = call(&app, "/api/auth/callback?code=c&state=s", &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("state does not match"));
+        let (status, body) = call(
+            &app,
+            "/api/auth/callback?error=access_denied%3Cscript%3E",
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("access_deniedscript"));
+        assert!(!body.contains('<'));
+    }
+
+    /// A login hint is a sign-in name, not free text: it goes into the IdP's URL, so
+    /// anything that is not `[A-Za-z0-9._@-]{1,64}` is dropped rather than escaped.
+    #[test]
+    fn safe_login_hint_accepts_names_and_drops_the_rest() {
+        assert_eq!(safe_login_hint(Some("demo")), Some("demo"));
+        assert_eq!(safe_login_hint(Some(" ada@x.io ")), Some("ada@x.io"));
+        assert_eq!(safe_login_hint(Some("")), None);
+        assert_eq!(safe_login_hint(Some("a b")), None);
+        assert_eq!(safe_login_hint(Some("<x>")), None);
+        assert_eq!(safe_login_hint(Some(&"a".repeat(65))), None);
+        assert_eq!(safe_login_hint(None), None);
+    }
+
+    #[tokio::test]
+    async fn login_with_unreachable_idp_fails_closed() {
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.issuer = "http://127.0.0.1:9/realms/none".into();
+        let auth = AuthState::new(*cfg, reqwest::Client::new(), None);
+        let app = app(auth);
+        assert_eq!(
+            call(&app, "/api/auth/login", &[]).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// The whole browser flow against an in-process mock IdP: login → callback →
+    /// session → /api/me → logout. PKCE, state, nonce and client auth are all checked.
+    #[tokio::test]
+    async fn full_login_flow_against_mock_idp() {
+        #[derive(Default)]
+        struct Idp {
+            challenge: Mutex<Option<String>>,
+            nonce: Mutex<Option<String>>,
+        }
+        let idp = Arc::new(Idp::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+
+        let b = base.clone();
+        let disc = move || {
+            let b = b.clone();
+            async move {
+                Json(json!({
+                    "issuer": b,
+                    "authorization_endpoint": format!("{b}/authorize"),
+                    "token_endpoint": format!("{b}/token"),
+                    "jwks_uri": format!("{b}/jwks"),
+                    "end_session_endpoint": format!("{b}/logout"),
+                    "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                }))
+            }
+        };
+        let b = base.clone();
+        let token = move |State(idp): State<Arc<Idp>>,
+                          axum::Form(f): axum::Form<HashMap<String, String>>| {
+            let b = b.clone();
+            async move {
+                let challenge = idp.challenge.lock().unwrap().clone().unwrap();
+                let ok = f.get("grant_type").map(String::as_str) == Some("authorization_code")
+                    && f.get("code").map(String::as_str) == Some("the-code")
+                    && f.get("client_id").map(String::as_str) == Some(CLIENT)
+                    && f.get("client_secret").map(String::as_str) == Some("s3cret")
+                    && f.get("redirect_uri").map(String::as_str)
+                        == Some("https://nova.example.com/api/auth/callback")
+                    && f.get("code_verifier").map(|v| pkce_challenge(v)) == Some(challenge);
+                if !ok {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_grant"})),
+                    );
+                }
+                let nonce = idp.nonce.lock().unwrap().clone().unwrap();
+                let id = sign(
+                    &json!({ "iss": b, "aud": CLIENT, "sub": "kc-42", "exp": now() + 300,
+                             "nonce": nonce, "preferred_username": "admin",
+                             "groups": ["/stardelt-admins"] }),
+                    Some("k1"),
+                );
+                (
+                    StatusCode::OK,
+                    Json(json!({ "access_token": "opaque", "id_token": id,
+                                 "token_type": "Bearer", "expires_in": 300 })),
+                )
+            }
+        };
+        let mock = Router::new()
+            .route("/.well-known/openid-configuration", get(disc))
+            .route("/jwks", get(|| async { Json(json!({ "keys": jwks() })) }))
+            .route("/token", post(token))
+            .with_state(idp.clone());
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.issuer = base.clone();
+        let auth = AuthState::new(*cfg, reqwest::Client::new(), None);
+        let app = app(auth);
+
+        // 1. login → 303 to the IdP with PKCE + state + nonce, and a login cookie.
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::get("/api/auth/login?return_to=/catalog&login_hint=demo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let loc = Url::parse(resp.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        assert!(loc.as_str().starts_with(&format!("{base}/authorize?")));
+        let q: HashMap<String, String> = loc.query_pairs().into_owned().collect();
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert_eq!(q["response_type"], "code");
+        assert_eq!(q["login_hint"], "demo");
+        *idp.challenge.lock().unwrap() = Some(q["code_challenge"].clone());
+        *idp.nonce.lock().unwrap() = Some(q["nonce"].clone());
+        let login_cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(login_cookie.contains("Path=/api/auth"));
+        let login_pair = login_cookie.split(';').next().unwrap().to_string();
+
+        // 2. callback with the browser's login cookie → session cookie + redirect.
+        let cb = format!("/api/auth/callback?code=the-code&state={}", q["state"]);
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::get(&cb)
+                    .header(header::COOKIE, &login_pair)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/catalog");
+        let session_pair = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|c| c.starts_with("nova_session=") && c.contains("HttpOnly"))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // The state is one-shot: replaying the callback fails.
+        let (status, _) = call(&app, &cb, &[(header::COOKIE, login_pair.clone())]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // 3. the session authenticates API calls.
+        let cookie = vec![(header::COOKIE, session_pair.clone())];
+        assert_eq!(
+            call(&app, "/api/me", &cookie).await,
+            (StatusCode::OK, "kc-42".into())
+        );
+
+        // 4. logout → 303 to the IdP's end-session endpoint, no token in the URL.
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::post("/api/auth/logout")
+                    .header(header::COOKIE, &session_pair)
+                    .header(header::ORIGIN, "https://nova.example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let loc = resp.headers()[header::LOCATION].to_str().unwrap();
+        assert!(loc.starts_with(&format!("{base}/logout?client_id=nova")));
+        assert!(!loc.contains("id_token"));
+        assert_eq!(
+            call(&app, "/api/me", &cookie).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Cross-origin logout is refused.
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::post("/api/auth/logout")
+                    .header(header::ORIGIN, "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The hint reaches the IdP's URL only when it is a plain sign-in name. `a b` is
+    /// dropped, never escaped — and never echoed by Nova.
+    #[tokio::test]
+    async fn login_drops_an_unsafe_login_hint() {
+        #[derive(Default)]
+        struct Idp {
+            challenge: Mutex<Option<String>>,
+            nonce: Mutex<Option<String>>,
+        }
+        let idp = Arc::new(Idp::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+
+        let b = base.clone();
+        let disc = move || {
+            let b = b.clone();
+            async move {
+                Json(json!({
+                    "issuer": b,
+                    "authorization_endpoint": format!("{b}/authorize"),
+                    "token_endpoint": format!("{b}/token"),
+                    "jwks_uri": format!("{b}/jwks"),
+                    "end_session_endpoint": format!("{b}/logout"),
+                    "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                }))
+            }
+        };
+        let b = base.clone();
+        let token = move |State(idp): State<Arc<Idp>>,
+                          axum::Form(f): axum::Form<HashMap<String, String>>| {
+            let b = b.clone();
+            async move {
+                let challenge = idp.challenge.lock().unwrap().clone().unwrap();
+                let ok = f.get("grant_type").map(String::as_str) == Some("authorization_code")
+                    && f.get("code").map(String::as_str) == Some("the-code")
+                    && f.get("client_id").map(String::as_str) == Some(CLIENT)
+                    && f.get("client_secret").map(String::as_str) == Some("s3cret")
+                    && f.get("redirect_uri").map(String::as_str)
+                        == Some("https://nova.example.com/api/auth/callback")
+                    && f.get("code_verifier").map(|v| pkce_challenge(v)) == Some(challenge);
+                if !ok {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_grant"})),
+                    );
+                }
+                let nonce = idp.nonce.lock().unwrap().clone().unwrap();
+                let id = sign(
+                    &json!({ "iss": b, "aud": CLIENT, "sub": "kc-42", "exp": now() + 300,
+                             "nonce": nonce, "preferred_username": "admin",
+                             "groups": ["/stardelt-admins"] }),
+                    Some("k1"),
+                );
+                (
+                    StatusCode::OK,
+                    Json(json!({ "access_token": "opaque", "id_token": id,
+                                 "token_type": "Bearer", "expires_in": 300 })),
+                )
+            }
+        };
+        let mock = Router::new()
+            .route("/.well-known/openid-configuration", get(disc))
+            .route("/jwks", get(|| async { Json(json!({ "keys": jwks() })) }))
+            .route("/token", post(token))
+            .with_state(idp.clone());
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.issuer = base.clone();
+        let auth = AuthState::new(*cfg, reqwest::Client::new(), None);
+        let app = app(auth);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::get("/api/auth/login?login_hint=a%20b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let loc = Url::parse(resp.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        let q: HashMap<String, String> = loc.query_pairs().into_owned().collect();
+        assert!(!q.contains_key("login_hint"), "{q:?}");
+        assert!(!loc.as_str().contains("a%20b"), "{}", loc.as_str());
+    }
+
+    // --- sessions in the state store (#103 slice c) ---------------------------
+
+    /// A session's credentials survive the row's round trip, and a token that ended while
+    /// Nova was down comes back needing a refresh rather than being replayed.
+    #[test]
+    fn stored_credentials_round_trip_and_an_ended_token_needs_a_refresh() {
+        let identity =
+            identity_from_claims(&json!({ "sub": "s" }), &ClaimConfig::default()).unwrap();
+        let mut creds = Credentials::new(
+            identity.clone(),
+            TokenSet {
+                access_token: Secret::new("a"),
+                id_token: Some(Secret::new("i")),
+                refresh_token: Some(Secret::new("r")),
+            },
+            Duration::from_secs(300),
+        );
+        // The token ended while the process was down.
+        creds.expires_at = Instant::now();
+        let plain = serde_json::to_vec(&StoredCredentials::from_credentials(&creds)).unwrap();
+        let back: StoredCredentials = serde_json::from_slice(&plain).unwrap();
+        let back = back.into_credentials();
+        assert_eq!(back.identity, identity);
+        assert_eq!(back.tokens.access_token.expose(), "a");
+        assert!(back.needs_refresh());
+        assert_eq!(back.lifetime, Duration::from_secs(300));
+    }
+
+    /// The restart case: the map is empty, the row is not. The next request with the same
+    /// cookie loads the session back under its own id and deadline.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_session_survives_a_restart_when_the_state_store_is_on() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let idp = FakeIdp::start().await;
+        let auth = auth_for_idp_with_pool(&idp, Some(pool.clone()));
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "a",
+            Some("r1"),
+            Duration::from_secs(300),
+        );
+        let (expires_unix, identity) = {
+            let session = auth.sessions.find(&sid).unwrap();
+            let creds = session.credentials.lock().await;
+            auth.persist_session(&sid, &creds, session.expires_unix)
+                .await;
+            (session.expires_unix, creds.identity.clone())
+        };
+
+        // The second process: same config and secret, an empty map.
+        let second = auth_for_idp_with_pool(&idp, Some(pool.clone()));
+        assert!(
+            second.sessions.find(&sid).is_none(),
+            "the restart emptied the map"
+        );
+        let (loaded, token, ends_at) = second.session_credentials(&sid).await.unwrap();
+        assert_eq!(loaded, identity);
+        assert_eq!(token.unwrap().expose(), "a");
+        assert_eq!(ends_at, Some(expires_unix));
+        // The load put it back in the map, so the next request does not read the store.
+        assert!(second.sessions.find(&sid).is_some());
+    }
+
+    /// A row this Nova cannot open (another secret, another layout) is deleted and the
+    /// request signs in again — never served, never retried on every request.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_session_sealed_with_another_secret_is_deleted_and_signs_out() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let idp = FakeIdp::start().await;
+        let auth = auth_for_idp_with_pool(&idp, Some(pool.clone()));
+        let sid = "a-session-id-from-another-nova";
+        let hash = session_store::id_hash(sid);
+        let sealed = seal::Sealer::from_secret(b"a different secret of 32 bytes ok")
+            .seal(b"{}", hash.as_bytes())
+            .unwrap();
+        let now = unix_now() as i64;
+        session_store::save(Some(&pool), &hash, &sealed, now + 3600, now).await;
+
+        let err = auth.session_credentials(sid).await.unwrap_err();
+        assert!(matches!(err, AuthError::Unauthenticated), "{err}");
+        assert!(
+            session_store::load(Some(&pool), &hash, unix_now() as i64)
+                .await
+                .is_none(),
+            "the row must be deleted"
+        );
+    }
+}

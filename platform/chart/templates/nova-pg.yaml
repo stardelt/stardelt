@@ -1,0 +1,61 @@
+{{- if and .Values.nova.enabled .Values.nova.database.enabled }}
+# CloudNative-PG Cluster for Nova's state store (stardelt-nova#103): saved queries,
+# personal settings, later the query log. Equivalent to manifests/nova-pg.yaml.
+# The operator generates Secret `nova-pg-app` (random password; nothing in git or in
+# values holds one) and Nova reads its `uri` key (templates/nova.yaml).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: nova-pg
+  namespace: {{ .Release.Namespace }}
+  labels: { app.kubernetes.io/part-of: stardelt }
+spec:
+  instances: 1
+  # Pinned: without `imageName` a Cluster tracks the operator's default image and
+  # starts a major upgrade the next time the operator ships one.
+  imageName: {{ .Values.nova.database.image }}
+  storage:
+    size: {{ .Values.nova.database.storage.size }}
+    {{- with .Values.storage.className }}
+    storageClass: {{ . }}
+    {{- end }}
+  {{- if .Values.postgres.backup.enabled }}
+  # Backup through the barman-cloud plugin (CloudNativePG 1.30; the native
+  # `spec.backup` object store was removed in 1.32). The plugin and
+  # ObjectStore/nova-pg-backups are rendered by this chart (cnpg-objectstore.yaml).
+  # CNPG writes under <bucket>/nova-pg/, so the clusters share the `backups` bucket.
+  backup:
+    retentionPolicy: {{ .Values.postgres.backup.retentionPolicy | quote }}
+    target: prefer-standby
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      enabled: true
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: nova-pg-backups
+  {{- end }}
+  bootstrap:
+    initdb:
+      database: nova
+      owner: nova
+  resources:
+    {{- toYaml .Values.nova.database.resources | nindent 4 }}
+{{- if .Values.postgres.backup.enabled }}
+---
+# Daily base backup, 03:00 (lakekeeper-pg 02:30, keycloak-pg 02:45): the three never overlap.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: nova-pg-daily
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: "0 0 3 * * *"
+  immediate: true
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  cluster:
+    name: nova-pg
+{{- end }}
+{{- end }}

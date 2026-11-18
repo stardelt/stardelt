@@ -1,0 +1,507 @@
+# Apache Airflow for the `pipelines` pillar: the platform's helm-values/airflow.yaml (chart
+# apache-airflow/airflow, the pin in planner.rs), with three changes for an operator-managed install:
+#   - the in-cluster addresses are short names (`seaweedfs-s3`, `lakekeeper`), which resolve in the
+#     namespace the release is installed into, so the namespace is not written into this file;
+#   - no Reloader annotation (the operator does not install Reloader, decision D-op-3);
+#   - the Secrets named below (`airflow-fernet-key`, `airflow-webserver-key`, `airflow-jwt-secret`,
+#     `airflow-admin`) are created by the operator before the release (airflow::SECRETS).
+# The image digests are pinned here, one set per operator release (decision D-op-5).
+# The digest follows stardelt-platform#572 / stardelt-demos#46 and carries the loader's access
+# control and the PEGELONLINE DAGs; bumping it is part of the operator release pin.
+# KubernetesExecutor: no Celery, no Redis, no standing workers; one replica of each component.
+executor: KubernetesExecutor
+
+# Pod Security `restricted` (platform#1096 question 5, twin of platform#1187). The pod block
+# REPLACES the chart's `uid`/`gid` fallback (templates/_helpers.yaml: "values are not
+# accumulated"), so it carries the current ids explicitly. Statsd reads its own block.
+securityContexts:
+  pod:
+    runAsUser: 50000
+    fsGroup: 0
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
+
+statsd:
+  securityContexts:
+    pod:
+      runAsUser: 65534
+      runAsNonRoot: true
+      seccompProfile: {type: RuntimeDefault}
+    container:
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+
+# D42 phase 2a: the demo DAG publishes to the bus only when this is set. The operator fills it
+# from `streaming_values` when `spec.pillars.streaming` is on (platform#595 parity).
+kafka:
+  bootstrap: ""
+
+# stardelt-owned image with DAGs baked in
+images:
+  airflow:
+    # GHCR, not Docker Hub, and the tag CI actually publishes. The digest is what
+    # runs (digests, not tags): `demo` moves on every demos merge, so a bare tag
+    # would silently redeploy a different DAG image.
+    repository: ghcr.io/stardelt/airflow
+    tag: demo
+    digest: sha256:42481f74338c23c5051ec20bc01fa42a720bfeded9eef6bdf2f699fb1b9c85d5
+    pullPolicy: IfNotPresent
+  # The chart's statsd exporter pod, which the scheduler and the workers push metrics to
+  # (the twin of stardelt-platform#1594). Left at the chart default it is the bare tag `v0.30.0`.
+  statsd:
+    repository: quay.io/prometheus/statsd-exporter
+    tag: v0.30.0@sha256:378cb79c4ac7d6941e5ed71b1f3cd6f4707cf42c72c104ffe81fa4d9026ef659
+
+# No secrets in this file: scripts/app-secrets.sh generates them per cluster
+# (the install targets run it before this chart) and keeps them across installs
+# and uninstalls. These are the chart's own Secret-reference fields and the key
+# each one reads:
+#   fernetKeySecretName          → `fernet-key`
+#   apiSecretKeySecretName       → `api-secret-key`   (Airflow 3: [api] secret_key)
+#   webserverSecretKeySecretName → `webserver-secret-key` (Airflow <3 only; same
+#                                  Secret, so a chart/app rollback still finds a
+#                                  stable key — the chart ignores it on 3.x)
+#   jwtSecretName                → `jwt-secret`
+# Rotating the fernet key invalidates every connection Airflow encrypted in its
+# metadata DB; rotating the API/JWT keys only ends sessions.
+fernetKeySecretName: airflow-fernet-key
+apiSecretKeySecretName: airflow-webserver-key
+webserverSecretKeySecretName: airflow-webserver-key
+jwtSecretName: airflow-jwt-secret
+
+# DAGs come from the image, not gitSync
+dags:
+  gitSync:
+    enabled: false
+  persistence:
+    enabled: false
+
+# Logs in emptyDir — fine for kind, lost on pod restart
+logs:
+  persistence:
+    enabled: false
+
+# Stateful components turned off
+redis:
+  enabled: false
+
+# Celery workers — KubernetesExecutor doesn't use them; 0 replicas
+workers:
+  replicas: 0
+  persistence:
+    enabled: false
+
+# Bundled Postgres — single instance, small storage
+postgresql:
+  enabled: true
+  # Pinned by digest (platform#1594). stardelt-platform/helm-values/airflow.yaml:104.
+  image:
+    tag: 16.1.0-debian-11-r15@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64
+  primary:
+    persistence:
+      size: 2Gi
+    resources:
+      requests: { cpu: "50m",  memory: "256Mi" }
+      limits:   { cpu: "1",    memory: "512Mi" }
+
+# Single-replica + smaller resources for each Airflow component
+apiServer:
+  replicas: 1
+  service:
+    type: ClusterIP
+  # Identity contract + Keycloak client secret, projected as files from the
+  # ConfigMap/Secret the identity install generates. `optional: true` on each
+  # source keeps a platform installed without `make install-identity` booting on
+  # the local admin login (see below), and only the api-server — the only
+  # component that builds the FAB app — gets them. (`apiServer.env` would be
+  # smaller, but chart 1.22.0's env helper drops `optional`, so an absent
+  # ConfigMap would block the pod on clusters that never ran install-identity.)
+  extraVolumes:
+    - name: stardelt-identity
+      projected:
+        sources:
+          - configMap:
+              name: stardelt-identity
+              optional: true
+              items:
+                - { key: issuerUrl, path: issuerUrl }
+                - { key: adminGroup, path: adminGroup }
+          - secret:
+              name: stardelt-oidc-clients
+              optional: true
+              items:
+                - { key: airflow, path: client-secret }
+  extraVolumeMounts:
+    - name: stardelt-identity
+      mountPath: /opt/airflow/stardelt-identity
+      readOnly: true
+  # The FAB auth manager reads its Flask config from webserver_config.py
+  # (`[fab] config_file`, /opt/airflow/webserver_config.py). The chart mounts this
+  # string there for Airflow >= 3.0.0. Changing it does not roll the pod (the
+  # ConfigMap name is fixed), so a values change needs
+  # `kubectl -n stardelt rollout restart deploy/airflow-api-server`.
+  #
+  # FAB registers one login view per AUTH_TYPE, so OAuth replaces the local form
+  # rather than sitting beside it; the local `admin` user (createUserJob,
+  # airflow-admin Secret) is kept and AUTH_TYPE falls back to AUTH_DB when the
+  # identity contract is absent or the break-glass flag is set:
+  #   kubectl -n stardelt set env deploy/airflow-api-server STARDELT_AUTH_LOCAL_ONLY=1
+  # (rolls the pod; `set env ... STARDELT_AUTH_LOCAL_ONLY-` undoes it).
+  apiServerConfig: |
+    import os
+    from flask_appbuilder.const import AUTH_DB, AUTH_OAUTH
+
+
+    def _identity_file(name):
+        try:
+            with open("/opt/airflow/stardelt-identity/" + name) as handle:
+                return handle.read().strip()
+        except OSError:
+            return ""
+
+
+    _issuer = _identity_file("issuerUrl").rstrip("/")
+    _admin_group = _identity_file("adminGroup") or "stardelt-admins"
+    _secret = _identity_file("client-secret")
+    _local_only = os.environ.get("STARDELT_AUTH_LOCAL_ONLY") == "1"
+
+    if _issuer and _secret and not _local_only:
+        AUTH_TYPE = AUTH_OAUTH
+        OAUTH_PROVIDERS = [
+            {
+                "name": "keycloak",
+                "token_key": "access_token",
+                "icon": "fa-key",
+                "remote_app": {
+                    "client_id": "airflow",
+                    "client_secret": _secret,
+                    # api_base_url + "openid-connect/userinfo" is how FAB's
+                    # Keycloak branch reads preferred_username and groups.
+                    "server_metadata_url": _issuer + "/.well-known/openid-configuration",
+                    "api_base_url": _issuer + "/protocol/",
+                    "client_kwargs": {"scope": "openid email profile"},
+                },
+            }
+        ]
+        # Realm users sign in as stardelt-member: Viewer without the global read on DAGs and DAG
+        # Runs, so a member sees no DAG until a role of their group grants it (createUserJob below
+        # creates the role; stardelt-internal design/airflow-access.md, platform#477). A plain
+        # Viewer sees every group's DAGs, runs, logs and code. stardelt-admins is synced to Admin
+        # at every login (the same group Nova treats as administrator).
+        AUTH_USER_REGISTRATION = True
+        AUTH_USER_REGISTRATION_ROLE = "stardelt-member"
+        # A group role exists only after the sync Job has created it, and a new group must take
+        # effect at the next sign-in, not at a webserver restart. FAB calls items() once per
+        # sign-in; a failed query falls back to the admin entry and never raises.
+        class _AuthRolesMapping(dict):
+            def items(self):
+                try:
+                    from airflow.providers.fab.auth_manager.cli_commands.utils import get_application_builder
+
+                    with get_application_builder() as appbuilder:
+                        sm = appbuilder.sm
+                        roles = sm.get_all_roles() or []
+                        base = dict(super().items()) if dict.__dict__.get("items") else {}
+                        mapping = {}
+                        admin_entry = base.get(_admin_group, ["Admin"])
+                        mapping[_admin_group] = admin_entry
+                        for role in roles:
+                            name = getattr(role, "name", None)
+                            if not name or not name.startswith("stardelt-group-"):
+                                continue
+                            group = name[len("stardelt-group-"):]
+                            if not group:
+                                continue
+                            mapping[group] = ["stardelt-member", name]
+                        return mapping.items()
+                except Exception:
+                    try:
+                        return dict(super().items()).items()
+                    except Exception:
+                        return [(_admin_group, ["Admin"])]
+
+        AUTH_ROLES_MAPPING = _AuthRolesMapping({_admin_group: ["Admin"]})
+        AUTH_ROLES_SYNC_AT_LOGIN = True
+    else:
+        AUTH_TYPE = AUTH_DB
+  resources:
+    requests: { cpu: "100m", memory: "384Mi" }
+    limits:   { cpu: "2",    memory: "1Gi"   }
+
+scheduler:
+  replicas: 1
+  resources:
+    requests: { cpu: "100m", memory: "384Mi" }
+    limits:   { cpu: "2",    memory: "1Gi"   }
+
+dagProcessor:
+  enabled: true
+  replicas: 1
+  resources:
+    requests: { cpu: "50m",  memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "512Mi" }
+
+triggerer:
+  enabled: true
+  replicas: 1
+  persistence:
+    enabled: false
+  resources:
+    requests: { cpu: "50m",  memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "512Mi" }
+
+# Task logs go to the object store so they outlive the task pod (scheduled jobs J0, platform#118):
+# a KubernetesExecutor pod writes its log to s3://backups/airflow-logs/ when the task ends, and
+# the API server reads it from there. Needs the Amazon provider in the image (stardelt-demos).
+config:
+  logging:
+    remote_logging: "True"
+    remote_base_log_folder: s3://backups/airflow-logs
+    remote_log_conn_id: stardelt_s3
+
+# Plain-value envs on every Airflow container (including spawned K8s task pods).
+env:
+  # Connection `stardelt_s3`: the object store speaks S3 with path-style addressing. The endpoint
+  # is not a secret; the credentials come from the standard AWS variables (extraEnv below), which
+  # the connection falls back to because it carries no login.
+  - name: AIRFLOW_CONN_STARDELT_S3
+    value: '{"conn_type":"aws","extra":{"endpoint_url":"http://seaweedfs-s3:8333","region_name":"us-east-1","config_kwargs":{"s3":{"addressing_style":"path"}}}}'
+  - name: CATALOG_URI
+    value: http://lakekeeper:8181/catalog
+  - name: CATALOG_WAREHOUSE
+    value: warehouse
+  - name: YEARS
+    value: "2023"
+  # KubernetesExecutor task pods: the executor builds their image as `<repository>:<tag>` from these two
+  # settings, which override the pod template. A bare tag (`demo`) resolves to a cached, older image on
+  # the node, so pipelines ran stale code (platform#203). A tag plus digest (`demo@sha256:...`) is a
+  # valid reference that pins the exact image, and must equal `images.airflow.digest` above:
+  # scripts/check-airflow-pin.sh fails the build when they differ.
+  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_REPOSITORY
+    value: ghcr.io/stardelt/airflow
+  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG
+    value: "demo@sha256:42481f74338c23c5051ec20bc01fa42a720bfeded9eef6bdf2f699fb1b9c85d5"
+
+# Secret-backed envs use extraEnv (templated string accepting valueFrom).
+extraEnv: |
+  {{- if .Values.kafka.bootstrap }}
+  - name: PEGELONLINE_KAFKA_BOOTSTRAP
+    value: {{ .Values.kafka.bootstrap | quote }}
+  {{- end }}
+  - name: S3_ENDPOINT
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-s3-creds
+        key: endpoint
+  - name: S3_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-s3-creds
+        key: access-key
+  - name: S3_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-s3-creds
+        key: secret-key
+  - name: S3_REGION
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-s3-creds
+        key: region
+  # The same credentials under the names the AWS SDK reads (connection stardelt_s3 above).
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-s3-creds
+        key: access-key
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-s3-creds
+        key: secret-key
+  - name: AWS_DEFAULT_REGION
+    value: us-east-1
+  # Catalog sign-in (platform#284, step 4 of the catalog turn-on): the loader DAG
+  # opens the Iceberg REST catalog itself (stardelt-demos dags/nyc_taxi_load.py), so
+  # every Airflow task pod gets the service client svc-catalog-airflow (KIND=service,
+  # platform#282) and the realm's token endpoint. All three keys come from that one
+  # Secret, so they appear and disappear together; `make sync-catalog-clients` writes
+  # `token-url` exactly so a consumer never sees a partial client (Nova refuses to
+  # start on one, and a DAG must fall back to anonymous rather than use half a pair).
+  # Nothing secret is written here — only secretKeyRefs. Optional: an install without
+  # an IdP has no Secret, the DAG keeps its current anonymous catalog properties, and
+  # Airflow still installs.
+  - name: CATALOG_CLIENT_ID
+    valueFrom:
+      secretKeyRef:
+        name: svc-catalog-airflow
+        key: client-id
+        optional: true
+  - name: CATALOG_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: svc-catalog-airflow
+        key: client-secret
+        optional: true
+  - name: CATALOG_TOKEN_URL
+    valueFrom:
+      secretKeyRef:
+        name: svc-catalog-airflow
+        key: token-url
+        optional: true
+  # Scheduled pipelines (platform#118, phase J0): the loader DAG in the image
+  # (stardelt-demos dags/pipeline_loader.py) runs `sql` tasks on the query engine as the
+  # service-account client `pipeline-runner` (scripts/keycloak-sync-pipeline-runner-client.sh).
+  # The token endpoint comes from the identity contract key `tokenEndpoint` (#611), never a
+  # literal realm path. All optional: without the identity install the variables are simply
+  # absent and a pipeline task fails with a clear message instead of the pod failing to start.
+  - name: PIPELINE_TRINO_URL
+    valueFrom:
+      configMapKeyRef:
+        name: stardelt-identity
+        key: trinoUrl
+        optional: true
+  - name: PIPELINE_TOKEN_URL
+    valueFrom:
+      configMapKeyRef:
+        name: stardelt-identity
+        key: tokenEndpoint
+        optional: true
+  - name: PIPELINE_CLIENT_ID
+    value: pipeline-runner
+  - name: PIPELINE_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: stardelt-oidc-clients
+        key: pipeline-runner
+        optional: true
+  - name: PIPELINE_TRINO_CA_FILE
+    value: /etc/stardelt/trino-ca/ca.crt
+  # Notebook tasks (platform#316, phase J2): the DAG that runs them (stardelt-demos
+  # dags/stardelt_pipelines/notebook.py) gives a `notebook` task a pod of its own, because the
+  # notebook image has no Airflow and cannot run an Airflow task. It reads these four: the
+  # image for that pod, the versioned bucket the published notebook and the executed copy live
+  # in, the Airflow connection that pre-signs the GET (pinned object version) and the PUT, and
+  # the Secret the pod mounts for the query engine's CA. PIPELINE_NOTEBOOK_IMAGE must equal
+  # singleuser.image.tag in helm-values/jupyterhub.yaml — a stale digest is an image without
+  # papermill, and the task fails inside the pod; scripts/check-notebook-image-pin.sh (make
+  # lint) fails the build when the two drift.
+  - name: PIPELINE_NOTEBOOK_BUCKET
+    value: notebooks
+  - name: PIPELINE_NOTEBOOK_S3_CONN
+    value: stardelt_s3
+  - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
+    value: trino-ca
+  - name: PIPELINE_NOTEBOOK_IMAGE
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:3f42884742d0a06ab1b187ba2da97c8e29f07c0491be9c4d1c1265f8a18bab83
+
+# The internal CA that signs the query engine's certificate (Secret trino-ca, manifests/trino-tls.yaml),
+# mounted into every Airflow container, task pods included, so the pipeline loader can verify
+# the engine's TLS endpoint. Optional: absent on an install without the identity overlay.
+volumes:
+  - name: trino-ca
+    secret:
+      secretName: trino-ca
+      optional: true
+      items:
+        - { key: ca.crt, path: ca.crt }
+volumeMounts:
+  - { name: trino-ca, mountPath: /etc/stardelt/trino-ca, readOnly: true }
+
+# helm does not run post-install hooks until every resource of the release is
+# ready, and the Airflow pods wait for the migrations — so on a fresh database,
+# installing with `--wait` (what `make install` and a GitOps toolkit do) deadlocks
+# against these two Jobs as hooks. Upstream requires them off for waiters, and
+# Job specs are immutable anyway, which makes the release un-reinstallable.
+#   https://airflow.apache.org/docs/helm-chart/1.22.0/index.html
+migrateDatabaseJob:
+  useHelmHooks: false
+  applyCustomEnv: false
+
+# The chart has no Secret reference for createUserJob.defaultUser — its args
+# template interpolates the literal `password` value. So the args are replaced
+# with the same command reading username and password from the airflow-admin
+# Secret through `createUserJob.env` (a supported chart field); role, email and
+# names are not credentials and stay literal.
+createUserJob:
+  useHelmHooks: false
+  applyCustomEnv: false
+  env:
+    - name: AIRFLOW_ADMIN_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: airflow-admin
+          key: username
+    - name: AIRFLOW_ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: airflow-admin
+          key: password
+    # The service user Nova signs in with (NOVA_AIRFLOW_USER / NOVA_AIRFLOW_PASSWORD). The same
+    # Job creates the `nova-api` user and moves it from `Viewer` to `stardelt-nova-operator`
+    # (stardelt-platform#476, #680), and `reset-password` makes the Secret's password the user's
+    # password.
+    - name: AIRFLOW_NOVA_API_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: airflow-nova-api
+          key: username
+    - name: AIRFLOW_NOVA_API_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: airflow-nova-api
+          key: password
+  args:
+    - "bash"
+    - "-c"
+    - |
+      set -e
+      airflow users create \
+        --role Admin \
+        --username "$AIRFLOW_ADMIN_USERNAME" \
+        --email admin@stardelt.local \
+        --firstname stardelt \
+        --lastname Admin \
+        --password "$AIRFLOW_ADMIN_PASSWORD"
+      airflow users create \
+        --role Viewer \
+        --username "$AIRFLOW_NOVA_API_USERNAME" \
+        --email nova-api@stardelt.local \
+        --firstname Nova \
+        --lastname API \
+        --password "$AIRFLOW_NOVA_API_PASSWORD"
+      airflow users reset-password \
+        --username "$AIRFLOW_NOVA_API_USERNAME" \
+        --password "$AIRFLOW_NOVA_API_PASSWORD"
+      python - <<'PY'
+      import os
+
+      from airflow.providers.fab.auth_manager.cli_commands.utils import get_application_builder
+
+      # stardelt-member (the registration role): Viewer without the two permissions that make
+      # every DAG visible. Run again, it changes nothing.
+      GLOBAL = {("can_read", "DAGs"), ("can_read", "DAG Runs")}
+      with get_application_builder() as appbuilder:
+          sm = appbuilder.sm
+          role = sm.find_role("stardelt-member") or sm.add_role("stardelt-member")
+          for permission in sm.find_role("Viewer").permissions:
+              if (permission.action.name, permission.resource.name) not in GLOBAL:
+                  sm.add_permission_to_role(role, permission)
+
+          # stardelt-nova-operator: Viewer plus run, pause and stop. Only nova-api holds it;
+          # Nova checks the caller's group before every call (nova#196, platform#680).
+          WRITE = {("can_edit", "DAGs"), ("can_create", "DAG Runs"), ("can_edit", "DAG Runs")}
+          op = sm.find_role("stardelt-nova-operator") or sm.add_role("stardelt-nova-operator")
+          for permission in sm.find_role("Viewer").permissions:
+              sm.add_permission_to_role(op, permission)
+          for action, resource in WRITE:
+              sm.add_permission_to_role(op, sm.create_permission(action, resource))
+          nova = sm.find_user(username=os.environ["AIRFLOW_NOVA_API_USERNAME"])
+          nova.roles = [op]
+          sm.update_user(nova)
+      PY

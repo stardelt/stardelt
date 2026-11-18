@@ -1,0 +1,177 @@
+# Trino authentication — the platform's "one identity" rule on the query engine.
+#
+# The controller layers this file over values/trino.yaml only when ConfigMap
+# `stardelt-identity` exists in the Lakehouse's namespace *and* the three Secrets it
+# reads are there (trino-coordinator-tls, trino-internal-secret, trino-password-db):
+# the platform's own rule (stardelt-platform/Makefile, target `trino:`), because a
+# Lakehouse has no identity field of its own.
+#
+# Ported from stardelt-platform/helm-values/trino-identity.yaml. What this file carries:
+# the PASSWORD+OAuth2 listener over TLS, the service account's password file (`auth`), the
+# file access control (`accessControl`, operator#229) and the resource groups plus the group
+# provider (`coordinator.additionalConfigFiles`, operator#224). Trino therefore does NOT fall
+# back to its default access control: an authenticated caller sees the engine catalogs as
+# denied and may impersonate only as `superset`.
+#
+# Deliberately NOT here: the OPA bridge (`access-control.config-files`) — it needs the catalog
+# service identity the operator cannot create yet (stardelt-operator#194). A listed but missing
+# config file stops Trino from starting, so the bridge's file arrives with the bridge.
+# The Iceberg catalog signs in as the catalog principal (Secret sp-catalog-trino): each Trino
+# JVM does its own client-credentials exchange, exactly like
+# stardelt-platform/helm-values/trino-identity.yaml. This block is a FULL COPY of the base
+# `catalogs.warehouse` string in values/trino.yaml — the overlay replaces the string, it does not
+# merge it — so every change to the base block must be repeated here in the same PR.
+catalogs:
+  warehouse: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://lakekeeper:8181/catalog
+    iceberg.rest-catalog.warehouse=warehouse
+    iceberg.rest-catalog.vended-credentials-enabled=false
+    # The caller's own identity: client id and secret come from Secret sp-catalog-trino through
+    # the process environment, and each Trino JVM does its own client-credentials exchange.
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.server-uri=${ENV:CATALOG_TOKEN_URL}
+    iceberg.rest-catalog.oauth2.credential=${ENV:CATALOG_CLIENT_ID}:${ENV:CATALOG_CLIENT_SECRET}
+    # Without this Iceberg asks for scope=catalog, which this realm does not have.
+    iceberg.rest-catalog.oauth2.scope=openid
+    fs.s3.enabled=true
+    s3.endpoint=http://seaweedfs-s3:8333
+    s3.region=us-east-1
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:S3_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:S3_SECRET_KEY}
+    # Single-replica SeaweedFS volume server can't sustain Trino's default
+    # parallel HTTP range requests (broken pipe / connection reset). Throttle
+    # both connection pool and the Iceberg metadata enumeration threads.
+    s3.max-connections=16
+    iceberg.split-manager-threads=4
+    iceberg.metadata.parallelism=2
+    # Worker-local file-system cache for object-store reads (platform#134).
+    # Trino 483+ (stardelt-platform#1002): the directories, size and TTL live in
+    # the node-level cache manager in values/trino.yaml; a catalog only turns
+    # caching on. The measured win is recorded there.
+    fs.cache.enabled=true
+server:
+  config:
+    # PASSWORD first: a Basic header from the service account is not parsed as a
+    # bearer token.
+    authenticationType: "PASSWORD,OAUTH2"
+    https:
+      enabled: true
+      port: 8443
+      keystore:
+        path: /etc/trino/tls/keystore.p12
+  # Coordinator-only (a worker refuses keys it does not bind). The value is a string,
+  # so it replaces the base one: the base query guards are restated here.
+  coordinatorExtraConfig: |
+    query.max-execution-time=10m
+    query.max-run-time=15m
+    http-server.https.keystore.key=${ENV:TRINO_TLS_KEYSTORE_PASSWORD}
+    http-server.authentication.allow-insecure-over-http=false
+    web-ui.authentication.type=oauth2
+    http-server.authentication.oauth2.issuer=${ENV:TRINO_OIDC_ISSUER}
+    http-server.authentication.oauth2.client-id=trino
+    http-server.authentication.oauth2.client-secret=${ENV:TRINO_CLIENT_SECRET}
+    http-server.authentication.oauth2.principal-field=sub
+    http-server.authentication.oauth2.scopes=openid
+    http-server.authentication.oauth2.oidc.use-userinfo-endpoint=false
+# The `superset:<bcrypt>` file the PASSWORD authenticator reads; the chart mounts
+# Secret trino-password-db at /etc/trino/auth/password/password.db (operator#209).
+auth:
+  passwordAuthSecret: trino-password-db
+# The file rules (stardelt-platform/helm-values/trino-identity.yaml): query visibility,
+# the three engine catalogs, table guards and the one impersonation grant. The chart renders
+# `access-control.properties` for `type: configmap` and mounts rules.json at
+# /etc/trino/access-control. Deliberately NOT copied: `access-control.config-files` — the
+# platform lists two files there because it also loads the OPA bridge; the operator has no
+# bridge yet, and a listed but missing file stops Trino from starting.
+accessControl:
+  type: configmap
+  rules:
+    rules.json: |-
+      {
+        "catalogs": [
+          {"group": "stardelt-admins", "allow": "all"},
+          {"catalog": "(system|tpch|tpcds)", "allow": "none"},
+          {"allow": "all"}
+        ],
+        "queries": [
+          {"group": "stardelt-admins", "allow": ["execute", "kill", "view"]},
+          {"allow": ["execute"]}
+        ],
+        "impersonation": [
+          {"original_user": "superset", "new_user": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "allow": true}
+        ],
+        "tables": [
+          {"group": "stardelt-admins", "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]},
+          {"catalog": "system", "schema": "runtime", "table": "(tasks|transactions|optimizer_rule_stats)", "privileges": []},
+          {"privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]}
+        ]
+      }
+initContainers:
+  coordinator:
+    - name: wait-for-idp
+      image: trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: TRINO_OIDC_ISSUER
+          valueFrom:
+            configMapKeyRef:
+              name: stardelt-identity
+              key: issuerUrl
+              optional: true
+      command:
+        - /usr/bin/bash
+        - -c
+        - |
+          until /usr/bin/curl -fsS --max-time 5 \
+            "$TRINO_OIDC_ISSUER/.well-known/openid-configuration" >/dev/null; do
+            echo "waiting for $TRINO_OIDC_ISSUER"
+            sleep 3
+          done
+coordinator:
+  # The PKCS12 keystore cert-manager writes into Secret trino-coordinator-tls. A
+  # directory mount, not a subPath file: the directory appears when the Secret does
+  # and picks up a renewal.
+  secretMounts:
+    - name: trino-tls
+      secretName: trino-coordinator-tls
+      path: /etc/trino/tls
+  # Resource groups and the group provider: both files are written by the access-sync CronJob
+  # (access_sync.rs) into ConfigMaps trino-warehouses and trino-group-file, created empty when
+  # absent (provision.rs ensure_trino_config_maps). The resource-group file manager reads its
+  # file once at startup — a SqlWarehouse class change needs a coordinator restart; groups.txt
+  # is re-read every 30 s. Ported from stardelt-platform/helm-values/trino-identity.yaml.
+  additionalConfigFiles:
+    resource-groups.properties: |
+      resource-groups.configuration-manager=file
+      resource-groups.config-file=/etc/trino/warehouses/resource-groups.json
+    group-provider.properties: |
+      group-provider.name=file
+      file.group-file=/etc/trino/groups/groups.txt
+      file.refresh-period=30s
+  additionalVolumes:
+    - name: trino-groups
+      configMap: { name: trino-group-file }
+    - name: trino-warehouses
+      configMap: { name: trino-warehouses }
+    - name: trino-fscache
+      emptyDir: { sizeLimit: 12Gi }
+    - name: trino-dumps
+      emptyDir: { sizeLimit: 2Gi }
+  additionalVolumeMounts:
+    - { name: trino-groups, mountPath: /etc/trino/groups }
+    - { name: trino-warehouses, mountPath: /etc/trino/warehouses }
+    - { name: trino-fscache, mountPath: /var/trino/cache }
+    - { name: trino-dumps, mountPath: /dumps }
+# Rendered into the coordinator *and* worker ConfigMaps, so it replaces the base
+# list: `http-server.process-forwarded` is restated. The shared secret is required
+# as soon as an authenticator is on (Secret trino-internal-secret).
+additionalConfigProperties:
+  - http-server.process-forwarded=true
+  - internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SHARED_SECRET}
+  # Node-level file-system cache (Trino 483+, stardelt-platform#1002). This list
+  # REPLACES the base one, so the cache-manager line must be repeated here; the
+  # file itself comes from values/trino.yaml (additionalConfigFiles, merged).
+  - cache-manager.config-files=etc/cache-manager-alluxio.properties

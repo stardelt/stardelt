@@ -1,0 +1,145 @@
+version: 2
+
+models:
+  - name: order_lines
+    description: The generated order lines (bronze). One row per line.
+    columns:
+      - name: order_line_id
+        data_tests: [unique, not_null]
+  - name: stg_customers
+    description: Customers with clean names and upper-case country codes (silver view).
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+      - name: segment
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [retail, business, enterprise]
+  - name: stg_products
+    description: Products with a decimal price (silver view).
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+  - name: stg_order_lines
+    description: Order lines as the marts read them (silver view).
+    columns:
+      - name: order_line_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
+      - name: product_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_products')
+                field: product_id
+      - name: quantity
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+  - name: daily_revenue
+    description: Revenue per day (gold, incremental merge).
+    columns:
+      - name: order_date
+        description: The day the order lines were placed.
+        data_tests: [unique, not_null]
+      - name: order_lines
+        description: Number of order lines placed that day.
+      - name: units
+        description: Sum of the quantities of those lines.
+      - name: revenue
+        description: Money those lines brought in, in the currency of the price list.
+        data_tests: [is_positive]
+  - name: customer_ltv
+    description: Lifetime value, rank and cumulative share per customer (gold).
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: customer_id
+        data_type: integer
+        description: The customer the row is about.
+        data_tests: [unique, not_null]
+      - name: customer_name
+        data_type: varchar
+        description: The customer's name as the source spells it.
+      - name: country
+        data_type: varchar
+        description: Upper-case ISO country code of the customer.
+      - name: segment
+        data_type: varchar
+        description: The customer's market segment.
+      - name: order_lines
+        data_type: bigint
+        description: How many order lines the customer placed.
+      - name: lifetime_value
+        data_type: "decimal(18,2)"
+        description: All revenue of the customer, rounded to cents.
+      - name: first_order
+        data_type: date
+        description: Day of the customer's first order line.
+      - name: last_order
+        data_type: date
+        description: Day of the customer's last order line.
+      - name: value_rank
+        data_type: bigint
+        description: Rank over lifetime value, best customer first; ties share a rank.
+      - name: cumulative_share
+        data_type: double
+        description: Share of all revenue made by this customer and the better ones.
+  - name: order_lines_enriched
+    description: Order lines with segment, category and revenue (gold, incremental append by day).
+    columns:
+      - name: order_line_id
+        data_tests: [unique, not_null]
+      - name: line_revenue
+        data_tests: [is_positive]
+  - name: product_mix
+    description: Units, revenue and revenue share per product, ranked inside its category (gold).
+    columns:
+      - name: product_id
+        description: The product the row is about.
+        data_tests: [unique, not_null]
+      - name: product_name
+        description: The product's name from the price list.
+      - name: category
+        description: The product's category.
+      - name: units
+        description: How many units of the product were sold.
+      - name: revenue
+        description: Revenue the product brought in.
+      - name: revenue_share
+        description: Share of all revenue made by this product.
+      - name: rank_in_category
+        description: Rank by revenue inside the product's category, best first.
+
+unit_tests:
+  - name: customer_ltv_ranks_by_value
+    description: The customer with the higher lifetime value ranks first; ties share a rank.
+    model: customer_ltv
+    given:
+      - input: ref('stg_customers')
+        rows:
+          - {customer_id: 1, customer_name: A, country: FR, segment: retail}
+          - {customer_id: 2, customer_name: B, country: NL, segment: business}
+          - {customer_id: 3, customer_name: C, country: DE, segment: retail}
+      - input: ref('stg_products')
+        rows:
+          - {product_id: 10, unit_price: 5.00}
+      - input: ref('stg_order_lines')
+        rows:
+          - {order_line_id: 1, customer_id: 1, product_id: 10, quantity: 1, order_date: 2026-11-01}
+          - {order_line_id: 2, customer_id: 2, product_id: 10, quantity: 4, order_date: 2026-11-01}
+          - {order_line_id: 3, customer_id: 3, product_id: 10, quantity: 1, order_date: 2026-11-02}
+    expect:
+      rows:
+        - {customer_id: 2, value_rank: 1}
+        - {customer_id: 1, value_rank: 2}
+        - {customer_id: 3, value_rank: 2}

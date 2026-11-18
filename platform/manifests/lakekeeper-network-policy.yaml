@@ -1,0 +1,144 @@
+# Interim catalog access control (stardelt-platform#274).
+#
+# Lakekeeper validates tokens since platform#285 (`LAKEKEEPER__OPENID_PROVIDER_URI`
+# and `AUDIENCE=lakekeeper` from ConfigMap `stardelt-identity`), so a request without
+# a valid bearer token is 401. Since platform#304 authorisation is decided by OpenFGA
+# and the OPA bridge: a valid token without a grant is 403. This policy stays as
+# defence in depth — it narrows *which* pods may even attempt a request (and which
+# may ask the bridge), and it keeps the catalog unreachable if authentication ever
+# regresses to anonymous.
+#
+# This policy is ingress-only: it does not restrict what Lakekeeper itself
+# reaches (Postgres, S3), and it has no ipBlock rule. The single
+# `namespaceSelector: {}` rule is the metrics scrape source below — a pod
+# labelled `app.kubernetes.io/name: prometheus` (stardelt-operator#607) reads
+# port 9000 from any namespace, read-only; every caller rule stays
+# same-namespace. Kubelet probes come from the node and are unaffected.
+#
+# The callers below are the pods that actually use the catalog, checked against
+# the live configuration in stardelt-platform#274:
+#   - Trino coordinator: the `warehouse` Iceberg REST catalog
+#     (ConfigMap trino-catalog, `iceberg.rest-catalog.uri`).
+#   - Nova: catalog browser and table documentation
+#     (`NOVA_LAKEKEEPER_URL` in manifests/nova-deployment.yaml).
+#   - Spark Connect driver: the second engine over the same catalog (the
+#     per-session catalog URI the notebook helper configures, platform#317).
+#   - SparkCluster driver: the Iceberg REST catalog for a group pipeline's writes and for
+#     remote signing (platform#1524). Its pod is labelled
+#     `sparkoperator.k8s.io/connect-name`, not `app.kubernetes.io/name: spark-connect`.
+#   - Airflow task pods: the NYC-taxi DAG writes through pyiceberg
+#     (`CATALOG_URI` in helm-values/airflow.yaml; every KubernetesExecutor task
+#     pod carries release=airflow, component=worker, tier=airflow).
+#   - Lakekeeper bootstrap Job: accepts the terms of use and creates the
+#     `warehouse` (manifests/lakekeeper-bootstrap.yaml). The Job controller puts
+#     `batch.kubernetes.io/job-name=lakekeeper-bootstrap` on its pod, so no
+#     change to the Job is needed.
+#   - Access sync CronJob: one Lakekeeper warehouse per `Catalog`
+#     (manifests/access-sync.yaml, platform#305). Management API on 8181.
+#
+# Not callers, and therefore not allowed: Trino workers (they read Parquet from
+# S3; the coordinator does the catalog work), Spark executors (they read data
+# files; the driver plans), the Lakekeeper db-migration Job (Postgres only),
+# Superset (Trino only), the backup Jobs (S3/Postgres only), the operator,
+# External Secrets and the JupyterHub single-user pods (the singleuser egress
+# policy already denies the catalog).
+#
+# Needs a CNI that enforces NetworkPolicy — k3s does (the JupyterHub policies
+# already rely on its controller); plain Flannel does not. To remove the
+# interim restriction, e.g. while debugging:
+#
+#   kubectl delete networkpolicy lakekeeper-ingress -n stardelt
+#
+# Re-apply with `kubectl apply -f manifests/lakekeeper-network-policy.yaml`;
+# `make uninstall` removes it too.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lakekeeper-ingress
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lakekeeper
+      # The chart's db-migration Job also carries name=lakekeeper but runs the
+      # migrations against Postgres; selecting component=catalog keeps the
+      # policy scoped to the serving pod only.
+      app.kubernetes.io/component: catalog
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Trino coordinator — Iceberg REST catalog for warehouse.* (Trino
+        # workers read data files from S3 and do not call the catalog).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: trino
+              app.kubernetes.io/component: coordinator
+        # Nova — catalog browser, table metadata and documentation.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nova
+        # Spark Connect driver — the second engine over the same catalog.
+        # Executors read data files; the driver does the catalog work.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spark-connect
+        # A group SparkCluster's driver (a SparkConnect server pod, stardelt-operator#460): it
+        # does the catalog work for a pipeline — Iceberg namespaces and tables, and every S3
+        # sign request when the warehouse uses remote signing (platform#1511). The label is the
+        # Spark Operator's own; the value is the SparkConnect object's name.
+        - podSelector:
+            matchExpressions:
+              - {key: sparkoperator.k8s.io/connect-name, operator: Exists}
+        # StreamApp driver (D42) — the Spark driver reads and writes the sink
+        # table through the REST catalog. The executors read data files only;
+        # the label selects both pods and is harmless for the executor.
+        - podSelector:
+            matchLabels:
+              stardelt.io/component: stream
+        # Airflow KubernetesExecutor task pods — pyiceberg in the DAGs
+        # (CATALOG_URI); the scheduler and API server do not call the catalog.
+        - podSelector:
+            matchLabels:
+              release: airflow
+              component: worker
+        # Lakekeeper bootstrap Job — terms of use and warehouse creation. The
+        # Job controller adds this label to the pod; the Job needs no change.
+        - podSelector:
+            matchLabels:
+              batch.kubernetes.io/job-name: lakekeeper-bootstrap
+        # Access sync CronJob (platform#305) — a `Catalog` becomes a warehouse,
+        # which is a management-API call on the same port.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: access-sync
+      ports:
+        - protocol: TCP
+          port: 8181
+    # The OPA bridge sidecar (platform#304) answers Trino's authorization
+    # questions on TCP 8282. The coordinator asks (Trino workers read data files
+    # and never call it); since platform#359 the access-sync CronJob also WRITES
+    # the catalog-level decision table there (`PUT /v1/data/stardelt/access`,
+    # scripts/access-sync-job.py) — the accelerator the front rule reads before
+    # it falls back to Lakekeeper. Both are the same trust boundary: those two
+    # pods are exactly the ones that already hold a Lakekeeper credential.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: trino
+              app.kubernetes.io/component: coordinator
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: access-sync
+      ports:
+        - protocol: TCP
+          port: 8282
+    # The customer's Prometheus (stardelt-operator#607): a scrape source, read-only.
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9000

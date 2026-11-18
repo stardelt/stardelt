@@ -1,0 +1,59 @@
+# Restore proof: recover the catalog's Postgres from the object store into a
+# namespace of its own, and look for the tables that should be there.
+#
+#   make verify-restore        # creates the namespace, restores, checks, deletes it
+#
+# The backup is taken through the barman-cloud plugin (manifests/cnpg-objectstore.yaml),
+# so the recovery reads it the same way: an ObjectStore in the restore namespace that
+# points at the same bucket path, and an external cluster that names it.
+#
+# `serverName` matters: it is the folder the source cluster wrote under in the
+# bucket (`lakekeeper-pg/`), and it does not follow the restored cluster's name.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: lakekeeper-pg-restore-source
+  namespace: stardelt-restore
+spec:
+  configuration:
+    destinationPath: s3://backups/
+    endpointURL: http://seaweedfs-s3.stardelt.svc.cluster.local:8333
+    s3Credentials:
+      accessKeyId:
+        name: stardelt-s3-creds
+        key: access-key
+      secretAccessKey:
+        name: stardelt-s3-creds
+        key: secret-key
+      region:
+        name: stardelt-s3-creds
+        key: region
+    wal: {compression: gzip, maxParallel: 2}
+    data: {compression: gzip}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: lakekeeper-pg-restore
+  namespace: stardelt-restore
+spec:
+  # A physical restore cannot cross a PostgreSQL major version: this must be the
+  # image the source cluster archives with (manifests/cnpg-postgres.yaml).
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2
+  instances: 1
+  storage:
+    size: 2Gi
+  bootstrap:
+    recovery:
+      # Latest archived WAL, not the base backup: the stricter claim.
+      source: origin
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: lakekeeper-pg-restore-source
+          serverName: lakekeeper-pg
+  resources:
+    requests: { cpu: "50m", memory: "256Mi" }
+    limits:   { cpu: "1",   memory: "512Mi" }

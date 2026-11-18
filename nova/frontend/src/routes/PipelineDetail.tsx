@@ -1,0 +1,615 @@
+import { Fragment, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { ApiError, api, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
+import ErrorBox from '../components/ErrorBox'
+import { EmptyState } from '../components/EmptyState'
+import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
+import DefinitionEditor from '../components/DefinitionEditor'
+import StopRunDialog from '../components/StopRunDialog'
+import RunTaskTable from '../components/RunTaskTable'
+import { shortRevision, shortVersion } from '../format'
+import { toYaml } from '../yaml'
+import {
+  NOT_LOADED_NOTE,
+  PipelineActions,
+  PipelineFeedback,
+  PipelineStateBadge,
+  RunStateBadge,
+  formatWhen,
+  runDuration,
+  runTypeWord,
+  triggerWord,
+  usePipelineActions,
+} from './Pipelines'
+
+/**
+ * One pipeline: its owner's facts, the declared tasks, the latest runs and — under a
+ * run — its task instances and their logs. Run now, pause, resume and stop live here
+ * too, sharing their implementation with the list.
+ *
+ * A run that is still `queued` or `running` is read again every 5 s. A log is read in
+ * pages and rendered as plain text: no markup, no links made from log text.
+ */
+export default function PipelineDetail() {
+  const { namespace = '', name = '' } = useParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const newest = searchParams.get('edit') === 'newest'
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // Demo mode has no cluster, so every write and the definition route answer 503 (#500).
+  const demo = me.data?.demo === true
+  const [openRun, setOpenRun] = useState<string | null>(null)
+  const [stopping, setStopping] = useState<RunView | null>(null)
+  const [editing, setEditing] = useState(newest)
+  const [deleting, setDeleting] = useState(false)
+  const [showDefinition, setShowDefinition] = useState(false)
+  const [editingDefinition, setEditingDefinition] = useState(false)
+
+  const detail = useQuery({
+    queryKey: ['pipeline', namespace, name],
+    queryFn: () => api.pipeline(namespace, name),
+    refetchInterval: (query) => {
+      const runs = query.state.data?.runs ?? []
+      return runs.some((run) => run.state === 'queued' || run.state === 'running') ? 5_000 : false
+    },
+  })
+
+  // The document is read when the person asks for it, not with every visit to the page.
+  const definition = useQuery({
+    queryKey: ['pipeline-spec', namespace, name],
+    queryFn: () => api.pipelineSpec(namespace, name),
+    enabled: showDefinition,
+  })
+
+  const actions = usePipelineActions(() =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] }),
+      queryClient.invalidateQueries({ queryKey: ['pipelines'] }),
+    ]),
+  )
+
+  function stopped(runId: string) {
+    setStopping(null)
+    actions.announce(`Stopped run ${runId}.`)
+    actions.clearError()
+    void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
+    void queryClient.invalidateQueries({ queryKey: ['pipeline-run', namespace, name, runId] })
+    void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+  }
+
+  if (detail.isLoading) {
+    return (
+      <div className="max-w-6xl space-y-5">
+        <h1 className="text-2xl font-bold tracking-tight break-words">{name}</h1>
+        <p className="text-sm text-text-mute">Loading pipeline…</p>
+      </div>
+    )
+  }
+
+  if (detail.isError && !detail.data) {
+    const status = detail.error instanceof ApiError ? detail.error.status : 0
+    const notFound = status === 404
+    // A 503 is a fact about the installation: no Retry, but the sentence says what to do.
+    const schedulerMissing = status === 503
+    return (
+      <div className="max-w-2xl space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">{notFound ? 'Not found' : name}</h1>
+        <div className="card space-y-3 p-5">
+          <ErrorBox
+            error={detail.error}
+            onRetry={notFound || schedulerMissing ? undefined : () => void detail.refetch()}
+          />
+          {schedulerMissing && (
+            <p className="text-sm text-text-mute">
+              An administrator has to set up the scheduler connection for this installation.
+            </p>
+          )}
+          <div>
+            <Link to="/pipelines" className="btn-ghost w-fit">Back to Pipelines</Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const pipeline = detail.data
+  if (!pipeline) {
+    // `isLoading` and `isError` cover every state react-query has; this only narrows the type.
+    return null
+  }
+
+  return (
+    <div className="max-w-6xl space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="mb-1 text-xs">
+            <Link to="/pipelines" className="underline text-text-dim">All pipelines</Link>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight break-words">{pipeline.name}</h1>
+            {(pipeline as PipelineDetailView & { airflowUrl?: string | null }).airflowUrl && (
+              <a
+                className="text-xs underline text-text-dim"
+                href={(pipeline as PipelineDetailView & { airflowUrl?: string | null }).airflowUrl as string}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Graph in Airflow ↗
+              </a>
+            )}
+          </div>
+          <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
+        </div>
+        {!demo && (
+          <div className="flex flex-wrap items-center gap-2">
+            <PipelineActions
+              pipeline={pipeline}
+              pending={actions.pending}
+              onAct={actions.act}
+              withRunForm
+              onRun={(start) => void actions.act(pipeline, 'run', start)}
+              error={actions.error}
+            />
+            {pipeline.canEdit && (
+              <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
+                Edit schedule
+              </button>
+            )}
+            {pipeline.canEdit && (
+              <button
+                type="button"
+                className="btn-ghost py-1.5 text-xs text-bad"
+                onClick={() => setDeleting(true)}
+              >
+                Delete pipeline
+              </button>
+            )}
+            {!pipeline.canEdit && (
+              <p className="text-text-dim text-sm">
+                Read-only: your group may run this pipeline;{' '}
+                {pipeline.ownerGroup ?? 'the owner group'} changes it.
+              </p>
+            )}
+          </div>
+        )}
+      </header>
+
+      <PipelineFeedback notice={actions.notice} error={actions.error} />
+
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
+        <Fact label="State">
+          <PipelineStateBadge state={pipeline.state} />
+          {pipeline.state === 'not-loaded' && (
+            <p className="mt-1 text-xs text-text-mute break-words">{NOT_LOADED_NOTE}</p>
+          )}
+        </Fact>
+        <Fact label="Owner">
+          <span className="break-words">{pipeline.ownerGroup ?? '—'}</span>
+        </Fact>
+        <Fact label="Schedule">
+          <span className="font-mono text-xs break-words">{pipeline.schedule ?? 'On demand'}</span>
+        </Fact>
+        <Fact label="Runs as">
+          <span className="font-mono text-xs break-words">{pipeline.runAs ?? '—'}</span>
+        </Fact>
+        <Fact label="Concurrency">
+          <span className="break-words">{pipeline.concurrency || '—'}</span>
+        </Fact>
+        {([
+          ['Tells on failure', pipeline.notify?.onFailure],
+          ['Tells on success', pipeline.notify?.onSuccess],
+          ['Tells on recovery', pipeline.notify?.onRecovered],
+        ] as const)
+          .filter(([, names]) => names?.length)
+          .map(([label, names]) => (
+            <Fact key={label} label={label}>
+              <span className="font-mono">{names!.join(', ')}</span>
+            </Fact>
+          ))}
+        {pipeline.deployment && (
+          <Fact label="Deployed from">
+            <span className="font-mono text-xs break-words" title={pipeline.deployment.revision}>
+              {pipeline.deployment.bundle} · {pipeline.deployment.target}
+              {pipeline.deployment.revision ? ` · ${shortRevision(pipeline.deployment.revision)}` : ''}
+            </span>
+            {(pipeline.deployment.deployedBy || pipeline.deployment.deployedAt) && (
+              <p className="mt-0.5 text-xs text-text-mute break-words">
+                {[
+                  pipeline.deployment.deployedBy ? `by ${pipeline.deployment.deployedBy}` : '',
+                  pipeline.deployment.deployedAt ? formatWhen(pipeline.deployment.deployedAt).text : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </p>
+            )}
+            {pipeline.deployment.modified && (
+              <p className="mt-0.5 text-xs text-warn break-words">
+                Changed since the last deploy. The next deploy of this bundle overwrites the change.
+              </p>
+            )}
+          </Fact>
+        )}
+        {!pipeline.deployment && pipeline.tasks.some((task) => task.kind === 'notebook') && (
+          <Fact label="Deployed from">
+            <span className="text-text-mute">
+              Not from Git — this notebook was published by hand.
+            </span>
+          </Fact>
+        )}
+      </dl>
+
+      <section className="card p-5">
+        <h2 className="text-lg font-semibold">Tasks</h2>
+        {pipeline.tasks.length === 0 ? (
+          <p className="mt-2 text-sm text-text-mute">This pipeline declares no tasks.</p>
+        ) : (
+          <ul className="mt-3 space-y-2 text-sm">
+            {pipeline.tasks.map((task, index) => {
+              const stored = Object.entries(task.notebookParams ?? {}).sort(([a], [b]) => a.localeCompare(b))
+              return (
+                <li key={`${task.name}-${index}`} className="min-w-0">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <span className="font-mono text-xs break-all">{task.name}</span>
+                    <span className="badge border-border bg-bg-soft text-text-dim">{task.kind || 'Unknown'}</span>
+                  </div>
+                  {task.kind === 'notebook' && (task.notebook || task.objectVersion) && (
+                    <p className="mt-0.5 text-text-dim break-words">
+                      Notebook <span className="font-mono text-xs break-all">{task.notebook || '—'}</span>
+                      {' · '}version <span className="font-mono text-xs">{shortVersion(task.objectVersion)}</span>
+                    </p>
+                  )}
+                  {stored.length > 0 && (
+                    <dl className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
+                      {stored.map(([paramName, value]) => (
+                        <Fragment key={paramName}>
+                          <dt className="font-mono text-text-mute break-all">{paramName}</dt>
+                          <dd className="font-mono text-text-dim break-all">{value}</dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </section>
+
+      {!demo && (
+      <section className="card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold">Definition</h2>
+            <p className="text-text-mute text-sm mt-1">
+              The pipeline as the document that creates it.
+              {showDefinition && definition.data ? (definition.data.editable ? ' Press Edit definition to change it.' : ' Read-only here.') : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn-ghost py-1.5 text-xs"
+            aria-expanded={showDefinition}
+            aria-controls="pipeline-definition"
+            onClick={() => {
+              setShowDefinition(!showDefinition)
+              setEditingDefinition(false)
+            }}
+          >
+            {showDefinition ? 'Hide definition' : 'Show definition'}
+          </button>
+        </div>
+        {showDefinition && (
+          <div id="pipeline-definition" className="mt-3 space-y-2">
+            {definition.isLoading && <p className="text-sm text-text-mute">Loading the definition…</p>}
+            {definition.isError && <ErrorBox error={definition.error} onRetry={() => void definition.refetch()} />}
+            {definition.data && (
+              <>
+                {!definition.data.editable && (
+                  <p className="text-sm text-text-dim break-words">
+                    {definition.data.managedBy === 'other'
+                      ? 'This pipeline is managed outside Nova (kubectl or GitOps); change it where it comes from.'
+                      : 'This pipeline has a shape the form cannot edit.'}
+                  </p>
+                )}
+                {editingDefinition ? (
+                  <DefinitionEditor
+                    key={definition.dataUpdatedAt}
+                    namespace={namespace}
+                    name={name}
+                    spec={definition.data}
+                    onClose={() => setEditingDefinition(false)}
+                    onReload={() => void definition.refetch()}
+                    onSaved={(view) => {
+                      setEditingDefinition(false)
+                      actions.clearError()
+                      actions.announce(`Saved ${view.name}.`)
+                      void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
+                      void queryClient.invalidateQueries({ queryKey: ['pipeline-spec', namespace, name] })
+                      void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+                    }}
+                  />
+                ) : (
+                  <>
+                    <pre
+                      role="region"
+                      aria-label="Definition as YAML"
+                      tabIndex={0}
+                      className="overflow-x-auto rounded border border-border bg-bg-soft p-3 font-mono text-xs"
+                    >
+                      {toYaml(definition.data.document)}
+                    </pre>
+                    {definition.data.editable && (
+                      <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditingDefinition(true)}>
+                        Edit definition
+                      </button>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </section>
+      )}
+
+      <div className="[container-type:inline-size]">
+      <section className="card relative overflow-x-auto">
+        <div className="px-5 pt-5 pb-3">
+          <h2 className="text-lg font-semibold">Runs</h2>
+          <p className="text-text-mute text-sm mt-1">The latest 20 runs, newest first.</p>
+        </div>
+        <table className="w-full text-sm">
+          <caption className="sr-only">The latest runs of {pipeline.name}.</caption>
+          <thead className="bg-bg-soft/50">
+            <tr>
+              <th scope="col" className="th min-w-[16rem] px-5 py-2.5">Run</th>
+              <th scope="col" className="th px-3 py-2.5">State</th>
+              <th scope="col" className="th px-3 py-2.5">Type</th>
+              <th scope="col" className="th px-3 py-2.5">Started</th>
+              <th scope="col" className="th px-3 py-2.5">Duration</th>
+              <th scope="col" className="th px-3 py-2.5">Triggered by</th>
+              <th scope="col" className="th px-3 py-2.5">Note</th>
+              <th scope="col" className="th px-3 py-2.5">
+                <span className="sr-only">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {pipeline.runs.length === 0 && (
+              <tr>
+                <td colSpan={8}><EmptyState icon="clock" title="No runs yet">{null}</EmptyState></td>
+              </tr>
+            )}
+            {pipeline.runs.map((run, index) => {
+              const open = openRun === run.runId
+              const panelId = `run-panel-${index}`
+              const started = formatWhen(run.startedAt ?? run.logicalDate)
+              const active = run.state === 'queued' || run.state === 'running'
+              return (
+                <RunRow
+                  key={run.runId}
+                  pipeline={pipeline}
+                  run={run}
+                  open={open}
+                  panelId={panelId}
+                  started={started}
+                  active={active}
+                  onToggle={() => setOpenRun(open ? null : run.runId)}
+                  onStop={() => setStopping(run)}
+                  onRetry={() => void actions.retry(pipeline, run.runId)}
+                  retrying={actions.pending === `retry:${run.runId}`}
+                />
+              )
+            })}
+          </tbody>
+        </table>
+      </section>
+      </div>
+
+      {stopping && (
+        <StopRunDialog
+          pipeline={pipeline}
+          run={stopping}
+          onClose={() => setStopping(null)}
+          onStopped={stopped}
+        />
+      )}
+
+      {editing && (
+        <ScheduleDialog
+          mode="edit"
+          pipeline={pipeline}
+          startWithNewest={newest}
+          onClose={() => {
+            setEditing(false)
+            setSearchParams({}, { replace: true })
+          }}
+          onScheduled={(view) => {
+            setEditing(false)
+            setSearchParams({}, { replace: true })
+            actions.clearError()
+            actions.announce(`Saved ${view.name}.`)
+            void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
+            void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+          }}
+        />
+      )}
+
+      {deleting && (
+        <DeletePipelineDialog
+          pipeline={pipeline}
+          onClose={() => setDeleting(false)}
+          onDeleted={() => {
+            setDeleting(false)
+            void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+            navigate('/pipelines', { state: { notice: `Deleted ${pipeline.name}.` } })
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="label">{label}</dt>
+      <dd className="mt-0.5">{children}</dd>
+    </div>
+  )
+}
+
+function RunRow({
+  pipeline,
+  run,
+  open,
+  panelId,
+  started,
+  active,
+  onToggle,
+  onStop,
+  onRetry,
+  retrying,
+}: {
+  pipeline: PipelineDetailView
+  run: RunView
+  open: boolean
+  panelId: string
+  started: { text: string; title?: string }
+  active: boolean
+  onToggle: () => void
+  onStop: () => void
+  onRetry: () => void
+  retrying: boolean
+}) {
+  return (
+    <>
+      <tr className="border-t border-border/70 hover:bg-bg-soft/30">
+        <td className="td px-5">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={panelId}
+            aria-label={`${open ? 'Hide' : 'Show'} tasks of run ${run.runId}`}
+            onClick={onToggle}
+            className="flex items-start gap-1.5 text-left"
+          >
+            <span aria-hidden className={`inline-block ${open ? 'rotate-90' : ''}`}>›</span>
+            <span className="text-sm" title={run.runId}>{started.title ?? run.runId}</span>
+          </button>
+        </td>
+        <td className="td px-3"><RunStateBadge state={run.state} /></td>
+        <td className="td px-3 text-text-dim">{runTypeWord(run.type)}</td>
+        <td className="td px-3 text-text-dim text-xs whitespace-nowrap">
+          <span title={started.title}>{started.text}</span>
+        </td>
+        <td className="td px-3 text-text-dim text-xs whitespace-nowrap">{runDuration(run.durationSeconds)}</td>
+        <td className="td px-3 text-text-dim">{triggerWord(run.triggeredBy)}</td>
+        <td className="td px-3">
+          {run.note ? <span className="break-words">{run.note}</span> : <span className="text-text-mute">—</span>}
+        </td>
+        <td className="td px-3">
+          <Link
+            className="btn-ghost py-1 px-2 text-xs whitespace-nowrap"
+            aria-label={`Open run ${run.runId}`}
+            to={`/pipelines/${encodeURIComponent(pipeline.namespace)}/${encodeURIComponent(pipeline.name)}/runs/${encodeURIComponent(run.runId)}`}
+          >
+            Open run
+          </Link>
+          {active && (
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs text-bad whitespace-nowrap"
+              aria-label={`Stop run ${run.runId}`}
+              onClick={onStop}
+            >
+              Stop run
+            </button>
+          )}
+          {run.state === 'failed' && pipeline.canRun && (
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs whitespace-nowrap"
+              aria-label={`Retry failed tasks of run ${run.runId}`}
+              disabled={retrying}
+              onClick={onRetry}
+            >
+              {retrying ? 'Retrying…' : 'Retry failed tasks'}
+            </button>
+          )}
+        </td>
+      </tr>
+      {open && (
+        <tr id={panelId} className="bg-bg-soft/20">
+          <td colSpan={8} className="px-4 py-4">
+            {/* Sticky and no wider than the card, so the panel stays in view when the runs table scrolls sideways. */}
+            <div className="sticky left-0 max-w-[calc(100cqw-2.5rem)]">
+              <RunTasks
+                namespace={pipeline.namespace}
+                name={pipeline.name}
+                runId={run.runId}
+                label={started.title ?? run.runId}
+                notebookTasks={pipeline.tasks.filter((task) => task.kind === 'notebook').map((task) => task.name)}
+                taskKinds={Object.fromEntries(pipeline.tasks.map((task) => [task.name, task.kind]))}
+              />
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+function RunTasks({
+  namespace,
+  name,
+  runId,
+  label,
+  notebookTasks,
+  taskKinds,
+}: {
+  namespace: string
+  name: string
+  runId: string
+  label: string
+  notebookTasks: string[]
+  taskKinds: Record<string, string>
+}) {
+  const tasks = useQuery({
+    queryKey: ['pipeline-run', namespace, name, runId],
+    queryFn: () => api.pipelineRun(namespace, name, runId),
+    refetchInterval: (query) => {
+      const state = query.state.data?.run.state
+      return state === 'queued' || state === 'running' ? 5_000 : false
+    },
+  })
+  const queries = useQuery({
+    queryKey: ['pipeline-run-queries', namespace, name, runId],
+    queryFn: () => api.pipelineRunQueries(namespace, name, runId),
+    refetchInterval: tasks.data?.run.state === 'running' || tasks.data?.run.state === 'queued' ? 5_000 : false,
+  })
+
+  if (tasks.isLoading) return <p className="text-sm text-text-mute">Loading tasks…</p>
+  if (tasks.isError || !tasks.data) {
+    return <ErrorBox error={tasks.error} onRetry={() => void tasks.refetch()} />
+  }
+
+  return (
+    <div className="space-y-3">
+      <h3 className="text-sm font-semibold break-all">
+        Tasks of run <span title={runId}>{label}</span>
+      </h3>
+      <RunTaskTable
+        namespace={namespace}
+        name={name}
+        runId={runId}
+        tasks={tasks.data.tasks}
+        queries={queries.data?.queries ?? []}
+        notebookTasks={notebookTasks}
+        taskKinds={taskKinds}
+      />
+    </div>
+  )
+}

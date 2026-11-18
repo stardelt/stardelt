@@ -1,0 +1,23 @@
+# The stardelt Operator's image (Makefile target `install-operator`). The operator is the one
+# component this repo installs from the sibling checkout, so its image was the one without a
+# checked-in pin: `make install-operator` used the chart's mutable `tag: dev` and the digest
+# the cluster actually ran lived only in the Deployment (2026-11-04, found while rolling out
+# operator#210-#214).
+#
+# `tag@sha256:…` pins the digest; the tag is only a label. After an operator merge, take the
+# `Pin it: …` line the Image workflow prints (`gh run view <run> --log | grep 'Pin it'`) and
+# update `tag` in a one-line PR; `./scripts/pin-image.sh stardelt-operator` moves the cluster and
+# this line together.
+#
+# Do NOT use the `Digest: sha256:…` line in the same log: that is the buildx export digest,
+# not the image manifest, and the kubelet answers `not found` for it. The correct value is
+# the one in the `Pin it:` line (and no other way to tell them apart from the log).
+image:
+  repository: ghcr.io/stardelt/stardelt-operator
+  tag: dev@sha256:2c0e7ed7660fe5220c6ee2d5a40ba9ab831988a77d7eaf6cce179c677a37bbc2
+  pullPolicy: IfNotPresent
+
+# One replica reconciles at a time (it holds the Lease stardelt-operator-leader); the second
+# is a standby that takes over about 15 s after the leader is gone. With one replica every
+# lease miss was a kubelet CrashLoopBackOff and 0/1 for minutes (platform#1458).
+replicaCount: 2

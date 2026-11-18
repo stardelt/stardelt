@@ -1,0 +1,34 @@
+[package]
+name = "stardelt-operator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+# `cargo run` starts the operator, not `crdgen`; the CLIs are `cargo run -q -- <command>`.
+default-run = "stardelt-operator"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+kube.workspace = true
+k8s-openapi.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+bcrypt.workspace = true
+# The raw request to the store through the API server's service proxy (`Client::request_text`).
+http = "1"
+# The job-script hash on the SparkApplication (stable across builds, unlike DefaultHasher).
+sha2 = "0.11"
+
+[dev-dependencies]
+# Already in the dependency tree (kube pulls both in); used to build a mock kube
+# client for the controller tests, so no test needs a cluster.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

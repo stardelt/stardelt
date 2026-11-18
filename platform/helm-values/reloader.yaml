@@ -1,0 +1,46 @@
+# Reloader (stakater/Reloader, Apache-2.0): restarts a workload when a Secret it lists changes, so
+# rotating a credential no longer needs a hand-written list of `rollout restart` commands
+# (docs: operations/rotating-secrets, platform#133).
+#
+# Scoped to the release namespace: no ClusterRole, and it never touches other namespaces.
+# `annotations` strategy: the restart is a pod-template annotation, not an injected environment
+# variable, so Helm and server-side apply see no foreign container fields.
+# Workloads opt in with `secret.reloader.stakater.com/reload: "<secret>[,<secret>]"` on their pod
+# template: an explicit list, never `auto`, because `auto` would also restart a workload for every
+# change of a ConfigMap it mounts (for example the Trino group file that is rewritten every five
+# minutes and deliberately needs no restart). Verified on a throwaway install: the annotation works
+# on the pod template, a Secret change rolls the workload within seconds, a workload without the
+# annotation is left alone.
+#
+# `reloadOnCreate`: a rotation replaces the Secret (delete, then re-create), which is a create event
+# and off by default — the pod would keep the old credential while the Secret had the new one
+# (platform#278). An update always reloads; this extends it to recreate.
+image:
+  # Pinned by digest (platform#1615): the chart's top-level `image.tag` is the Deployment's
+  # image (`reloader.image.*` is the Reloader *behaviour* block, not the image).
+  tag: "v1.4.24@sha256:3ab43d3eb96c59798644bf826b0444a846c0197d22ab4b6c101c4da3e1d6ef23"
+reloader:
+  watchGlobally: false
+  reloadStrategy: annotations
+  # See the header: a rotation recreates the Secret, which is a create event.
+  reloadOnCreate: true
+  # Prometheus text on 9090 (#607): the chart creates no Service by default, so a
+  # scrape config had no stable name to select. Annotations are the fallback for a
+  # customer without the Prometheus Operator; the later ServiceMonitor slice uses
+  # the same Service.
+  service:
+    port: 9090
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9090"
+      prometheus.io/path: /metrics
+  deployment:
+    # Pod Security `restricted` (platform#1096 question 5): the chart's pod block is already
+    # correct (`runAsNonRoot`, 65534, seccomp); only the container lacked the two fields.
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 128Mi }

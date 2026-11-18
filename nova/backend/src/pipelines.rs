@@ -1,0 +1,15071 @@
+//! The Pipelines API: read (list, detail, runs, tasks, logs — stardelt-nova#188), act (run now,
+//! pause, resume, stop a run — stardelt-nova#196), schedule (create, change, delete a
+//! pipeline — stardelt-nova#210) and the schedule options (parameters, retries, time limit,
+//! concurrency, a statement check, a next-runs preview — stardelt-nova#223); design notes
+//! `design/scheduled-jobs.md` §6.1 and `design/scheduling-and-notebooks.md` §2, phase J1.
+//!
+//! Nova is the enforcement point. Airflow's one credential reads every DAG, so every route here
+//! first finds the `Pipeline` resource, checks that the caller may see it, and only then asks
+//! Airflow. A pipeline the caller may not see answers **404**, exactly like one that does not
+//! exist — a refusal that distinguishes "hidden" from "absent" would leak the hidden one.
+//!
+//! - **Visibility** ([`visible`]): administrators see everything; everybody else sees a pipeline
+//!   whose `spec.ownerGroup` is one of their groups, or whose `spec.viewers` lists one of them.
+//!   A pipeline without an `ownerGroup` is administrators-only. Acting ([`may_act`]) stays with
+//!   the owner group and administrators: a `viewers` entry is read-only — list, detail, runs and
+//!   spec — and everybody else gets the same 404.
+//! - **Airflow's naming**: `Pipeline <namespace>/<name>` has the DAG id `<namespace>__<name>`
+//!   ([`airflow::dag_id_for`]). Every Airflow path is built from that id, never from a browser
+//!   value, so a run id of another pipeline cannot resolve.
+//! - **A new pipeline is loading**: the loader creates the DAG about 25 seconds after the
+//!   resource appears. Until then the view says `loaded: false`, `state: "loading"`; after three
+//!   minutes without a DAG it says `"not-loaded"` instead (the loader refused this resource).
+//! - **Airflow's refusals are Nova's sentences**, not Airflow's silent behaviour:
+//!   triggering a paused pipeline would queue a run that never starts (409 here), `Forbid` is not
+//!   enforced at trigger time (Nova checks the latest runs itself), a `logical_date` in the past
+//!   or future produces a run without tasks (Nova always sends now), and stopping a run marks it
+//!   failed — it is not a cancel: in-flight work can finish and commit (see #255).
+//! - **Logs**: the `::group::` source-details block (the marker with `sources`, the internal
+//!   object-store path Airflow writes as the next event, and `::endgroup::`) is dropped, and no
+//!   field of an answer can hold a `sources` value or an internal path. Answers are capped at 2000
+//!   lines and 512 KiB and say `truncated: true` beyond that.
+//! - **Unreachable upstreams are 502, never 500** (rule U12 of `design/ui-conformance.md`):
+//!   without a cluster client or an Airflow client the routes answer 503 and say which one is
+//!   missing; an Airflow that refuses Nova's service user answers 502 `the scheduler refused
+//!   Nova's service user`, and one that is unreachable answers 502 `the scheduler did not
+//!   answer`.
+//! - **Audit**: every action writes one `audit` line, including a refusal that never reaches
+//!   Airflow; no field can hold a note or log text.
+//! - **Writes** (#210): *Schedule* creates a `Pipeline` for one of the caller's **own** groups
+//!   (administrators included: they schedule for the groups they belong to) with
+//!   `runAs: pipeline-<group>` — the design note's naming convention. Nova validates everything
+//!   the loader (`stardelt-demos` `dags/stardelt_pipelines/plan.py`) would refuse, so a pipeline
+//!   Nova writes always becomes a DAG; the principal of the group must exist and be ready.
+//!   Only pipelines labelled `app.kubernetes.io/managed-by: stardelt-nova` may be changed or
+//!   deleted — a `kubectl` or GitOps pipeline answers 409 instead of being rewritten. The
+//!   statement is **never** audited, only its length and the cron text. A create needs no
+//!   Airflow (the resource is the source of truth); the read routes keep answering 503 without it.
+//!   In demo mode (`NOVA_DEMO=1`) the three read routes answer sample data from `demo.rs`; the
+//!   write routes and the detail routes still answer 503.
+//!
+//! - **Options and parameters** (#223): a schedule carries `${params.<name>}` values (at most 16,
+//!   lower-case names, values up to 256 characters) and the advanced options the loader reads
+//!   (`retries`, `timeout`, `concurrency`). An omitted option keeps today's default, so an old body
+//!   writes what it always wrote. Every `${…}` in the statement must be one the loader knows
+//!   (`run.date`, `run.id`, `params.<name>`) — an unknown one would fail the run, so it is a 400 at
+//!   create time. `POST /api/pipelines/check` asks the engine about a statement with `EXPLAIN`
+//!   (never `EXPLAIN ANALYZE`, never the statement itself), and `POST /api/pipelines/preview-schedule`
+//!   lists the next fire times in the schedule's zone.
+//!
+//! - **Notebooks** (#237): the same two routes schedule a published notebook version instead of a
+//!   statement. A body gives *either* a non-empty `sql` or a `notebook`
+//!   (`{ name, objectVersion, params }`) — both or neither is a 400. The resource's one task is
+//!   then `{"name": "run", "kind": "notebook", "config": {notebook, objectVersion, params}}`, where
+//!   `params` is the task's JSON object string with sorted keys; everything else (runAs, retries,
+//!   timeout, concurrency, schedule) is the SQL shape's. Nova refuses what the CRD or the loader
+//!   would refuse: the `.ipynb` name rule, at most 32 parameters named `[A-Za-z_][A-Za-z0-9_]{0,63}`,
+//!   values up to 256 characters without NUL, a JSON text of at most 4096 characters — and a version
+//!   that is **not in the store**: `notebooks::head_version` asks S3 (503 without `NOVA_S3_*`, 502
+//!   when it does not answer), so a schedule always pins bytes that exist. A version is never a
+//!   branch or a tag: the loader reads `<ownerGroup>/<notebook>` at exactly that version, so a group
+//!   the caller does not belong to can never be named. An update changes the notebook it names, its
+//!   version and its parameters, never what the pipeline runs: `sql` on a notebook pipeline is 400
+//!   `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a
+//!   statement`.
+//!
+//! The route logic sits in plain `async fn`s that take their inputs, so the tests call them
+//! without a router; each handler is the thin axum wrapper that checks sign-in and the two
+//! clients. The whole surface is uncacheable (`Cache-Control: no-store`).
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
+
+#[cfg(test)]
+use std::sync::Mutex;
+
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::{FromRequestParts, Path, Query, Request},
+    http::{HeaderValue, StatusCode, header, request::Parts},
+    middleware::Next,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use chrono::{DateTime, Datelike, Days, LocalResult, TimeZone, Utc};
+use chrono_tz::Tz;
+use futures::stream::{self, StreamExt};
+use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::AppState;
+use crate::airflow::{
+    AirflowClient, AirflowError, DagRun, DagSummary, LogEvent, LogPage, TaskInstance, dag_id_for,
+};
+use crate::api_json::ApiJson;
+use crate::audit::{self, PipelineWrite};
+use crate::auth::{Identity, Principal};
+use crate::connection_routes::{Fail, SignedIn};
+use crate::notebooks::{self, NotebookStore};
+
+/// The `Pipeline` resources of the platform namespace: the cluster, or memory in tests.
+pub enum PipelineResources {
+    Kube(Box<ClusterResources>),
+    #[cfg(test)]
+    Memory(Arc<Mutex<MemoryStore>>),
+}
+
+/// The two resource types of Nova's namespace. Boxed, so the enum stays the size of a pointer
+/// beside the test double.
+pub struct ClusterResources {
+    pipelines: Api<DynamicObject>,
+    principals: Api<DynamicObject>,
+}
+
+/// What the test double holds: the `Pipeline` resources and the `ServicePrincipal` resources of
+/// the namespace, both by name.
+#[cfg(test)]
+#[derive(Default)]
+pub struct MemoryStore {
+    pub pipelines: BTreeMap<String, Value>,
+    pub principals: BTreeMap<String, Value>,
+}
+
+#[derive(Debug)]
+pub enum ResourceError {
+    /// The name is taken: the answer is 409, never an overwrite.
+    Exists,
+    /// The resource changed (or vanished) since it was read: 409, never a silent overwrite.
+    Conflict,
+    /// The cluster did not answer or refused.
+    Unavailable(String),
+}
+
+impl PipelineResources {
+    /// The pipeline resources of Nova's namespace, through the cluster client.
+    pub fn cluster(client: kube::Client) -> Self {
+        let pipelines = Api::namespaced_with(
+            client.clone(),
+            &crate::cluster::namespace(),
+            &ApiResource::from_gvk(&GroupVersionKind::gvk(
+                "stardelt.io",
+                "v1alpha1",
+                "Pipeline",
+            )),
+        );
+        // The principal of a group, `pipeline-<group>` by convention, is another resource of the
+        // same namespace: Nova reads it, never writes it (an administrator creates it).
+        let principals = Api::namespaced_with(
+            client,
+            &crate::cluster::namespace(),
+            &ApiResource::from_gvk(&GroupVersionKind::gvk(
+                "stardelt.io",
+                "v1alpha1",
+                "ServicePrincipal",
+            )),
+        );
+        Self::Kube(Box::new(ClusterResources {
+            pipelines,
+            principals,
+        }))
+    }
+
+    /// Every `Pipeline` of the namespace, unfiltered; the caller applies [`visible`].
+    pub async fn list(&self) -> Result<Vec<Value>, ResourceError> {
+        match self {
+            Self::Kube(resources) => {
+                let objects = resources
+                    .pipelines
+                    .list(&kube::api::ListParams::default())
+                    .await
+                    .map_err(|e| ResourceError::Unavailable(e.to_string()))?;
+                objects
+                    .items
+                    .into_iter()
+                    .map(|o| {
+                        serde_json::to_value(o)
+                            .map_err(|e| ResourceError::Unavailable(e.to_string()))
+                    })
+                    .collect()
+            }
+            #[cfg(test)]
+            Self::Memory(items) => Ok(items
+                .lock()
+                .expect("memory pipeline resources poisoned")
+                .pipelines
+                .values()
+                .cloned()
+                .collect()),
+        }
+    }
+
+    /// One `Pipeline` by name; `None` when it does not exist.
+    pub async fn get(&self, name: &str) -> Result<Option<Value>, ResourceError> {
+        match self {
+            Self::Kube(resources) => resources
+                .pipelines
+                .get_opt(name)
+                .await
+                .map_err(|e| ResourceError::Unavailable(e.to_string()))
+                .map(|object| {
+                    object.map(|o| {
+                        serde_json::to_value(o)
+                            .map_err(|e| ResourceError::Unavailable(e.to_string()))
+                    })
+                })?
+                .transpose(),
+            #[cfg(test)]
+            Self::Memory(items) => Ok(items
+                .lock()
+                .expect("memory pipeline resources poisoned")
+                .pipelines
+                .get(name)
+                .cloned()),
+        }
+    }
+
+    /// A real create, not an apply: a name that already exists is [`ResourceError::Exists`].
+    /// Answers the resource as the cluster stored it.
+    pub async fn create(&self, resource: Value) -> Result<Value, ResourceError> {
+        match self {
+            Self::Kube(resources) => {
+                let object: DynamicObject = serde_json::from_value(resource)
+                    .map_err(|e| ResourceError::Unavailable(format!("not a resource: {e}")))?;
+                let created = resources
+                    .pipelines
+                    .create(&kube::api::PostParams::default(), &object)
+                    .await
+                    .map_err(|e| match e {
+                        kube::Error::Api(er) if er.code == 409 => ResourceError::Exists,
+                        other => ResourceError::Unavailable(other.to_string()),
+                    })?;
+                serde_json::to_value(created).map_err(|e| ResourceError::Unavailable(e.to_string()))
+            }
+            #[cfg(test)]
+            Self::Memory(store) => {
+                let mut store = store.lock().expect("memory pipeline resources poisoned");
+                let name = pipeline_name(&resource).to_string();
+                if store.pipelines.contains_key(&name) {
+                    return Err(ResourceError::Exists);
+                }
+                store.pipelines.insert(name, resource.clone());
+                Ok(resource)
+            }
+        }
+    }
+
+    /// Replace one, carrying the `resourceVersion` it was read with: a concurrent change is
+    /// [`ResourceError::Conflict`], never a silent overwrite. Answers the stored resource.
+    pub async fn replace(&self, name: &str, resource: Value) -> Result<Value, ResourceError> {
+        match self {
+            Self::Kube(resources) => {
+                let object: DynamicObject = serde_json::from_value(resource)
+                    .map_err(|e| ResourceError::Unavailable(format!("not a resource: {e}")))?;
+                let replaced = resources
+                    .pipelines
+                    .replace(name, &kube::api::PostParams::default(), &object)
+                    .await
+                    .map_err(|e| match e {
+                        // A conflict is the API server's `409`; a `404` means somebody deleted it
+                        // between the read and the write — both ask the caller to reload.
+                        kube::Error::Api(er) if er.code == 409 || er.code == 404 => {
+                            ResourceError::Conflict
+                        }
+                        other => ResourceError::Unavailable(other.to_string()),
+                    })?;
+                serde_json::to_value(replaced)
+                    .map_err(|e| ResourceError::Unavailable(e.to_string()))
+            }
+            #[cfg(test)]
+            Self::Memory(store) => {
+                let mut store = store.lock().expect("memory pipeline resources poisoned");
+                let Some(current) = store.pipelines.get(name) else {
+                    return Err(ResourceError::Conflict);
+                };
+                let read_with = current
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("resourceVersion"));
+                let written_with = resource
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("resourceVersion"));
+                if read_with != written_with {
+                    return Err(ResourceError::Conflict);
+                }
+                store.pipelines.insert(name.to_string(), resource.clone());
+                Ok(resource)
+            }
+        }
+    }
+
+    /// Delete one; a resource that is already gone is success (a `404` is not an error).
+    pub async fn delete(&self, name: &str) -> Result<(), ResourceError> {
+        match self {
+            Self::Kube(resources) => {
+                match resources
+                    .pipelines
+                    .delete(name, &kube::api::DeleteParams::default())
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
+                    Err(e) => Err(ResourceError::Unavailable(e.to_string())),
+                }
+            }
+            #[cfg(test)]
+            Self::Memory(store) => {
+                store
+                    .lock()
+                    .expect("memory pipeline resources poisoned")
+                    .pipelines
+                    .remove(name);
+                Ok(())
+            }
+        }
+    }
+
+    /// Every `ServicePrincipal` of the namespace, unfiltered; the caller picks a group's one.
+    pub async fn principals(&self) -> Result<Vec<Value>, ResourceError> {
+        match self {
+            Self::Kube(resources) => {
+                let objects = resources
+                    .principals
+                    .list(&kube::api::ListParams::default())
+                    .await
+                    .map_err(|e| ResourceError::Unavailable(e.to_string()))?;
+                objects
+                    .items
+                    .into_iter()
+                    .map(|o| {
+                        serde_json::to_value(o)
+                            .map_err(|e| ResourceError::Unavailable(e.to_string()))
+                    })
+                    .collect()
+            }
+            #[cfg(test)]
+            Self::Memory(store) => Ok(store
+                .lock()
+                .expect("memory pipeline resources poisoned")
+                .principals
+                .values()
+                .cloned()
+                .collect()),
+        }
+    }
+}
+
+/// The resource's `metadata.name`, or the empty string for a malformed object.
+fn pipeline_name(resource: &Value) -> &str {
+    resource
+        .get("metadata")
+        .and_then(|m| m.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// The resource's `spec`; the resource itself when the field is missing (every read then sees
+/// no owner group, no tasks and no schedule, which is the safe answer).
+fn spec_of(resource: &Value) -> &Value {
+    resource.get("spec").unwrap_or(resource)
+}
+
+/// `spec.notify` as the shape the document and the detail page carry; `None` when the key is
+/// absent or does not parse (the operator's lists may be left out, `serde(default)` fills them).
+fn notify_of(spec: &Value) -> Option<PipelineNotify> {
+    serde_json::from_value(spec.get("notify")?.clone()).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Pure rules
+// ---------------------------------------------------------------------------
+
+/// Who may see a pipeline. Administrators see all; everybody else sees a pipeline whose
+/// `spec.ownerGroup` names one of their groups, or whose `spec.viewers` lists one of them —
+/// a viewer reads (list, detail, runs, spec) and runs it (epic#895 decision 12).
+pub fn visible(identity: &Identity, spec: &Value) -> bool {
+    if identity.is_admin {
+        return true;
+    }
+    let mine = |group: &str| identity.groups.iter().any(|g| g == group);
+    if spec
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .is_some_and(mine)
+    {
+        return true;
+    }
+    spec.get("viewers")
+        .and_then(Value::as_array)
+        .is_some_and(|viewers| viewers.iter().filter_map(Value::as_str).any(mine))
+}
+
+/// Who may change a pipeline: pause it, resume it, change its spec or delete it. The owner group
+/// and administrators only — `spec.viewers` may not (epic#895 decision 12). Running is
+/// deliberately not here: a viewer runs the owner's statement, which cannot change what the
+/// pipeline does; that verb is [`visible`]. Written out rather than as a call to [`visible`],
+/// because the two rules differ on purpose; a caller who may see the pipeline but not change it
+/// gets 403.
+pub fn may_act(identity: &Identity, spec: &Value) -> bool {
+    if identity.is_admin {
+        return true;
+    }
+    spec.get("ownerGroup")
+        .and_then(Value::as_str)
+        .is_some_and(|group| identity.groups.iter().any(|g| g == group))
+}
+
+/// How long a resource may exist without a DAG before the view calls it `not-loaded`. The loader
+/// creates a DAG about 25 seconds after the resource appears; a resource the loader refuses
+/// never gets one.
+const NOT_LOADED_AFTER_SECONDS: f64 = 3.0 * 60.0;
+
+/// The single pipeline state the UI shows.
+///
+/// Not loaded: `loading` for the first three minutes after the resource was created (the loader
+/// needs about 25 seconds), then `not-loaded` — the loader will not create this DAG, and saying
+/// "loading" forever would be a lie. `created_age_seconds` is `None` when the resource carries
+/// no `metadata.creationTimestamp`; then the view stays `loading`.
+///
+/// `paused` wins over everything else (a paused pipeline is not "failed" even if its last run
+/// failed). A last run that is `running` or `queued` makes the pipeline `running`;
+/// `failed`/`upstream_failed` is `failed`; `success` is `succeeded`; anything else (never ran,
+/// `skipped`, …) is `idle`.
+pub fn pipeline_state(
+    paused: bool,
+    loaded: bool,
+    last_run_state: Option<&str>,
+    created_age_seconds: Option<f64>,
+) -> &'static str {
+    if !loaded {
+        return match created_age_seconds {
+            Some(age) if age > NOT_LOADED_AFTER_SECONDS => "not-loaded",
+            _ => "loading",
+        };
+    }
+    if paused {
+        return "paused";
+    }
+    match last_run_state {
+        Some("running") | Some("queued") => "running",
+        Some("failed") | Some("upstream_failed") => "failed",
+        Some("success") => "succeeded",
+        _ => "idle",
+    }
+}
+
+/// `"0 3 * * * (Europe/Berlin)"`, or just the cron when the schedule has no time zone. A
+/// schedule written as a bare string is accepted too (the `IngestionSource` shape).
+fn schedule_of(spec: &Value) -> Option<String> {
+    match spec.get("schedule")? {
+        Value::String(cron) if !cron.trim().is_empty() => Some(cron.trim().to_string()),
+        Value::Object(schedule) => {
+            let cron = schedule.get("cron")?.as_str()?.trim();
+            if cron.is_empty() {
+                return None;
+            }
+            match schedule
+                .get("timezone")
+                .and_then(Value::as_str)
+                .filter(|tz| !tz.is_empty())
+            {
+                Some(timezone) => Some(format!("{cron} ({timezone})")),
+                None => Some(cron.to_string()),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The task names and kinds the resource declares, in declaration order. `detailed` adds what
+/// only the edit dialog needs — a `sql` task's statement, a notebook task's file name, version
+/// and parameters — so the list stays small.
+fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
+    spec.get("tasks")
+        .and_then(Value::as_array)
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter_map(|task| {
+                    let kind = task.get("kind").and_then(Value::as_str).unwrap_or_default();
+                    let config = task.get("config");
+                    let notebook = detailed && kind == "notebook";
+                    Some(TaskSpecView {
+                        name: task.get("name")?.as_str()?.to_string(),
+                        kind: kind.to_string(),
+                        sql: if detailed && kind == "sql" {
+                            task.get("sql").and_then(Value::as_str).map(str::to_string)
+                        } else {
+                            None
+                        },
+                        notebook: if notebook {
+                            config
+                                .and_then(|config| config.get("notebook"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        object_version: if notebook {
+                            config
+                                .and_then(|config| config.get("objectVersion"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        notebook_params: if notebook {
+                            config
+                                .and_then(|config| config.get("params"))
+                                .and_then(Value::as_str)
+                                .and_then(|params| serde_json::from_str(params).ok())
+                        } else {
+                            None
+                        },
+                        depends_on: task
+                            .get("dependsOn")
+                            .and_then(Value::as_array)
+                            .map(|names| {
+                                names
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `${params.<name>}` values as the resource carries them.
+fn params_of(spec: &Value) -> BTreeMap<String, String> {
+    spec.get("params")
+        .and_then(Value::as_object)
+        .map(|params| {
+            params
+                .iter()
+                .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The retry policy as the resource carries it.
+fn retries_of(spec: &Value) -> Option<RetriesView> {
+    let retries = spec.get("retries")?;
+    Some(RetriesView {
+        attempts: retries.get("attempts")?.as_i64()?,
+        backoff: retries
+            .get("backoff")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// A duration the CRD accepts (`30s`, `5m`, `2h`, `1d`, the grammar of the loader's `plan.py`)
+/// as whole minutes. `None` for anything else, so a hand-written resource never breaks the view.
+fn minutes_of(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (number, seconds) = ["s", "m", "h", "d"].iter().find_map(|unit| {
+        let number = text.strip_suffix(unit)?;
+        let seconds = match *unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3600,
+            _ => 86_400,
+        };
+        Some((number, seconds))
+    })?;
+    Some(number.parse::<i64>().ok()? * seconds / 60)
+}
+
+/// The options as the resource carries them, defaults when a field is absent (or written in a
+/// form Nova does not read): the edit dialog prefills from this.
+fn options_of(spec: &Value) -> PipelineOptionsView {
+    let retries = spec.get("retries");
+    let backoff = retries
+        .and_then(|retries| retries.get("backoff"))
+        .and_then(Value::as_str)
+        .and_then(minutes_of)
+        .unwrap_or(DEFAULT_BACKOFF_MINUTES);
+    PipelineOptionsView {
+        retries: retries
+            .and_then(|retries| retries.get("attempts"))
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_RETRIES),
+        backoff_minutes: backoff,
+        timeout_minutes: spec
+            .get("timeout")
+            .and_then(Value::as_str)
+            .and_then(minutes_of)
+            .unwrap_or(DEFAULT_TIMEOUT_MINUTES),
+        concurrency: spec
+            .get("concurrency")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_CONCURRENCY)
+            .to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Time: Airflow's RFC 3339 strings and a run's duration (no date dependency)
+// ---------------------------------------------------------------------------
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = (year - era * 400) as u64;
+    let month_index = if month > 2 { month - 3 } else { month + 9 } as u64;
+    let doy = (153 * month_index + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// Seconds since the Unix epoch for an RFC 3339 timestamp, fraction included. Answers `None`
+/// for anything Airflow would not send (a missing date, an unknown zone, trailing text).
+fn parse_rfc3339(text: &str) -> Option<f64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let year = number(0..4)?;
+    if bytes.get(4) != Some(&b'-') {
+        return None;
+    }
+    let month = number(5..7)? as u32;
+    if bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let day = number(8..10)? as u32;
+    if !matches!(bytes.get(10), Some(b'T') | Some(b't') | Some(b' ')) {
+        return None;
+    }
+    let hour = number(11..13)?;
+    if bytes.get(13) != Some(&b':') {
+        return None;
+    }
+    let minute = number(14..16)?;
+    if bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let second = number(17..19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+
+    let mut at = 19;
+    let mut fraction = 0.0;
+    if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        let start = at;
+        while at < bytes.len() && bytes[at].is_ascii_digit() {
+            at += 1;
+        }
+        if at == start {
+            return None;
+        }
+        let digits: String = text[start..at].chars().take(9).collect();
+        fraction = format!("0.{digits}").parse::<f64>().ok()?;
+    }
+
+    let offset = match bytes.get(at) {
+        Some(b'Z') | Some(b'z') => {
+            at += 1;
+            0
+        }
+        Some(sign @ (b'+' | b'-')) => {
+            let sign = if *sign == b'+' { 1 } else { -1 };
+            let hours = number(at + 1..at + 3)?;
+            if bytes.get(at + 3) != Some(&b':') {
+                return None;
+            }
+            let minutes = number(at + 4..at + 6)?;
+            at += 6;
+            sign * (hours * 3_600 + minutes * 60)
+        }
+        _ => return None,
+    };
+    if at != bytes.len() {
+        return None;
+    }
+
+    let seconds =
+        days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second - offset;
+    Some(seconds as f64 + fraction)
+}
+
+/// The seconds between two Airflow timestamps, rounded to microseconds; `None` unless both
+/// parse and the end is not before the start. Airflow's ISO strings carry microseconds, and a
+/// float difference would otherwise leak binary noise into the JSON.
+pub(crate) fn duration_seconds(started: Option<&str>, ended: Option<&str>) -> Option<f64> {
+    let ended = parse_rfc3339(ended?)?;
+    let started = parse_rfc3339(started?)?;
+    let duration = ended - started;
+    (duration >= 0.0).then(|| (duration * 1_000_000.0).round() / 1_000_000.0)
+}
+
+/// The civil date for a number of days since 1970-01-01 (the inverse of [`days_from_civil`]).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = (days - era * 146_097) as u64;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    } as u32;
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for whole seconds since the epoch, always UTC and always with `Z`.
+/// Airflow 3 wants a `logical_date`; Nova always sends the current second (`now_rfc3339`).
+fn format_rfc3339(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (of_day / 3_600, (of_day % 3_600) / 60, of_day % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Whole seconds since the epoch, as a float for the age comparison.
+fn now_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or_default()
+}
+
+/// The clock as a UTC date-time, for the statement check's "today" and the preview's "next".
+/// Read through `std` on purpose: Nova never asks the machine for its local zone.
+fn now_utc() -> DateTime<Utc> {
+    DateTime::<Utc>::from(std::time::SystemTime::now())
+}
+
+/// Now, whole seconds, UTC, for Airflow's `logical_date`.
+fn now_rfc3339() -> String {
+    format_rfc3339(now_seconds() as i64)
+}
+
+/// The resource's `metadata.creationTimestamp`, as the cluster wrote it.
+fn created_at_of(resource: &Value) -> Option<&str> {
+    resource
+        .get("metadata")
+        .and_then(|metadata| metadata.get("creationTimestamp"))
+        .and_then(Value::as_str)
+}
+
+/// How long ago the resource was created; `None` without a readable `creationTimestamp`.
+fn created_age_seconds(resource: &Value) -> Option<f64> {
+    let created = parse_rfc3339(created_at_of(resource)?)?;
+    Some((now_seconds() - created).max(0.0))
+}
+
+// ---------------------------------------------------------------------------
+// Writes: what *Schedule* accepts, and the resource it writes
+// ---------------------------------------------------------------------------
+
+/// The label that says Nova owns a pipeline. Anything else (kubectl, GitOps) is not ours to
+/// rewrite: the answer is 409, never a silent edit of somebody's manifest.
+pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+pub const MANAGED_BY_NOVA: &str = "stardelt-nova";
+
+/// The longest statement a scheduled pipeline may carry.
+const MAX_STATEMENT_CHARS: usize = 20_000;
+
+/// At most this many pipelines created per user per hour (`AppState::pipeline_creates`).
+const CREATES_PER_HOUR: usize = 10;
+const CREATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+fn invalid_name() -> &'static str {
+    "name must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+}
+
+fn invalid_sql() -> &'static str {
+    "give the statement to run (up to 20,000 characters)"
+}
+
+/// The name rules of the CRD and of `ServicePrincipalSpec::validate`: 1 to 40 lower-case
+/// letters, digits and dashes, starting with a letter and not ending with a dash.
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
+    let bytes = name.as_bytes();
+    let ok = !bytes.is_empty()
+        && bytes.len() <= 40
+        && bytes[0].is_ascii_lowercase()
+        && bytes[bytes.len() - 1] != b'-'
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid_name().into())
+    }
+}
+
+/// `sql`, trimmed: not empty, at most 20,000 characters, no NUL; one trailing `;` is dropped so
+/// the loader does not have to guess. Answers the statement as it is stored.
+fn validate_sql(sql: &str) -> Result<String, String> {
+    let trimmed = sql.trim();
+    let statement = trimmed
+        .strip_suffix(';')
+        .map(str::trim_end)
+        .unwrap_or(trimmed);
+    if statement.is_empty()
+        || statement.chars().count() > MAX_STATEMENT_CHARS
+        || statement.contains('\0')
+    {
+        return Err(invalid_sql().into());
+    }
+    Ok(statement.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Parameters and advanced options (`Schedule`, #223)
+// ---------------------------------------------------------------------------
+
+/// At most this many `${params.<name>}` values per schedule (#223).
+const MAX_PARAMS: usize = 16;
+/// The longest parameter value the resource may carry.
+const MAX_PARAM_VALUE_CHARS: usize = 256;
+
+const PARAM_NAMES: &str = "parameter names are lower-case letters, digits and underscores";
+const TOO_MANY_PARAMS: &str = "at most 16 parameters";
+const PARAM_VALUE_TOO_LONG: &str = "a parameter value is at most 256 characters";
+const PARAM_VALUE_NUL: &str = "a parameter value cannot contain NUL";
+const RETRIES_RANGE: &str = "retries are 0 to 5";
+const BACKOFF_RANGE: &str = "the wait between retries is 1 to 60 minutes";
+const TIMEOUT_RANGE: &str = "the time limit is 1 to 720 minutes";
+const CONCURRENCY_RULE: &str = "runs are Forbid or Allow";
+const COUNT_RANGE: &str = "count is 1 to 10";
+
+/// Today's defaults for a schedule that sends no `options`: one retry after five minutes, a
+/// two-hour time limit, one run at a time (what `pipeline_resource` wrote before #223).
+const DEFAULT_RETRIES: i64 = 1;
+const DEFAULT_BACKOFF_MINUTES: i64 = 5;
+const DEFAULT_TIMEOUT_MINUTES: i64 = 120;
+const DEFAULT_CONCURRENCY: &str = "Forbid";
+
+/// `^[a-z][a-z0-9_]{0,31}$`: the names the loader expands as `${params.<name>}`.
+fn valid_param_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+/// The parameter table a schedule may carry: at most 16 values, lower-case names, short values
+/// without NUL. `Err` is the sentence the caller sees.
+fn validate_params(params: &BTreeMap<String, String>) -> Result<(), String> {
+    if params.len() > MAX_PARAMS {
+        return Err(TOO_MANY_PARAMS.into());
+    }
+    for (name, value) in params {
+        if !valid_param_name(name) {
+            return Err(PARAM_NAMES.into());
+        }
+        if value.contains('\0') {
+            return Err(PARAM_VALUE_NUL.into());
+        }
+        if value.chars().count() > MAX_PARAM_VALUE_CHARS {
+            return Err(PARAM_VALUE_TOO_LONG.into());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The notebook task (`Schedule`, #237)
+// ---------------------------------------------------------------------------
+
+/// The most parameters one notebook task may pass to papermill — the CRD's
+/// `maxProperties` for `config.params`.
+const MAX_NOTEBOOK_PARAMS: usize = 32;
+/// The longest one notebook parameter value may be, in characters.
+const MAX_NOTEBOOK_PARAM_VALUE_CHARS: usize = 256;
+/// The longest the `params` JSON object string may be — the CRD's CEL limit.
+const MAX_NOTEBOOK_PARAMS_JSON_CHARS: usize = 4096;
+
+const ONE_OF_STATEMENT_OR_NOTEBOOK: &str = "give a statement or a notebook";
+const NOTEBOOK_NAME_RULE: &str = "the notebook name is a .ipynb file name (letters, digits, \
+                                  dots, dashes, underscores and spaces)";
+const NOTEBOOK_PARAM_NAMES: &str = "parameter names are letters, digits and underscores";
+const NOTEBOOK_TOO_MANY_PARAMS: &str = "at most 32 parameters";
+const NOTEBOOK_PARAM_VALUE: &str = "a parameter value is at most 256 characters";
+const NOTEBOOK_PARAMS_TOO_LONG: &str = "the parameters are too long";
+/// An update cannot change what a pipeline runs (#237): the kind is the resource's.
+const NOTEBOOK_PIPELINE: &str = "this pipeline runs a notebook";
+const STATEMENT_PIPELINE: &str = "this pipeline runs a statement";
+
+/// `^[A-Za-z_][A-Za-z0-9_]{0,63}$`: the parameter names papermill binds. Notebook names are
+/// valid under the publish route's rule, so a schedule can only name a notebook a publish
+/// accepts (`notebooks::valid_name`, the CRD's own regular expression).
+fn valid_notebook_param_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// The notebook a schedule pins, checked the way the CRD and the loader check it. `Err` is the
+/// sentence the caller sees; `Ok` is the `config.params` JSON text, keys sorted by
+/// [`BTreeMap`], which is what the task carries.
+fn validate_notebook(notebook: &NotebookRequest) -> Result<String, String> {
+    if !notebooks::valid_name(&notebook.name) {
+        return Err(NOTEBOOK_NAME_RULE.into());
+    }
+    if notebook.params.len() > MAX_NOTEBOOK_PARAMS {
+        return Err(NOTEBOOK_TOO_MANY_PARAMS.into());
+    }
+    for (name, value) in &notebook.params {
+        if !valid_notebook_param_name(name) {
+            return Err(NOTEBOOK_PARAM_NAMES.into());
+        }
+        // The one sentence covers both: a value that would not fit papermill's call.
+        if value.chars().count() > MAX_NOTEBOOK_PARAM_VALUE_CHARS || value.contains('\0') {
+            return Err(NOTEBOOK_PARAM_VALUE.into());
+        }
+    }
+    let params = serde_json::to_string(&notebook.params)
+        .map_err(|_| NOTEBOOK_PARAMS_TOO_LONG.to_string())?;
+    if params.chars().count() > MAX_NOTEBOOK_PARAMS_JSON_CHARS {
+        return Err(NOTEBOOK_PARAMS_TOO_LONG.into());
+    }
+    Ok(params)
+}
+
+/// The `run` task of a Nova-written pipeline as a write stores it (#210, #237): exactly one of a
+/// statement and a pinned notebook version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Statement {
+    /// The statement as stored: trimmed, one trailing `;` dropped.
+    Sql(String),
+    /// The notebook fields as stored: the file name, the immutable object version and the
+    /// parameter JSON text with sorted keys.
+    Notebook {
+        name: String,
+        object_version: String,
+        params: String,
+    },
+    /// A whole task list, each task checked (`#905`).
+    Tasks(Vec<TaskStatement>),
+}
+
+/// The body's statement with the rules of its kind applied: the SQL ones (statement, template
+/// parameters, placeholders), or the notebook ones (name, parameters, and a pinned version that
+/// exists in the group). `Err` is the sentence and the audit's reason. A body gives exactly one
+/// of a non-empty `sql` and a `notebook`; both or neither is the same sentence (#237).
+async fn checked_statement(
+    sql: &str,
+    notebook: Option<&NotebookRequest>,
+    template_params: &BTreeMap<String, String>,
+    notebooks: Option<&NotebookStore>,
+    group: &str,
+) -> Result<Statement, ActionError> {
+    let refused = |reason: &'static str, message: String| {
+        ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
+    };
+    match (sql.trim().is_empty(), notebook) {
+        (false, None) => {
+            let sql = validate_sql(sql).map_err(|message| refused("sql", message))?;
+            validate_params(template_params).map_err(|message| refused("params", message))?;
+            check_placeholders(&sql, template_params)
+                .map_err(|message| refused("params", message))?;
+            Ok(Statement::Sql(sql))
+        }
+        (true, Some(notebook)) => {
+            let params =
+                validate_notebook(notebook).map_err(|message| refused("notebook", message))?;
+            if !notebooks::object_version_ok(&notebook.object_version) {
+                // Nothing with a space in it, or longer than 128 characters, ever came out of
+                // a publish: it cannot be in the store.
+                return Err(refused("version", no_such_version_message(group)));
+            }
+            match notebooks::head_version(
+                notebooks,
+                group,
+                &notebook.name,
+                &notebook.object_version,
+            )
+            .await
+            {
+                Ok(true) => Ok(Statement::Notebook {
+                    name: notebook.name.clone(),
+                    object_version: notebook.object_version.clone(),
+                    params,
+                }),
+                Ok(false) => Err(refused("version", no_such_version_message(group))),
+                Err(fail) => Err(ActionError::refused("store", fail)),
+            }
+        }
+        _ => Err(refused("body", ONE_OF_STATEMENT_OR_NOTEBOOK.into())),
+    }
+}
+
+/// One task of a task list (`#905`): its name, what must succeed first, and the statement the
+/// existing per-kind rules accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskStatement {
+    name: String,
+    depends_on: Vec<String>,
+    statement: Statement,
+}
+
+/// The task a `TaskStatement` carries as the resource stores it.
+fn task_json(task: &TaskStatement) -> Value {
+    let mut value = match &task.statement {
+        Statement::Sql(sql) => json!({ "name": task.name, "kind": "sql", "sql": sql }),
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => json!({
+            "name": task.name,
+            "kind": "notebook",
+            "config": { "notebook": name, "objectVersion": object_version, "params": params },
+        }),
+        // `checked_statement` never answers a task list.
+        Statement::Tasks(_) => unreachable!("a task carries one statement, not a list"),
+    };
+    if !task.depends_on.is_empty() {
+        value["dependsOn"] = json!(task.depends_on);
+    }
+    value
+}
+
+/// At most this many tasks: the CRD's `spec.tasks` `maxItems` (`PipelineSpec`, measured live).
+const MAX_TASKS: usize = 30;
+/// At most this many dependencies per task: the CRD's `tasks[].dependsOn` `maxItems`.
+const MAX_TASK_DEPENDS_ON: usize = 8;
+const TOO_MANY_TASKS: &str = "at most 30 tasks";
+const NO_TASKS: &str = "give at least one task";
+const TASK_NAME_RULE: &str = "task names are 1 to 63 lower-case letters, digits, dashes and underscores, starting with a \
+     letter or digit";
+const TOO_MANY_TASK_DEPENDS_ON: &str = "a task depends on at most 8 tasks";
+const ONE_OF_STATEMENT_NOTEBOOK_OR_TASKS: &str = "give a statement, a notebook or a task list";
+/// A task list is edited in its file, not in the dialog (`#905` decision 5).
+const SEVERAL_TASKS: &str =
+    "this pipeline has several tasks; change it in its file and deploy again";
+
+/// `^[a-z0-9][a-z0-9_-]{0,62}$`: the lower-case subset of the CRD's task-name pattern.
+fn valid_task_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-' || *byte == b'_'
+        })
+}
+
+/// Refuse a task list whose dependencies loop. The operator's `PipelineSpec::validate` runs the
+/// same check (Kahn's algorithm); Nova answers a sentence instead of the API server's 422.
+fn check_task_cycles(tasks: &[TaskStatement]) -> Result<(), String> {
+    fn visit(at: usize, tasks: &[TaskStatement], state: &mut [u8]) -> Result<(), String> {
+        match state[at] {
+            2 => return Ok(()),
+            1 => {
+                return Err(format!(
+                    "task `{}` is part of a dependency cycle",
+                    tasks[at].name
+                ));
+            }
+            _ => {}
+        }
+        state[at] = 1;
+        for dependency in &tasks[at].depends_on {
+            if let Some(next) = tasks.iter().position(|task| &task.name == dependency) {
+                visit(next, tasks, state)?;
+            }
+        }
+        state[at] = 2;
+        Ok(())
+    }
+    // 0 = unvisited, 1 = on the current path, 2 = done. At most 30 tasks, so the recursion depth
+    // is bounded.
+    let mut state = vec![0u8; tasks.len()];
+    for at in 0..tasks.len() {
+        visit(at, tasks, &mut state)?;
+    }
+    Ok(())
+}
+
+/// The `tasks` a body gives, checked: each task's name, its dependencies and exactly one statement
+/// or pinned notebook under the rules of `checked_statement`, then the list's own rules (1 to 30
+/// tasks, unique names, every dependency names a task of the list, no cycle). `Err` is one sentence
+/// that names the task (`#905` decision 2).
+async fn checked_tasks(
+    tasks: &[PipelineTaskRequest],
+    template_params: &BTreeMap<String, String>,
+    notebooks: Option<&NotebookStore>,
+    group: &str,
+) -> Result<Vec<TaskStatement>, ActionError> {
+    let refused = |reason: &'static str, message: String| {
+        ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
+    };
+    if tasks.is_empty() {
+        return Err(refused("tasks", NO_TASKS.into()));
+    }
+    if tasks.len() > MAX_TASKS {
+        return Err(refused("tasks", TOO_MANY_TASKS.into()));
+    }
+    let mut checked: Vec<TaskStatement> = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if !valid_task_name(&task.name) {
+            return Err(refused(
+                "task-name",
+                format!("task name `{}` is not valid: {TASK_NAME_RULE}", task.name),
+            ));
+        }
+        if checked.iter().any(|done| done.name == task.name) {
+            return Err(refused(
+                "task-name",
+                format!("task name `{}` is used twice", task.name),
+            ));
+        }
+        if task.depends_on.len() > MAX_TASK_DEPENDS_ON {
+            return Err(refused(
+                "task-depends",
+                format!("task `{}`: {TOO_MANY_TASK_DEPENDS_ON}", task.name),
+            ));
+        }
+        if task
+            .depends_on
+            .iter()
+            .any(|dependency| dependency == &task.name)
+        {
+            return Err(refused(
+                "task-depends",
+                format!("task `{}` cannot depend on itself", task.name),
+            ));
+        }
+        // The same rules the single `run` task gets (#821, #237); `checked_run` has already
+        // validated the pipeline-level parameter table, so a refusal here is the task's own.
+        let statement = checked_statement(
+            &task.sql,
+            task.notebook.as_ref(),
+            template_params,
+            notebooks,
+            group,
+        )
+        .await
+        .map_err(|error| error.about_task(&task.name))?;
+        checked.push(TaskStatement {
+            name: task.name.clone(),
+            depends_on: task.depends_on.clone(),
+            statement,
+        });
+    }
+    for task in &checked {
+        for dependency in &task.depends_on {
+            if !checked.iter().any(|other| &other.name == dependency) {
+                return Err(refused(
+                    "task-depends",
+                    format!(
+                        "task `{}` depends on `{dependency}`, which is not a task of this pipeline",
+                        task.name
+                    ),
+                ));
+            }
+        }
+    }
+    check_task_cycles(&checked).map_err(|message| refused("task-cycle", message))?;
+    Ok(checked)
+}
+
+/// What a body asks the pipeline to run: one statement, one pinned notebook, or a task list —
+/// exactly one of the three, each under the rules of its kind (`#905` decision 1).
+async fn checked_run(
+    sql: &str,
+    notebook: Option<&NotebookRequest>,
+    tasks: Option<&[PipelineTaskRequest]>,
+    template_params: &BTreeMap<String, String>,
+    notebooks: Option<&NotebookStore>,
+    group: &str,
+) -> Result<Statement, ActionError> {
+    match (sql.trim().is_empty(), notebook.is_some(), tasks) {
+        // A body without `tasks` behaves exactly as today, sentence included.
+        (_, _, None) => checked_statement(sql, notebook, template_params, notebooks, group).await,
+        (true, false, Some(tasks)) => {
+            // Once for the whole list: the parameters are the pipeline's, shared by every task.
+            validate_params(template_params).map_err(|message| {
+                ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
+            })?;
+            checked_tasks(tasks, template_params, notebooks, group)
+                .await
+                .map(Statement::Tasks)
+        }
+        _ => Err(ActionError::refused(
+            "body",
+            Fail::new(StatusCode::BAD_REQUEST, ONE_OF_STATEMENT_NOTEBOOK_OR_TASKS),
+        )),
+    }
+}
+
+/// What a stored pipeline runs, for the rules only an update has (`#905` decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredShape {
+    /// The form's single `run` task, of this kind (`sql` or `notebook`).
+    Run(&'static str),
+    /// A task list: every task is `sql` or `notebook`, and it is not the single `run` task.
+    Tasks,
+    /// A shape Nova does not write (another kind, or no tasks at all).
+    Other,
+}
+
+/// A task list: `run_task_kind` does not answer, and every task is a kind Nova can write.
+fn is_task_list(resource: &Value) -> bool {
+    if run_task_kind(resource).is_some() {
+        return false;
+    }
+    resource
+        .get("spec")
+        .and_then(|spec| spec.get("tasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            !tasks.is_empty()
+                && tasks.iter().all(|task| {
+                    matches!(
+                        task.get("kind").and_then(Value::as_str),
+                        Some("sql" | "notebook")
+                    )
+                })
+        })
+}
+
+fn stored_shape(resource: &Value) -> StoredShape {
+    match run_task_kind(resource) {
+        Some("notebook") => StoredShape::Run("notebook"),
+        Some(_) => StoredShape::Run("sql"),
+        None if is_task_list(resource) => StoredShape::Tasks,
+        None => StoredShape::Other,
+    }
+}
+
+/// The word the form uses for what a pipeline runs, in `changes_of`: the single task's kind, or
+/// `tasks` for a task list (`#905` decision 4).
+fn run_word(resource: &Value) -> &'static str {
+    match run_task_kind(resource) {
+        Some("notebook") => "notebook",
+        Some(_) => "statement",
+        None => "tasks",
+    }
+}
+
+/// The sentence a version that is not in the store answers (#237).
+fn no_such_version_message(group: &str) -> String {
+    format!("that notebook version does not exist in group {group}")
+}
+
+/// One `${…}` the loader's `expand.py` would replace: the offset of its `${`, the offset just
+/// past its `}`, and the name inside. `from` is where the search starts.
+///
+/// The grammar is deliberately the loader's (`\$\{[A-Za-z_][A-Za-z0-9_.]*\}`): a `${` its regex
+/// does not match is no placeholder, and the loader leaves it in the statement — Nova must not
+/// refuse a statement the loader happily runs.
+fn next_placeholder(statement: &str, from: usize) -> Option<(usize, usize, &str)> {
+    let mut at = from;
+    while let Some(found) = statement.get(at..)?.find("${") {
+        let start = at + found;
+        let body = start + 2;
+        let rest = statement.get(body..)?;
+        let length = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'.')
+            .count();
+        let name = rest.get(..length)?;
+        let first_ok = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        let closes = rest.as_bytes().get(length) == Some(&b'}');
+        if first_ok && closes {
+            return Some((start, body + length + 1, name));
+        }
+        at = body;
+    }
+    None
+}
+
+/// Every `${…}` in the statement must be one the loader can fill: `run.date`, `run.id`, or
+/// `params.<name>` for a parameter this schedule defines. An unknown one fails the run
+/// (`expand.py` raises), so Nova refuses the write instead.
+fn check_placeholders(statement: &str, params: &BTreeMap<String, String>) -> Result<(), String> {
+    let mut at = 0;
+    while let Some((_, end, name)) = next_placeholder(statement, at) {
+        let known = name == "run.date"
+            || name == "run.id"
+            || name
+                .strip_prefix("params.")
+                .is_some_and(|key| params.contains_key(key));
+        if !known {
+            return Err(format!("unknown placeholder ${{{name}}}"));
+        }
+        at = end;
+    }
+    Ok(())
+}
+
+/// The statement with every placeholder replaced, in one pass so a value that itself contains
+/// `${…}` is never expanded again. Unknown placeholders are refused before this runs.
+fn fill_placeholders(
+    statement: &str,
+    run_date: &str,
+    run_id: &str,
+    params: &BTreeMap<String, String>,
+) -> String {
+    let mut out = String::with_capacity(statement.len());
+    let mut at = 0;
+    while let Some((start, end, name)) = next_placeholder(statement, at) {
+        out.push_str(statement.get(at..start).unwrap_or_default());
+        let value = match name {
+            "run.date" => Some(run_date),
+            "run.id" => Some(run_id),
+            other => other
+                .strip_prefix("params.")
+                .and_then(|key| params.get(key))
+                .map(String::as_str),
+        };
+        match value {
+            Some(value) => out.push_str(value),
+            // Unreachable after `check_placeholders`; leaving the text alone is the safe answer.
+            None => out.push_str(statement.get(start..end).unwrap_or_default()),
+        }
+        at = end;
+    }
+    out.push_str(statement.get(at..).unwrap_or_default());
+    out
+}
+
+const CRON_FIELDS: &str = "a schedule has five fields: minute hour day month weekday";
+const CRON_RANGE: &str = "a field is out of range";
+const CRON_TOO_OFTEN: &str = "at most one run every 5 minutes";
+
+const MONTH_NAMES: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+const WEEKDAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/// One number or name in a cron field, mapped to its value (months count from 1, weekdays from
+/// Sunday = 0) and checked against the field's range.
+fn cron_value(text: &str, min: u32, max: u32, names: &[&str]) -> Result<u32, String> {
+    let value = if let Ok(number) = text.parse::<u32>() {
+        number
+    } else if let Some(index) = names
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(text))
+    {
+        min + index as u32
+    } else {
+        return Err(CRON_RANGE.into());
+    };
+    if value < min || value > max {
+        return Err(CRON_RANGE.into());
+    }
+    Ok(value)
+}
+
+/// One field: a comma list of `*`, `*/n`, `a`, `a-b` and `a-b/n`, with every number in range.
+fn cron_field(field: &str, min: u32, max: u32, names: &[&str]) -> Result<BTreeSet<u32>, String> {
+    let mut values = BTreeSet::new();
+    for part in field.split(',') {
+        if part.is_empty() {
+            return Err(CRON_RANGE.into());
+        }
+        let (body, step) = match part.split_once('/') {
+            Some((body, step)) if !step.contains('/') => (body, Some(step)),
+            Some(_) => return Err(CRON_RANGE.into()),
+            None => (part, None),
+        };
+        let step = match step {
+            Some(step) => step
+                .parse::<u32>()
+                .ok()
+                .filter(|step| *step >= 1)
+                .ok_or_else(|| CRON_RANGE.to_string())?,
+            None => 1,
+        };
+        let (start, end) = if body == "*" {
+            (min, max)
+        } else if let Some((start, end)) = body.split_once('-') {
+            let start = cron_value(start, min, max, names)?;
+            let end = cron_value(end, min, max, names)?;
+            if start > end {
+                return Err(CRON_RANGE.into());
+            }
+            (start, end)
+        } else {
+            let single = cron_value(body, min, max, names)?;
+            // `a/n` is not one of the five shapes: only `*/n` and `a-b/n` take a step.
+            if step != 1 {
+                return Err(CRON_RANGE.into());
+            }
+            (single, single)
+        };
+        let mut value = start;
+        while value <= end {
+            values.insert(value);
+            value += step;
+        }
+    }
+    Ok(values)
+}
+
+/// The minutes of an hour a cron fires on, from its minute field.
+fn cron_minutes(field: &str) -> Result<BTreeSet<u32>, String> {
+    cron_field(field, 0, 59, &[])
+}
+
+/// `true` when two fires are closer than five minutes, or more than twelve fire in an hour.
+/// Only the minute field can make an hourly schedule fire more often than hourly; a set with a
+/// gap under five minutes (including the wrap from the last minute to the first) is refused.
+fn fires_too_often(minutes: &BTreeSet<u32>) -> bool {
+    if minutes.len() > 12 {
+        return true;
+    }
+    let values: Vec<u32> = minutes.iter().copied().collect();
+    let adjacently_too_close = values.windows(2).any(|pair| pair[1] - pair[0] < 5);
+    let wrap_too_close = match (values.first(), values.last()) {
+        (Some(first), Some(last)) if values.len() > 1 => (60 - last) + first < 5,
+        _ => false,
+    };
+    adjacently_too_close || wrap_too_close
+}
+
+/// The schedule rules of the loader: five fields, in range, no `@daily` shortcut, no seconds,
+/// and never more often than every five minutes. `Err` is the sentence the caller sees.
+pub fn validate_cron(cron: &str) -> Result<(), String> {
+    parse_cron(cron).map(|_| ())
+}
+
+/// A parsed cron: the values each field names. The preview walks it (#223); `validate_cron` is
+/// this parser's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CronSchedule {
+    minutes: BTreeSet<u32>,
+    hours: BTreeSet<u32>,
+    days: BTreeSet<u32>,
+    months: BTreeSet<u32>,
+    weekdays: BTreeSet<u32>,
+}
+
+/// Parse and validate in one place, so the preview and the create route cannot drift: the field
+/// sets, the `7` = Sunday spelling, and the same sentences.
+fn parse_cron(cron: &str) -> Result<CronSchedule, String> {
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    if fields.len() != 5 {
+        return Err(CRON_FIELDS.into());
+    }
+    let minutes = cron_minutes(fields[0])?;
+    let hours = cron_field(fields[1], 0, 23, &[])?;
+    let days = cron_field(fields[2], 1, 31, &[])?;
+    let months = cron_field(fields[3], 1, 12, &MONTH_NAMES)?;
+    let mut weekdays = cron_field(fields[4], 0, 7, &WEEKDAY_NAMES)?;
+    if weekdays.remove(&7) {
+        weekdays.insert(0);
+    }
+    if fires_too_often(&minutes) {
+        return Err(CRON_TOO_OFTEN.into());
+    }
+    Ok(CronSchedule {
+        minutes,
+        hours,
+        days,
+        months,
+        weekdays,
+    })
+}
+
+/// The next `count` times the schedule fires in `zone`, strictly after `now`.
+///
+/// Walks the local days the cron names (at most 366 of them, so a schedule that can never fire —
+/// `0 0 31 2 *` — answers fewer runs instead of spinning), then their hours and minutes. Like
+/// croniter, a day matches when both day fields are restricted and either matches, and when one
+/// of them is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump
+/// does not exist and is not a run; a wall-clock time that happens twice (the clocks going back)
+/// is answered with its first occurrence.
+fn next_runs(
+    schedule: &CronSchedule,
+    zone: Tz,
+    count: usize,
+    now: DateTime<Utc>,
+) -> Vec<DateTime<Tz>> {
+    let mut runs = Vec::with_capacity(count);
+    // `*` and any expression that selects every day mean the same thing; the dom/dow rule only
+    // cares whether a field actually restricts the day.
+    let day_restricted = schedule.days.len() < 31;
+    let weekday_restricted = schedule.weekdays.len() < 7;
+    let today = now.with_timezone(&zone).date_naive();
+    for offset in 0..=366 {
+        if runs.len() == count {
+            break;
+        }
+        let Some(day) = today.checked_add_days(Days::new(offset)) else {
+            break;
+        };
+        if !schedule.months.contains(&day.month()) {
+            continue;
+        }
+        let day_of_month = schedule.days.contains(&day.day());
+        let day_of_week = schedule
+            .weekdays
+            .contains(&day.weekday().num_days_from_sunday());
+        let matches = if day_restricted && weekday_restricted {
+            day_of_month || day_of_week
+        } else {
+            day_of_month && day_of_week
+        };
+        if !matches {
+            continue;
+        }
+        for hour in &schedule.hours {
+            for minute in &schedule.minutes {
+                let Some(local) = day.and_hms_opt(*hour, *minute, 0) else {
+                    continue;
+                };
+                let fires_at = match zone.from_local_datetime(&local) {
+                    LocalResult::None => continue,
+                    LocalResult::Single(fires_at) => fires_at,
+                    LocalResult::Ambiguous(first, _) => first,
+                };
+                if fires_at.with_timezone(&Utc) > now {
+                    runs.push(fires_at);
+                    if runs.len() == count {
+                        return runs;
+                    }
+                }
+            }
+        }
+    }
+    runs
+}
+
+/// The validated schedule: the cron text and the IANA zone, as they go into the resource.
+fn validate_schedule(
+    schedule: Option<&ScheduleRequest>,
+) -> Result<Option<(String, String)>, String> {
+    let Some(schedule) = schedule else {
+        return Ok(None);
+    };
+    let cron = schedule.cron.trim();
+    validate_cron(cron)?;
+    let timezone = schedule.timezone.trim();
+    if Tz::from_str(timezone).is_err() {
+        return Err("unknown timezone".into());
+    }
+    Ok(Some((cron.to_string(), timezone.to_string())))
+}
+
+/// The sentence for a group whose principal an administrator has not created yet. It is the
+/// `principals` route's message and the create/update refusal, word for word.
+fn no_principal_message(group: &str) -> String {
+    format!(
+        "No principal for this group yet: an administrator creates one with \
+         make sync-principal NAME=pipeline-{group} GROUP={group}"
+    )
+}
+
+/// Why a principal is not ready: its `Ready` condition's message, or `no status yet`.
+fn principal_message(principal: &Value) -> String {
+    principal
+        .get("status")
+        .and_then(|status| status.get("conditions"))
+        .and_then(Value::as_array)
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|condition| condition.get("type").and_then(Value::as_str) == Some("Ready"))
+        })
+        .and_then(|condition| condition.get("message"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.is_empty())
+        .unwrap_or("no status yet")
+        .to_string()
+}
+
+/// One group's principal: `pipeline-<group>` when a `ServicePrincipal` of that name with
+/// `spec.ownerGroup` equal to the group exists, its `status.ready`, and why not when it is not.
+pub(crate) fn principal_view(principals: &[Value], group: &str) -> PrincipalView {
+    let name = format!("pipeline-{group}");
+    let found = principals.iter().find(|principal| {
+        principal
+            .get("metadata")
+            .and_then(|metadata| metadata.get("name"))
+            .and_then(Value::as_str)
+            == Some(name.as_str())
+            && principal
+                .get("spec")
+                .and_then(|spec| spec.get("ownerGroup"))
+                .and_then(Value::as_str)
+                == Some(group)
+    });
+    match found {
+        Some(principal) => {
+            let ready = principal
+                .get("status")
+                .and_then(|status| status.get("ready"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            PrincipalView {
+                group: group.to_string(),
+                principal: Some(name),
+                ready,
+                message: (!ready).then(|| principal_message(principal)),
+            }
+        }
+        None => PrincipalView {
+            group: group.to_string(),
+            principal: None,
+            ready: false,
+            message: Some(no_principal_message(group)),
+        },
+    }
+}
+
+/// Every principal the caller may see, sorted by name. The visibility rule is `visible()`,
+/// the same one the pipelines list uses; a resource without `metadata.name` is skipped.
+fn visible_principals(principals: &[Value], who: &Identity) -> Vec<ServicePrincipalView> {
+    let mut views: Vec<ServicePrincipalView> = principals
+        .iter()
+        .filter_map(|principal| {
+            let name = pipeline_name(principal);
+            if name.is_empty() {
+                return None;
+            }
+            let spec = spec_of(principal);
+            if !visible(who, spec) {
+                return None;
+            }
+            let purpose = spec
+                .get("purpose")
+                .and_then(Value::as_str)
+                .unwrap_or("pipeline")
+                .to_string();
+            // The CRD defaults `audiences` to trino+lakekeeper, so an empty list only
+            // happens for a resource that bypassed the schema.
+            let audiences = spec
+                .get("audiences")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ready = principal
+                .get("status")
+                .and_then(|status| status.get("ready"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(ServicePrincipalView {
+                name: name.to_string(),
+                owner_group: spec
+                    .get("ownerGroup")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                purpose,
+                audiences,
+                ready,
+                message: (!ready).then(|| principal_message(principal)),
+            })
+        })
+        .collect();
+    views.sort_by(|a, b| a.name.cmp(&b.name));
+    views
+}
+
+/// Whether Nova wrote this pipeline (and may therefore change or delete it).
+pub(crate) fn nova_managed(resource: &Value) -> bool {
+    resource
+        .get("metadata")
+        .and_then(|metadata| metadata.get("labels"))
+        .and_then(|labels| labels.get(MANAGED_BY_LABEL))
+        .and_then(Value::as_str)
+        == Some(MANAGED_BY_NOVA)
+}
+
+/// The kind of the pipeline's single `run` task when the form may edit it — `sql` or
+/// `notebook` (#210, #237). Anything else is a shape the form does not edit, and an update
+/// never changes the kind.
+fn run_task_kind(resource: &Value) -> Option<&str> {
+    let task = resource
+        .get("spec")?
+        .get("tasks")?
+        .as_array()
+        .filter(|tasks| tasks.len() == 1)?
+        .first()?;
+    if task.get("name").and_then(Value::as_str) != Some("run") {
+        return None;
+    }
+    match task.get("kind").and_then(Value::as_str)? {
+        kind @ ("sql" | "notebook") => Some(kind),
+        _ => None,
+    }
+}
+
+/// The `Pipeline` *Schedule* writes: the ticket's shape (#210), the caller's parameters and
+/// options (#223), a statement or a pinned notebook version (#237), the notifications it names
+/// (nova#815), nothing else.
+#[allow(clippy::too_many_arguments)]
+fn pipeline_resource(
+    name: &str,
+    group: &str,
+    statement: &Statement,
+    schedule: Option<&(String, String)>,
+    params: &BTreeMap<String, String>,
+    options: &PipelineOptionsView,
+    created_by: &str,
+    notify: Option<&PipelineNotify>,
+) -> Value {
+    let tasks = match statement {
+        Statement::Sql(sql) => json!([{ "name": "run", "kind": "sql", "sql": sql }]),
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => json!([{
+            "name": "run",
+            "kind": "notebook",
+            "config": { "notebook": name, "objectVersion": object_version, "params": params },
+        }]),
+        Statement::Tasks(tasks) => Value::Array(tasks.iter().map(task_json).collect()),
+    };
+    let mut spec = json!({
+        "ownerGroup": group,
+        "runAs": format!("pipeline-{group}"),
+        "tasks": tasks,
+        "concurrency": options.concurrency,
+        "retries": { "attempts": options.retries, "backoff": format!("{}m", options.backoff_minutes) },
+        "timeout": format!("{}m", options.timeout_minutes),
+    });
+    if !params.is_empty() {
+        spec["params"] = json!(params);
+    }
+    if let Some((cron, timezone)) = schedule {
+        spec["schedule"] = json!({ "cron": cron, "timezone": timezone });
+    }
+    // Never an empty object: the CRD refuses `notify` without an owner group, and an empty
+    // object says nothing a reader can use.
+    if let Some(notify) = notify.filter(|notify| !notify.is_empty()) {
+        spec["notify"] = serde_json::to_value(notify).unwrap_or(Value::Null);
+    }
+    let mut labels = serde_json::Map::new();
+    labels.insert(MANAGED_BY_LABEL.to_string(), json!(MANAGED_BY_NOVA));
+    labels.insert("stardelt.io/owner-group".to_string(), json!(group));
+    json!({
+        "apiVersion": "stardelt.io/v1alpha1",
+        "kind": "Pipeline",
+        "metadata": {
+            "name": name,
+            "namespace": crate::cluster::namespace(),
+            "labels": Value::Object(labels),
+            "annotations": { "stardelt.io/created-by": created_by },
+        },
+        "spec": spec,
+    })
+}
+
+/// The resource an update writes: `resource` with the statement or the pinned notebook, the
+/// options, the parameters and the schedule replaced by the body's (the body describes the whole
+/// editable state, nothing is merged), and nothing else touched. The update and the validation
+/// both build it here, so what is checked is what is written.
+fn updated_resource(
+    resource: &Value,
+    statement: &Statement,
+    options: &PipelineOptionsView,
+    params: &BTreeMap<String, String>,
+    schedule: Option<&(String, String)>,
+    notify: Option<&PipelineNotify>,
+) -> Value {
+    let mut updated = resource.clone();
+    match statement {
+        Statement::Sql(sql) => updated["spec"]["tasks"][0]["sql"] = json!(sql),
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => {
+            updated["spec"]["tasks"][0]["config"] = json!({
+                "notebook": name,
+                "objectVersion": object_version,
+                "params": params,
+            });
+        }
+        Statement::Tasks(tasks) => {
+            updated["spec"]["tasks"] = Value::Array(tasks.iter().map(task_json).collect());
+        }
+    }
+    updated["spec"]["concurrency"] = json!(options.concurrency);
+    updated["spec"]["retries"] = json!({
+        "attempts": options.retries,
+        "backoff": format!("{}m", options.backoff_minutes),
+    });
+    updated["spec"]["timeout"] = json!(format!("{}m", options.timeout_minutes));
+    if params.is_empty() {
+        if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+            spec.remove("params");
+        }
+    } else {
+        updated["spec"]["params"] = json!(params);
+    }
+    match schedule {
+        Some((cron, timezone)) => {
+            updated["spec"]["schedule"] = json!({ "cron": cron, "timezone": timezone });
+        }
+        None => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("schedule");
+            }
+        }
+    }
+    // `None` leaves what the resource carries: until the form edits notifications, a save must
+    // not wipe one a bundle deployed. All three lists empty removes the key.
+    match notify {
+        Some(notify) if !notify.is_empty() => {
+            updated["spec"]["notify"] = serde_json::to_value(notify).unwrap_or(Value::Null);
+        }
+        Some(_) => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("notify");
+            }
+        }
+        None => {}
+    }
+    updated
+}
+
+/// What differs between a stored pipeline and the resource an update would write, in the words
+/// of the form: `statement` or `notebook`, `schedule`, `params`, `options` (any of the
+/// concurrency, retries and time limit), and `deployment` when the bundle, the target or the
+/// commit a deploy stamped differs.
+fn changes_of(before_resource: &Value, after_resource: &Value) -> Vec<String> {
+    let (before, after) = (spec_of(before_resource), spec_of(after_resource));
+    let run = run_word(after_resource);
+    let options = ["concurrency", "retries", "timeout"]
+        .iter()
+        .any(|key| before.get(key) != after.get(key));
+    // Who deployed and when change with every deploy; the bundle, the target and the commit are
+    // what a person means by "the deployment changed".
+    let deployed =
+        |resource: &Value| deployment_of(resource).map(|d| (d.bundle, d.target, d.revision));
+    [
+        (run, before.get("tasks") != after.get("tasks")),
+        ("schedule", before.get("schedule") != after.get("schedule")),
+        ("params", before.get("params") != after.get("params")),
+        ("options", options),
+        (
+            "deployment",
+            deployed(before_resource) != deployed(after_resource),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, changed)| *changed)
+    .map(|(name, _)| name.to_string())
+    .collect()
+}
+
+/// The in-memory create rate limit (`AppState::pipeline_creates`): per signed-in `sub`, the
+/// creation times inside the last hour.
+pub type CreateLimiter = std::sync::Mutex<HashMap<String, VecDeque<Instant>>>;
+
+/// Take one creation slot for `sub`, or report that the hour is full. Refusals before the
+/// limiter (bad name, foreign group, missing principal, bad body, name taken) never reach it;
+/// only a restart forgets it.
+fn take_create_slot(limiter: &CreateLimiter, sub: &str) -> bool {
+    let mut map = limiter.lock().expect("create limiter poisoned");
+    let now = Instant::now();
+    let slots = map.entry(sub.to_string()).or_default();
+    while slots
+        .front()
+        .is_some_and(|then| now.duration_since(*then) >= CREATE_WINDOW)
+    {
+        slots.pop_front();
+    }
+    if slots.len() >= CREATES_PER_HOUR {
+        false
+    } else {
+        slots.push_back(now);
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request and answer shapes (`Schedule`, #210)
+// ---------------------------------------------------------------------------
+
+/// A cron expression and its IANA zone; both required when a `schedule` object is sent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ScheduleRequest {
+    pub cron: String,
+    pub timezone: String,
+}
+
+/// Who is told when a run of this pipeline ends (`spec.notify`, operator#582 / nova#815).
+/// Each list names at most five destinations owned by the pipeline's `ownerGroup`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNotify {
+    /// Destinations told when the run fails, after the last retry.
+    #[serde(default)]
+    pub on_failure: Vec<String>,
+    /// Destinations told when the run succeeds.
+    #[serde(default)]
+    pub on_success: Vec<String>,
+    /// Destinations told on the first success after a failure.
+    #[serde(default)]
+    pub on_recovered: Vec<String>,
+}
+
+impl PipelineNotify {
+    /// Nothing is listed, so the resource carries no `spec.notify` at all.
+    pub fn is_empty(&self) -> bool {
+        self.on_failure.is_empty() && self.on_success.is_empty() && self.on_recovered.is_empty()
+    }
+
+    /// The operator's shape rules (`crd.rs`, `PipelineSpec::validate`), in its order and its
+    /// sentences: at most five names per list, each 1 to 64 characters without outer
+    /// whitespace, and no name twice in one list.
+    fn check_shape(&self) -> Result<(), String> {
+        for (list, names) in [
+            ("onFailure", &self.on_failure),
+            ("onSuccess", &self.on_success),
+            ("onRecovered", &self.on_recovered),
+        ] {
+            if names.len() > 5 {
+                return Err(format!("notify.{list} names at most 5 destinations"));
+            }
+            let mut seen = BTreeSet::new();
+            for name in names {
+                if name.trim().is_empty() || name.chars().count() > 64 {
+                    return Err(format!(
+                        "notify.{list} holds `{name}`, which is not a destination name (1 to 64 characters)"
+                    ));
+                }
+                if name != name.trim() {
+                    return Err(format!(
+                        "notify.{list} holds `{name}`, which has leading or trailing whitespace"
+                    ));
+                }
+                if !seen.insert(name.as_str()) {
+                    return Err(format!("notify.{list} names `{name}` twice"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The advanced options of a schedule (#223), all optional: an omitted field keeps today's
+/// default (one retry, five minutes between retries, a two-hour time limit, one run at a time).
+/// `Replace` is deliberately not offered — the loader treats it as `Forbid`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineOptions {
+    /// Extra attempts after a failure, 0 to 5.
+    #[serde(default)]
+    pub retries: Option<i64>,
+    /// The wait between attempts, 1 to 60 minutes.
+    #[serde(default)]
+    pub backoff_minutes: Option<i64>,
+    /// The longest a whole run may take, 1 to 720 minutes.
+    #[serde(default)]
+    pub timeout_minutes: Option<i64>,
+    /// `Forbid` (one run at a time, the default) or `Allow` (runs side by side).
+    #[serde(default)]
+    pub concurrency: Option<String>,
+}
+
+/// The options as the resource carries them, defaults filled in — what the edit dialog prefills.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineOptionsView {
+    pub retries: i64,
+    pub backoff_minutes: i64,
+    pub timeout_minutes: i64,
+    pub concurrency: String,
+}
+
+impl PipelineOptions {
+    /// The options with their defaults, checked. `Err` is the sentence the caller sees; the
+    /// order is the order of the fields (retries, the wait, the time limit, the run mode).
+    fn resolve(&self) -> Result<PipelineOptionsView, String> {
+        let retries = self.retries.unwrap_or(DEFAULT_RETRIES);
+        if !(0..=5).contains(&retries) {
+            return Err(RETRIES_RANGE.into());
+        }
+        let backoff_minutes = self.backoff_minutes.unwrap_or(DEFAULT_BACKOFF_MINUTES);
+        if !(1..=60).contains(&backoff_minutes) {
+            return Err(BACKOFF_RANGE.into());
+        }
+        let timeout_minutes = self.timeout_minutes.unwrap_or(DEFAULT_TIMEOUT_MINUTES);
+        if !(1..=720).contains(&timeout_minutes) {
+            return Err(TIMEOUT_RANGE.into());
+        }
+        let concurrency = self
+            .concurrency
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(DEFAULT_CONCURRENCY);
+        if concurrency != "Allow" && concurrency != "Forbid" {
+            return Err(CONCURRENCY_RULE.into());
+        }
+        Ok(PipelineOptionsView {
+            retries,
+            backoff_minutes,
+            timeout_minutes,
+            concurrency: concurrency.to_string(),
+        })
+    }
+}
+
+/// The published notebook version a schedule pins (#237): the `.ipynb` file name, the immutable
+/// object version a publish answered, and the parameters the run passes to papermill.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookRequest {
+    /// `<group>/<name>` is the object key; the group is the pipeline's `ownerGroup`, so a
+    /// notebook of another group can never be named.
+    pub name: String,
+    /// The S3 object version, never a branch or a tag: exactly the bytes a person published.
+    pub object_version: String,
+    /// Parameter values by name; at most 32, names `[A-Za-z_][A-Za-z0-9_]{0,63}`, values up to
+    /// 256 characters. Written as the task's `config.params` JSON object string.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
+/// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement and
+/// a notebook, and the tasks that must succeed first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineTaskRequest {
+    /// Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}` (the CRD also accepts capitals).
+    pub name: String,
+    /// The statement to run; exactly one of this and `notebook` is given.
+    #[serde(default)]
+    pub sql: String,
+    /// A published notebook version to run instead (#237).
+    #[serde(default)]
+    pub notebook: Option<NotebookRequest>,
+    /// Names of the tasks that must succeed first; at most 8, each a task of this list.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+/// `POST /api/pipelines`: schedule a statement for one of the caller's own groups.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePipelineRequest {
+    pub name: String,
+    pub owner_group: String,
+    /// The statement to run; exactly one of this and `notebook` is given.
+    #[serde(default)]
+    pub sql: String,
+    /// A published notebook version to run instead of a statement (#237).
+    #[serde(default)]
+    pub notebook: Option<NotebookRequest>,
+    /// A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement or a
+    /// pinned notebook, with dependencies. Exclusive with `sql` and `notebook`.
+    #[serde(default)]
+    pub tasks: Option<Vec<PipelineTaskRequest>>,
+    #[serde(default)]
+    pub schedule: Option<ScheduleRequest>,
+    /// Values for `${params.<name>}` in the statement; at most 16. A notebook's values are in
+    /// `notebook.params`, not here.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// Retries, the wait between them, the time limit and the run mode; omitted fields keep the
+    /// defaults.
+    #[serde(default)]
+    pub options: Option<PipelineOptions>,
+    /// Which bundle, target and commit this pipeline is deployed from (`stardelt bundle deploy`).
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
+    /// Who is told when a run ends (`spec.notify`). Omitted writes none; every name must be a
+    /// destination of `ownerGroup`.
+    #[serde(default)]
+    pub notify: Option<PipelineNotify>,
+}
+
+/// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
+/// and the options — or, for a notebook pipeline, the notebook, its version and its parameters.
+/// Every other field of the resource stays as it is, and what the pipeline runs never changes
+/// kind.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePipelineRequest {
+    /// The statement of a statement pipeline; a notebook pipeline refuses it.
+    #[serde(default)]
+    pub sql: String,
+    /// The notebook, its version and its parameters for a notebook pipeline; a statement
+    /// pipeline refuses it.
+    #[serde(default)]
+    pub notebook: Option<NotebookRequest>,
+    /// A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement or a
+    /// pinned notebook, with dependencies. Exclusive with `sql` and `notebook`.
+    #[serde(default)]
+    pub tasks: Option<Vec<PipelineTaskRequest>>,
+    /// Omitted means no schedule: the pipeline then runs on demand only.
+    #[serde(default)]
+    pub schedule: Option<ScheduleRequest>,
+    /// The whole parameter table; omitted means none.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// The whole option set; omitted means the defaults.
+    #[serde(default)]
+    pub options: Option<PipelineOptions>,
+    /// The `resourceVersion` the caller read (`pipelines_spec`). When it is given and is not the
+    /// stored one, somebody changed the pipeline in between: 409 `the pipeline changed while you
+    /// edited it: reload`, and nothing is written. Omitted keeps the old behaviour (the update
+    /// then only fails if the resource changes while the update itself runs).
+    #[serde(default)]
+    pub resource_version: Option<String>,
+    /// Which bundle, target and commit this update deploys. Omitted leaves what the pipeline
+    /// already says untouched; given, it replaces it.
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
+    /// Who is told when a run ends (`spec.notify`). Omitted keeps the stored `spec.notify`;
+    /// given with all three lists empty, it removes it — a form save must not wipe a
+    /// notification a bundle deployed until the form edits it.
+    #[serde(default)]
+    pub notify: Option<PipelineNotify>,
+}
+
+/// Where a pipeline came from when `stardelt bundle deploy` published it. It names things and
+/// decides nothing: it is shown on the pipeline page and lets a later deploy find what a bundle
+/// owns. Written as the labels `stardelt.io/bundle` and `stardelt.io/target` and the annotation
+/// `stardelt.io/revision`, plus who deployed and when.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Provenance {
+    /// The bundle's name: 3 to 40 lower-case letters, digits and dashes.
+    pub bundle: String,
+    /// The target of the bundle: 1 to 32 lower-case letters, digits and dashes.
+    pub target: String,
+    /// The commit the bundle was read at: 7 to 64 hex digits, with `-dirty` appended when the
+    /// working tree had uncommitted changes. Omitted when the bundle is not in a Git checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// The bundle's repository as an `https://host/path` address, so a later stage can link the
+    /// pull request that promotes a commit. Omitted when the bundle's checkout names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
+/// What `view_of` shows of a [`Provenance`], with who deployed and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentView {
+    pub bundle: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// The repository the bundle was read from: `https://host/path`, for the compare link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployed_at: Option<String>,
+    /// `true` when what the deploy decides differs from what it wrote: a pipeline's run,
+    /// schedule, parameters and options, or a stream's source, sink, engine and restart policy.
+    /// Someone used the form, the YAML editor or `kubectl` since. Left out when they match, and
+    /// for a resource stamped before the digest existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<bool>,
+}
+
+/// `POST /api/pipelines/check`: what the engine says about a statement, without running it.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct CheckStatementRequest {
+    pub sql: String,
+    /// The parameters the statement's `${params.<name>}` placeholders are filled with.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
+/// The engine's verdict. `checked: false` means this kind of statement cannot be checked here;
+/// `ok` is absent then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct CheckStatementResponse {
+    pub checked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// The engine's sentence when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `POST /api/pipelines/preview-schedule`: the next fire times of a cron in its zone.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct PreviewScheduleRequest {
+    pub cron: String,
+    pub timezone: String,
+    /// How many runs to list, 1 to 10; 5 when omitted.
+    #[serde(default)]
+    pub count: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct PreviewScheduleResponse {
+    /// The next fire times in the schedule's zone, RFC 3339 with that offset.
+    pub runs: Vec<String>,
+}
+
+/// `POST /api/pipelines/validate`: what a create (or an apply) of this document would do, without doing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidatePipelineResponse {
+    /// True when the document would be accepted.
+    pub ok: bool,
+    /// `create` when the name is free, `update` when it names a pipeline Nova wrote and the caller
+    /// may change; absent when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Why not: one sentence per problem (today the first rule that refuses).
+    pub errors: Vec<ValidationIssue>,
+    /// What an `update` would change, from `statement` (or `notebook`), `schedule`, `params` and
+    /// `options`; empty for a `create`, for a refusal and for an update that changes nothing.
+    pub changes: Vec<String>,
+    /// The next five fire times (RFC 3339, in the schedule's zone) when the document is accepted
+    /// and has a schedule.
+    pub next_runs: Vec<String>,
+    /// `true` for an `update` of a pipeline that was changed after its last deploy
+    /// (`deployment.modified` of the pipeline view): applying this document overwrites that
+    /// change. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ValidationIssue {
+    pub message: String,
+}
+
+/// `GET /api/pipelines/{namespace}/{name}/spec`: the editable document of a pipeline, in the shape
+/// of the body of `pipelines_create`, so it can be edited and sent to `pipelines_validate` as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDocument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_group: Option<String>,
+    /// The statement of a statement pipeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    /// The pinned notebook of a notebook pipeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notebook: Option<NotebookRequest>,
+    /// The cron and its zone; a resource without a zone is `UTC`, as the loader reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleRequest>,
+    /// The values of `${params.<name>}`; left out when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    /// Retries, the wait, the time limit and the run mode, defaults filled in.
+    pub options: PipelineOptionsView,
+    /// Who is told when a run ends; left out when the resource has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<PipelineNotify>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineSpecResponse {
+    pub document: PipelineDocument,
+    /// The resource's `resourceVersion`, for a later edit to detect a concurrent change.
+    pub resource_version: Option<String>,
+    /// `nova` when Nova wrote the pipeline, `other` for one made with kubectl or by GitOps.
+    pub managed_by: String,
+    /// True when Nova may change it: Nova wrote it and it has the shape the form edits (one
+    /// `run` task, a statement or a notebook). A pipeline that is not editable is still shown.
+    pub editable: bool,
+}
+
+/// One of the caller's groups and its pipeline principal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct PrincipalView {
+    pub group: String,
+    /// `pipeline-<group>` when such a `ServicePrincipal` of this group exists.
+    pub principal: Option<String>,
+    /// The principal's `status.ready`.
+    pub ready: bool,
+    /// `null` when ready; otherwise the `Ready` condition's message, or `no status yet`, or the
+    /// `make sync-principal` command for a group without a principal.
+    pub message: Option<String>,
+}
+
+/// `GET /api/pipelines/principals`: every group of the caller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct PrincipalsResponse {
+    pub groups: Vec<PrincipalView>,
+}
+
+/// One `ServicePrincipal` the caller may see (#479).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrincipalView {
+    pub name: String,
+    pub owner_group: String,
+    pub purpose: String,
+    pub audiences: Vec<String>,
+    pub ready: bool,
+    /// `null` when ready; otherwise the same sentence the Schedule dialog would refuse with.
+    pub message: Option<String>,
+}
+
+/// `GET /api/service-principals`: the principals the caller may see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ServicePrincipalsResponse {
+    pub principals: Vec<ServicePrincipalView>,
+}
+
+// ---------------------------------------------------------------------------
+// Views (serde camelCase; no raw Airflow field names and no `sources`)
+// ---------------------------------------------------------------------------
+
+/// One task as the resource declares it. A `sql` task's statement and a `notebook` task's file
+/// name, version and parameters are carried only by the detail route (Schedule's edit dialog
+/// prefills from them).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSpecView {
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    /// The `.ipynb` file name of a `kind: "notebook"` task (#237).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notebook: Option<String>,
+    /// The immutable object version a notebook task pins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_version: Option<String>,
+    /// The parameters a notebook task passes, parsed back from `config.params`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notebook_params: Option<BTreeMap<String, String>>,
+    /// The task names this task waits for (`tasks[].dependsOn`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+}
+
+/// One pipeline in the list: the resource plus what Airflow says about it.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineView {
+    pub name: String,
+    pub namespace: String,
+    /// `spec.ownerGroup`; `None` means administrators only.
+    pub owner_group: Option<String>,
+    /// Whether the caller may run it and stop its runs.
+    pub can_run: bool,
+    /// Whether the caller may also pause, resume, change or delete it — the owner group and
+    /// administrators only (epic#895 decision 12).
+    pub can_edit: bool,
+    /// The cron schedule, with the time zone in parentheses when there is one.
+    pub schedule: Option<String>,
+    pub paused: bool,
+    /// `false` while Airflow has no DAG for the resource yet; the loader needs about 25 seconds.
+    pub loaded: bool,
+    pub next_run: Option<String>,
+    /// `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`, or `not-loaded` after three
+    /// minutes without a DAG.
+    pub state: String,
+    pub last_run: Option<RunView>,
+    pub tasks: Vec<TaskSpecView>,
+    pub run_as: Option<String>,
+    /// `spec.concurrency` as the resource carries it (`Allow`, `Forbid`, `Replace`).
+    pub concurrency: String,
+    /// `metadata.creationTimestamp` as the cluster wrote it (RFC 3339); `None` for a malformed
+    /// resource.
+    pub created_at: Option<String>,
+    /// The bundle, target and commit a deploy stamped on the pipeline; absent for one that was
+    /// made in the interface or with `stardelt apply`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentView>,
+}
+
+/// One DagRun. `type` is Airflow's `run_type` under the name the UI uses.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunView {
+    pub run_id: String,
+    pub state: String,
+    #[serde(rename = "type")]
+    pub run_type: String,
+    pub logical_date: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub triggered_by: Option<String>,
+    pub note: Option<String>,
+}
+
+/// The body of `POST …/runs`: a run date and parameter values for this run only (nova#817).
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunStart {
+    pub run_date: Option<String>,
+    pub params: Option<BTreeMap<String, String>>,
+}
+
+/// One task instance of a run.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskView {
+    pub task_id: String,
+    pub state: String,
+    pub try_number: u32,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub operator: Option<String>,
+}
+
+/// One log message. `sources` is deliberately absent: it names internal object-store paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct LogLine {
+    pub timestamp: Option<String>,
+    pub level: Option<String>,
+    pub text: String,
+}
+
+/// One page of a task's log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogView {
+    pub lines: Vec<LogLine>,
+    pub next_token: Option<String>,
+    pub truncated: bool,
+}
+
+/// The retry policy of a pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct RetriesView {
+    pub attempts: i64,
+    pub backoff: Option<String>,
+}
+
+/// `GET /api/pipelines`.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct PipelineListResponse {
+    pub pipelines: Vec<PipelineView>,
+}
+
+/// One run in the cross-pipeline list (`GET /api/runs`).
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsListRow {
+    pub namespace: String,
+    pub name: String,
+    /// `spec.ownerGroup`; `None` means administrators only.
+    pub owner_group: Option<String>,
+    /// `sql`, `notebook`, or `pipeline` for a multi-step pipeline (`run_task_kind`).
+    pub kind: String,
+    #[serde(flatten)]
+    pub run: RunView,
+}
+
+/// `GET /api/runs`.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct RunsListResponse {
+    pub runs: Vec<RunsListRow>,
+    /// Every owner group of a pipeline the caller can see, sorted; the runs filters do not
+    /// narrow it. Administrators (`ownerGroup: null`) are not a group.
+    pub groups: Vec<String>,
+}
+
+/// One pipeline that runs a published notebook (`GET /api/notebooks/{group}/{name}/usage`,
+/// stardelt-nova#517): a Schedule is a one-task `Pipeline` (#516), so this is its resource.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookScheduleRow {
+    pub namespace: String,
+    pub name: String,
+    pub owner_group: String,
+    /// The pinned `config.objectVersion`; a schedule runs exactly these bytes.
+    pub object_version: String,
+    /// `spec.schedule.cron`; `None` for a pipeline that runs on demand.
+    pub cron: Option<String>,
+    /// `spec.schedule.timezone`; `None` for a pipeline that runs on demand.
+    pub timezone: Option<String>,
+    /// `spec.runAs`.
+    pub run_as: Option<String>,
+}
+
+/// `GET /api/notebooks/{group}/{name}/usage`.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct NotebookUsageResponse {
+    /// The visible pipelines that run this notebook, sorted by name.
+    pub schedules: Vec<NotebookScheduleRow>,
+}
+
+/// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's
+/// parameters, retry policy and options.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDetail {
+    #[serde(flatten)]
+    pub pipeline: PipelineView,
+    pub runs: Vec<RunView>,
+    pub params: BTreeMap<String, String>,
+    pub retries: Option<RetriesView>,
+    /// Retries, the wait between them, the time limit and the run mode as the resource carries
+    /// them, with the defaults filled in when a field is absent.
+    pub options: PipelineOptionsView,
+    /// The public Airflow DAG URL, `None` when `NOVA_BASE_DOMAIN` is unset; the route is already visibility-gated, so no second permission check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub airflow_url: Option<String>,
+    /// Who is told when a run ends; left out when the resource has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<PipelineNotify>,
+}
+
+/// `GET …/runs/{run_id}`: one run and its task instances.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct RunResponse {
+    pub run: RunView,
+    pub tasks: Vec<TaskView>,
+}
+
+/// One statement a run's task sent to the engine (nova#788 S5).
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunQueryView {
+    /// The engine's query id.
+    pub id: String,
+    pub state: String,
+    /// The task id from the `task=` client tag, when the loader sent one.
+    pub task_id: Option<String>,
+    /// Started at, epoch milliseconds.
+    pub started_at: Option<i64>,
+    pub wall_ms: Option<i64>,
+    pub execution_ms: Option<i64>,
+    pub input_bytes: Option<i64>,
+    pub input_rows: Option<i64>,
+    /// The statement; string literals are replaced by `?` under NOVA_QUERY_LOG_REDACT_LITERALS=1.
+    pub sql: String,
+}
+
+/// `GET …/runs/{run_id}/queries` — the run's statements, slowest first.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunQueriesResponse {
+    pub queries: Vec<RunQueryView>,
+}
+
+fn run_view(run: &DagRun) -> RunView {
+    RunView {
+        run_id: run.dag_run_id.clone(),
+        state: run.state.clone().unwrap_or_default(),
+        run_type: run.run_type.clone().unwrap_or_default(),
+        logical_date: run.logical_date.clone(),
+        started_at: run.start_date.clone(),
+        ended_at: run.end_date.clone(),
+        duration_seconds: duration_seconds(run.start_date.as_deref(), run.end_date.as_deref()),
+        triggered_by: run.triggered_by.clone(),
+        note: run.note.clone(),
+    }
+}
+
+fn task_view(task: &TaskInstance) -> TaskView {
+    TaskView {
+        task_id: task.task_id.clone(),
+        state: task.state.clone().unwrap_or_default(),
+        try_number: task.try_number.unwrap_or(0),
+        started_at: task.start_date.clone(),
+        ended_at: task.end_date.clone(),
+        duration_seconds: task.duration,
+        operator: task.operator.clone(),
+    }
+}
+
+fn view_of(
+    namespace: &str,
+    name: &str,
+    resource: &Value,
+    dag: Option<&DagSummary>,
+    last_run: Option<&DagRun>,
+    who: &Identity,
+) -> PipelineView {
+    let spec = spec_of(resource);
+    let loaded = dag.is_some();
+    let paused = loaded && dag.and_then(|d| d.is_paused).unwrap_or(false);
+    let state = pipeline_state(
+        paused,
+        loaded,
+        last_run.and_then(|r| r.state.as_deref()),
+        created_age_seconds(resource),
+    );
+    PipelineView {
+        name: name.to_string(),
+        namespace: namespace.to_string(),
+        owner_group: spec
+            .get("ownerGroup")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        can_run: visible(who, spec),
+        can_edit: may_act(who, spec),
+        schedule: schedule_of(spec),
+        paused,
+        loaded,
+        next_run: dag.and_then(|d| d.next_dagrun_run_after.clone()),
+        state: state.to_string(),
+        last_run: last_run.map(run_view),
+        tasks: task_specs(spec, false),
+        run_as: spec
+            .get("runAs")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        concurrency: spec
+            .get("concurrency")
+            .and_then(Value::as_str)
+            .unwrap_or("Forbid")
+            .to_string(),
+        created_at: created_at_of(resource).map(str::to_string),
+        deployment: deployment_of(resource),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logs: drop the marker, strip ANSI, cap the answer
+// ---------------------------------------------------------------------------
+
+/// Remove ANSI escape sequences (`\x1b\[[0-9;]*[A-Za-z]`) from a log event. Multi-byte text
+/// survives; only the escape sequences are dropped.
+fn strip_ansi(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == 0x1b && bytes.get(at + 1) == Some(&b'[') {
+            let mut end = at + 2;
+            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b';') {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+                at = end + 1;
+                continue;
+            }
+        }
+        let ch = text[at..].chars().next().expect("a char starts at `at`");
+        out.push(ch);
+        at += ch.len_utf8();
+    }
+    out
+}
+
+/// The start of the `::group::Log message source details` block: the marker carries `sources`,
+/// and Airflow then writes the internal path as its own event.
+fn starts_sources_group(event: &LogEvent) -> bool {
+    !event.sources.is_empty()
+        || event
+            .event
+            .as_deref()
+            .is_some_and(|text| text.trim_start().starts_with("::group::"))
+}
+
+/// The `::endgroup::` that closes the source-details block.
+fn ends_sources_group(event: &LogEvent) -> bool {
+    event
+        .event
+        .as_deref()
+        .is_some_and(|text| text.trim_start().starts_with("::endgroup::"))
+}
+
+/// The most log lines one answer carries.
+const MAX_LOG_LINES: usize = 2000;
+/// The most log text (bytes) one answer carries.
+const MAX_LOG_BYTES: usize = 512 * 1024;
+/// The most stack frames one failed task shows below its exception.
+const MAX_ERROR_FRAMES: usize = 20;
+
+/// The last segment of a frame's filename: `/home/airflow/.local/lib/python3.12/site-packages/…`
+/// never reaches the page, `task_runner.py` does.
+fn short_path(filename: &str) -> &str {
+    filename
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(filename)
+}
+
+fn log_view(page: LogPage) -> LogView {
+    let mut lines = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    // The `::group::` source-details block is three events on live Airflow: the marker (with
+    // `sources`), the internal object-store path as its own event, and `::endgroup::`. All three
+    // are dropped: those paths are internal and never leave this module.
+    let mut in_sources_group = false;
+    for event in page.content {
+        if starts_sources_group(&event) {
+            in_sources_group = true;
+            continue;
+        }
+        if in_sources_group {
+            if ends_sources_group(&event) {
+                in_sources_group = false;
+            }
+            continue;
+        }
+        if ends_sources_group(&event) {
+            continue;
+        }
+        let text = strip_ansi(event.event.as_deref().unwrap_or_default());
+        if lines.len() >= MAX_LOG_LINES || bytes + text.len() > MAX_LOG_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += text.len();
+        lines.push(LogLine {
+            timestamp: event.timestamp,
+            level: event.level,
+            text,
+        });
+        // A failed task's reason lives only in `error_detail`; without it the page stops at
+        // "Task failed with exception" and says nothing.
+        for detail in &event.error_detail {
+            let text = format!("{}: {}", detail.exc_type, detail.exc_value);
+            if lines.len() >= MAX_LOG_LINES || bytes + text.len() > MAX_LOG_BYTES {
+                truncated = true;
+                break;
+            }
+            bytes += text.len();
+            lines.push(LogLine {
+                timestamp: None,
+                level: Some("error".to_string()),
+                text,
+            });
+            for frame in detail.frames.iter().take(MAX_ERROR_FRAMES) {
+                let text = format!(
+                    "  {}:{} in {}",
+                    short_path(&frame.filename),
+                    frame.lineno,
+                    frame.name
+                );
+                if lines.len() >= MAX_LOG_LINES || bytes + text.len() > MAX_LOG_BYTES {
+                    truncated = true;
+                    break;
+                }
+                bytes += text.len();
+                lines.push(LogLine {
+                    timestamp: None,
+                    level: None,
+                    text,
+                });
+            }
+        }
+    }
+    LogView {
+        lines,
+        next_token: page.continuation_token,
+        truncated,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Errors and the ticketing facts
+// ---------------------------------------------------------------------------
+
+pub(crate) fn no_cluster() -> Fail {
+    Fail::new(StatusCode::SERVICE_UNAVAILABLE, "no cluster connection")
+}
+
+fn scheduler_not_configured() -> Fail {
+    Fail::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the scheduler is not configured",
+    )
+}
+
+fn no_such_pipeline() -> Fail {
+    Fail::new(StatusCode::NOT_FOUND, "no such pipeline")
+}
+
+fn no_such_run() -> Fail {
+    Fail::new(StatusCode::NOT_FOUND, "no such run")
+}
+
+fn no_such_task() -> Fail {
+    Fail::new(StatusCode::NOT_FOUND, "no such task")
+}
+
+/// Airflow has no DAG for the resource yet (or the loader refused it). Acting on a pipeline that
+/// does not exist in Airflow is a 409 with a sentence, not a 404: the resource does exist.
+fn pipeline_not_loaded() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "the scheduler has not loaded this pipeline yet",
+    )
+}
+
+/// Triggering a paused pipeline would succeed in Airflow and the run would sit `queued` until
+/// someone resumes — it looks like it worked and nothing happens (#255). Nova refuses instead.
+fn pipeline_paused() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "the pipeline is paused: resume it first",
+    )
+}
+
+/// `Forbid` is not enforced by Airflow at trigger time: a second run is created and queued.
+fn run_already_active() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "a run is already active: wait for it or stop it",
+    )
+}
+
+/// Marking a finished run failed would rewrite history; only `queued` and `running` can stop.
+fn run_not_active() -> Fail {
+    Fail::new(StatusCode::CONFLICT, "the run is not active")
+}
+
+fn too_many_runs() -> Fail {
+    Fail::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many runs started; wait a minute",
+    )
+}
+
+/// A `Pipeline` of that name already exists; a create never overwrites one.
+fn pipeline_exists() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "a pipeline with this name already exists",
+    )
+}
+
+/// More than ten creates in an hour: the answer is 429, not a silently growing namespace.
+fn too_many_creates() -> Fail {
+    Fail::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many pipelines created this hour; wait before creating another",
+    )
+}
+
+/// A pipeline Nova did not write is somebody's manifest: change it there, not through the form.
+fn managed_outside() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "this pipeline is managed outside Nova (kubectl or Git); change it there",
+    )
+}
+
+/// The resource changed between the read and the write: reload instead of overwriting.
+fn pipeline_changed() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "the pipeline changed while you edited it: reload",
+    )
+}
+
+/// The form edits exactly one `sql` task named `run`; anything else is not its shape.
+fn shape_not_editable() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "this pipeline has a shape the form cannot edit",
+    )
+}
+
+/// An Airflow that refused Nova's service user is a configuration problem, not an
+/// unreachable scheduler: say which one it is (stardelt-platform#1047). The detail goes to
+/// the log; the sentence stays one line and carries no credential.
+fn scheduler_fail(e: AirflowError) -> Fail {
+    match e {
+        AirflowError::NotConfigured => scheduler_not_configured(),
+        AirflowError::Refused(m) => {
+            tracing::warn!(error = %m, "Airflow refused Nova's service user");
+            Fail::new(
+                StatusCode::BAD_GATEWAY,
+                "the scheduler refused Nova's service user",
+            )
+        }
+        other => {
+            tracing::warn!(error = %other, "Airflow request failed");
+            Fail::new(StatusCode::BAD_GATEWAY, "the scheduler did not answer")
+        }
+    }
+}
+
+/// A lookup that answers nothing when Airflow has no such run.
+fn run_lookup_fail(e: AirflowError) -> Fail {
+    match e {
+        AirflowError::NotFound => no_such_run(),
+        other => scheduler_fail(other),
+    }
+}
+
+/// A lookup that answers nothing when Airflow has no such task (or run).
+fn task_lookup_fail(e: AirflowError) -> Fail {
+    match e {
+        AirflowError::NotFound => no_such_task(),
+        other => scheduler_fail(other),
+    }
+}
+
+/// The status for a read of a resource: the sentence stays generic (a kube error names the API
+/// server), the detail goes to the log.
+pub(crate) fn resource_fail(e: ResourceError) -> Fail {
+    match e {
+        ResourceError::Unavailable(message) => {
+            tracing::warn!(error = %message, "pipeline resource request failed");
+            Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer")
+        }
+        // A read cannot take a name or hit a conflict; both are upstream failures here.
+        ResourceError::Exists | ResourceError::Conflict => {
+            Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer")
+        }
+    }
+}
+
+/// The status for a write: the two facts a read never has a sentence for become the caller's
+/// 409, everything else is the generic upstream failure.
+fn resource_write_fail(e: ResourceError) -> Fail {
+    match e {
+        ResourceError::Exists => pipeline_exists(),
+        ResourceError::Conflict => pipeline_changed(),
+        ResourceError::Unavailable(message) => {
+            tracing::warn!(error = %message, "pipeline resource write failed");
+            Fail::new(StatusCode::BAD_GATEWAY, "the cluster did not answer")
+        }
+    }
+}
+
+/// The latest runs the detail page and the run routes read. Nova never asks Airflow for an
+/// id the browser sent without finding it in this list first.
+const LATEST_RUNS: u32 = 20;
+
+/// The latest runs a "run now" checks for activity: enough to catch a `Forbid`/`Replace` DAG
+/// whose last run is still queued or running.
+const ACTIVE_RUNS: u32 = 5;
+
+/// At most this many runs started per user per minute.
+const RUN_STARTS_PER_MINUTE: usize = 10;
+
+/// The in-memory run-start rate limit (`AppState::run_starts`): per signed-in `sub`, the start
+/// times inside the last minute. Refusals before the limiter (unloaded, paused) never reach it;
+/// only a restart forgets it.
+pub type RunStartsLimiter = std::sync::Mutex<std::collections::HashMap<String, VecDeque<Instant>>>;
+
+/// Take one run-start slot for `sub`, or report that the last minute is full.
+fn take_run_slot(limiter: &RunStartsLimiter, sub: &str) -> bool {
+    let mut map = limiter.lock().expect("run-start limiter poisoned");
+    let now = Instant::now();
+    let slots = map.entry(sub.to_string()).or_default();
+    while slots
+        .front()
+        .is_some_and(|then| now.duration_since(*then) >= std::time::Duration::from_secs(60))
+    {
+        slots.pop_front();
+    }
+    if slots.len() >= RUN_STARTS_PER_MINUTE {
+        false
+    } else {
+        slots.push_back(now);
+        true
+    }
+}
+
+/// The most last-run calls in flight at once.
+const LAST_RUN_CONCURRENCY: usize = 8;
+
+/// The most run-list calls in flight at once (`GET /api/runs`).
+const RUN_LIST_CONCURRENCY: usize = 8;
+
+/// `GET /api/runs` answers this many runs when the caller gives no `limit`.
+const RUNS_DEFAULT_LIMIT: usize = 50;
+
+/// `GET /api/runs` never answers more than this many runs.
+const RUNS_MAX_LIMIT: usize = 200;
+
+/// The `kind` values `GET /api/runs` offers; `pipeline` is a multi-step pipeline.
+const RUNS_KINDS: [&str; 3] = ["sql", "notebook", "pipeline"];
+
+/// Find the resource, check the namespace and the caller in that order, and only then answer
+/// the DAG id. A pipeline the caller cannot see is indistinguishable from an absent one: that
+/// stays 404. A pipeline the caller can see but whose `allow` rule refuses answers 403 with the
+/// reason, so the page does not say "no such pipeline" about itself.
+async fn load_allowed(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    allow: fn(&Identity, &Value) -> bool,
+) -> Result<(String, Value), Fail> {
+    if namespace != crate::cluster::namespace() {
+        return Err(no_such_pipeline());
+    }
+    let Some(resource) = resources.get(name).await.map_err(resource_fail)? else {
+        return Err(no_such_pipeline());
+    };
+    if !allow(who, spec_of(&resource)) {
+        if visible(who, spec_of(&resource)) {
+            return Err(Fail::new(
+                StatusCode::FORBIDDEN,
+                "only the owner group may change this pipeline",
+            ));
+        }
+        return Err(no_such_pipeline());
+    }
+    Ok((dag_id_for(namespace, name), resource))
+}
+
+/// A read: who may see the pipeline.
+async fn load_visible(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Value), Fail> {
+    load_allowed(resources, who, namespace, name, visible).await
+}
+
+/// A run or a stop: a viewer may run the owner's statement and stop one of its runs.
+async fn load_runnable(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Value), Fail> {
+    load_allowed(resources, who, namespace, name, visible).await
+}
+
+/// A change: who may pause, resume, change or delete the pipeline (a viewer may not).
+async fn load_actionable(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Value), Fail> {
+    load_allowed(resources, who, namespace, name, may_act).await
+}
+
+fn scheduler(airflow: Option<&AirflowClient>) -> Result<&AirflowClient, Fail> {
+    airflow.ok_or_else(scheduler_not_configured)
+}
+
+// ---------------------------------------------------------------------------
+// The route logic. These take their inputs, so the tests call them directly.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/pipelines`: the visible resources, one DAG-list call, and one last-run call per
+/// visible loaded pipeline (at most eight at a time). A failing last-run call leaves that
+/// pipeline's `lastRun` empty; it does not fail the list.
+async fn list_pipelines(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+) -> Result<PipelineListResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let namespace = crate::cluster::namespace();
+
+    let mut resources = resources.list().await.map_err(resource_fail)?;
+    resources.retain(|resource| visible(who, spec_of(resource)));
+    resources.sort_by(|a, b| pipeline_name(a).cmp(pipeline_name(b)));
+    if resources.is_empty() {
+        // Nothing visible: do not tell Airflow (or a timing observer) that there is anything.
+        return Ok(PipelineListResponse {
+            pipelines: Vec::new(),
+        });
+    }
+
+    let dags: BTreeMap<String, DagSummary> = airflow
+        .list_dags("pipeline", true)
+        .await
+        .map_err(scheduler_fail)?
+        .into_iter()
+        .map(|dag| (dag.dag_id.clone(), dag))
+        .collect();
+
+    let loaded: Vec<(String, String)> = resources
+        .iter()
+        .map(|resource| pipeline_name(resource).to_string())
+        .map(|name| {
+            let dag_id = dag_id_for(&namespace, &name);
+            (name, dag_id)
+        })
+        .filter(|(_, dag_id)| dags.contains_key(dag_id))
+        .collect();
+
+    let last_runs: Vec<(String, Option<DagRun>)> = stream::iter(loaded)
+        .map(|(name, dag_id)| async move {
+            let run = match airflow.runs(&dag_id, 1).await {
+                Ok(runs) => runs.into_iter().next(),
+                Err(e) => {
+                    tracing::warn!(dag = %dag_id, error = %e, "could not read a pipeline's last run");
+                    None
+                }
+            };
+            (name, run)
+        })
+        .buffer_unordered(LAST_RUN_CONCURRENCY)
+        .collect()
+        .await;
+    let last_runs: BTreeMap<String, Option<DagRun>> = last_runs.into_iter().collect();
+
+    let pipelines = resources
+        .iter()
+        .map(|resource| {
+            let name = pipeline_name(resource);
+            let dag = dags.get(&dag_id_for(&namespace, name));
+            let last_run = last_runs.get(name).and_then(Option::as_ref);
+            view_of(&namespace, name, resource, dag, last_run, who)
+        })
+        .collect();
+    Ok(PipelineListResponse { pipelines })
+}
+
+/// `GET /api/runs`: every run of the caller's visible pipelines, newest first, filtered by
+/// `state`, `kind`, `group`, `pipeline` and `notebook`, capped at `limit`. One DAG list, then
+/// one run-list call per loaded pipeline (at most eight at a time); a failing call skips that
+/// pipeline instead of failing the page. Nothing visible means no call to Airflow at all.
+async fn runs_across_pipelines(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    query: &BTreeMap<String, String>,
+) -> Result<RunsListResponse, Fail> {
+    let filter = RunsFilter::parse(query)?;
+
+    // The notebook page is owner-group scoped: an administrator gets no wider view (#517).
+    // Checked before the cluster and the list, like the usage route, so a caller outside the
+    // group is refused even when no pipeline of their own is visible.
+    if let Some((group, _)) = &filter.notebook
+        && !who.groups.iter().any(|g| g == group)
+    {
+        return Err(crate::notebooks::forbidden_group(group));
+    }
+
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let namespace = crate::cluster::namespace();
+
+    let mut resources = resources.list().await.map_err(resource_fail)?;
+    resources.retain(|resource| visible(who, spec_of(resource)));
+    resources.sort_by(|a, b| pipeline_name(a).cmp(pipeline_name(b)));
+    if resources.is_empty() {
+        // Nothing visible: do not tell Airflow (or a timing observer) that there is anything.
+        return Ok(RunsListResponse {
+            runs: Vec::new(),
+            groups: Vec::new(),
+        });
+    }
+
+    // The groups of the visible pipelines, not of the rows: the runs filters and the cap must
+    // not narrow the choice (`?group=` would otherwise collapse the list to one option).
+    let groups: Vec<String> = resources
+        .iter()
+        .filter_map(|resource| spec_of(resource).get("ownerGroup").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+
+    if let Some((group, notebook)) = &filter.notebook {
+        resources.retain(|resource| notebook_schedule(resource, group, notebook));
+    }
+
+    let dags: BTreeMap<String, DagSummary> = airflow
+        .list_dags("pipeline", true)
+        .await
+        .map_err(scheduler_fail)?
+        .into_iter()
+        .map(|dag| (dag.dag_id.clone(), dag))
+        .collect();
+
+    let loaded: Vec<(String, String)> = resources
+        .iter()
+        .map(|resource| pipeline_name(resource).to_string())
+        .map(|name| {
+            let dag_id = dag_id_for(&namespace, &name);
+            (name, dag_id)
+        })
+        .filter(|(_, dag_id)| dags.contains_key(dag_id))
+        .collect();
+    let by_name: BTreeMap<&str, &Value> = resources
+        .iter()
+        .map(|resource| (pipeline_name(resource), resource))
+        .collect();
+
+    let runs_per_pipeline: Vec<(String, Vec<DagRun>)> = stream::iter(loaded)
+        .map(|(name, dag_id)| async move {
+            let runs = match airflow.runs(&dag_id, filter.limit as u32).await {
+                Ok(runs) => runs,
+                Err(e) => {
+                    // One DAG that is gone (or failing) must not fail the whole page.
+                    tracing::warn!(dag = %dag_id, error = %e, "could not read a pipeline's runs");
+                    Vec::new()
+                }
+            };
+            (name, runs)
+        })
+        .buffer_unordered(RUN_LIST_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut rows = Vec::new();
+    for (name, runs) in runs_per_pipeline {
+        let Some(resource) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        let owner_group = spec_of(resource)
+            .get("ownerGroup")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let kind = run_task_kind(resource).unwrap_or("pipeline").to_string();
+        for run in runs {
+            rows.push(RunsListRow {
+                namespace: namespace.clone(),
+                name: name.clone(),
+                owner_group: owner_group.clone(),
+                kind: kind.clone(),
+                run: run_view(&run),
+            });
+        }
+    }
+    Ok(filter.answer(rows, groups))
+}
+
+/// The query of `GET /api/runs`, parsed once: the five filters and the cap. Demo mode parses
+/// the same query, so a bad one refuses there too.
+struct RunsFilter<'a> {
+    limit: usize,
+    kind: Option<&'a str>,
+    state: Option<&'a str>,
+    group: Option<&'a str>,
+    pipeline: Option<(String, String)>,
+    /// The notebook as `<group>/<name>`; narrowed at the source (the rows do not carry it).
+    notebook: Option<(String, String)>,
+}
+
+impl<'a> RunsFilter<'a> {
+    fn parse(query: &'a BTreeMap<String, String>) -> Result<Self, Fail> {
+        Ok(Self {
+            limit: runs_limit(query)?,
+            kind: runs_kind(query)?,
+            state: query.get("state").map(String::as_str),
+            group: query.get("group").map(String::as_str),
+            pipeline: runs_pipeline(query)?,
+            notebook: runs_notebook(query)?,
+        })
+    }
+
+    /// The answer: the filters, newest first, then the cap. A run without a start date goes
+    /// last; the name and the run id keep the order stable within the same second. `groups`
+    /// is the unfiltered choice of the caller's visible groups.
+    fn answer(&self, mut rows: Vec<RunsListRow>, groups: Vec<String>) -> RunsListResponse {
+        rows.retain(|row| {
+            self.state.is_none_or(|state| row.run.state == state)
+                && self.kind.is_none_or(|kind| row.kind == kind)
+                && self
+                    .group
+                    .is_none_or(|group| row.owner_group.as_deref() == Some(group))
+                && self.pipeline.as_ref().is_none_or(|(namespace, name)| {
+                    row.namespace == *namespace && row.name == *name
+                })
+        });
+        rows.sort_by(|a, b| {
+            b.run
+                .started_at
+                .cmp(&a.run.started_at)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.run.run_id.cmp(&b.run.run_id))
+        });
+        rows.truncate(self.limit);
+        RunsListResponse { runs: rows, groups }
+    }
+}
+
+/// The `limit` of `GET /api/runs`: 50 when absent, a positive integer of at most 200.
+fn runs_limit(query: &BTreeMap<String, String>) -> Result<usize, Fail> {
+    let Some(value) = query.get("limit") else {
+        return Ok(RUNS_DEFAULT_LIMIT);
+    };
+    let limit = value
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| Fail::new(StatusCode::BAD_REQUEST, "limit must be a positive integer"))?;
+    if limit > RUNS_MAX_LIMIT {
+        return Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "limit must be at most 200",
+        ));
+    }
+    Ok(limit)
+}
+
+/// The `kind` of `GET /api/runs`: one of `sql`, `notebook`, `pipeline` when given.
+fn runs_kind(query: &BTreeMap<String, String>) -> Result<Option<&str>, Fail> {
+    let Some(kind) = query.get("kind").map(String::as_str) else {
+        return Ok(None);
+    };
+    if RUNS_KINDS.contains(&kind) {
+        Ok(Some(kind))
+    } else {
+        Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "kind must be one of sql, notebook, pipeline",
+        ))
+    }
+}
+
+/// The `pipeline` filter of `GET /api/runs`: `<namespace>/<name>` when given.
+fn runs_pipeline(query: &BTreeMap<String, String>) -> Result<Option<(String, String)>, Fail> {
+    let Some(value) = query.get("pipeline") else {
+        return Ok(None);
+    };
+    match value.split_once('/') {
+        Some((namespace, name))
+            if !namespace.is_empty() && !name.is_empty() && !name.contains('/') =>
+        {
+            Ok(Some((namespace.to_string(), name.to_string())))
+        }
+        _ => Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "pipeline must be <namespace>/<name>",
+        )),
+    }
+}
+
+/// The `notebook` filter of `GET /api/runs`: `<group>/<name>` when given.
+fn runs_notebook(query: &BTreeMap<String, String>) -> Result<Option<(String, String)>, Fail> {
+    let Some(value) = query.get("notebook") else {
+        return Ok(None);
+    };
+    match value.split_once('/') {
+        Some((group, name)) if !group.is_empty() && !name.is_empty() && !name.contains('/') => {
+            Ok(Some((group.to_string(), name.to_string())))
+        }
+        _ => Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "notebook must be <group>/<name>",
+        )),
+    }
+}
+
+/// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs, params and retries.
+/// A pipeline whose DAG does not exist yet is `loaded: false`, `state: "loading"` — not an
+/// error. History of a deleted pipeline is not offered: without the resource the answer is 404.
+async fn pipeline_detail(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineDetail, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let (dag_id, resource) = load_visible(resources, who, namespace, name).await?;
+
+    let dag = match airflow.dag(&dag_id).await {
+        Ok(dag) => Some(dag),
+        Err(AirflowError::NotFound) => None,
+        Err(e) => return Err(scheduler_fail(e)),
+    };
+    let runs = match dag {
+        Some(_) => match airflow.runs(&dag_id, LATEST_RUNS).await {
+            Ok(runs) => runs,
+            // The DAG vanished between the two calls: show it as loading, not as a failure.
+            Err(AirflowError::NotFound) => Vec::new(),
+            Err(e) => return Err(scheduler_fail(e)),
+        },
+        None => Vec::new(),
+    };
+    let mut view = view_of(namespace, name, &resource, dag.as_ref(), runs.first(), who);
+    let spec = spec_of(&resource);
+    // The statement goes only on the detail route: the list stays small, and the caller has
+    // already passed the same visibility rule that `load_visible` applies to an edit.
+    view.tasks = task_specs(spec, true);
+    let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
+    // A non-administrator's Airflow role has no global DAG read, so the DAG page answers 403.
+    let airflow_url =
+        (who.is_admin && !base.is_empty()).then(|| format!("https://airflow.{base}/dags/{dag_id}"));
+    Ok(PipelineDetail {
+        pipeline: view,
+        runs: runs.iter().map(run_view).collect(),
+        params: params_of(spec),
+        retries: retries_of(spec),
+        options: options_of(spec),
+        airflow_url,
+        notify: notify_of(spec),
+    })
+}
+
+/// The editable document of a stored pipeline (see [`PipelineDocument`]); built from the
+/// resource alone, so it needs neither Airflow nor a notebook store.
+fn spec_response(resource: &Value) -> PipelineSpecResponse {
+    let spec = spec_of(resource);
+    let kind = run_task_kind(resource);
+    let task = task_specs(spec, true).into_iter().next();
+    let (sql, notebook) = match (kind, task) {
+        (Some("sql"), Some(task)) => (task.sql, None),
+        (Some("notebook"), Some(task)) => {
+            let notebook = task
+                .notebook
+                .zip(task.object_version)
+                .map(|(name, object_version)| NotebookRequest {
+                    name,
+                    object_version,
+                    params: task.notebook_params.unwrap_or_default(),
+                });
+            (None, notebook)
+        }
+        _ => (None, None),
+    };
+    let schedule = spec.get("schedule").and_then(|schedule| {
+        let cron = schedule.get("cron")?.as_str()?;
+        let timezone = schedule
+            .get("timezone")
+            .and_then(Value::as_str)
+            .filter(|timezone| !timezone.is_empty())
+            .unwrap_or("UTC");
+        Some(ScheduleRequest {
+            cron: cron.to_string(),
+            timezone: timezone.to_string(),
+        })
+    });
+    let managed = nova_managed(resource);
+    PipelineSpecResponse {
+        document: PipelineDocument {
+            name: pipeline_name(resource).to_string(),
+            owner_group: spec
+                .get("ownerGroup")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            sql,
+            notebook,
+            schedule,
+            params: params_of(spec),
+            options: options_of(spec),
+            notify: notify_of(spec),
+        },
+        resource_version: resource
+            .get("metadata")
+            .and_then(|metadata| metadata.get("resourceVersion"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        managed_by: if managed { "nova" } else { "other" }.to_string(),
+        editable: managed && kind.is_some(),
+    }
+}
+
+/// `GET /api/pipelines/{namespace}/{name}/spec`: who may see a pipeline may read its document.
+async fn pipeline_spec(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineSpecResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let (_, resource) = load_visible(resources, who, namespace, name).await?;
+    Ok(spec_response(&resource))
+}
+
+/// `GET …/runs/{run_id}`: the run and its tasks. The run is looked up through this pipeline's
+/// DAG id, so a run id of another pipeline answers 404 and never reaches that DAG.
+async fn run_detail(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let (dag_id, _) = load_visible(resources, who, namespace, name).await?;
+
+    let runs = airflow
+        .runs(&dag_id, LATEST_RUNS)
+        .await
+        .map_err(run_lookup_fail)?;
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .ok_or_else(no_such_run)?;
+    let tasks = airflow
+        .task_instances(&dag_id, &run.dag_run_id)
+        .await
+        .map_err(task_lookup_fail)?;
+    Ok(RunResponse {
+        run: run_view(run),
+        tasks: tasks.iter().map(task_view).collect(),
+    })
+}
+
+/// One row of the run-queries read, in the query's column order. A named alias because the
+/// tuple is too wide for `clippy::type_complexity`.
+type RunQueryRow = (
+    String,
+    String,
+    Vec<String>,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// The statements of one run, selected by the tags the pipeline loader sends
+/// (`stardelt-demos` `dags/stardelt_pipelines/trino.py`): the pipeline tag must match too,
+/// because Airflow's scheduled run ids are the same for every pipeline.
+async fn run_queries_for(
+    pool: &sqlx::PgPool,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    redact: bool,
+) -> Result<Vec<RunQueryView>, sqlx::Error> {
+    let pipeline = format!("pipeline={namespace}/{name}");
+    let run = format!("run={run_id}");
+    let rows: Vec<RunQueryRow> = sqlx::query_as(
+        "SELECT query_id, state, client_tags, sql_text, \
+            (extract(epoch FROM started_at) * 1000)::bigint AS started_ms, \
+            wall_ms, execution_ms, input_bytes, input_rows \
+         FROM query_log \
+         WHERE client_tags @> ARRAY[$1, $2]::text[] AND state <> 'QUEUED' \
+         ORDER BY COALESCE(wall_ms, 0) DESC, started_at DESC NULLS LAST \
+         LIMIT 200",
+    )
+    .bind(&pipeline)
+    .bind(&run)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, state, tags, sql, started_at, wall_ms, execution_ms, input_bytes, input_rows)| {
+                RunQueryView {
+                    id,
+                    state,
+                    task_id: tags
+                        .iter()
+                        .find_map(|tag| tag.strip_prefix("task=").map(str::to_string)),
+                    started_at,
+                    wall_ms,
+                    execution_ms,
+                    input_bytes,
+                    input_rows,
+                    sql: if redact {
+                        crate::query_log::redact_literals(&sql)
+                    } else {
+                        sql
+                    },
+                }
+            },
+        )
+        .collect())
+}
+
+/// `GET …/runs/{run_id}/queries`: the run's statements, slowest first. Access is the
+/// pipeline's (`load_visible`), not the query log's owner rule: these statements ran as the
+/// pipeline's service principal.
+async fn run_queries_answer(
+    signed: SignedIn,
+    namespace: String,
+    name: String,
+    run_id: String,
+) -> Result<RunQueriesResponse, Fail> {
+    let resources = resources(signed.state()).ok_or_else(no_cluster)?;
+    load_visible(&resources, signed.identity(), &namespace, &name).await?;
+    let Some(pool) = signed.state().db.as_ref() else {
+        return Err(Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the state store is not configured",
+        ));
+    };
+    let queries = run_queries_for(
+        pool,
+        &namespace,
+        &name,
+        &run_id,
+        signed.state().redact_query_log_literals,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "run queries read failed");
+        Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the query log is not readable",
+        )
+    })?;
+    Ok(RunQueriesResponse { queries })
+}
+
+/// `GET …/tasks/{task_id}/logs`: one page of a task's log. `try` defaults to the task's last
+/// attempt (read from the run's task instances). The group marker is dropped and the answer is
+/// capped; the audit line names the user, pipeline, run and task — never the content.
+#[allow(clippy::too_many_arguments)]
+async fn task_logs(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    task_id: &str,
+    try_number: Option<u32>,
+    token: Option<&str>,
+) -> Result<LogView, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let (dag_id, _) = load_visible(resources, who, namespace, name).await?;
+
+    // Confirm the run belongs to this pipeline before any task id is passed on.
+    let runs = airflow
+        .runs(&dag_id, LATEST_RUNS)
+        .await
+        .map_err(run_lookup_fail)?;
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .ok_or_else(no_such_run)?;
+
+    let try_number = match try_number {
+        Some(0) => {
+            return Err(Fail::new(
+                StatusCode::BAD_REQUEST,
+                "try must be a positive number",
+            ));
+        }
+        Some(number) => number,
+        None => airflow
+            .task_instances(&dag_id, &run.dag_run_id)
+            .await
+            .map_err(task_lookup_fail)?
+            .iter()
+            .filter(|task| task.task_id == task_id)
+            .filter_map(|task| task.try_number)
+            .max()
+            .unwrap_or(1),
+    };
+
+    let page = airflow
+        .logs(&dag_id, &run.dag_run_id, task_id, try_number, token)
+        .await
+        .map_err(task_lookup_fail)?;
+    audit::pipeline_log_event(who, namespace, name, &run.dag_run_id, task_id);
+    Ok(log_view(page))
+}
+
+/// `^\S{1,64}$` of `[A-Za-z0-9_-]`: what a task id in a run's object key can be.
+fn valid_task_id(task: &str) -> bool {
+    (1..=64).contains(&task.chars().count())
+        && task
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+fn no_notebook_storage() -> Fail {
+    Fail::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "notebook storage is not configured",
+    )
+}
+
+fn no_run_copy() -> Fail {
+    Fail::new(
+        StatusCode::NOT_FOUND,
+        "this run's executed notebook is not there: it was never written, or it expired",
+    )
+}
+
+fn run_copy_too_large() -> Fail {
+    Fail::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the executed notebook is larger than 25 MiB",
+    )
+}
+
+fn bad_task_id() -> Fail {
+    Fail::new(
+        StatusCode::BAD_REQUEST,
+        "a task id is 1 to 64 letters, digits, underscores or dashes",
+    )
+}
+
+/// `GET …/tasks/{task_id}/notebook`: the executed copy of one notebook task run — exactly the
+/// bytes the loader wrote to `_runs/<ownerGroup>/<pipeline>/<run_id>/<task>.ipynb` (#682). The
+/// same visibility rule as the run and its log, the same audit line as a log read, and no
+/// cache: the copy of a run never changes after it is written.
+#[allow(clippy::too_many_arguments)]
+async fn task_notebook(
+    resources: Option<&PipelineResources>,
+    store: Option<&NotebookStore>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    task_id: &str,
+    download: bool,
+) -> Result<Response, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let (_, resource) = load_visible(resources, who, namespace, name).await?;
+    let owner = spec_of(&resource)
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .ok_or_else(no_such_pipeline)?
+        .to_string();
+    if !valid_task_id(task_id) {
+        return Err(bad_task_id());
+    }
+    let store = store.ok_or_else(no_notebook_storage)?;
+    let key = notebooks::run_copy_key(&owner, name, run_id, task_id);
+    let bytes = match notebooks::read_run_copy(store, &key).await {
+        Ok(bytes) => bytes,
+        Err(notebooks::StoreError::Refused(404)) => return Err(no_run_copy()),
+        Err(notebooks::StoreError::TooLarge) => return Err(run_copy_too_large()),
+        Err(error) => return Err(notebooks::store_fail(error)),
+    };
+    if bytes.len() > notebooks::MAX_RUN_NOTEBOOK_BYTES {
+        return Err(run_copy_too_large());
+    }
+    // The bytes are the loader's own notebook; they go out as they are, never re-rendered.
+    audit::pipeline_log_event(who, namespace, name, run_id, task_id);
+    let mut response = (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
+        bytes,
+    )
+        .into_response();
+    if download {
+        let disposition =
+            HeaderValue::from_str(&format!("attachment; filename=\"{name}-{task_id}.ipynb\""))
+                .map_err(|_| bad_task_id())?;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, disposition);
+    }
+    Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Actions: run now, pause, resume, stop a run. Every action writes one audit line.
+// ---------------------------------------------------------------------------
+
+/// A refused or failed action: the answer and the audit outcome token (`refused:<why>` or
+/// `error`). Keeping the two together is what makes "one audit line per action" true even on the
+/// early returns.
+struct ActionError {
+    fail: Fail,
+    outcome: String,
+}
+
+impl ActionError {
+    fn refused(why: &'static str, fail: Fail) -> Self {
+        Self {
+            fail,
+            outcome: format!("refused:{why}"),
+        }
+    }
+
+    /// A refusal from a resource load: a pipeline the caller cannot see is `not-found`; one it
+    /// can see but may not change is `forbidden` — the audit line says which, as the answer does.
+    fn load_refusal(fail: Fail) -> Self {
+        let why = if fail.status() == StatusCode::FORBIDDEN {
+            "forbidden"
+        } else {
+            "not-found"
+        };
+        Self::refused(why, fail)
+    }
+
+    /// The same refusal with the task's name in front of the sentence (`#905` decision 2).
+    fn about_task(self, name: &str) -> Self {
+        Self {
+            fail: Fail::new(
+                self.fail.status(),
+                format!("task `{name}`: {}", self.fail.message()),
+            ),
+            outcome: self.outcome,
+        }
+    }
+
+    fn error(fail: Fail) -> Self {
+        Self {
+            fail,
+            outcome: "error".into(),
+        }
+    }
+}
+
+/// `spec.concurrency` as the resource carries it; Airflow's and the CRD's default is `Forbid`.
+fn concurrency_of(spec: &Value) -> &str {
+    spec.get("concurrency")
+        .and_then(Value::as_str)
+        .unwrap_or("Forbid")
+}
+
+/// `POST …/runs`: start a run now. Refusals happen before Airflow is asked to trigger:
+/// not loaded (409), paused (409), rate limit (429), an active run under `Forbid`/`Replace`
+/// (409). `Allow` skips the activity check. `start` carries the run date and parameter values
+/// of this run only (`dag_run.conf`, nova#817); it never changes the stored schedule.
+pub(crate) async fn run_now(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    limiter: &RunStartsLimiter,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    start: &RunStart,
+) -> Result<RunView, Fail> {
+    let result = run_now_inner(resources, airflow, limiter, who, namespace, name, start).await;
+    match &result {
+        Ok(run) => {
+            audit::pipeline_event("run", who, namespace, name, Some(&run.run_id), "ok", None)
+        }
+        Err(e) => audit::pipeline_event("run", who, namespace, name, None, &e.outcome, None),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn run_now_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    limiter: &RunStartsLimiter,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    start: &RunStart,
+) -> Result<RunView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, resource) = load_runnable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    let dag = match airflow.dag(&dag_id).await {
+        Ok(dag) => dag,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    if dag.is_paused == Some(true) {
+        return Err(ActionError::refused("paused", pipeline_paused()));
+    }
+
+    // The rate limit comes after the checks that never touch Airflow's trigger: a refusal here
+    // means a run was actually going to start.
+    if !take_run_slot(limiter, &who.sub) {
+        return Err(ActionError::refused("rate-limited", too_many_runs()));
+    }
+
+    if concurrency_of(spec_of(&resource)) != "Allow" {
+        let runs = match airflow.runs(&dag_id, ACTIVE_RUNS).await {
+            Ok(runs) => runs,
+            Err(AirflowError::NotFound) => {
+                return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+            }
+            Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+        };
+        if runs
+            .iter()
+            .any(|run| matches!(run.state.as_deref(), Some("queued") | Some("running")))
+        {
+            return Err(ActionError::refused("already-active", run_already_active()));
+        }
+    }
+
+    // Always now, whole seconds, UTC: Airflow accepts any date and makes a run with no tasks for
+    // one that is not now (#255). The date the person asked for travels as `conf`, which the
+    // loader reads (`dag_run.conf`, nova#817), never as the logical date.
+    let note = format!("Started from Nova by {}", who.display_name);
+    let conf = run_conf(start);
+    match airflow
+        .trigger(&dag_id, &now_rfc3339(), Some(&note), conf.as_ref())
+        .await
+    {
+        Ok(run) => Ok(run_view(&run)),
+        Err(e) => Err(ActionError::error(scheduler_fail(e))),
+    }
+}
+
+/// The `conf` of a triggered run: only the keys the caller gave, `None` when there were none
+/// (so an empty body sends exactly what Nova sent before #817).
+fn run_conf(start: &RunStart) -> Option<Value> {
+    let mut conf = serde_json::Map::new();
+    if let Some(date) = &start.run_date {
+        conf.insert("runDate".into(), Value::String(date.clone()));
+    }
+    if let Some(params) = &start.params {
+        conf.insert("params".into(), json!(params));
+    }
+    if conf.is_empty() {
+        None
+    } else {
+        Some(Value::Object(conf))
+    }
+}
+
+/// `POST …/pause`: idempotent (pausing a paused pipeline answers 200) and answers the fresh view.
+async fn pause_pipeline(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, Fail> {
+    set_paused_action("pause", true, resources, airflow, who, namespace, name).await
+}
+
+/// `POST …/resume`: idempotent (resuming a running pipeline answers 200) and answers the fresh
+/// view.
+async fn resume_pipeline(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, Fail> {
+    set_paused_action("resume", false, resources, airflow, who, namespace, name).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn set_paused_action(
+    action: &'static str,
+    paused: bool,
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, Fail> {
+    let result = set_paused_inner(paused, resources, airflow, who, namespace, name).await;
+    match &result {
+        Ok(_) => audit::pipeline_event(action, who, namespace, name, None, "ok", None),
+        Err(e) => audit::pipeline_event(action, who, namespace, name, None, &e.outcome, None),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn set_paused_inner(
+    paused: bool,
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    // The patch answers the DAG as Airflow now has it, which is the fresh view the caller gets;
+    // `404` is a pipeline the loader has not created yet.
+    let dag = match airflow.set_paused(&dag_id, paused).await {
+        Ok(dag) => dag,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    // A failing last-run read does not fail the pause: the view then has no lastRun, exactly as
+    // the list behaves.
+    let last_run = airflow
+        .runs(&dag_id, 1)
+        .await
+        .ok()
+        .and_then(|runs| runs.into_iter().next());
+    Ok(view_of(
+        namespace,
+        name,
+        &resource,
+        Some(&dag),
+        last_run.as_ref(),
+        who,
+    ))
+}
+
+/// `POST …/runs/{run_id}/stop`: mark an active run failed. Not a cancel: in-flight work can
+/// finish and commit; the promise is only "the run is marked failed" (#255).
+async fn stop_run(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, Fail> {
+    let result = stop_run_inner(resources, airflow, who, namespace, name, run_id).await;
+    match &result {
+        Ok(run) => {
+            audit::pipeline_event("stop", who, namespace, name, Some(&run.run_id), "ok", None)
+        }
+        Err(e) => {
+            audit::pipeline_event("stop", who, namespace, name, Some(run_id), &e.outcome, None)
+        }
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn stop_run_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, _) = load_runnable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    // Read the run through this pipeline's DAG id first: a run id of another pipeline never
+    // resolves, and the PATCH below only ever sees an id found here.
+    let runs = match airflow.runs(&dag_id, LATEST_RUNS).await {
+        Ok(runs) => runs,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .ok_or_else(|| ActionError::refused("not-found", no_such_run()))?;
+    if !matches!(run.state.as_deref(), Some("queued") | Some("running")) {
+        return Err(ActionError::refused("not-active", run_not_active()));
+    }
+
+    let note = format!(
+        "{} by {}",
+        crate::pipeline_notice::STOPPED_NOTE,
+        who.display_name
+    );
+    match airflow
+        .mark_run_failed(&dag_id, &run.dag_run_id, &note)
+        .await
+    {
+        Ok(run) => Ok(run_view(&run)),
+        Err(AirflowError::NotFound) => Err(ActionError::refused("not-found", no_such_run())),
+        Err(e) => Err(ActionError::error(scheduler_fail(e))),
+    }
+}
+
+/// `POST …/runs/{run_id}/retry`: clear only the failed task instances of a failed run, in
+/// place. The run keeps its id, date and parameters; the tasks that already succeeded are not
+/// repeated (nova#816).
+async fn retry_run(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, Fail> {
+    let result = retry_run_inner(resources, airflow, who, namespace, name, run_id).await;
+    match &result {
+        Ok(run) => {
+            audit::pipeline_event("retry", who, namespace, name, Some(&run.run_id), "ok", None)
+        }
+        Err(e) => audit::pipeline_event(
+            "retry",
+            who,
+            namespace,
+            name,
+            Some(run_id),
+            &e.outcome,
+            None,
+        ),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn retry_run_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    // A viewer (`spec.viewers`) may retry, exactly as it may run and stop (#816 decision 1).
+    let (dag_id, _) = load_runnable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    // Read the run through this pipeline's DAG id first: a run id of another pipeline never
+    // resolves, and the clear below only ever sees an id found here.
+    let runs = match airflow.runs(&dag_id, LATEST_RUNS).await {
+        Ok(runs) => runs,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .cloned()
+        .ok_or_else(|| ActionError::refused("not-found", no_such_run()))?;
+    if run.state.as_deref() != Some("failed") {
+        return Err(ActionError::refused(
+            "not-failed",
+            Fail::new(StatusCode::CONFLICT, "only a failed run can be retried"),
+        ));
+    }
+
+    match airflow.dag(&dag_id).await {
+        Ok(dag) if dag.is_paused == Some(true) => {
+            return Err(ActionError::refused(
+                "paused",
+                Fail::new(
+                    StatusCode::CONFLICT,
+                    "the pipeline is paused: resume it, then retry",
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    }
+
+    let cleared = match airflow.clear_failed_tasks(&dag_id, run_id).await {
+        Ok(cleared) => cleared,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    if cleared.is_empty() {
+        return Err(ActionError::refused(
+            "nothing-to-retry",
+            Fail::new(
+                StatusCode::CONFLICT,
+                "this run has no failed tasks to retry",
+            ),
+        ));
+    }
+
+    // The clear re-queues the tasks; answer the run as Airflow now reports it.
+    let runs = match airflow.runs(&dag_id, LATEST_RUNS).await {
+        Ok(runs) => runs,
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    match runs.iter().find(|fresh| fresh.dag_run_id == run_id) {
+        Some(fresh) => Ok(run_view(fresh)),
+        None => Err(ActionError::error(scheduler_fail(
+            AirflowError::Unavailable("the run vanished from the latest runs".into()),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Writes: the principals route, create, update and delete. Every write is audited.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/pipelines/principals`: every group of the caller and its pipeline principal.
+async fn principal_views(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+) -> Result<PrincipalsResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let principals = resources.principals().await.map_err(resource_fail)?;
+    let groups: BTreeSet<&str> = who
+        .groups
+        .iter()
+        .map(String::as_str)
+        .filter(|group| !group.is_empty())
+        .collect();
+    Ok(PrincipalsResponse {
+        groups: groups
+            .into_iter()
+            .map(|group| principal_view(&principals, group))
+            .collect(),
+    })
+}
+
+async fn service_principal_views(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+) -> Result<ServicePrincipalsResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let principals = resources.principals().await.map_err(resource_fail)?;
+    Ok(ServicePrincipalsResponse {
+        principals: visible_principals(&principals, who),
+    })
+}
+
+/// The name an audit line can carry: the request's, capped so a malformed one cannot flood the
+/// log (the rest of the request is refused by [`validate_name`] anyway).
+fn audit_name(name: &str) -> String {
+    name.chars().take(64).collect()
+}
+
+/// The facts a create or update records beside the action (#210, #223, #237): the statement's
+/// **length**, the cron text and — for a notebook — the group, the file name and the pinned
+/// version. Never the statement, never a parameter value. A task list (`#905`) counts the
+/// characters of its `sql` tasks and carries no notebook target: it is not one notebook.
+struct WriteFacts {
+    statement_chars: usize,
+    cron: Option<String>,
+    kind: &'static str,
+    notebook: Option<(String, String, String)>,
+}
+
+impl WriteFacts {
+    fn of(
+        sql: &str,
+        notebook: Option<&NotebookRequest>,
+        tasks: Option<&[PipelineTaskRequest]>,
+        schedule: Option<&ScheduleRequest>,
+        group: &str,
+    ) -> Self {
+        Self {
+            statement_chars: tasks
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .map(|task| task.sql.trim().chars().count())
+                        .sum()
+                })
+                .unwrap_or_else(|| sql.trim().chars().count()),
+            cron: schedule.map(|schedule| schedule.cron.trim().to_string()),
+            kind: if tasks.is_some() {
+                "tasks"
+            } else if notebook.is_some() {
+                "notebook"
+            } else {
+                "sql"
+            },
+            notebook: notebook.map(|notebook| {
+                (
+                    group.to_string(),
+                    notebook.name.clone(),
+                    notebook.object_version.clone(),
+                )
+            }),
+        }
+    }
+
+    fn write(&self) -> PipelineWrite<'_> {
+        PipelineWrite {
+            statement_chars: self.statement_chars,
+            schedule: self.cron.as_deref(),
+            kind: self.kind,
+            notebook: self
+                .notebook
+                .as_ref()
+                .map(|(group, name, version)| audit::NotebookTarget {
+                    group,
+                    name,
+                    version,
+                }),
+        }
+    }
+}
+
+/// The owner group of a pipeline, for an audit line: empty when the resource cannot be read
+/// (the caller's answer is then a refusal anyway, and an audit line may not hold a guess).
+async fn audit_group(resources: Option<&PipelineResources>, name: &str) -> String {
+    let Some(resources) = resources else {
+        return String::new();
+    };
+    let Ok(Some(resource)) = resources.get(name).await else {
+        return String::new();
+    };
+    spec_of(&resource)
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `POST /api/pipelines`: create the resource, then answer its view (`loaded: false`, because
+/// Airflow has not seen it yet). Audited whatever happens.
+async fn create_pipeline(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks: Option<&NotebookStore>,
+    limiter: &CreateLimiter,
+    who: &Identity,
+    body: CreatePipelineRequest,
+) -> Result<PipelineView, Fail> {
+    let namespace = crate::cluster::namespace();
+    let pipeline = audit_name(&body.name);
+    let facts = WriteFacts::of(
+        &body.sql,
+        body.notebook.as_ref(),
+        body.tasks.as_deref(),
+        body.schedule.as_ref(),
+        &body.owner_group,
+    );
+    let result = create_pipeline_inner(resources, db, notebooks, limiter, who, body).await;
+    match &result {
+        Ok(_) => audit::pipeline_event(
+            "create",
+            who,
+            &namespace,
+            &pipeline,
+            None,
+            "ok",
+            Some(facts.write()),
+        ),
+        Err(e) => audit::pipeline_event(
+            "create",
+            who,
+            &namespace,
+            &pipeline,
+            None,
+            &e.outcome,
+            Some(facts.write()),
+        ),
+    }
+    result.map_err(|e| e.fail)
+}
+
+/// Every name in `notify` must be a destination of `group` (nova#815 decision 1). The shape is
+/// the operator's (`PipelineNotify::check_shape`), the ownership is the state store's: the
+/// pipeline's `ownerGroup`, never the caller's groups, so an administrator cannot name another
+/// group's destination either.
+async fn check_notify(
+    db: Option<&sqlx::PgPool>,
+    group: &str,
+    notify: Option<&PipelineNotify>,
+) -> Result<(), Fail> {
+    let Some(notify) = notify.filter(|notify| !notify.is_empty()) else {
+        return Ok(());
+    };
+    notify
+        .check_shape()
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    let Some(db) = db else {
+        return Err(Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this needs Nova's database, and this installation has none; ask your administrator",
+        ));
+    };
+    let lists = [&notify.on_failure, &notify.on_success, &notify.on_recovered];
+    let names: Vec<String> = lists
+        .iter()
+        .flat_map(|names| names.iter().cloned())
+        .collect();
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM destination WHERE owner_group = $1 AND name = ANY($2)",
+    )
+    .bind(group)
+    .bind(&names)
+    .fetch_all(db)
+    .await
+    .map_err(|_| {
+        Fail::new(
+            StatusCode::BAD_GATEWAY,
+            "Nova's database is not answering; try again in a minute",
+        )
+    })?;
+    for name in lists.iter().flat_map(|names| names.iter()) {
+        if !found.contains(name) {
+            return Err(Fail::new(
+                StatusCode::BAD_REQUEST,
+                format!("there is no destination named {name} in {group}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What a create writes once every rule has passed: the statement or notebook, the schedule, the options.
+struct Planned {
+    statement: Statement,
+    schedule: Option<(String, String)>,
+    options: PipelineOptionsView,
+}
+
+/// The rules every write of a new pipeline runs before it writes, in order (a create and the
+/// validate route share them, so "the check passed" and "the write succeeds" cannot drift apart).
+async fn plan_pipeline(
+    resources: &PipelineResources,
+    db: Option<&sqlx::PgPool>,
+    notebooks_store: Option<&NotebookStore>,
+    who: &Identity,
+    body: &CreatePipelineRequest,
+) -> Result<Planned, ActionError> {
+    // 1. The name the CRD (and the loader) accepts.
+    validate_name(&body.name).map_err(|message| {
+        ActionError::refused("name", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
+    // 2. One of the caller's own groups — an administrator schedules for their groups too.
+    if !who.groups.iter().any(|group| group == &body.owner_group) {
+        return Err(ActionError::refused(
+            "not-member",
+            Fail::new(
+                StatusCode::FORBIDDEN,
+                format!("you are not a member of the group {}", body.owner_group),
+            ),
+        ));
+    }
+
+    // 2b. Every notification destination belongs to the pipeline's own group (nova#815).
+    check_notify(db, &body.owner_group, body.notify.as_ref())
+        .await
+        .map_err(|fail| ActionError::refused("notify", fail))?;
+
+    // 3. The principal of the group must exist and be ready: the loader refuses otherwise, and
+    //    a pipeline the loader refuses would sit in the list as `not-loaded`.
+    let principals = resources
+        .principals()
+        .await
+        .map_err(|e| ActionError::error(resource_fail(e)))?;
+    let principal = principal_view(&principals, &body.owner_group);
+    if !principal.ready {
+        return Err(ActionError::refused(
+            "no-principal",
+            Fail::new(StatusCode::CONFLICT, principal.message.unwrap_or_default()),
+        ));
+    }
+
+    // 4. What it runs: exactly one of a statement, a notebook and a task list (#237, #905), with
+    //    the rules of its kind — the statement's parameters and placeholders, or the notebook's
+    //    name, parameters and a pinned version that exists in the group.
+    let statement = checked_run(
+        &body.sql,
+        body.notebook.as_ref(),
+        body.tasks.as_deref(),
+        &body.params,
+        notebooks_store,
+        &body.owner_group,
+    )
+    .await?;
+
+    // 5. The advanced options, defaults filled in.
+    let options = body
+        .options
+        .clone()
+        .unwrap_or_default()
+        .resolve()
+        .map_err(|message| {
+            ActionError::refused("options", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+
+    // 6. The schedule (or none, for on demand).
+    let schedule = validate_schedule(body.schedule.as_ref()).map_err(|message| {
+        ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
+    // 6b. What a deploy says about where the pipeline came from, when it says anything.
+    if let Some(provenance) = &body.provenance {
+        check_provenance(provenance).map_err(|message| {
+            ActionError::refused("provenance", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+    }
+
+    Ok(Planned {
+        statement,
+        schedule,
+        options,
+    })
+}
+
+const BUNDLE_LABEL: &str = "stardelt.io/bundle";
+const TARGET_LABEL: &str = "stardelt.io/target";
+const REVISION_NOTE: &str = "stardelt.io/revision";
+const REPOSITORY_NOTE: &str = "stardelt.io/repository";
+const DEPLOYED_BY_NOTE: &str = "stardelt.io/deployed-by";
+const DEPLOYED_AT_NOTE: &str = "stardelt.io/deployed-at";
+pub(crate) const DIGEST_NOTE: &str = "stardelt.io/spec-digest";
+
+/// `value` as text with the keys of every object in sorted order, so two spellings of one
+/// document give one text.
+pub(crate) fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|key| format!("{}:{}", json!(key), canonical(&map[key])))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(canonical).collect();
+            format!("[{}]", parts.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A fingerprint of what a deploy decides about a pipeline: the run, the schedule, the parameters
+/// and the options, the same fields `changes_of` compares. A deploy writes it; a later difference
+/// means someone changed the pipeline since.
+fn spec_digest(resource: &Value) -> String {
+    let spec = spec_of(resource);
+    let decided = json!([
+        spec.get("tasks"),
+        spec.get("schedule"),
+        spec.get("params"),
+        spec.get("concurrency"),
+        spec.get("retries"),
+        spec.get("timeout"),
+    ]);
+    Sha256::digest(canonical(&decided).as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Lower-case letters, digits and inner dashes, `shortest` to `longest` characters.
+fn dashed_name(text: &str, shortest: usize, longest: usize) -> bool {
+    (shortest..=longest).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !text.starts_with('-')
+        && !text.ends_with('-')
+}
+
+/// The rules for what a deploy may stamp on a pipeline: short, plain words that are valid label
+/// values. `Err` is the sentence the caller sees.
+pub(crate) fn check_provenance(provenance: &Provenance) -> Result<(), String> {
+    if !dashed_name(&provenance.bundle, 3, 40) {
+        return Err("the bundle name must be 3 to 40 lower-case letters, digits and dashes".into());
+    }
+    if !dashed_name(&provenance.target, 1, 32) {
+        return Err("the target must be 1 to 32 lower-case letters, digits and dashes".into());
+    }
+    if let Some(revision) = &provenance.revision {
+        let hex = revision.strip_suffix("-dirty").unwrap_or(revision);
+        let plain = (7..=64).contains(&hex.len())
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !plain {
+            return Err(
+                "the revision must be 7 to 64 hex digits, with -dirty appended when the working tree had uncommitted changes"
+                    .into(),
+            );
+        }
+    }
+    if let Some(repository) = &provenance.repository {
+        // A scheme with no host (`https://`) passes every character rule below but is not an
+        // address a link can be built from; nova#676 showed it blanking the Deployments page.
+        let host = repository
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split('/').next());
+        let plain = repository.len() <= 200
+            && host.is_some_and(|host| !host.is_empty())
+            && !repository[8..]
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '@' | '?' | '#'));
+        if !plain {
+            return Err(
+                "the repository must be an https address of at most 200 characters, without a user or a token"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Write a deploy's provenance on `resource`: the two labels, the revision (or none), who and when.
+pub(crate) fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: &str) {
+    resource["metadata"]["labels"][BUNDLE_LABEL] = json!(provenance.bundle);
+    resource["metadata"]["labels"][TARGET_LABEL] = json!(provenance.target);
+    let notes = &mut resource["metadata"]["annotations"];
+    match &provenance.revision {
+        Some(revision) => notes[REVISION_NOTE] = json!(revision),
+        None => {
+            if let Some(map) = notes.as_object_mut() {
+                map.remove(REVISION_NOTE);
+            }
+        }
+    }
+    match &provenance.repository {
+        Some(repository) => notes[REPOSITORY_NOTE] = json!(repository),
+        None => {
+            if let Some(map) = notes.as_object_mut() {
+                map.remove(REPOSITORY_NOTE);
+            }
+        }
+    }
+    notes[DEPLOYED_BY_NOTE] = json!(deployed_by);
+    notes[DEPLOYED_AT_NOTE] = json!(now_rfc3339());
+    let digest = spec_digest(resource);
+    resource["metadata"]["annotations"][DIGEST_NOTE] = json!(digest);
+}
+
+/// What a deploy stamped on a stored resource, if it did. `digest_of` answers the resource's
+/// current fingerprint: `spec_digest` for a pipeline, the stream's own digest for a `StreamApp`.
+pub(crate) fn deployment_of_with(
+    resource: &Value,
+    digest_of: fn(&Value) -> String,
+) -> Option<DeploymentView> {
+    let metadata = resource.get("metadata")?;
+    let label = |key: &str| {
+        metadata
+            .get("labels")?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    };
+    let note = |key: &str| {
+        metadata
+            .get("annotations")?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    };
+    Some(DeploymentView {
+        bundle: label(BUNDLE_LABEL)?,
+        target: label(TARGET_LABEL)?,
+        revision: note(REVISION_NOTE),
+        repository: note(REPOSITORY_NOTE),
+        deployed_by: note(DEPLOYED_BY_NOTE),
+        deployed_at: note(DEPLOYED_AT_NOTE),
+        modified: note(DIGEST_NOTE)
+            .filter(|digest| *digest != digest_of(resource))
+            .map(|_| true),
+    })
+}
+
+/// What a deploy stamped on a stored pipeline, if it did.
+pub(crate) fn deployment_of(resource: &Value) -> Option<DeploymentView> {
+    deployment_of_with(resource, spec_digest)
+}
+
+async fn create_pipeline_inner(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks_store: Option<&NotebookStore>,
+    limiter: &CreateLimiter,
+    who: &Identity,
+    body: CreatePipelineRequest,
+) -> Result<PipelineView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+
+    let Planned {
+        statement,
+        schedule,
+        options,
+    } = plan_pipeline(resources, db, notebooks_store, who, &body).await?;
+
+    // 7. The name is free.
+    if resources
+        .get(&body.name)
+        .await
+        .map_err(|e| ActionError::error(resource_fail(e)))?
+        .is_some()
+    {
+        return Err(ActionError::refused("exists", pipeline_exists()));
+    }
+
+    // 8. The rate limit comes last: a refusal above never consumes a slot.
+    if !take_create_slot(limiter, &who.sub) {
+        return Err(ActionError::refused("rate-limited", too_many_creates()));
+    }
+
+    let mut resource = pipeline_resource(
+        &body.name,
+        &body.owner_group,
+        &statement,
+        schedule.as_ref(),
+        &body.params,
+        &options,
+        &who.display_name,
+        body.notify.as_ref(),
+    );
+    if let Some(provenance) = &body.provenance {
+        stamp_provenance(&mut resource, provenance, &who.display_name);
+    }
+    let written = resources.create(resource).await.map_err(|e| match e {
+        // Another Nova or a `kubectl apply` won the race between the read and the create.
+        ResourceError::Exists => ActionError::refused("exists", pipeline_exists()),
+        other => ActionError::error(resource_write_fail(other)),
+    })?;
+    let mut view = view_of(
+        &crate::cluster::namespace(),
+        &body.name,
+        &written,
+        None,
+        None,
+        who,
+    );
+    // The answer is the resource as written: the loader has not seen it yet, whatever the
+    // cluster's clock says about its age.
+    view.loaded = false;
+    view.state = "loading".to_string();
+    Ok(view)
+}
+
+/// The answer of a refused check: the sentence, nothing else.
+fn not_ok(message: &str) -> ValidatePipelineResponse {
+    ValidatePipelineResponse {
+        ok: false,
+        action: None,
+        errors: vec![ValidationIssue {
+            message: message.to_string(),
+        }],
+        changes: Vec::new(),
+        next_runs: Vec::new(),
+        modified: None,
+    }
+}
+
+/// The refusal a production stage gives a notebook schedule that no bundle deploy stamped
+/// (stardelt-nova#819 decision 3). One sentence, the same on every route.
+pub(crate) const PRODUCTION_NOTEBOOK: &str =
+    "In production a notebook comes from Git. Deploy it with a bundle.";
+
+/// Whether the body runs a notebook: the single-notebook form or any notebook task of a list.
+fn runs_a_notebook(
+    notebook: Option<&NotebookRequest>,
+    tasks: Option<&[PipelineTaskRequest]>,
+) -> bool {
+    notebook.is_some()
+        || tasks.is_some_and(|tasks| tasks.iter().any(|task| task.notebook.is_some()))
+}
+
+/// Whether a stored Pipeline resource runs a notebook task (`spec.tasks[*].kind == "notebook"`).
+fn resource_runs_a_notebook(resource: &Value) -> bool {
+    resource
+        .get("spec")
+        .and_then(|spec| spec.get("tasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|task| task.get("kind").and_then(Value::as_str) == Some("notebook"))
+        })
+}
+
+/// The production rule: a scheduled notebook needs a bundle deploy stamp. `has_stamp` is whether
+/// the pipeline will carry one after this request (the body's, or the stored one on an update).
+fn production_notebook_sentence(
+    stage_kind: &str,
+    has_schedule: bool,
+    runs_notebook: bool,
+    has_stamp: bool,
+) -> Option<&'static str> {
+    (stage_kind == "prod" && has_schedule && runs_notebook && !has_stamp)
+        .then_some(PRODUCTION_NOTEBOOK)
+}
+
+/// The update half of the production rule (#819 decision 3). The stamp may be on the stored
+/// resource: a form save sends no `provenance`, and `UpdatePipelineRequest` keeps what is
+/// stored. A read that fails here is not this rule's answer — `update_pipeline` reports it.
+async fn update_production_refusal(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    body: &UpdatePipelineRequest,
+) -> Option<Fail> {
+    if state.stage_kind != "prod" || body.schedule.is_none() {
+        return None;
+    }
+    if body.provenance.is_some() || !runs_a_notebook(body.notebook.as_ref(), body.tasks.as_deref())
+    {
+        return None;
+    }
+    let resources = resources(state)?;
+    let (_, stored) = load_actionable(&resources, who, namespace, name)
+        .await
+        .ok()?;
+    if deployment_of(&stored).is_some() || !resource_runs_a_notebook(&stored) {
+        return None;
+    }
+    Some(Fail::new(StatusCode::BAD_REQUEST, PRODUCTION_NOTEBOOK))
+}
+
+/// Run every rule of a create against `body` and say what would happen, writing nothing and
+/// taking no slot of the creation limit. A refusal of a rule is an answer (`ok: false`); an
+/// unreachable cluster or notebook store is still an error, as on create.
+async fn validate_pipeline(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks_store: Option<&NotebookStore>,
+    who: &Identity,
+    body: CreatePipelineRequest,
+) -> Result<ValidatePipelineResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let planned = match plan_pipeline(resources, db, notebooks_store, who, &body).await {
+        Ok(planned) => planned,
+        Err(e) if e.outcome.starts_with("refused:") => return Ok(not_ok(e.fail.message())),
+        Err(e) => return Err(e.fail),
+    };
+    let mut modified = None;
+    let (action, changes) = match resources.get(&body.name).await.map_err(resource_fail)? {
+        None => ("create", Vec::new()),
+        Some(existing) => {
+            if !may_act(who, spec_of(&existing)) {
+                return Ok(not_ok(pipeline_exists().message()));
+            }
+            if !nova_managed(&existing) {
+                return Ok(not_ok(managed_outside().message()));
+            }
+            if spec_of(&existing)["ownerGroup"].as_str() != Some(body.owner_group.as_str()) {
+                return Ok(not_ok("the group of an existing pipeline cannot change"));
+            }
+            // What an update has, for three shapes (#905 decision 3).
+            match (stored_shape(&existing), &planned.statement) {
+                (StoredShape::Other, _) => return Ok(not_ok(shape_not_editable().message())),
+                (StoredShape::Tasks, Statement::Tasks(_)) => {}
+                (StoredShape::Tasks, _) => return Ok(not_ok(SEVERAL_TASKS)),
+                (StoredShape::Run("notebook"), Statement::Notebook { .. }) => {}
+                (StoredShape::Run("notebook"), _) => return Ok(not_ok(NOTEBOOK_PIPELINE)),
+                (StoredShape::Run(_), Statement::Sql(_)) => {}
+                (StoredShape::Run(_), _) => return Ok(not_ok(STATEMENT_PIPELINE)),
+            }
+            let mut updated = updated_resource(
+                &existing,
+                &planned.statement,
+                &planned.options,
+                &body.params,
+                planned.schedule.as_ref(),
+                body.notify.as_ref(),
+            );
+            if let Some(provenance) = &body.provenance {
+                stamp_provenance(&mut updated, provenance, &who.display_name);
+            }
+            modified = deployment_of(&existing).and_then(|deployment| deployment.modified);
+            ("update", changes_of(&existing, &updated))
+        }
+    };
+    let next_runs = planned
+        .schedule
+        .and_then(|(cron, timezone)| {
+            let request = PreviewScheduleRequest {
+                cron,
+                timezone,
+                count: Some(5),
+            };
+            preview_schedule(request, now_utc()).ok()
+        })
+        .map(|preview| preview.runs)
+        .unwrap_or_default();
+    Ok(ValidatePipelineResponse {
+        ok: true,
+        action: Some(action.to_string()),
+        errors: Vec::new(),
+        changes,
+        next_runs,
+        modified,
+    })
+}
+
+/// The view after a write: the DAG and last run when Airflow is configured (a failed lookup only
+/// leaves them empty), the resource alone otherwise — a write never requires Airflow.
+async fn view_after_write(
+    airflow: Option<&AirflowClient>,
+    namespace: &str,
+    name: &str,
+    resource: &Value,
+    who: &Identity,
+) -> PipelineView {
+    let Some(airflow) = airflow else {
+        return view_of(namespace, name, resource, None, None, who);
+    };
+    let dag_id = dag_id_for(namespace, name);
+    let dag = match airflow.dag(&dag_id).await {
+        Ok(dag) => Some(dag),
+        Err(AirflowError::NotFound) => None,
+        Err(e) => {
+            tracing::warn!(dag = %dag_id, error = %e, "could not read the DAG after a write");
+            None
+        }
+    };
+    let last_run = match dag {
+        Some(_) => airflow
+            .runs(&dag_id, 1)
+            .await
+            .ok()
+            .and_then(|runs| runs.into_iter().next()),
+        None => None,
+    };
+    view_of(
+        namespace,
+        name,
+        resource,
+        dag.as_ref(),
+        last_run.as_ref(),
+        who,
+    )
+}
+
+/// `PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule of a statement
+/// pipeline, or the version and parameters of a notebook pipeline, and nothing else. Audited
+/// whatever happens.
+#[allow(clippy::too_many_arguments)]
+async fn update_pipeline(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks: Option<&NotebookStore>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    body: UpdatePipelineRequest,
+) -> Result<PipelineView, Fail> {
+    // The update keeps the pipeline's group, so the audit's group is read from the resource.
+    let group = audit_group(resources, name).await;
+    let facts = WriteFacts::of(
+        &body.sql,
+        body.notebook.as_ref(),
+        body.tasks.as_deref(),
+        body.schedule.as_ref(),
+        &group,
+    );
+    let result = update_pipeline_inner(
+        resources, db, notebooks, airflow, who, namespace, name, body,
+    )
+    .await;
+    match &result {
+        Ok(_) => audit::pipeline_event(
+            "update",
+            who,
+            namespace,
+            name,
+            None,
+            "ok",
+            Some(facts.write()),
+        ),
+        Err(e) => audit::pipeline_event(
+            "update",
+            who,
+            namespace,
+            name,
+            None,
+            &e.outcome,
+            Some(facts.write()),
+        ),
+    }
+    result.map_err(|e| e.fail)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_pipeline_inner(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks_store: Option<&NotebookStore>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    body: UpdatePipelineRequest,
+) -> Result<PipelineView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let (_, resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    // Only what Nova wrote may be rewritten; a manifest stays its author's.
+    if !nova_managed(&resource) {
+        return Err(ActionError::refused("not-nova", managed_outside()));
+    }
+
+    // An editor sends the version it read: a different stored version means somebody changed the
+    // pipeline meanwhile, and the person must reload before anything is written.
+    if let Some(read) = body.resource_version.as_deref() {
+        let stored = resource
+            .get("metadata")
+            .and_then(|metadata| metadata.get("resourceVersion"))
+            .and_then(Value::as_str);
+        if stored != Some(read) {
+            return Err(ActionError::refused("conflict", pipeline_changed()));
+        }
+    }
+
+    // The pipeline's group: both the refusal sentence and the notebook's object key.
+    let group = spec_of(&resource)
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .filter(|group| !group.is_empty())
+        .ok_or_else(|| ActionError::refused("shape", shape_not_editable()))?
+        .to_string();
+
+    // Every notification destination belongs to the pipeline's own group, never the caller's.
+    check_notify(db, &group, body.notify.as_ref())
+        .await
+        .map_err(|fail| ActionError::refused("notify", fail))?;
+
+    // A body names exactly one of a statement, a notebook and a task list (#237, #905), and an
+    // update never changes the shape the pipeline has: a task list stays a task list and a `run`
+    // pipeline stays one.
+    let requested = checked_run(
+        &body.sql,
+        body.notebook.as_ref(),
+        body.tasks.as_deref(),
+        &body.params,
+        notebooks_store,
+        &group,
+    )
+    .await?;
+    match (stored_shape(&resource), &requested) {
+        // Not Nova's shape at all; the form never edits it.
+        (StoredShape::Other, _) => {
+            return Err(ActionError::refused("shape", shape_not_editable()));
+        }
+        (StoredShape::Tasks, Statement::Tasks(_)) => {}
+        (StoredShape::Tasks, _) => {
+            return Err(ActionError::refused(
+                "shape",
+                Fail::new(StatusCode::CONFLICT, SEVERAL_TASKS),
+            ));
+        }
+        (StoredShape::Run("notebook"), Statement::Notebook { .. }) => {}
+        (StoredShape::Run("notebook"), _) => {
+            return Err(ActionError::refused(
+                "kind",
+                Fail::new(StatusCode::BAD_REQUEST, NOTEBOOK_PIPELINE),
+            ));
+        }
+        (StoredShape::Run(_), Statement::Sql(_)) => {}
+        (StoredShape::Run(_), _) => {
+            return Err(ActionError::refused(
+                "kind",
+                Fail::new(StatusCode::BAD_REQUEST, STATEMENT_PIPELINE),
+            ));
+        }
+    }
+
+    let options = body
+        .options
+        .clone()
+        .unwrap_or_default()
+        .resolve()
+        .map_err(|message| {
+            ActionError::refused("options", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+    let schedule = validate_schedule(body.schedule.as_ref()).map_err(|message| {
+        ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
+    if let Some(provenance) = &body.provenance {
+        check_provenance(provenance).map_err(|message| {
+            ActionError::refused("provenance", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+    }
+
+    // The principal of the pipeline's own group must still be ready, or the change would make a
+    // pipeline the loader refuses.
+    let principals = resources
+        .principals()
+        .await
+        .map_err(|e| ActionError::error(resource_fail(e)))?;
+    let principal = principal_view(&principals, &group);
+    if !principal.ready {
+        return Err(ActionError::refused(
+            "no-principal",
+            Fail::new(StatusCode::CONFLICT, principal.message.unwrap_or_default()),
+        ));
+    }
+
+    let mut updated = updated_resource(
+        &resource,
+        &requested,
+        &options,
+        &body.params,
+        schedule.as_ref(),
+        body.notify.as_ref(),
+    );
+    if let Some(provenance) = &body.provenance {
+        stamp_provenance(&mut updated, provenance, &who.display_name);
+    }
+
+    // The resource still carries the `resourceVersion` read above: a concurrent change is a
+    // conflict, not a silent overwrite.
+    let written = resources
+        .replace(name, updated)
+        .await
+        .map_err(|e| match e {
+            ResourceError::Conflict => ActionError::refused("conflict", pipeline_changed()),
+            other => ActionError::error(resource_write_fail(other)),
+        })?;
+    Ok(view_after_write(airflow, namespace, name, &written, who).await)
+}
+
+/// `DELETE /api/pipelines/{namespace}/{name}`: remove a pipeline Nova wrote. Airflow is not
+/// called — the resource is the source of truth, and the loader removes the DAG.
+async fn delete_pipeline(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(), Fail> {
+    let result = delete_pipeline_inner(resources, who, namespace, name).await;
+    match &result {
+        Ok(()) => audit::pipeline_event("delete", who, namespace, name, None, "ok", None),
+        Err(e) => audit::pipeline_event("delete", who, namespace, name, None, &e.outcome, None),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn delete_pipeline_inner(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(), ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let (_, resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+    if !nova_managed(&resource) {
+        return Err(ActionError::refused("not-nova", managed_outside()));
+    }
+    resources
+        .delete(name)
+        .await
+        .map_err(|e| ActionError::error(resource_write_fail(e)))
+}
+
+// ---------------------------------------------------------------------------
+// The statement check and the next-runs preview (#223): no resource, no store.
+// ---------------------------------------------------------------------------
+
+/// The engine's `source` for the Schedule dialog's statement check. Trino records it in the
+/// query events, so a check reads differently from a real query or a pipeline run.
+const SOURCE_SCHEDULE_CHECK: &str = "nova-schedule-check";
+
+/// A signed-in caller for the two routes that touch no `Pipeline` and no secret store. They
+/// still refuse an anonymous caller: in `oidc` mode `require_auth` refuses first, and a router
+/// mounted without that middleware — as the tests mount one — answers the same 401.
+pub(crate) struct Caller {
+    state: Arc<AppState>,
+    principal: Principal,
+}
+
+impl Caller {
+    pub(crate) fn state(&self) -> &AppState {
+        &self.state
+    }
+
+    pub(crate) fn principal(&self) -> &Principal {
+        &self.principal
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for Caller {
+    type Rejection = Fail;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let principal = parts
+            .extensions
+            .get::<Principal>()
+            .cloned()
+            .ok_or_else(|| Fail::new(StatusCode::UNAUTHORIZED, "not signed in"))?;
+        Ok(Self {
+            state: Arc::clone(state),
+            principal,
+        })
+    }
+}
+
+/// The keywords `EXPLAIN` accepts here: what Nova may ask the engine about.
+const CHECKABLE_KEYWORDS: [&str; 8] = [
+    "select", "with", "insert", "merge", "delete", "update", "values", "create",
+];
+
+/// The statement's first word, as written.
+fn first_keyword(statement: &str) -> &str {
+    let start = statement.trim_start();
+    let end = start
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(start.len());
+    &start[..end]
+}
+
+/// Whether the engine can plan this statement. `create` only when it creates from a query
+/// (`CREATE … AS …`): a bare `CREATE TABLE t (a int)` has no plan, and `EXPLAIN` refuses it.
+fn checkable(statement: &str) -> bool {
+    let keyword = first_keyword(statement);
+    if !CHECKABLE_KEYWORDS
+        .iter()
+        .any(|checkable| keyword.eq_ignore_ascii_case(checkable))
+    {
+        return false;
+    }
+    if keyword.eq_ignore_ascii_case("create") {
+        return statement.to_ascii_lowercase().contains(" as ");
+    }
+    true
+}
+
+/// `POST /api/pipelines/check`: fill the placeholders and ask the engine to *plan* the
+/// statement — `EXPLAIN`, as the caller, under the check's own source. It never sends
+/// `EXPLAIN ANALYZE` and never the statement itself, so nothing runs and nothing is written.
+/// A statement kind that cannot be explained answers `checked: false`.
+async fn check_statement(
+    state: &AppState,
+    caller: &Principal,
+    body: CheckStatementRequest,
+) -> Result<CheckStatementResponse, Fail> {
+    let statement =
+        validate_sql(&body.sql).map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    validate_params(&body.params).map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    check_placeholders(&statement, &body.params)
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    if !checkable(&statement) {
+        return Ok(CheckStatementResponse {
+            checked: false,
+            ok: None,
+            message: None,
+        });
+    }
+    let today = now_utc().format("%Y-%m-%d").to_string();
+    let sql = format!(
+        "EXPLAIN {}",
+        fill_placeholders(&statement, &today, "check", &body.params)
+    );
+    match crate::trino::execute_from(state, sql, Some(caller), SOURCE_SCHEDULE_CHECK).await {
+        Ok(_) => Ok(CheckStatementResponse {
+            checked: true,
+            ok: Some(true),
+            message: None,
+        }),
+        // The engine did not answer at all: 502, like every other unreachable upstream (U12).
+        Err(message) if message == crate::trino::ENGINE_UNREACHABLE => {
+            Err(Fail::new(StatusCode::BAD_GATEWAY, message))
+        }
+        // A refused statement is the engine's sentence, not a Nova error.
+        Err(message) => Ok(CheckStatementResponse {
+            checked: true,
+            ok: Some(false),
+            message: Some(message),
+        }),
+    }
+}
+
+/// `POST /api/pipelines/preview-schedule`: the next `count` fire times of a cron in its zone,
+/// RFC 3339 with that zone's offset. `now` is a parameter so the tests can pin the clock.
+fn preview_schedule(
+    body: PreviewScheduleRequest,
+    now: DateTime<Utc>,
+) -> Result<PreviewScheduleResponse, Fail> {
+    let schedule = ScheduleRequest {
+        cron: body.cron,
+        timezone: body.timezone,
+    };
+    let (cron, timezone) = validate_schedule(Some(&schedule))
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?
+        .expect("a schedule was given");
+    let count = body.count.unwrap_or(5);
+    if !(1..=10).contains(&count) {
+        return Err(Fail::new(StatusCode::BAD_REQUEST, COUNT_RANGE));
+    }
+    let zone: Tz = timezone
+        .parse()
+        .expect("validate_schedule checked the zone");
+    let parsed = parse_cron(&cron).expect("validate_schedule checked the cron");
+    Ok(PreviewScheduleResponse {
+        runs: next_runs(&parsed, zone, count, now)
+            .into_iter()
+            .map(|run| run.to_rfc3339())
+            .collect(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The handlers: sign-in, the two clients, then one of the functions above.
+// ---------------------------------------------------------------------------
+
+/// The pipeline page is never cacheable, including the refusals an extractor produces before a
+/// handler runs.
+pub(crate) async fn no_store(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// The deployed pipelines of this stage, reduced for the stage comparison (`stages.rs`):
+/// only the ones `stardelt bundle deploy` stamped, and only those the caller may see.
+pub(crate) async fn deployed_rows(
+    state: &AppState,
+    who: &Identity,
+) -> Result<Vec<crate::stages::StageRow>, String> {
+    let resources = resources(state).ok_or("this Nova has no cluster connection")?;
+    let list = resources.list().await.map_err(|e| match e {
+        ResourceError::Unavailable(message) => message,
+        _ => "the cluster did not answer".to_string(),
+    })?;
+    Ok(list
+        .iter()
+        .filter(|resource| visible(who, spec_of(resource)))
+        .filter_map(|resource| {
+            let deployment = deployment_of(resource)?;
+            Some(crate::stages::StageRow {
+                bundle: deployment.bundle,
+                target: deployment.target,
+                name: pipeline_name(resource).to_string(),
+                revision: deployment.revision,
+                repository: deployment.repository,
+                modified: deployment.modified,
+            })
+        })
+        .collect())
+}
+
+/// The resource client for this request; `None` without a cluster connection.
+pub(crate) fn resources(state: &AppState) -> Option<PipelineResources> {
+    state.kube.clone().map(PipelineResources::cluster)
+}
+
+/// The read, action and write routes, all uncacheable.
+pub(crate) fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/pipelines", get(list).post(create))
+        // The Runs page (#516): every run of the caller's pipelines, newest first.
+        .route("/runs", get(list_runs))
+        // The notebook page's "where it is used": the pipelines that run one published notebook (#517).
+        .route("/notebooks/{group}/{name}/usage", get(notebook_usage))
+        // The caller's groups and their pipeline principals, before any `{namespace}/{name}`
+        // route can see the word "principals" as a name.
+        .route("/pipelines/principals", get(principals))
+        // The caller's service principals (operator#63): a group's jobs, maintenance and
+        // collector identities, which the Schedule dialog's `pipeline-<group>` check does not show.
+        .route("/service-principals", get(service_principals))
+        // The Schedule dialog's two helpers (#223): no resource and no store, but a signed-in
+        // caller; placed before `{namespace}/{name}` like `principals`.
+        .route("/pipelines/check", post(check))
+        .route("/pipelines/preview-schedule", post(preview))
+        .route("/pipelines/validate", post(validate))
+        .route(
+            "/pipelines/{namespace}/{name}",
+            get(detail).put(update).delete(remove),
+        )
+        .route("/pipelines/{namespace}/{name}/spec", get(spec))
+        .route("/pipelines/{namespace}/{name}/runs", post(trigger_run))
+        .route("/pipelines/{namespace}/{name}/pause", post(pause))
+        .route("/pipelines/{namespace}/{name}/resume", post(resume))
+        .route("/pipelines/{namespace}/{name}/runs/{run_id}", get(run))
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/queries",
+            get(run_queries),
+        )
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/stop",
+            post(stop),
+        )
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/retry",
+            post(retry),
+        )
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
+            get(logs),
+        )
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/notebook",
+            get(run_notebook),
+        )
+        .route_layer(axum::middleware::from_fn(no_store))
+}
+
+pub(crate) fn answer<T: Serialize>(result: Result<T, Fail>) -> Response {
+    answer_with(StatusCode::OK, result)
+}
+
+pub(crate) fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fail>) -> Response {
+    match result {
+        Ok(value) => (status, Json(value)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Demo mode has no principal and no store, so `SignedIn` refuses every read before the
+/// handler runs (#500). This lets exactly the read routes that have demo samples through.
+pub(crate) enum ReadCaller {
+    Demo,
+    /// Boxed: `SignedIn` is 208 bytes and `clippy::large_enum_variant` is a gate.
+    Signed(Box<SignedIn>),
+}
+
+impl FromRequestParts<Arc<AppState>> for ReadCaller {
+    type Rejection = Fail;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if state.demo {
+            return Ok(ReadCaller::Demo);
+        }
+        SignedIn::from_request_parts(parts, state)
+            .await
+            .map(|signed| ReadCaller::Signed(Box::new(signed)))
+    }
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_list",
+    path = "/api/pipelines",
+    tag = "public",
+    description = "The pipelines the caller may see: their groups' pipelines, and every pipeline for an administrator. A pipeline without `spec.ownerGroup` is administrators-only. `state` is one of `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`; `loaded` is false while Airflow has no DAG for a new pipeline yet. Answers `Cache-Control: no-store`.",
+    responses(
+        (status = 200, description = "The visible pipelines, sorted by name", body = PipelineListResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn list(caller: ReadCaller) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => return answer(Ok(crate::demo::pipelines())),
+        ReadCaller::Signed(signed) => signed,
+    };
+    answer(
+        list_pipelines(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "runs_list",
+    path = "/api/runs",
+    tag = "public",
+    description = "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group`, `pipeline` (`<namespace>/<name>`) and `notebook` (`<group>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A `notebook` filter is owner-group scoped: a caller who is not a member of the group answers 403. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
+    params(
+        ("limit" = Option<usize>, Query, description = "Rows to answer; 50 when absent, at most 200"),
+        ("state" = Option<String>, Query, description = "Exact match on the run's state; an unknown state answers no rows"),
+        ("kind" = Option<String>, Query, description = "`sql`, `notebook` or `pipeline`"),
+        ("group" = Option<String>, Query, description = "Exact match on the pipeline's `spec.ownerGroup`"),
+        ("pipeline" = Option<String>, Query, description = "One pipeline as `<namespace>/<name>`"),
+        ("notebook" = Option<String>, Query, description = "One published notebook as `<group>/<name>`: only the runs of its schedules"),
+    ),
+    responses(
+        (status = 200, description = "The visible runs, newest first", body = RunsListResponse),
+        (status = 400, description = "`limit`, `kind`, `pipeline` or `notebook` is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the notebook's group", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn list_runs(
+    caller: ReadCaller,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let signed = match caller {
+        // Demo mode has no scheduler: the sample is filtered and capped like a real answer, so
+        // the page's filters and its 400s behave the same way.
+        ReadCaller::Demo => return answer(demo_runs(&query)),
+        ReadCaller::Signed(signed) => signed,
+    };
+    answer(
+        runs_across_pipelines(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &query,
+        )
+        .await,
+    )
+}
+
+/// The hosted MCP tool `pipeline_list` (#114 read slice): `GET /api/pipelines` for a caller
+/// the MCP endpoint has already authenticated. Same visibility rule, same answer.
+pub(crate) async fn list_for(state: &AppState, who: &Identity) -> Response {
+    answer(list_pipelines(resources(state).as_ref(), state.airflow.as_ref(), who).await)
+}
+
+/// The hosted MCP tool `pipeline_runs`: `GET /api/runs` with the same filters, as the caller.
+pub(crate) async fn runs_for(
+    state: &AppState,
+    who: &Identity,
+    query: &BTreeMap<String, String>,
+) -> Response {
+    answer(
+        runs_across_pipelines(
+            resources(state).as_ref(),
+            state.airflow.as_ref(),
+            who,
+            query,
+        )
+        .await,
+    )
+}
+
+/// The hosted MCP tool `pipeline_run`: `GET /api/pipelines/{ns}/{name}/runs/{run_id}`, as the caller.
+pub(crate) async fn run_for(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Response {
+    answer(
+        run_detail(
+            resources(state).as_ref(),
+            state.airflow.as_ref(),
+            who,
+            namespace,
+            name,
+            run_id,
+        )
+        .await,
+    )
+}
+
+/// The hosted MCP tool `pipeline_task_log`: one page of a task's log, as the caller. Audited by `task_logs`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn task_log_for(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    task_id: &str,
+    try_number: Option<u32>,
+    token: Option<&str>,
+) -> Response {
+    answer(
+        task_logs(
+            resources(state).as_ref(),
+            state.airflow.as_ref(),
+            who,
+            namespace,
+            name,
+            run_id,
+            task_id,
+            try_number,
+            token,
+        )
+        .await,
+    )
+}
+
+/// Demo mode's `GET /api/runs`: the sample is filtered and capped like a real answer, so the
+/// page's filters and its 400s behave the same way. There is no notebook schedule in demo mode,
+/// so a `notebook` filter answers no rows — the same empty list the notebook page's usage route
+/// answers there.
+fn demo_runs(query: &BTreeMap<String, String>) -> Result<RunsListResponse, Fail> {
+    let filter = RunsFilter::parse(query)?;
+    let sample = crate::demo::runs();
+    if filter.notebook.is_some() {
+        return Ok(RunsListResponse {
+            runs: Vec::new(),
+            groups: sample.groups,
+        });
+    }
+    Ok(filter.answer(sample.runs, sample.groups))
+}
+
+/// Whether this Pipeline is a Schedule of one published notebook: the owner group, the one-task
+/// shape a Schedule writes (#516), `kind: notebook` and `config.notebook == name`.
+fn notebook_schedule(resource: &Value, group: &str, notebook: &str) -> bool {
+    let spec = spec_of(resource);
+    if spec.get("ownerGroup").and_then(Value::as_str) != Some(group) {
+        return false;
+    }
+    let Some(task) = spec
+        .get("tasks")
+        .and_then(Value::as_array)
+        .and_then(|tasks| tasks.first())
+    else {
+        return false;
+    };
+    task.get("kind").and_then(Value::as_str) == Some("notebook")
+        && task
+            .get("config")
+            .and_then(|config| config.get("notebook"))
+            .and_then(Value::as_str)
+            == Some(notebook)
+}
+
+/// The visible pipelines whose single task is `kind: notebook` with `config.notebook == name`,
+/// owned by `group`. Administrators get no wider view than a member: the notebook page is
+/// owner-group scoped (the rule `notebooks.rs` documents).
+fn notebook_usage_rows(
+    resources: &[Value],
+    who: &Identity,
+    group: &str,
+    name: &str,
+) -> Vec<NotebookScheduleRow> {
+    let mut rows: Vec<NotebookScheduleRow> = resources
+        .iter()
+        .filter(|resource| visible(who, spec_of(resource)))
+        .filter(|resource| notebook_schedule(resource, group, name))
+        .filter_map(|resource| {
+            let spec = spec_of(resource);
+            let config = spec.get("tasks")?.as_array()?.first()?.get("config")?;
+            Some(NotebookScheduleRow {
+                namespace: crate::cluster::namespace(),
+                name: pipeline_name(resource).to_string(),
+                owner_group: group.to_string(),
+                object_version: config.get("objectVersion")?.as_str()?.to_string(),
+                cron: spec
+                    .get("schedule")
+                    .and_then(|s| s.get("cron"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                timezone: spec
+                    .get("schedule")
+                    .and_then(|s| s.get("timezone"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                run_as: spec
+                    .get("runAs")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "notebooks_usage",
+    path = "/api/notebooks/{group}/{name}/usage",
+    tag = "public",
+    description = "The pipelines that run one published notebook — the schedules and on-demand pipelines of that group, sorted by name. Each row is the one-task `Pipeline` a Schedule created (#516): its pinned `objectVersion`, its cron and timezone when it has a schedule, and its `runAs`. Owner-group scoped: a caller who is not a member of `group` answers 403, and an administrator gets no wider view. Answers `Cache-Control: no-store`.",
+    params(
+        ("group" = String, Path, description = "The notebook's owner group"),
+        ("name" = String, Path, description = "The notebook's `.ipynb` file name"),
+    ),
+    responses(
+        (status = 200, description = "The visible schedules, sorted by name", body = NotebookUsageResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the group", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn notebook_usage(
+    caller: ReadCaller,
+    Path((group, name)): Path<(String, String)>,
+) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => {
+            return answer(Ok(NotebookUsageResponse {
+                schedules: Vec::new(),
+            }));
+        }
+        ReadCaller::Signed(signed) => *signed,
+    };
+    if !signed.identity().groups.iter().any(|g| g == &group) {
+        return crate::notebooks::forbidden_group(&group).into_response();
+    }
+    if !crate::notebooks::valid_group(&group) {
+        return Fail::new(
+            StatusCode::BAD_REQUEST,
+            "the group name cannot be used as a notebook prefix",
+        )
+        .into_response();
+    }
+    if !crate::notebooks::valid_name(&name) {
+        return Fail::new(StatusCode::BAD_REQUEST, "a notebook name ends in .ipynb")
+            .into_response();
+    }
+    let Some(resources) = resources(signed.state()) else {
+        return no_cluster().into_response();
+    };
+    match resources.list().await {
+        Ok(list) => answer(Ok(NotebookUsageResponse {
+            schedules: notebook_usage_rows(&list, signed.identity(), &group, &name),
+        })),
+        Err(error) => resource_fail(error).into_response(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_principals",
+    path = "/api/pipelines/principals",
+    tag = "public",
+    description = "The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command that creates one. A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`.",
+    responses(
+        (status = 200, description = "One entry per group of the caller, sorted by group", body = PrincipalsResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn principals(caller: ReadCaller) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => return answer(Ok(crate::demo::pipeline_principals())),
+        ReadCaller::Signed(signed) => signed,
+    };
+    answer(principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "service_principals_list",
+    path = "/api/service-principals",
+    tag = "public",
+    description = "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
+    responses(
+        (status = 200, description = "The caller's principals, sorted by name", body = ServicePrincipalsResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn service_principals(caller: ReadCaller) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => return answer(Ok(crate::demo::service_principals())),
+        ReadCaller::Signed(signed) => signed,
+    };
+    answer(service_principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_check",
+    path = "/api/pipelines/check",
+    tag = "public",
+    description = "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create … as …` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
+    request_body = CheckStatementRequest,
+    responses(
+        (status = 200, description = "The engine's verdict, or that this statement cannot be checked", body = CheckStatementResponse),
+        (status = 400, description = "The statement, a parameter or a placeholder is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn check(
+    caller: Caller,
+    ApiJson(body): ApiJson<CheckStatementRequest>,
+) -> Response {
+    answer(check_statement(caller.state(), caller.principal(), body).await)
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_preview_schedule",
+    path = "/api/pipelines/preview-schedule",
+    tag = "public",
+    description = "The next fire times of a cron in its zone, RFC 3339 with that zone's offset (for example `2026-10-21T03:00:00+02:00`), so the Schedule dialog can show what a cadence means before it is saved. A field or a zone as on create (400 with the same sentences); `count` is 1 to 10, 5 when omitted. Like croniter, a day matches when both day fields are restricted and either matches, and when one is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump is not a run; a time that happens twice is answered with its first occurrence. A cron that can never fire answers fewer runs (at most 366 days are searched), not an error. Answers `Cache-Control: no-store`.",
+    request_body = PreviewScheduleRequest,
+    responses(
+        (status = 200, description = "The next runs in the schedule's zone", body = PreviewScheduleResponse),
+        (status = 400, description = "The cron, the timezone or the count is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn preview(
+    _caller: Caller,
+    ApiJson(body): ApiJson<PreviewScheduleRequest>,
+) -> Response {
+    answer(preview_schedule(body, now_utc()))
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_create",
+    path = "/api/pipelines",
+    tag = "public",
+    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    request_body = CreatePipelineRequest,
+    responses(
+        (status = 201, description = "The resource as written", body = PipelineView),
+        (status = 400, description = "The name, the statement, the cron or the timezone is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the owner group", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "No ready principal for the group, or the name is taken", body = crate::openapi::ErrorResponse),
+        (status = 429, description = "More than ten creations in the last hour", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn create(
+    signed: SignedIn,
+    ApiJson(body): ApiJson<CreatePipelineRequest>,
+) -> Response {
+    if let Some(sentence) = production_notebook_sentence(
+        signed.state().stage_kind,
+        body.schedule.is_some(),
+        runs_a_notebook(body.notebook.as_ref(), body.tasks.as_deref()),
+        body.provenance.is_some(),
+    ) {
+        return Fail::new(StatusCode::BAD_REQUEST, sentence).into_response();
+    }
+    answer_with(
+        StatusCode::CREATED,
+        create_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().db.as_ref(),
+            signed.state().notebooks.as_ref(),
+            &signed.state().pipeline_creates,
+            signed.identity(),
+            body,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_validate",
+    path = "/api/pipelines/validate",
+    tag = "public",
+    description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with `ok: false` at 200 (\"In production a notebook comes from Git. Deploy it with a bundle.\") unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
+    request_body = CreatePipelineRequest,
+    responses(
+        (status = 200, description = "The verdict: accepted (with the action) or the reason it is not", body = ValidatePipelineResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn validate(
+    signed: SignedIn,
+    ApiJson(body): ApiJson<CreatePipelineRequest>,
+) -> Response {
+    if let Some(sentence) = production_notebook_sentence(
+        signed.state().stage_kind,
+        body.schedule.is_some(),
+        runs_a_notebook(body.notebook.as_ref(), body.tasks.as_deref()),
+        body.provenance.is_some(),
+    ) {
+        return answer(Ok(not_ok(sentence)));
+    }
+    answer(
+        validate_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().db.as_ref(),
+            signed.state().notebooks.as_ref(),
+            signed.identity(),
+            body,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    put,
+    operation_id = "pipelines_update",
+    path = "/api/pipelines/{namespace}/{name}",
+    tag = "public",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    request_body = UpdatePipelineRequest,
+    responses(
+        (status = 200, description = "The resource as written", body = PipelineView),
+        (status = 400, description = "The statement, the cron or the timezone is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "Managed outside Nova, an uneditable shape, no ready principal, or a conflict", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn update(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+    ApiJson(body): ApiJson<UpdatePipelineRequest>,
+) -> Response {
+    if let Some(fail) =
+        update_production_refusal(signed.state(), signed.identity(), &namespace, &name, &body).await
+    {
+        return fail.into_response();
+    }
+    answer(
+        update_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().db.as_ref(),
+            signed.state().notebooks.as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            body,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    delete,
+    operation_id = "pipelines_delete",
+    path = "/api/pipelines/{namespace}/{name}",
+    tag = "public",
+    description = "Delete a pipeline Nova created. Only the owner group and administrators may delete: a viewer (`spec.viewers`) answers 403 `only the owner group may change this pipeline`, and a pipeline the caller cannot see 404. A pipeline that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 204, description = "Deleted (or already gone)"),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The pipeline is managed outside Nova", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn remove(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    match delete_pipeline(
+        resources(signed.state()).as_ref(),
+        signed.identity(),
+        &namespace,
+        &name,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_spec",
+    path = "/api/pipelines/{namespace}/{name}/spec",
+    tag = "public",
+    description = "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The document, its resource version, who manages it, and whether it is editable", body = PipelineSpecResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn spec(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer(
+        pipeline_spec(
+            resources(signed.state()).as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_get",
+    path = "/api/pipelines/{namespace}/{name}",
+    tag = "public",
+    description = "One pipeline: the list fields, the latest 20 runs, and the resource's `params`, `retries` and `options` (defaults filled in when a field is absent, so the edit dialog can prefill). A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The pipeline, its latest runs, params, retries and options", body = PipelineDetail),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn detail(
+    caller: ReadCaller,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => {
+            return match crate::demo::pipeline_detail(&namespace, &name) {
+                Some(detail) => answer(Ok(detail)),
+                None => answer::<PipelineDetail>(Err(no_such_pipeline())),
+            };
+        }
+        ReadCaller::Signed(signed) => *signed,
+    };
+    answer(
+        pipeline_detail(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_get",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}",
+    tag = "public",
+    description = "One run of a pipeline with its task instances. The run id is looked up through this pipeline's DAG id, so a run id of another pipeline answers 404. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id, for example `manual__2026-10-20T07:23:50.608876+00:00`"),
+    ),
+    responses(
+        (status = 200, description = "The run and its tasks", body = RunResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such run", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn run(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(
+        run_detail(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_queries",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/queries",
+    tag = "public",
+    description = "The statements one run sent to the query engine, slowest first, read from the `pipeline=` and `run=` client tags the pipeline loader writes. Access is the pipeline's (`load_visible`), not the query log's owner rule: these statements ran as the pipeline's service principal, so the query-log scope would hide them from the person who can see the run. Each answers taskId, startedAt, wallMs, executionMs, inputBytes, inputRows and the statement; with NOVA_QUERY_LOG_REDACT_LITERALS=1 every statement shows '?' in place of its string literals. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id, for example `scheduled__2026-11-14T03:00:00+00:00`"),
+    ),
+    responses(
+        (status = 200, description = "The run's statements, slowest first", body = RunQueriesResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn run_queries(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(run_queries_answer(signed, namespace, name, run_id).await)
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_task_logs",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
+    tag = "public",
+    description = "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source-details block dropped — its marker, the internal object-store path it wraps and its `::endgroup::` (they are never returned). A failed task's line is followed by the exception the scheduler recorded (`ExcType: message`) and up to 20 of its stack frames, each with the file's last path segment; they count against the same caps. `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+        ("task_id" = String, Path, description = "Task id"),
+        ("try" = Option<u32>, Query, description = "Attempt number; defaults to the task's last try"),
+        ("token" = Option<String>, Query, description = "Continuation token from a previous answer"),
+    ),
+    responses(
+        (status = 200, description = "The log page", body = LogView),
+        (status = 400, description = "`try` is not a positive number", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, no such run, or no such task", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn logs(
+    signed: SignedIn,
+    Path((namespace, name, run_id, task_id)): Path<(String, String, String, String)>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let try_number = match query.get("try").map(|value| value.parse::<u32>()) {
+        None => None,
+        Some(Ok(number)) => Some(number),
+        Some(Err(_)) => {
+            return Fail::new(StatusCode::BAD_REQUEST, "try must be a positive number")
+                .into_response();
+        }
+    };
+    answer(
+        task_logs(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+            &task_id,
+            try_number,
+            query.get("token").map(String::as_str),
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_task_notebook",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/notebook",
+    tag = "public",
+    description = "The executed copy of one notebook task run: the notebook with its outputs and tracebacks, as the run wrote it. That copy is the run's log. The same visibility rule as the run (404 for another group's pipeline), the same audit line as a log read, and `Cache-Control: no-store`. `download=true` also names the file `<pipeline>-<task>.ipynb` in `Content-Disposition`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+        ("task_id" = String, Path, description = "Task id: 1 to 64 letters, digits, underscores or dashes"),
+        ("download" = Option<bool>, Query, description = "Answer as a file attachment"),
+    ),
+    responses(
+        (status = 200, description = "The executed notebook, as the run wrote it", body = String),
+        (status = 400, description = "The task id is not 1 to 64 letters, digits, underscores or dashes, or `download` is not true or false", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, a pipeline without a group, or no executed copy for this task", body = crate::openapi::ErrorResponse),
+        (status = 413, description = "The executed notebook is larger than 25 MiB", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The notebook store did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or notebook storage is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn run_notebook(
+    signed: SignedIn,
+    Path((namespace, name, run_id, task_id)): Path<(String, String, String, String)>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let download = match query.get("download").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => {
+            return Fail::new(StatusCode::BAD_REQUEST, "download must be true or false")
+                .into_response();
+        }
+    };
+    match task_notebook(
+        resources(signed.state()).as_ref(),
+        signed.state().notebooks.as_ref(),
+        signed.identity(),
+        &namespace,
+        &name,
+        &run_id,
+        &task_id,
+        download,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The body of `POST …/runs` (nova#817): absent, or `{}`, starts a run for now with the
+/// schedule's parameters, exactly as before. A run date must be `YYYY-MM-DD`; parameters are
+/// checked like a saved parameter (`validate_params`), and the names and values are never
+/// echoed in the refusal.
+fn run_start(body: &[u8]) -> Result<RunStart, Fail> {
+    if body.is_empty() {
+        return Ok(RunStart::default());
+    }
+    let start: RunStart = serde_json::from_slice(body)
+        .map_err(|_| Fail::new(StatusCode::BAD_REQUEST, "the run body is not valid JSON"))?;
+    if let Some(date) = &start.run_date {
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| Fail::new(StatusCode::BAD_REQUEST, "runDate is a date (YYYY-MM-DD)"))?;
+    }
+    if let Some(params) = &start.params {
+        validate_params(params).map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    }
+    Ok(start)
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_run_trigger",
+    path = "/api/pipelines/{namespace}/{name}/runs",
+    tag = "public",
+    description = "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). The body is optional: `runDate` (a `YYYY-MM-DD` calendar date, past or future) applies to this run only, as does `params`, this run's values of the schedule's `${params.<name>}` placeholders (at most 16, lower-case names, values up to 256 characters); the stored schedule never changes, and neither value is audited. `logicalDate` stays now, UTC, whole seconds, so the run has tasks — the date travels as Airflow's `dag_run.conf` instead. An absent body or `{}` starts a run for now with the schedule's parameters, exactly as before. Every attempt that reaches the run logic, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    request_body = Option<RunStart>,
+    responses(
+        (status = 201, description = "The new run, queued", body = RunView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The body is not JSON, the run date is not `YYYY-MM-DD`, or a parameter is refused", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The pipeline is not loaded, is paused, or already has an active run", body = crate::openapi::ErrorResponse),
+        (status = 429, description = "More than ten runs were started in the last minute", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn trigger_run(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let start = match run_start(&body) {
+        Ok(start) => start,
+        Err(fail) => return fail.into_response(),
+    };
+    answer_with(
+        StatusCode::CREATED,
+        run_now(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            &signed.state().run_starts,
+            signed.identity(),
+            &namespace,
+            &name,
+            &start,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_pause",
+    path = "/api/pipelines/{namespace}/{name}/pause",
+    tag = "public",
+    description = "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not pause it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The pipeline, now paused", body = PipelineView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The scheduler has not loaded this pipeline yet", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn pause(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer(
+        pause_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_resume",
+    path = "/api/pipelines/{namespace}/{name}/resume",
+    tag = "public",
+    description = "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not resume it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The pipeline, now unpaused", body = PipelineView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The scheduler has not loaded this pipeline yet", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn resume(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer(
+        resume_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_run_stop",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/stop",
+    tag = "public",
+    description = "Stop a run: mark it failed. A viewer (`spec.viewers`) may stop a run, as it may start one. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+    ),
+    responses(
+        (status = 200, description = "The run, now failed", body = RunView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such run", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The run is not active", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn stop(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(
+        stop_run(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_run_retry",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/retry",
+    tag = "public",
+    description = "Retry the failed tasks of a run, **in the same run**: the run keeps its id, date and parameters, and the tasks that already succeeded are not repeated (Airflow's run-scoped clear). A viewer (`spec.viewers`) may retry, as it may run and stop. A paused pipeline, a run that is not `failed`, and a run with no failed tasks are refused with 409. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and nothing is cleared. Answers the fresh `RunView` and `Cache-Control: no-store`. Every attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+    ),
+    responses(
+        (status = 200, description = "The run, with its failed tasks cleared for another attempt", body = RunView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such run", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The run is not failed, the pipeline is paused, or there is nothing to retry", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn retry(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(
+        retry_run(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+        )
+        .await,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Mutex};
+
+    /// Serialises the tests that set/remove NOVA_BASE_DOMAIN: the environment is process-global.
+    /// Tokio's mutex, because the guard is held across the test's awaits.
+    static BASE_DOMAIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    use axum::{
+        Extension,
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::airflow::{AirflowConfig, AirflowError, DagRun, DagSummary};
+    use crate::auth::{Principal, Secret};
+    use crate::notebooks::NotebookStore;
+    use crate::notebooks::fake::{FakeS3, notebook_store};
+    use crate::secret_store::StoreClient;
+
+    /// A value that must never appear in a log answer: the marker's `sources` path.
+    const SOURCES_CANARY: &str = "s3://backups/airflow-logs/dag_id=stardelt__smoke/run_id=manual__2026-10-20T07:23:50.608876+00:00/task_id=insert/attempt=3.log";
+    /// The path Airflow sends as the group's *body* event on live Airflow 3 (a separate event,
+    /// no `sources`): it must never appear in an answer either.
+    const SOURCES_BODY_CANARY: &str = "s3://backups/airflow-logs/dag_id=stardelt__smoke/run_id=manual__2026-10-20T07:23:50.608876+00:00/task_id=insert/attempt=2.log";
+    const SMOKE_RUN: &str = "manual__2026-10-20T07:23:50.608876+00:00";
+    const OTHER_RUN: &str = "manual__2026-10-20T09:00:00.000000+00:00";
+
+    fn who(sub: &str, groups: &[&str], admin: bool) -> Identity {
+        Identity {
+            sub: sub.into(),
+            display_name: sub.into(),
+            email: None,
+            name: None,
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            roles: vec![],
+            groups_overage: false,
+            is_admin: admin,
+        }
+    }
+
+    fn admin() -> Identity {
+        who("sub-root", &["stardelt-admins"], true)
+    }
+
+    /// One `Pipeline` resource, with the fields the operator's CRD carries.
+    fn resource(name: &str, owner_group: Option<&str>) -> Value {
+        json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": {
+                "name": name,
+                "namespace": crate::cluster::namespace(),
+                "creationTimestamp": now_rfc3339(),
+            },
+            "spec": {
+                "ownerGroup": owner_group,
+                "tasks": [
+                    { "name": "schema", "kind": "sql" },
+                    { "name": "insert", "kind": "sql" }
+                ],
+                "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" },
+                "runAs": "pipeline-analytics",
+                "params": { "target": "warehouse.smoke" },
+                "retries": { "attempts": 2, "backoff": "5m" },
+                "concurrency": "Forbid",
+                "engine": "airflow"
+            }
+        })
+    }
+
+    /// The same resource with another `spec.concurrency`.
+    fn with_concurrency(mut resource: Value, concurrency: &str) -> Value {
+        resource["spec"]["concurrency"] = json!(concurrency);
+        resource
+    }
+
+    /// The same resource with `spec.viewers`: groups that may read it but not act (epic#895
+    /// decision 12).
+    fn with_viewers(mut resource: Value, viewers: &[&str]) -> Value {
+        resource["spec"]["viewers"] = json!(viewers);
+        resource
+    }
+
+    /// The same resource, created `seconds` ago (for the `loading`/`not-loaded` boundary).
+    fn with_created_ago(mut resource: Value, seconds: i64) -> Value {
+        resource["metadata"]["creationTimestamp"] =
+            json!(format_rfc3339(now_seconds() as i64 - seconds));
+        resource
+    }
+
+    fn limiter() -> RunStartsLimiter {
+        Mutex::new(std::collections::HashMap::new())
+    }
+
+    /// The pipelines router with a fake cluster (one `smoke` pipeline) and a fake Airflow,
+    /// signed in as a member of `analytics`: what a browser calls for `POST …/runs` (nova#817).
+    async fn run_route(airflow: AirflowClient) -> Router {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let kube = fake_kube::start(vec![resource("smoke", Some("analytics"))]).await;
+        router()
+            .with_state(test_state(Some(kube), airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))))
+    }
+
+    fn memory(items: &[(&str, Value)]) -> PipelineResources {
+        memory_with(items, &[])
+    }
+
+    fn memory_with(items: &[(&str, Value)], principals: &[(&str, Value)]) -> PipelineResources {
+        let pipelines: BTreeMap<String, Value> = items
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect();
+        let principals: BTreeMap<String, Value> = principals
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect();
+        PipelineResources::Memory(Arc::new(Mutex::new(MemoryStore {
+            pipelines,
+            principals,
+        })))
+    }
+
+    fn dag(dag_id: &str) -> Value {
+        json!({
+            "dag_id": dag_id,
+            "dag_display_name": dag_id,
+            "is_paused": false,
+            "is_stale": false,
+            "timetable_description": "0 3 * * *",
+            "next_dagrun_run_after": "2026-10-21T03:00:00Z",
+            "last_parsed_time": "2026-10-20T07:24:29.819955Z",
+            "tags": [{ "name": "pipeline" }, { "name": "stardelt" }]
+        })
+    }
+
+    fn run(dag_run_id: &str, state: &str) -> Value {
+        json!({
+            "dag_run_id": dag_run_id,
+            "state": state,
+            "run_type": "manual",
+            "logical_date": "2026-10-20T07:23:50Z",
+            "start_date": "2026-10-20T07:23:50.608876Z",
+            "end_date": "2026-10-20T07:23:58.876923Z",
+            "note": "from the test",
+            "triggered_by": "rest_api",
+            "triggering_user_name": "nova-api",
+            "conf": {},
+            "run_after": "2026-10-20T07:23:50.608876Z"
+        })
+    }
+
+    fn task(task_id: &str, try_number: u32) -> Value {
+        json!({
+            "task_id": task_id,
+            "state": "success",
+            "try_number": try_number,
+            "start_date": "2026-10-20T07:23:50.608876Z",
+            "end_date": "2026-10-20T07:23:58.876923Z",
+            "duration": 8.268047,
+            "operator": "PythonOperator",
+            "map_index": -1
+        })
+    }
+
+    fn log_page() -> Value {
+        json!({
+            "content": [
+                {
+                    "event": "::group::Log message source details",
+                    "sources": [SOURCES_CANARY]
+                },
+                {
+                    "event": SOURCES_BODY_CANARY
+                },
+                {
+                    "event": "::endgroup::"
+                },
+                {
+                    "timestamp": "2026-10-20T07:23:51.000000Z",
+                    "level": "info",
+                    "event": "\u{1b}[32minsert\u{1b}[0m done"
+                },
+                {
+                    "timestamp": "2026-10-20T07:23:52.000000Z",
+                    "level": "warning",
+                    "event": "still here"
+                }
+            ],
+            "continuation_token": null
+        })
+    }
+
+    /// A fake Airflow with the few routes the read API uses. The marker's `sources` path is a
+    /// canary: it must never appear in an answer.
+    mod fake_airflow {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            Json, Router,
+            extract::{OriginalUri, Path, Query, State},
+            http::{HeaderMap, StatusCode, Uri, header},
+            routing::{get, patch, post},
+        };
+        use serde_json::{Value, json};
+
+        use crate::airflow::{AirflowClient, AirflowConfig};
+        use crate::auth::Secret;
+
+        use super::{OTHER_RUN, SMOKE_RUN, dag, log_page, run, task};
+
+        const PASSWORD: &str = "pw-canary-pipeline-4a17";
+        const TOKEN: &str = "tok-canary-pipeline-4a17";
+
+        type Refusal = (StatusCode, Json<Value>);
+
+        fn refused() -> Refusal {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "detail": "Invalid credentials" })),
+            )
+        }
+
+        #[derive(Default)]
+        pub struct Fake {
+            /// `METHOD path?query` of every call except the sign-in.
+            pub calls: Vec<String>,
+            pub dags: Vec<Value>,
+            pub runs: BTreeMap<String, Vec<Value>>,
+            pub tasks: BTreeMap<String, Vec<Value>>,
+            pub log_page: Value,
+            /// DAG ids whose run listing answers `500`.
+            pub fail_runs: BTreeSet<String>,
+            /// Every trigger's JSON body, in order, so a test can read the `logical_date` and
+            /// the note Nova sent.
+            pub trigger_bodies: Vec<Value>,
+            /// Every run-scoped clear's JSON body, in order (nova#816).
+            pub clear_bodies: Vec<Value>,
+            /// When set, the clear selects nothing: a run with no failed task.
+            pub clear_empty: bool,
+        }
+
+        pub type Shared = Arc<Mutex<Fake>>;
+
+        fn seeded() -> Fake {
+            let mut fake = Fake {
+                dags: vec![
+                    dag("stardelt__smoke"),
+                    dag("stardelt__other"),
+                    dag("stardelt__hidden"),
+                ],
+                log_page: log_page(),
+                ..Fake::default()
+            };
+            fake.runs
+                .insert("stardelt__smoke".into(), vec![run(SMOKE_RUN, "success")]);
+            fake.runs
+                .insert("stardelt__other".into(), vec![run(OTHER_RUN, "failed")]);
+            fake.runs.insert(
+                "stardelt__hidden".into(),
+                vec![run("hidden__2026-10-20T08:00:00+00:00", "success")],
+            );
+            fake.tasks
+                .insert(SMOKE_RUN.into(), vec![task("insert", 3), task("schema", 1)]);
+            fake.tasks.insert(OTHER_RUN.into(), vec![task("insert", 1)]);
+            fake
+        }
+
+        fn line(uri: &Uri) -> String {
+            uri.path_and_query()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| uri.path().to_string())
+        }
+
+        fn remember(state: &mut Fake, method: &str, uri: &Uri) {
+            state.calls.push(format!("{method} {}", line(uri)));
+        }
+
+        fn authorize(headers: &HeaderMap) -> Result<(), Refusal> {
+            let expected = format!("Bearer {TOKEN}");
+            if headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                != Some(expected.as_str())
+            {
+                return Err(refused());
+            }
+            Ok(())
+        }
+
+        async fn login(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+            if body["username"].as_str() == Some("nova-api")
+                && body["password"].as_str() == Some(PASSWORD)
+            {
+                return (StatusCode::CREATED, Json(json!({ "access_token": TOKEN })));
+            }
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "detail": "Invalid credentials" })),
+            )
+        }
+
+        async fn dags(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Query(query): Query<BTreeMap<String, String>>,
+            headers: HeaderMap,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "GET", &uri);
+            authorize(&headers)?;
+            let total = state.dags.len();
+            let offset: usize = query
+                .get("offset")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let limit: usize = query
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100);
+            let page: Vec<Value> = state
+                .dags
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect();
+            Ok(Json(json!({ "dags": page, "total_entries": total })))
+        }
+
+        async fn one_dag(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path(dag_id): Path<String>,
+            headers: HeaderMap,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "GET", &uri);
+            authorize(&headers)?;
+            match state.dags.iter().find(|dag| dag["dag_id"] == dag_id) {
+                Some(dag) => Ok(Json(dag.clone())),
+                None => Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                )),
+            }
+        }
+
+        async fn runs(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path(dag_id): Path<String>,
+            Query(query): Query<BTreeMap<String, String>>,
+            headers: HeaderMap,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "GET", &uri);
+            authorize(&headers)?;
+            if state.fail_runs.contains(&dag_id) {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "detail": "boom" })),
+                ));
+            }
+            let Some(runs) = state.runs.get(&dag_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            };
+            let limit: usize = query
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100);
+            let page: Vec<Value> = runs.iter().take(limit).cloned().collect();
+            Ok(Json(
+                json!({ "dag_runs": page, "total_entries": runs.len() }),
+            ))
+        }
+
+        fn run_belongs(state: &Fake, dag_id: &str, run_id: &str) -> bool {
+            state
+                .runs
+                .get(dag_id)
+                .is_some_and(|runs| runs.iter().any(|run| run["dag_run_id"] == run_id))
+        }
+
+        async fn tasks(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path((dag_id, run_id)): Path<(String, String)>,
+            headers: HeaderMap,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "GET", &uri);
+            authorize(&headers)?;
+            if !run_belongs(&state, &dag_id, &run_id) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DagRun not found" })),
+                ));
+            }
+            let tasks = state.tasks.get(&run_id).cloned().unwrap_or_default();
+            Ok(Json(
+                json!({ "task_instances": tasks, "total_entries": tasks.len() }),
+            ))
+        }
+
+        async fn logs(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path((dag_id, run_id, _task_id, _try_number)): Path<(String, String, String, u32)>,
+            headers: HeaderMap,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "GET", &uri);
+            authorize(&headers)?;
+            if !run_belongs(&state, &dag_id, &run_id) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DagRun not found" })),
+                ));
+            }
+            Ok(Json(state.log_page.clone()))
+        }
+
+        async fn trigger(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path(dag_id): Path<String>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<(StatusCode, Json<Value>), Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "POST", &uri);
+            authorize(&headers)?;
+            if !state.dags.iter().any(|dag| dag["dag_id"] == dag_id) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            }
+            let logical_date = body["logical_date"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let run = json!({
+                "dag_run_id": format!("manual__{logical_date}"),
+                "state": "queued",
+                "run_type": "manual",
+                "logical_date": logical_date,
+                "start_date": null,
+                "end_date": null,
+                "note": body.get("note").cloned().unwrap_or(Value::Null),
+                "triggered_by": "rest_api",
+                "triggering_user_name": "nova-api"
+            });
+            state.trigger_bodies.push(body);
+            state.runs.entry(dag_id).or_default().insert(0, run.clone());
+            Ok((StatusCode::CREATED, Json(run)))
+        }
+
+        async fn patch_dag(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path(dag_id): Path<String>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "PATCH", &uri);
+            authorize(&headers)?;
+            let Some(dag) = state.dags.iter_mut().find(|dag| dag["dag_id"] == dag_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            };
+            if let Some(paused) = body.get("is_paused") {
+                dag["is_paused"] = paused.clone();
+            }
+            Ok(Json(dag.clone()))
+        }
+
+        async fn patch_run(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path((dag_id, run_id)): Path<(String, String)>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "PATCH", &uri);
+            authorize(&headers)?;
+            let Some(runs) = state.runs.get_mut(&dag_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            };
+            let Some(run) = runs.iter_mut().find(|run| run["dag_run_id"] == run_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DagRun not found" })),
+                ));
+            };
+            if let Some(value) = body.get("state") {
+                run["state"] = value.clone();
+            }
+            Ok(Json(run.clone()))
+        }
+
+        /// The run-scoped clear (nova#816): only the failed tasks are selected.
+        async fn clear_run(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path((dag_id, run_id)): Path<(String, String)>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "POST", &uri);
+            authorize(&headers)?;
+            if !run_belongs(&state, &dag_id, &run_id) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DagRun not found" })),
+                ));
+            }
+            state.clear_bodies.push(body);
+            if state.clear_empty {
+                return Ok(Json(json!({ "task_instances": [] })));
+            }
+            Ok(Json(json!({
+                "task_instances": [
+                    { "task_id": "load", "state": "upstream_failed", "try_number": 1 }
+                ]
+            })))
+        }
+
+        pub async fn start() -> (AirflowClient, Shared) {
+            let shared: Shared = Arc::new(Mutex::new(seeded()));
+            let app = Router::new()
+                .route("/auth/token", post(login))
+                .route("/api/v2/dags", get(dags))
+                .route("/api/v2/dags/{dag_id}", get(one_dag).patch(patch_dag))
+                .route("/api/v2/dags/{dag_id}/dagRuns", get(runs).post(trigger))
+                .route(
+                    "/api/v2/dags/{dag_id}/dagRuns/{run_id}",
+                    patch(patch_run),
+                )
+                .route(
+                    "/api/v2/dags/{dag_id}/dagRuns/{run_id}/clear",
+                    post(clear_run),
+                )
+                .route(
+                    "/api/v2/dags/{dag_id}/dagRuns/{run_id}/taskInstances",
+                    get(tasks),
+                )
+                .route(
+                    "/api/v2/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/logs/{try_number}",
+                    get(logs),
+                )
+                .with_state(Arc::clone(&shared));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let config = AirflowConfig {
+                url: format!("http://{addr}"),
+                user: "nova-api".into(),
+                password: Secret::new(PASSWORD),
+            };
+            (AirflowClient::new(reqwest::Client::new(), config), shared)
+        }
+    }
+
+    /// A fake Kubernetes API serving the `Pipeline` and `ServicePrincipal` routes the resource
+    /// client uses, including the writes and the `resourceVersion` check of a replace.
+    mod fake_kube {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            Json, Router,
+            extract::{Path, State},
+            http::StatusCode,
+            routing::get,
+        };
+        use serde_json::{Value, json};
+
+        struct Fake {
+            items: Vec<Value>,
+            principals: Vec<Value>,
+            version: u64,
+        }
+
+        type Shared = Arc<Mutex<Fake>>;
+
+        fn not_found() -> (StatusCode, Json<Value>) {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "message": "not found",
+                    "reason": "NotFound",
+                    "code": 404
+                })),
+            )
+        }
+
+        fn conflict() -> (StatusCode, Json<Value>) {
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "message": "the object has been modified",
+                    "reason": "Conflict",
+                    "code": 409
+                })),
+            )
+        }
+
+        async fn list(State(state): State<Shared>) -> Json<Value> {
+            let state = state.lock().unwrap();
+            Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "PipelineList",
+                "metadata": { "resourceVersion": "1" },
+                "items": state.items
+            }))
+        }
+
+        async fn principal_list(State(state): State<Shared>) -> Json<Value> {
+            let state = state.lock().unwrap();
+            Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "ServicePrincipalList",
+                "metadata": { "resourceVersion": "1" },
+                "items": state.principals
+            }))
+        }
+
+        async fn one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let state = state.lock().unwrap();
+            match state
+                .items
+                .iter()
+                .find(|item| item["metadata"]["name"] == name)
+            {
+                Some(item) => Ok(Json(item.clone())),
+                None => Err(not_found()),
+            }
+        }
+
+        async fn create(
+            State(state): State<Shared>,
+            Path(_namespace): Path<String>,
+            Json(body): Json<Value>,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            let mut state = state.lock().unwrap();
+            let name = body["metadata"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if state
+                .items
+                .iter()
+                .any(|item| item["metadata"]["name"] == name)
+            {
+                return Err(conflict());
+            }
+            state.version += 1;
+            let resource_version = state.version.to_string();
+            let mut stored = body;
+            stored["metadata"]["resourceVersion"] = json!(resource_version);
+            stored["metadata"]["creationTimestamp"] = json!("2026-10-20T10:00:00Z");
+            state.items.push(stored.clone());
+            Ok((StatusCode::CREATED, Json(stored)))
+        }
+
+        async fn replace(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let mut state = state.lock().unwrap();
+            let Some(index) = state
+                .items
+                .iter()
+                .position(|item| item["metadata"]["name"] == name)
+            else {
+                return Err(not_found());
+            };
+            if state.items[index]["metadata"]["resourceVersion"]
+                != body["metadata"]["resourceVersion"]
+            {
+                return Err(conflict());
+            }
+            state.version += 1;
+            let resource_version = state.version.to_string();
+            let mut stored = body;
+            stored["metadata"]["resourceVersion"] = json!(resource_version);
+            state.items[index] = stored.clone();
+            Ok(Json(stored))
+        }
+
+        async fn delete_one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let mut state = state.lock().unwrap();
+            let Some(index) = state
+                .items
+                .iter()
+                .position(|item| item["metadata"]["name"] == name)
+            else {
+                return Err(not_found());
+            };
+            state.items.remove(index);
+            Ok(Json(json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Success",
+                "code": 200
+            })))
+        }
+
+        pub async fn start(items: Vec<Value>) -> kube::Client {
+            start_with(items, vec![]).await
+        }
+
+        pub async fn start_with(items: Vec<Value>, principals: Vec<Value>) -> kube::Client {
+            let shared: Shared = Arc::new(Mutex::new(Fake {
+                items,
+                principals,
+                version: 1,
+            }));
+            let app = Router::new()
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/pipelines",
+                    get(list).post(create),
+                )
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/pipelines/{name}",
+                    get(one).put(replace).delete(delete_one),
+                )
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/serviceprincipals",
+                    get(principal_list),
+                )
+                .with_state(shared);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let url = format!("http://{addr}").parse().unwrap();
+            kube::Client::try_from(kube::Config::new(url)).expect("a client for the fake API")
+        }
+    }
+
+    /// A fake Trino coordinator with the one endpoint the statement check uses. It records the
+    /// statement text and the headers, so a test can prove what Nova sent — and what it never sent.
+    mod fake_trino {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+        use serde_json::{Value, json};
+
+        #[derive(Default)]
+        pub struct Fake {
+            /// The body of every `/v1/statement` POST, in order.
+            pub statements: Vec<String>,
+            /// The `X-Trino-Source` of every POST.
+            pub sources: Vec<String>,
+            /// The `X-Trino-User` of every POST: who the check ran as.
+            pub users: Vec<String>,
+            /// Answer this error document instead of a result.
+            pub error: Option<Value>,
+        }
+
+        pub type Shared = Arc<Mutex<Fake>>;
+
+        async fn statement(
+            State(state): State<Shared>,
+            headers: HeaderMap,
+            body: String,
+        ) -> Json<Value> {
+            let mut fake = state.lock().expect("fake trino poisoned");
+            fake.statements.push(body);
+            fake.sources.push(
+                headers
+                    .get("x-trino-source")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            fake.users.push(
+                headers
+                    .get("x-trino-user")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            match &fake.error {
+                // No `nextUri`: the client stops on the first document.
+                Some(error) => Json(json!({ "id": "q-check", "error": error, "stats": {} })),
+                None => Json(json!({
+                    "id": "q-check",
+                    "columns": [{ "name": "plan", "type": "varchar" }],
+                    "data": [["Output[columnNames = [x]]"]],
+                    "stats": {}
+                })),
+            }
+        }
+
+        pub async fn start(error: Option<Value>) -> (String, Shared) {
+            let shared: Shared = Arc::new(Mutex::new(Fake {
+                error,
+                ..Fake::default()
+            }));
+            let app = Router::new()
+                .route("/v1/statement", post(statement))
+                .with_state(shared.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (format!("http://{addr}"), shared)
+        }
+    }
+
+    fn test_state(
+        kube: Option<kube::Client>,
+        airflow: AirflowClient,
+        store: StoreClient,
+    ) -> Arc<AppState> {
+        test_state_at(kube, airflow, store, "http://127.0.0.1:1")
+    }
+
+    fn test_state_at(
+        kube: Option<kube::Client>,
+        airflow: AirflowClient,
+        store: StoreClient,
+        trino_url: &str,
+    ) -> Arc<AppState> {
+        Arc::new(AppState {
+            dev_user: "test".into(),
+            trino_url: trino_url.into(),
+            lakekeeper_url: "http://127.0.0.1:1".into(),
+            shared_accounts: vec![],
+            // No catalog client in these tests: Lakekeeper is called as before (#222).
+            catalog_token: None,
+            superset_url: "http://127.0.0.1:1".into(),
+            jupyterhub_url: "http://127.0.0.1:1".into(),
+            warehouse_name: "warehouse".into(),
+            stage_name: None,
+            stage_kind: "dev",
+            stages: Vec::new(),
+            catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
+            catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
+            catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),
+            metrics_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            metrics_round: tokio::sync::Mutex::new(()),
+            metrics_refresh: std::sync::Mutex::new(None),
+            catalog_layers: std::sync::Mutex::new(None),
+            principal_owners: std::sync::Mutex::new(None),
+            http: reqwest::Client::new(),
+            demo: false,
+            forward_identity: false,
+            redact_query_log_literals: false,
+            mcp: None,
+            auth: None,
+            jobs: Mutex::new(Vec::new()),
+            demo_state: std::sync::RwLock::new(crate::demo::DemoState::default()),
+            kube,
+            workloads: crate::cluster::WorkloadCache::default(),
+            admin_console_url: None,
+            db: None,
+            store: Some(store),
+            break_glass_reads: Mutex::new(std::collections::HashMap::new()),
+            run_starts: Mutex::new(std::collections::HashMap::new()),
+            pipeline_creates: Mutex::new(std::collections::HashMap::new()),
+            catalog_access_changes: Mutex::new(std::collections::HashMap::new()),
+            team_creates: Mutex::new(HashMap::new()),
+            airflow: Some(airflow),
+            table_locks: Mutex::new(std::collections::HashMap::new()),
+            people_touched: Mutex::new(std::collections::HashMap::new()),
+            notebooks: None,
+            workspace: None,
+            statements: Default::default(),
+        })
+    }
+
+    fn principal(identity: Identity) -> Principal {
+        Principal {
+            identity,
+            via: "session",
+            access_token: Some(Secret::new("good")),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Visibility
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn visibility_follows_the_owner_group() {
+        let member = who("sub-ada", &["analytics"], false);
+        let outsider = who("sub-bob", &["finance"], false);
+        let administrator = who("sub-root", &[], true);
+        let owned = json!({ "ownerGroup": "analytics" });
+
+        assert!(
+            visible(&member, &owned),
+            "a member sees the group's pipeline"
+        );
+        assert!(!visible(&outsider, &owned), "another group does not");
+        assert!(visible(&administrator, &owned), "an administrator sees all");
+
+        let unowned = json!({});
+        assert!(
+            !visible(&member, &unowned),
+            "no ownerGroup is administrators-only"
+        );
+        assert!(visible(&administrator, &unowned));
+
+        let other = json!({ "ownerGroup": "finance" });
+        assert!(
+            !visible(&member, &other),
+            "membership is by exact group name"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_hides_other_groups_pipelines() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("hidden", resource("hidden", Some("finance"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let answer = list_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+        )
+        .await
+        .expect("the list succeeds");
+
+        let names: Vec<&str> = answer
+            .pipelines
+            .iter()
+            .map(|pipeline| pipeline.name.as_str())
+            .collect();
+        assert_eq!(names, ["smoke"], "only the caller's group is listed");
+
+        let calls = fake.lock().unwrap().calls.clone();
+        assert!(
+            !calls.iter().any(|call| call.contains("stardelt__hidden")),
+            "Airflow heard nothing about the hidden pipeline: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains("stardelt__smoke/dagRuns")),
+            "the visible pipeline's last run was read: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_of_a_hidden_pipeline_is_404_not_403() {
+        let resources = memory(&[("hidden", resource("hidden", Some("finance")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let outsider = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let error = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &outsider,
+            &namespace,
+            "hidden",
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "the hidden pipeline never reaches Airflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_and_logs_of_a_hidden_pipeline_are_404_not_403() {
+        let resources = memory(&[("hidden", resource("hidden", Some("finance")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let outsider = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let error = run_detail(
+            Some(&resources),
+            Some(&airflow),
+            &outsider,
+            &namespace,
+            "hidden",
+            "hidden__2026-10-20T08:00:00+00:00",
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+
+        let error = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &outsider,
+            &namespace,
+            "hidden",
+            "hidden__2026-10-20T08:00:00+00:00",
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "neither route asks Airflow about a hidden pipeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_queries_of_a_hidden_pipeline_is_404_before_the_state_store_is_read() {
+        // The state has no database: a route that read the store before the visibility check
+        // would answer 503 "the state store is not configured", not 404.
+        let kube = fake_kube::start(vec![resource("hidden", Some("finance"))]).await;
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, airflow_fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+        let app = router()
+            .with_state(test_state(Some(kube), airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/pipelines/{namespace}/hidden/runs/scheduled__2026-11-14T03:00:00+00:00/queries"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no such pipeline");
+        assert!(
+            airflow_fake.lock().unwrap().calls.is_empty(),
+            "a hidden pipeline never reaches Airflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_notebook_of_a_hidden_pipeline_is_404_not_403() {
+        let resources = memory(&[("hidden", resource("hidden", Some("finance")))]);
+        let outsider = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let error = task_notebook(
+            Some(&resources),
+            None,
+            &outsider,
+            &namespace,
+            "hidden",
+            "hidden__2026-10-20T08:00:00+00:00",
+            "run",
+            false,
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
+    }
+
+    #[tokio::test]
+    async fn run_notebook_over_the_run_copy_cap_is_413() {
+        let resources = memory(&[("daily", resource("daily", Some("analytics")))]);
+        let s3 = FakeS3::start().await;
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let run_id = "scheduled__2026-11-10T03:00:00+00:00";
+        let key = notebooks::run_copy_key("analytics", "daily", run_id, "run");
+
+        // A 6 MiB executed copy is over the publish limit and under the run-copy cap.
+        s3.put_raw(&key, &vec![b'x'; 6 * 1024 * 1024], "alice");
+        let response = task_notebook(
+            Some(&resources),
+            Some(&store),
+            &ada,
+            &namespace,
+            "daily",
+            run_id,
+            "run",
+            false,
+        )
+        .await
+        .expect("a 6 MiB executed copy");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Over the run-copy cap the new object answers the promised 413, not a 502.
+        s3.put_raw(
+            &key,
+            &vec![b'x'; notebooks::MAX_RUN_NOTEBOOK_BYTES + 1024],
+            "alice",
+        );
+        let error = task_notebook(
+            Some(&resources),
+            Some(&store),
+            &ada,
+            &namespace,
+            "daily",
+            run_id,
+            "run",
+            false,
+        )
+        .await
+        .expect_err("over the run-copy cap");
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error.message(),
+            "the executed notebook is larger than 25 MiB"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pipeline_state_table() {
+        for loaded in [true, false] {
+            for paused in [true, false] {
+                for last in [
+                    None,
+                    Some("running"),
+                    Some("queued"),
+                    Some("failed"),
+                    Some("upstream_failed"),
+                    Some("success"),
+                    Some("skipped"),
+                ] {
+                    let state = pipeline_state(paused, loaded, last, Some(0.0));
+                    let expected = if !loaded {
+                        "loading"
+                    } else if paused {
+                        "paused"
+                    } else {
+                        match last {
+                            Some("running") | Some("queued") => "running",
+                            Some("failed") | Some("upstream_failed") => "failed",
+                            Some("success") => "succeeded",
+                            _ => "idle",
+                        }
+                    };
+                    assert_eq!(
+                        state, expected,
+                        "paused={paused} loaded={loaded} last={last:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            pipeline_state(true, true, Some("failed"), Some(0.0)),
+            "paused",
+            "paused beats a failed last run"
+        );
+        assert_eq!(
+            pipeline_state(false, true, Some("queued"), Some(0.0)),
+            "running",
+            "queued counts as running"
+        );
+        assert_eq!(
+            pipeline_state(false, true, None, Some(0.0)),
+            "idle",
+            "never ran is idle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_pipeline_without_a_dag_is_loading() {
+        let resources = memory(&[("brand-new", resource("brand-new", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "brand-new",
+        )
+        .await
+        .expect("a pipeline without a DAG is not an error");
+
+        assert!(!detail.pipeline.loaded);
+        assert_eq!(detail.pipeline.state, "loading");
+        assert!(!detail.pipeline.paused);
+        assert_eq!(detail.pipeline.next_run, None);
+        assert_eq!(detail.pipeline.last_run, None);
+        assert!(detail.runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_calls_airflow_once_for_the_dags() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        list_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+        )
+        .await
+        .expect("the list succeeds");
+
+        let calls = fake.lock().unwrap().calls.clone();
+        let dag_lists = calls
+            .iter()
+            .filter(|call| call.starts_with("GET /api/v2/dags?"))
+            .count();
+        let last_runs = calls
+            .iter()
+            .filter(|call| call.contains("/dagRuns?") && !call.contains("/logs/"))
+            .count();
+        assert_eq!(
+            dag_lists, 1,
+            "one DAG list for the whole request: {calls:?}"
+        );
+        let dag_list = calls
+            .iter()
+            .find(|call| call.starts_with("GET /api/v2/dags?"))
+            .expect("a DAG list call");
+        assert!(
+            dag_list.contains("tags=pipeline") && dag_list.contains("exclude_stale=false"),
+            "the list asks for pipeline DAGs including stale ones: {dag_list}"
+        );
+        assert_eq!(
+            last_runs, 2,
+            "one last-run call per loaded pipeline: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_lists_only_visible_pipelines_newest_first() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("finance"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.runs.insert(
+                "stardelt__smoke".into(),
+                vec![
+                    run_started("scheduled__smoke-old", "failed", "2026-10-19T06:00:00Z"),
+                    run_started(SMOKE_RUN, "success", "2026-10-20T07:23:50Z"),
+                ],
+            );
+            fake.runs.insert(
+                "stardelt__other".into(),
+                vec![run_started(OTHER_RUN, "success", "2026-10-21T09:00:00Z")],
+            );
+        }
+
+        let answer = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("the runs list succeeds");
+
+        assert_eq!(
+            answer.runs.len(),
+            2,
+            "only the visible pipeline's runs: {:?}",
+            answer.runs
+        );
+        assert!(answer.runs.iter().all(|row| row.name == "smoke"));
+        assert!(
+            answer
+                .runs
+                .iter()
+                .all(|row| row.owner_group.as_deref() == Some("analytics"))
+        );
+        assert!(
+            answer
+                .runs
+                .iter()
+                .all(|row| ["sql", "notebook", "pipeline"].contains(&row.kind.as_str()))
+        );
+        let starts: Vec<Option<&str>> = answer
+            .runs
+            .iter()
+            .map(|row| row.run.started_at.as_deref())
+            .collect();
+        assert_eq!(
+            starts,
+            vec![Some("2026-10-20T07:23:50Z"), Some("2026-10-19T06:00:00Z")],
+            "newest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_filters_by_state_kind_group_and_limit() {
+        fn filter(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        }
+
+        let resources = memory(&[
+            (
+                "smoke",
+                run_task_resource("smoke", Some("analytics"), "sql"),
+            ),
+            (
+                "notes",
+                run_task_resource("notes", Some("analytics"), "notebook"),
+            ),
+            (
+                "revenue",
+                run_task_resource("revenue", Some("finance"), "sql"),
+            ),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags = vec![
+                dag("stardelt__smoke"),
+                dag("stardelt__notes"),
+                dag("stardelt__revenue"),
+            ];
+            // Newest first, as Airflow answers: a `limit` then keeps the newest run.
+            fake.runs.insert(
+                "stardelt__smoke".into(),
+                vec![
+                    run_started(SMOKE_RUN, "success", "2026-10-20T07:23:50Z"),
+                    run_started("scheduled__smoke-old", "failed", "2026-10-19T06:00:00Z"),
+                ],
+            );
+            fake.runs.insert(
+                "stardelt__notes".into(),
+                vec![run_started(
+                    "scheduled__notes",
+                    "failed",
+                    "2026-10-18T06:00:00Z",
+                )],
+            );
+            fake.runs.insert(
+                "stardelt__revenue".into(),
+                vec![run_started(
+                    "scheduled__revenue",
+                    "failed",
+                    "2026-10-17T06:00:00Z",
+                )],
+            );
+        }
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let all = runs_across_pipelines(Some(&resources), Some(&airflow), &ada, &filter(&[]))
+            .await
+            .expect("the unfiltered list succeeds");
+        assert_eq!(all.runs.len(), 3, "the visible runs: {:?}", all.runs);
+
+        let successes = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("state", "success")]),
+        )
+        .await
+        .expect("a state filter succeeds");
+        assert_eq!(successes.runs.len(), 1, "{:?}", successes.runs);
+        assert_eq!(successes.runs[0].run.run_id, SMOKE_RUN);
+        assert!(
+            !successes
+                .runs
+                .iter()
+                .any(|row| row.run.run_id == "scheduled__smoke-old"),
+            "an older run of another state is not in the answer"
+        );
+
+        let news = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("state", "news")]),
+        )
+        .await
+        .expect("an unknown state is not an error");
+        assert!(news.runs.is_empty(), "{:?}", news.runs);
+
+        let sql = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("kind", "sql")]),
+        )
+        .await
+        .expect("a kind filter succeeds");
+        assert_eq!(sql.runs.len(), 2, "{:?}", sql.runs);
+        assert!(
+            sql.runs
+                .iter()
+                .all(|row| row.kind == "sql" && row.name == "smoke")
+        );
+
+        let finance = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("group", "finance")]),
+        )
+        .await
+        .expect("a group filter succeeds");
+        assert!(finance.runs.is_empty(), "{:?}", finance.runs);
+
+        let one = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("limit", "1")]),
+        )
+        .await
+        .expect("a limit succeeds");
+        assert_eq!(one.runs.len(), 1);
+        assert_eq!(one.runs[0].run.run_id, SMOKE_RUN, "the newest row survives");
+    }
+
+    #[tokio::test]
+    async fn runs_rejects_a_bad_limit_and_a_bad_kind() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let ada = who("sub-ada", &["analytics"], false);
+        let cases: [(&str, &str, &str); 5] = [
+            ("limit", "x", "limit must be a positive integer"),
+            ("limit", "0", "limit must be a positive integer"),
+            ("limit", "201", "limit must be at most 200"),
+            (
+                "kind",
+                "bundle",
+                "kind must be one of sql, notebook, pipeline",
+            ),
+            ("pipeline", "smoke", "pipeline must be <namespace>/<name>"),
+        ];
+        for (key, value, sentence) in cases {
+            let query: BTreeMap<String, String> =
+                [(key.to_string(), value.to_string())].into_iter().collect();
+            let error = runs_across_pipelines(Some(&resources), Some(&airflow), &ada, &query)
+                .await
+                .expect_err("a bad query is refused");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{key}={value}");
+            assert_eq!(error.message(), sentence, "{key}={value}");
+        }
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a refused query never reaches the scheduler"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_asks_airflow_for_one_dag_list_and_one_run_list_per_loaded_pipeline() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("unloaded", resource("unloaded", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("the runs list succeeds");
+
+        let calls = fake.lock().unwrap().calls.clone();
+        let dag_lists = calls
+            .iter()
+            .filter(|call| call.starts_with("GET /api/v2/dags?"))
+            .count();
+        assert_eq!(
+            dag_lists, 1,
+            "one DAG list for the whole request: {calls:?}"
+        );
+        let run_lists: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.contains("/dagRuns?"))
+            .collect();
+        assert_eq!(
+            run_lists.len(),
+            1,
+            "one run list, only for the loaded pipeline: {calls:?}"
+        );
+        assert!(
+            run_lists
+                .iter()
+                .all(|call| call.contains("stardelt__smoke")),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("unloaded")),
+            "no call for a DAG the scheduler does not hold: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_names_every_visible_group_whatever_the_filter() {
+        let resources = memory(&[
+            ("alpha", resource("alpha", Some("a"))),
+            ("beta", resource("beta", Some("b"))),
+            ("root-only", resource("root-only", None)),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags = vec![dag("stardelt__alpha"), dag("stardelt__beta")];
+            fake.runs.insert(
+                "stardelt__alpha".into(),
+                vec![run_started(
+                    "scheduled__alpha",
+                    "success",
+                    "2026-10-20T07:00:00Z",
+                )],
+            );
+            fake.runs.insert(
+                "stardelt__beta".into(),
+                vec![run_started(
+                    "scheduled__beta",
+                    "success",
+                    "2026-10-21T07:00:00Z",
+                )],
+            );
+        }
+
+        let all =
+            runs_across_pipelines(Some(&resources), Some(&airflow), &admin(), &BTreeMap::new())
+                .await
+                .expect("the unfiltered list succeeds");
+        assert_eq!(all.runs.len(), 2, "one run each: {:?}", all.runs);
+        assert_eq!(
+            all.groups,
+            vec!["a".to_string(), "b".to_string()],
+            "every visible group, sorted; administrators are not a group"
+        );
+
+        let a = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &BTreeMap::from([("group".to_string(), "a".to_string())]),
+        )
+        .await
+        .expect("a group filter succeeds");
+        assert_eq!(a.runs.len(), 1, "only group a's run: {:?}", a.runs);
+        assert_eq!(
+            a.groups,
+            vec!["a".to_string(), "b".to_string()],
+            "the group filter does not narrow the choice"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_filter_parses_a_notebook() {
+        let query = BTreeMap::from([("notebook".to_string(), "analytics/smoke.ipynb".to_string())]);
+        let filter = RunsFilter::parse(&query).expect("a group and a name parse");
+        assert_eq!(
+            filter.notebook,
+            Some(("analytics".to_string(), "smoke.ipynb".to_string()))
+        );
+        for value in ["smoke.ipynb", "analytics/", "/smoke.ipynb", "analytics/a/b"] {
+            let query = BTreeMap::from([("notebook".to_string(), value.to_string())]);
+            let error = match RunsFilter::parse(&query) {
+                Ok(_) => panic!("{value} must be refused"),
+                Err(error) => error,
+            };
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{value}");
+            assert_eq!(
+                error.message(),
+                "notebook must be <group>/<name>",
+                "{value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_notebook_schedule_is_recognised_by_group_notebook_and_task_kind() {
+        let schedule = notebook_run_resource("smoke-daily", "analytics", "smoke.ipynb");
+        assert!(
+            notebook_schedule(&schedule, "analytics", "smoke.ipynb"),
+            "the schedule of that notebook"
+        );
+        assert!(
+            !notebook_schedule(&schedule, "analytics", "other.ipynb"),
+            "another notebook name"
+        );
+        assert!(
+            !notebook_schedule(&schedule, "finance", "smoke.ipynb"),
+            "another owner group"
+        );
+        let sql = run_task_resource("smoke-daily", Some("analytics"), "sql");
+        assert!(
+            !notebook_schedule(&sql, "analytics", "smoke.ipynb"),
+            "a sql task is no notebook schedule"
+        );
+        let no_config = run_task_resource("smoke-daily", Some("analytics"), "notebook");
+        assert!(
+            !notebook_schedule(&no_config, "analytics", "smoke.ipynb"),
+            "the notebook name is part of the shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_notebook_filter_answers_only_that_notebooks_runs() {
+        let resources = memory(&[
+            (
+                "smoke-daily",
+                notebook_run_resource("smoke-daily", "analytics", "smoke.ipynb"),
+            ),
+            (
+                "other-daily",
+                notebook_run_resource("other-daily", "analytics", "other.ipynb"),
+            ),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags = vec![dag("stardelt__smoke-daily"), dag("stardelt__other-daily")];
+            fake.runs.insert(
+                "stardelt__smoke-daily".into(),
+                vec![run_started(
+                    "scheduled__smoke",
+                    "success",
+                    "2026-10-20T07:00:00Z",
+                )],
+            );
+            fake.runs.insert(
+                "stardelt__other-daily".into(),
+                vec![run_started(
+                    "scheduled__other",
+                    "success",
+                    "2026-10-21T07:00:00Z",
+                )],
+            );
+        }
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let answer = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &BTreeMap::from([("notebook".to_string(), "analytics/smoke.ipynb".to_string())]),
+        )
+        .await
+        .expect("a notebook filter succeeds");
+        assert_eq!(answer.runs.len(), 1, "{:?}", answer.runs);
+        assert_eq!(answer.runs[0].run.run_id, "scheduled__smoke");
+        assert_eq!(
+            answer.groups,
+            vec!["analytics".to_string()],
+            "every visible group, not only the notebook's"
+        );
+        let calls = fake.lock().unwrap().calls.clone();
+        assert!(
+            !calls.iter().any(|call| call.contains("other-daily")),
+            "the filter narrows the resources before any Airflow call: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_notebook_filter_refuses_a_non_member() {
+        let resources = memory(&[(
+            "smoke-daily",
+            notebook_run_resource("smoke-daily", "analytics", "smoke.ipynb"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let error = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-1", &["ops"], false),
+            &BTreeMap::from([("notebook".to_string(), "analytics/smoke.ipynb".to_string())]),
+        )
+        .await
+        .expect_err("a non-member is refused");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "you are not a member of the group analytics"
+        );
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a refused query never reaches the scheduler"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_in_demo_mode_answers_the_sample() {
+        let sample = crate::demo::runs();
+        assert!(!sample.runs.is_empty(), "the demo sample has runs");
+        let starts: Vec<Option<&str>> = sample
+            .runs
+            .iter()
+            .map(|row| row.run.started_at.as_deref())
+            .collect();
+        let mut newest_first = starts.clone();
+        newest_first.sort_by(|a, b| b.cmp(a));
+        assert_eq!(starts, newest_first, "the demo sample is newest first");
+
+        // Demo mode has no notebook schedule: the filter answers no rows, not an error.
+        let demo = demo_runs(&BTreeMap::from([(
+            "notebook".to_string(),
+            "analytics/smoke.ipynb".to_string(),
+        )]))
+        .expect("a notebook filter is accepted in demo mode");
+        assert!(demo.runs.is_empty(), "{:?}", demo.runs);
+        let unfiltered = demo_runs(&BTreeMap::new()).expect("the plain list succeeds");
+        assert_eq!(
+            unfiltered.runs.len(),
+            sample.runs.len(),
+            "the sample without a notebook filter"
+        );
+    }
+
+    /// One notebook schedule as the Schedule form writes it (#516): a single `run` task of
+    /// `kind: notebook` naming the file.
+    fn notebook_run_resource(name: &str, owner_group: &str, notebook: &str) -> Value {
+        let mut resource = run_task_resource(name, Some(owner_group), "notebook");
+        resource["spec"]["tasks"][0]["config"] =
+            json!({ "notebook": notebook, "objectVersion": "v1" });
+        resource
+    }
+
+    /// One `Pipeline` the Schedule form could have written: a single `run` task of `kind`.
+    fn run_task_resource(name: &str, owner_group: Option<&str>, kind: &str) -> Value {
+        let mut resource = resource(name, owner_group);
+        resource["spec"]["tasks"] = json!([{ "name": "run", "kind": kind }]);
+        resource
+    }
+
+    /// The same run as [`run`], started at `started` (RFC 3339).
+    fn run_started(id: &str, state: &str, started: &str) -> Value {
+        let mut run = run(id, state);
+        run["start_date"] = json!(started);
+        run["logical_date"] = json!(started);
+        run
+    }
+
+    #[tokio::test]
+    async fn a_failing_last_run_call_does_not_fail_the_list() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock()
+            .unwrap()
+            .fail_runs
+            .insert("stardelt__other".into());
+
+        let answer = list_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+        )
+        .await
+        .expect("one broken last-run call must not fail the list");
+
+        let smoke = answer
+            .pipelines
+            .iter()
+            .find(|pipeline| pipeline.name == "smoke")
+            .expect("smoke");
+        let other = answer
+            .pipelines
+            .iter()
+            .find(|pipeline| pipeline.name == "other")
+            .expect("other");
+        assert!(smoke.last_run.is_some());
+        assert_eq!(smoke.state, "succeeded");
+        assert_eq!(other.last_run, None, "the failed call leaves lastRun empty");
+        assert_eq!(other.state, "idle");
+    }
+
+    // -----------------------------------------------------------------------
+    // Logs
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn log_lines_drop_the_group_marker_and_ansi() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(3),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert_eq!(view.lines.len(), 2, "the group marker is dropped");
+        assert_eq!(view.lines[0].text, "insert done", "ANSI escapes are gone");
+        assert_eq!(view.lines[1].text, "still here");
+
+        let serialized = serde_json::to_string(&view).expect("serialises");
+        assert!(
+            !serialized.contains(SOURCES_CANARY),
+            "the marker's object-store path must not be in the answer: {serialized}"
+        );
+        assert!(
+            !serialized.contains(SOURCES_BODY_CANARY),
+            "the group's body path must not be in the answer: {serialized}"
+        );
+        assert!(!serialized.contains("::endgroup::"));
+        assert!(!serialized.contains("s3://"));
+        assert!(!serialized.contains("::group::"));
+        assert!(!serialized.contains("sources"));
+    }
+
+    #[tokio::test]
+    async fn log_answer_is_capped_and_marked_truncated() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let events: Vec<Value> = (0..MAX_LOG_LINES + 1)
+            .map(|index| json!({ "level": "info", "event": format!("line {index}") }))
+            .collect();
+        fake.lock().unwrap().log_page = json!({
+            "content": events,
+            "continuation_token": null
+        });
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+        assert_eq!(view.lines.len(), MAX_LOG_LINES);
+        assert!(view.truncated, "more lines existed than the cap allows");
+
+        let big: Vec<Value> = (0..600)
+            .map(|_| json!({ "level": "info", "event": "x".repeat(1000) }))
+            .collect();
+        fake.lock().unwrap().log_page = json!({
+            "content": big,
+            "continuation_token": null
+        });
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+        assert!(view.lines.len() < 600, "the byte cap cut the answer");
+        assert!(view.truncated);
+        let bytes: usize = view.lines.iter().map(|line| line.text.len()).sum();
+        assert!(bytes <= MAX_LOG_BYTES);
+    }
+
+    #[tokio::test]
+    async fn log_token_is_passed_through() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [{ "level": "info", "event": "page one" }],
+            "continuation_token": "next-page-token"
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            None,
+            Some("page-1"),
+        )
+        .await
+        .expect("the log is readable");
+        assert_eq!(view.next_token.as_deref(), Some("next-page-token"));
+
+        let calls = fake.lock().unwrap().calls.clone();
+        let log_call = calls
+            .iter()
+            .rev()
+            .find(|call| call.contains("/logs/"))
+            .expect("a log call");
+        assert!(
+            log_call.contains("token=page-1"),
+            "the continuation token is passed on: {log_call}"
+        );
+        assert!(
+            log_call.contains("/logs/3?"),
+            "try defaults to the task's last try (3): {log_call}"
+        );
+    }
+
+    /// One failed event whose exception carries `frames` frames.
+    fn failed_event(frames: usize) -> Value {
+        let frames: Vec<Value> = (0..frames)
+            .map(|index| {
+                json!({
+                    "filename": "/home/airflow/.local/lib/python3.12/site-packages/airflow/task/task_runner.py",
+                    "lineno": 1263 + index,
+                    "name": format!("frame_{index}")
+                })
+            })
+            .collect();
+        json!({
+            "timestamp": "2026-11-11T06:07:40.133090Z",
+            "event": "Task failed with exception",
+            "level": "error",
+            "error_detail": [{
+                "exc_type": "TrinoError",
+                "exc_value": "CATALOG_NOT_FOUND: line 1:1: Catalog 'bronze' not found",
+                "is_cause": false,
+                "frames": frames
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn log_error_detail_reaches_the_lines() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [
+                { "level": "info", "event": "starting" },
+                failed_event(2)
+            ],
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert!(!view.truncated);
+        let texts: Vec<&str> = view.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "starting",
+                "Task failed with exception",
+                "TrinoError: CATALOG_NOT_FOUND: line 1:1: Catalog 'bronze' not found",
+                "  task_runner.py:1263 in frame_0",
+                "  task_runner.py:1264 in frame_1",
+            ]
+        );
+        assert_eq!(
+            view.lines[2].level.as_deref(),
+            Some("error"),
+            "the exception is an error level line"
+        );
+        assert_eq!(view.lines[2].timestamp, None, "the detail has no timestamp");
+        assert_eq!(view.lines[3].level, None, "a frame carries no level");
+    }
+
+    #[tokio::test]
+    async fn an_event_without_error_detail_is_unchanged() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [
+                { "level": "info", "event": "starting" },
+                {
+                    "level": "error",
+                    "event": "Task failed with exception",
+                    "error_detail": []
+                }
+            ],
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert_eq!(view.lines.len(), 2, "an empty detail appends nothing");
+        assert_eq!(view.lines[1].text, "Task failed with exception");
+        assert_eq!(view.lines[1].level.as_deref(), Some("error"));
+        assert!(!view.truncated);
+    }
+
+    #[tokio::test]
+    async fn a_long_traceback_is_cut_to_the_frame_cap() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [failed_event(30)],
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        let frames = view.lines.iter().filter(|line| line.text.starts_with("  "));
+        assert_eq!(frames.count(), MAX_ERROR_FRAMES);
+        assert_eq!(view.lines.len(), 1 + 1 + MAX_ERROR_FRAMES);
+    }
+
+    #[tokio::test]
+    async fn the_error_detail_counts_against_the_line_cap() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let mut events: Vec<Value> = (0..MAX_LOG_LINES - 5)
+            .map(|index| json!({ "level": "info", "event": format!("line {index}") }))
+            .collect();
+        events.push(failed_event(30));
+        fake.lock().unwrap().log_page = json!({
+            "content": events,
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert!(
+            view.lines.len() <= MAX_LOG_LINES,
+            "the page stayed under the line cap: {}",
+            view.lines.len()
+        );
+        assert!(view.truncated, "the detail overflowed the page");
+    }
+
+    // -----------------------------------------------------------------------
+    // A run id never crosses pipelines
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn a_run_id_of_another_pipeline_does_not_resolve() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let error = run_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            OTHER_RUN,
+        )
+        .await
+        .expect_err("other's run id must not resolve under smoke");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such run");
+
+        let calls = fake.lock().unwrap().calls.clone();
+        assert!(
+            !calls.iter().any(|call| call.contains("stardelt__other")),
+            "the other pipeline's DAG was never addressed: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call.contains("stardelt__smoke")),
+            "every Airflow path used smoke's DAG id: {calls:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Upstreams, headers, view shape
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn airflow_down_is_502_and_not_configured_is_503_for_every_action() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
+        let namespace = crate::cluster::namespace();
+        let root = admin();
+        let limiter = limiter();
+
+        // No scheduler client: every action answers 503 and names the missing client.
+        let error = run_now(
+            Some(&resources),
+            None,
+            &limiter,
+            &root,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
+        let error = pause_pipeline(Some(&resources), None, &root, &namespace, "smoke")
+            .await
+            .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
+        let error = resume_pipeline(Some(&resources), None, &root, &namespace, "smoke")
+            .await
+            .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
+        let error = stop_run(
+            Some(&resources),
+            None,
+            &root,
+            &namespace,
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
+
+        // No cluster client at all: the read routes still say which one is missing.
+        let error = list_pipelines(None, None, &root)
+            .await
+            .expect_err("no cluster client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "no cluster connection");
+
+        // An Airflow that does not answer: 502, never 500, for every action.
+        let down = AirflowClient::new(
+            reqwest::Client::new(),
+            AirflowConfig {
+                url: "http://127.0.0.1:9".into(),
+                user: "nova-api".into(),
+                password: Secret::new("x"),
+            },
+        );
+        for (action, error) in [
+            (
+                "run",
+                run_now(
+                    Some(&resources),
+                    Some(&down),
+                    &limiter,
+                    &root,
+                    &namespace,
+                    "smoke",
+                    &RunStart::default(),
+                )
+                .await
+                .expect_err("Airflow is down"),
+            ),
+            (
+                "pause",
+                pause_pipeline(Some(&resources), Some(&down), &root, &namespace, "smoke")
+                    .await
+                    .expect_err("Airflow is down"),
+            ),
+            (
+                "resume",
+                resume_pipeline(Some(&resources), Some(&down), &root, &namespace, "smoke")
+                    .await
+                    .expect_err("Airflow is down"),
+            ),
+            (
+                "stop",
+                stop_run(
+                    Some(&resources),
+                    Some(&down),
+                    &root,
+                    &namespace,
+                    "smoke",
+                    SMOKE_RUN,
+                )
+                .await
+                .expect_err("Airflow is down"),
+            ),
+        ] {
+            assert_eq!(error.status(), StatusCode::BAD_GATEWAY, "{action}");
+            assert_eq!(error.message(), "the scheduler did not answer", "{action}");
+        }
+    }
+
+    #[test]
+    fn a_refused_sign_in_is_not_reported_as_an_unanswered_scheduler() {
+        let fail = scheduler_fail(AirflowError::Refused("401".into()));
+        assert_eq!(fail.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(fail.message(), "the scheduler refused Nova's service user");
+    }
+
+    #[test]
+    fn an_unreachable_airflow_still_says_it_did_not_answer() {
+        let fail = scheduler_fail(AirflowError::Unavailable("connect refused".into()));
+        assert_eq!(fail.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(fail.message(), "the scheduler did not answer");
+    }
+
+    #[tokio::test]
+    async fn responses_are_not_cacheable() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let kube = fake_kube::start(vec![resource("smoke", Some("analytics"))]).await;
+        let app = router()
+            .with_state(test_state(Some(kube), airflow, store))
+            .layer(Extension(principal(admin())));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store"),
+            "a successful pipeline answer is never cached"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["pipelines"][0]["name"], "smoke");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/pipelines/{}/no-such-pipeline",
+                        crate::cluster::namespace()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store"),
+            "a refusal is never cached either"
+        );
+
+        let namespace = crate::cluster::namespace();
+        for (uri, expected) in [
+            (
+                format!("/pipelines/{namespace}/smoke/runs"),
+                StatusCode::CREATED,
+            ),
+            (
+                format!("/pipelines/{namespace}/smoke/pause"),
+                StatusCode::OK,
+            ),
+            (
+                format!("/pipelines/{namespace}/smoke/resume"),
+                StatusCode::OK,
+            ),
+            (
+                format!("/pipelines/{namespace}/smoke/runs/{SMOKE_RUN}/stop"),
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "every action answer, success or refusal, is uncacheable: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_view_has_no_raw_airflow_fields() {
+        let resource = resource("smoke", Some("analytics"));
+        let dag: DagSummary = serde_json::from_value(json!({
+            "dag_id": "stardelt__smoke",
+            "is_paused": false,
+            "is_stale": false,
+            "next_dagrun_run_after": "2026-10-21T03:00:00Z",
+            "tags": [{ "name": "pipeline" }]
+        }))
+        .unwrap();
+        let run: DagRun = serde_json::from_value(run(SMOKE_RUN, "success")).unwrap();
+        let view = view_of(
+            "stardelt",
+            "smoke",
+            &resource,
+            Some(&dag),
+            Some(&run),
+            &who("sub-ada", &["analytics"], false),
+        );
+
+        let value = serde_json::to_value(&view).expect("serialises");
+        let keys: BTreeSet<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "name",
+                "namespace",
+                "ownerGroup",
+                "canRun",
+                "canEdit",
+                "schedule",
+                "paused",
+                "loaded",
+                "nextRun",
+                "state",
+                "lastRun",
+                "tasks",
+                "runAs",
+                "concurrency",
+                "createdAt",
+            ])
+        );
+        let serialized = serde_json::to_string(&value).unwrap();
+        for raw in [
+            "dag_id",
+            "is_paused",
+            "is_stale",
+            "next_dagrun_run_after",
+            "dag_run_id",
+            "run_type",
+            "start_date",
+            "end_date",
+            "try_number",
+            "sources",
+            "continuation_token",
+        ] {
+            assert!(
+                !serialized.contains(raw),
+                "the view must not carry the raw Airflow field {raw}: {serialized}"
+            );
+        }
+
+        let run = view.last_run.expect("a last run");
+        let run = serde_json::to_value(&run).unwrap();
+        let keys: BTreeSet<&str> = run
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "runId",
+                "state",
+                "type",
+                "logicalDate",
+                "startedAt",
+                "endedAt",
+                "durationSeconds",
+                "triggeredBy",
+                "note",
+            ])
+        );
+        let duration = run["durationSeconds"].as_f64().expect("a duration");
+        assert!(
+            (duration - 8.268047).abs() < 1e-9,
+            "the run duration is the difference of its timestamps: {duration}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_carries_params_retries_and_schedule() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert_eq!(
+            detail.pipeline.schedule.as_deref(),
+            Some("0 3 * * * (Europe/Berlin)")
+        );
+        assert_eq!(
+            detail.params.get("target").map(String::as_str),
+            Some("warehouse.smoke")
+        );
+        let retries = detail.retries.expect("a retry policy");
+        assert_eq!(retries.attempts, 2);
+        assert_eq!(retries.backoff.as_deref(), Some("5m"));
+        assert_eq!(detail.runs.len(), 1);
+        assert_eq!(detail.pipeline.last_run.as_ref().unwrap().run_id, SMOKE_RUN);
+    }
+
+    #[tokio::test]
+    async fn detail_carries_the_statement() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        smoke["spec"]["tasks"] = json!([{ "name": "run", "kind": "sql", "sql": "select 1" }]);
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert_eq!(detail.pipeline.tasks.len(), 1);
+        assert_eq!(detail.pipeline.tasks[0].sql.as_deref(), Some("select 1"));
+    }
+
+    #[tokio::test]
+    async fn detail_includes_airflow_url_from_base_domain() {
+        let _base_domain = BASE_DOMAIN_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("NOVA_BASE_DOMAIN", "alpha.dev.stardelt.io");
+        }
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert_eq!(
+            detail.airflow_url.as_deref(),
+            Some("https://airflow.alpha.dev.stardelt.io/dags/stardelt__smoke")
+        );
+        unsafe {
+            std::env::remove_var("NOVA_BASE_DOMAIN");
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_hides_airflow_url_from_non_admins() {
+        let _base_domain = BASE_DOMAIN_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("NOVA_BASE_DOMAIN", "alpha.dev.stardelt.io");
+        }
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert!(
+            detail.airflow_url.is_none(),
+            "a non-administrator is not sent to a DAG page that answers 403"
+        );
+        unsafe {
+            std::env::remove_var("NOVA_BASE_DOMAIN");
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_airflow_url_none_when_base_domain_unset() {
+        let _base_domain = BASE_DOMAIN_LOCK.lock().await;
+        unsafe {
+            std::env::remove_var("NOVA_BASE_DOMAIN");
+        }
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert!(detail.airflow_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_does_not_carry_the_statement() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        smoke["spec"]["tasks"] = json!([{ "name": "run", "kind": "sql", "sql": "select 1" }]);
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let answer = list_pipelines(Some(&resources), Some(&airflow), &admin())
+            .await
+            .expect("the list succeeds");
+
+        let tasks = &answer.pipelines[0].tasks;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].sql, None);
+        let value = serde_json::to_value(&tasks[0]).expect("serialises");
+        assert!(
+            value.get("sql").is_none(),
+            "the list does not carry the statement: {value}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_task_without_statement_has_none() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert!(
+            !detail.pipeline.tasks.is_empty(),
+            "the fixture declares tasks"
+        );
+        for task in &detail.pipeline.tasks {
+            assert_eq!(task.sql, None, "{} has no statement", task.name);
+        }
+    }
+
+    #[test]
+    fn timestamps_parse_with_fractions_and_offsets() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0.0));
+        assert_eq!(
+            parse_rfc3339("2026-10-20T07:23:50.608876Z"),
+            Some(1_792_481_030.608_876)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-20T07:23:50+00:00"),
+            parse_rfc3339("2026-10-20T07:23:50Z")
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-20T09:23:50+02:00"),
+            parse_rfc3339("2026-10-20T07:23:50Z")
+        );
+        assert_eq!(parse_rfc3339("not a date"), None);
+        assert_eq!(parse_rfc3339("2026-10-20T07:23:50Zjunk"), None);
+        let duration = duration_seconds(
+            Some("2026-10-20T07:23:50.608876Z"),
+            Some("2026-10-20T07:23:58.876923Z"),
+        )
+        .expect("a duration");
+        assert!(
+            (duration - 8.268047).abs() < 1e-9,
+            "fractions are preserved: {duration}"
+        );
+        assert_eq!(duration_seconds(None, Some("2026-10-20T07:23:58Z")), None);
+    }
+
+    #[test]
+    fn ansi_sequences_are_removed_but_text_survives() {
+        assert_eq!(strip_ansi("\u{1b}[32minsert\u{1b}[0m done"), "insert done");
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("grün \u{1b}[1;31mrot\u{1b}[0m"), "grün rot");
+        // The ticket's pattern matches `ESC [ n` as well: the text loses those three bytes.
+        assert_eq!(strip_ansi("\u{1b}[not-a-sequence"), "ot-a-sequence");
+    }
+
+    // -----------------------------------------------------------------------
+    // Actions: who may act, run now, pause, resume, stop, audit
+    // -----------------------------------------------------------------------
+
+    /// Set the fake's DAG paused state, as an operator would through Airflow.
+    fn set_dag_paused(fake: &fake_airflow::Shared, dag_id: &str, paused: bool) {
+        for dag in &mut fake.lock().unwrap().dags {
+            if dag["dag_id"] == dag_id {
+                dag["is_paused"] = json!(paused);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_group_and_admins_may_act_and_others_get_404() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let outsider = who("sub-bob", &["finance"], false);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+
+        for (action, error) in [
+            (
+                "run",
+                run_now(
+                    Some(&resources),
+                    Some(&airflow),
+                    &limiter,
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                    &RunStart::default(),
+                )
+                .await
+                .expect_err("an outsider may not run"),
+            ),
+            (
+                "pause",
+                pause_pipeline(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                )
+                .await
+                .expect_err("an outsider may not pause"),
+            ),
+            (
+                "resume",
+                resume_pipeline(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                )
+                .await
+                .expect_err("an outsider may not resume"),
+            ),
+            (
+                "stop",
+                stop_run(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                    SMOKE_RUN,
+                )
+                .await
+                .expect_err("an outsider may not stop"),
+            ),
+        ] {
+            assert_eq!(error.status(), StatusCode::NOT_FOUND, "{action}");
+            assert_eq!(error.message(), "no such pipeline", "{action}");
+        }
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a hidden pipeline never reaches Airflow: {:?}",
+            fake.lock().unwrap().calls
+        );
+
+        let owned = resource("smoke", Some("analytics"));
+        let spec = spec_of(&owned);
+        assert!(may_act(&who("sub-ada", &["analytics"], false), spec));
+        assert!(may_act(&admin(), spec));
+        assert!(!may_act(&outsider, spec));
+    }
+
+    /// A shared pipeline (epic#895 decision 12): `spec.viewers` may read it and run it; changing
+    /// it stays the owner group's.
+    fn shared() -> Value {
+        with_viewers(resource("shop", Some("demo")), &["visitors"])
+    }
+
+    #[test]
+    fn visible_admits_a_viewer_while_may_act_refuses_it() {
+        let shared = shared();
+        let spec = spec_of(&shared);
+
+        let viewer = who("sub-vera", &["visitors"], false);
+        assert!(visible(&viewer, spec), "a viewer sees the pipeline");
+        assert!(!may_act(&viewer, spec), "a viewer may not act on it");
+
+        let owner = who("sub-dana", &["demo"], false);
+        assert!(visible(&owner, spec), "the owner group sees it");
+        assert!(may_act(&owner, spec), "the owner group acts on it");
+
+        assert!(visible(&admin(), spec), "an administrator sees it");
+        assert!(may_act(&admin(), spec), "an administrator acts on it");
+
+        let outsider = who("sub-bob", &["finance"], false);
+        assert!(!visible(&outsider, spec));
+        assert!(!may_act(&outsider, spec));
+    }
+
+    #[tokio::test]
+    async fn a_viewer_runs_the_shared_pipeline_and_the_run_is_audited_as_the_viewer() {
+        let resources = memory(&[
+            ("shop", shared()),
+            ("smoke", resource("smoke", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        // The loader has created the shared pipeline's DAG, with no run yet.
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags.push(dag("stardelt__shop"));
+            fake.runs.insert("stardelt__shop".into(), Vec::new());
+        }
+        let viewer = who("sub-vera-807", &["visitors"], false);
+        let namespace = crate::cluster::namespace();
+        let _ = audit::test_sink::take_for("sub-vera-807");
+
+        // The list and the detail show a pipeline the viewer may run.
+        let answer = list_pipelines(Some(&resources), Some(&airflow), &viewer)
+            .await
+            .expect("the list succeeds");
+        let names: Vec<&str> = answer
+            .pipelines
+            .iter()
+            .map(|pipeline| pipeline.name.as_str())
+            .collect();
+        assert_eq!(names, ["shop"], "the viewer's list has the shared pipeline");
+        assert!(answer.pipelines[0].can_run, "the viewer may run it");
+        assert!(
+            !answer.pipelines[0].can_edit,
+            "the viewer may not change it"
+        );
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &viewer,
+            &namespace,
+            "shop",
+        )
+        .await
+        .expect("the viewer reads the detail");
+        assert!(detail.pipeline.can_run, "a viewer's detail may run");
+        assert!(
+            !detail.pipeline.can_edit,
+            "a viewer's detail may not change"
+        );
+        pipeline_spec(Some(&resources), &viewer, &namespace, "shop")
+            .await
+            .expect("the viewer reads the spec");
+
+        // Run now: a viewer starts the owner's statement, as the viewer.
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &viewer,
+            &namespace,
+            "shop",
+            &RunStart::default(),
+        )
+        .await
+        .expect("a viewer may run the shared pipeline");
+        assert_eq!(run.state, "queued");
+        assert_eq!(
+            run.note.as_deref(),
+            Some("Started from Nova by sub-vera-807")
+        );
+        {
+            let fake = fake.lock().unwrap();
+            assert_eq!(
+                fake.trigger_bodies.len(),
+                1,
+                "Airflow was asked to trigger: {:?}",
+                fake.calls
+            );
+            assert_eq!(
+                fake.trigger_bodies[0]["note"],
+                "Started from Nova by sub-vera-807"
+            );
+            assert!(
+                fake.calls
+                    .iter()
+                    .any(|call| call == "POST /api/v2/dags/stardelt__shop/dagRuns"),
+                "the trigger names the shared pipeline: {:?}",
+                fake.calls
+            );
+        }
+
+        let records = audit::test_sink::take_for("sub-vera-807");
+        assert_eq!(
+            records.len(),
+            1,
+            "one audit record for the run: {records:?}"
+        );
+        assert_eq!(records[0].action, "run");
+        assert_eq!(records[0].outcome, "ok");
+        assert_eq!(records[0].sub, "sub-vera-807", "the viewer is the actor");
+        assert_eq!(records[0].pipeline, "shop");
+        assert_eq!(records[0].run.as_deref(), Some(run.run_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_viewer_who_changes_the_shared_pipeline_gets_403_and_the_reason() {
+        let resources = memory(&[("shop", shared())]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let viewer = who("sub-vera", &["visitors"], false);
+        let namespace = crate::cluster::namespace();
+        let calls_before = fake.lock().unwrap().calls.clone();
+
+        let error = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &viewer,
+            &namespace,
+            "shop",
+        )
+        .await
+        .expect_err("a viewer may not pause");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "only the owner group may change this pipeline"
+        );
+
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            Some(&airflow),
+            &viewer,
+            &namespace,
+            "shop",
+            update_body("select 2;"),
+        )
+        .await
+        .expect_err("a viewer may not change the spec");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "only the owner group may change this pipeline"
+        );
+
+        assert_eq!(
+            fake.lock().unwrap().calls,
+            calls_before,
+            "a refused change never reaches Airflow"
+        );
+        let stored = resources
+            .get("shop")
+            .await
+            .expect("the store answers")
+            .expect("the pipeline is still there");
+        assert_eq!(
+            stored["spec"]["tasks"][0]["name"], "schema",
+            "the refused update wrote nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hidden_pipeline_still_answers_404_for_a_run_and_a_change() {
+        let resources = memory(&[("hidden", resource("hidden", Some("other-team")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let outsider = who("sub-vera", &["visitors"], false);
+        let namespace = crate::cluster::namespace();
+
+        for (action, error) in [
+            (
+                "run",
+                run_now(
+                    Some(&resources),
+                    Some(&airflow),
+                    &limiter(),
+                    &outsider,
+                    &namespace,
+                    "hidden",
+                    &RunStart::default(),
+                )
+                .await
+                .expect_err("an outsider may not run"),
+            ),
+            (
+                "pause",
+                pause_pipeline(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "hidden",
+                )
+                .await
+                .expect_err("an outsider may not pause"),
+            ),
+            (
+                "update",
+                update_pipeline(
+                    Some(&resources),
+                    None,
+                    None,
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "hidden",
+                    update_body("select 2;"),
+                )
+                .await
+                .expect_err("an outsider may not change"),
+            ),
+        ] {
+            assert_eq!(error.status(), StatusCode::NOT_FOUND, "{action}");
+            assert_eq!(error.message(), "no such pipeline", "{action}");
+        }
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a hidden pipeline never reaches Airflow: {:?}",
+            fake.lock().unwrap().calls
+        );
+    }
+
+    #[test]
+    fn can_run_and_can_edit_differ_for_a_viewer_an_owner_and_an_admin() {
+        let shared = shared();
+        let viewer = who("sub-vera", &["visitors"], false);
+        let owner = who("sub-dana", &["demo"], false);
+
+        let view = view_of("stardelt", "shop", &shared, None, None, &viewer);
+        assert!(view.can_run, "a viewer may run");
+        assert!(!view.can_edit, "a viewer may not change");
+
+        let view = view_of("stardelt", "shop", &shared, None, None, &owner);
+        assert!(view.can_run, "the owner may run");
+        assert!(view.can_edit, "the owner may change");
+
+        let view = view_of("stardelt", "shop", &shared, None, None, &admin());
+        assert!(view.can_run, "an administrator may run");
+        assert!(view.can_edit, "an administrator may change");
+    }
+
+    #[tokio::test]
+    async fn run_now_triggers_with_now_and_a_note() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let started = now_seconds();
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &member,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("the run starts");
+        assert_eq!(run.state, "queued");
+        assert_eq!(run.note.as_deref(), Some("Started from Nova by sub-ada"));
+        assert!(run.run_id.starts_with("manual__"));
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let body = &fake.trigger_bodies[0];
+        let logical_date = body["logical_date"].as_str().expect("a logical_date");
+        assert!(
+            logical_date.ends_with('Z'),
+            "always UTC with a Z: {logical_date}"
+        );
+        assert!(
+            !logical_date.contains('.'),
+            "whole seconds only: {logical_date}"
+        );
+        let at = parse_rfc3339(logical_date).expect("RFC 3339");
+        assert!(
+            (at - started).abs() <= 2.0,
+            "logical_date is now, not a guess: {logical_date} vs {started}"
+        );
+        assert_eq!(body["note"], "Started from Nova by sub-ada");
+        assert!(
+            fake.calls
+                .iter()
+                .any(|call| call == "POST /api/v2/dags/stardelt__smoke/dagRuns"),
+            "Airflow was asked to trigger: {:?}",
+            fake.calls
+        );
+    }
+
+    /// The route with a run date and parameters: they reach Airflow as `conf`, and the logical
+    /// date stays now (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_sends_the_run_date_and_params_as_conf() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+
+        let started = now_seconds();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/pipelines/{}/smoke/runs",
+                        crate::cluster::namespace()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "runDate": "2026-11-13", "params": { "days": "7" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let body = &fake.trigger_bodies[0];
+        assert_eq!(
+            body["conf"]["runDate"], "2026-11-13",
+            "the date travels as conf: {body}"
+        );
+        assert_eq!(body["conf"]["params"]["days"], "7", "the params travel too");
+        let logical_date = body["logical_date"].as_str().expect("a logical_date");
+        assert_ne!(logical_date, "2026-11-13", "the logical date stays now");
+        assert!(
+            logical_date.ends_with('Z') && !logical_date.contains('.'),
+            "now, whole seconds, UTC: {logical_date}"
+        );
+        let at = parse_rfc3339(logical_date).expect("RFC 3339");
+        assert!(
+            (at - started).abs() <= 2.0,
+            "logical_date is now, not the run date: {logical_date} vs {started}"
+        );
+    }
+
+    /// No body, exactly as the interface posts today: no `conf` key at all (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_without_a_body_sends_no_conf() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/pipelines/{}/smoke/runs",
+                        crate::cluster::namespace()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let body = &fake.trigger_bodies[0];
+        assert!(
+            body.get("conf").is_none(),
+            "an empty body sends no conf: {body}"
+        );
+        assert_eq!(body["note"], "Started from Nova by sub-ada");
+    }
+
+    /// A date that is not `YYYY-MM-DD` is a 400 before Airflow is asked (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_refuses_a_bad_run_date() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/pipelines/{}/smoke/runs",
+                        crate::cluster::namespace()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "runDate": "13.11.2026" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "runDate is a date (YYYY-MM-DD)");
+        assert!(
+            fake.lock().unwrap().trigger_bodies.is_empty(),
+            "nothing was triggered"
+        );
+    }
+
+    /// A saved parameter's rules apply to a run's parameters too: a name that is not
+    /// lower-case, and 17 of them, are a 400 (nova#817).
+    #[tokio::test]
+    async fn pipelines_run_trigger_refuses_more_than_16_params() {
+        let (airflow, fake) = fake_airflow::start().await;
+        let app = run_route(airflow).await;
+        let uri = format!("/pipelines/{}/smoke/runs", crate::cluster::namespace());
+
+        for (body, sentence) in [
+            (
+                json!({ "params": { "Days": "7" } }),
+                "parameter names are lower-case letters, digits and underscores",
+            ),
+            (
+                json!({ "params": (0..17).map(|n| (format!("p{n}"), "v")).collect::<BTreeMap<_, _>>() }),
+                "at most 16 parameters",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], sentence);
+        }
+        assert!(
+            fake.lock().unwrap().trigger_bodies.is_empty(),
+            "nothing was triggered"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_now_refuses_a_paused_pipeline_and_does_not_trigger() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        set_dag_paused(&fake, "stardelt__smoke", true);
+
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("a paused pipeline does not start");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "the pipeline is paused: resume it first");
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake.calls.iter().any(|call| call.starts_with("POST ")),
+            "Airflow was not asked to trigger: {:?}",
+            fake.calls
+        );
+        assert!(fake.trigger_bodies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_now_refuses_when_a_run_is_active_under_forbid() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![run("manual__2026-10-20T09:30:00Z", "running")],
+        );
+
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("Forbid refuses a second run");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "a run is already active: wait for it or stop it"
+        );
+        let fake = fake.lock().unwrap();
+        assert!(fake.trigger_bodies.is_empty(), "nothing was triggered");
+        assert!(!fake.calls.iter().any(|call| call.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn run_now_allows_a_second_run_under_allow() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![run("manual__2026-10-20T09:30:00Z", "running")],
+        );
+
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("Allow skips the activity check");
+        assert_eq!(run.state, "queued");
+        assert_eq!(fake.lock().unwrap().trigger_bodies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_now_refuses_an_unloaded_pipeline() {
+        let resources = memory(&[("brand-new", resource("brand-new", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "brand-new",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("no DAG yet");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "the scheduler has not loaded this pipeline yet"
+        );
+        assert!(
+            fake.lock().unwrap().trigger_bodies.is_empty(),
+            "there is nothing to trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_now_is_rate_limited_per_user() {
+        let resources = memory(&[
+            (
+                "smoke",
+                with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+            ),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        set_dag_paused(&fake, "stardelt__other", true);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        // Refusals before the limiter do not count: ten paused refusals still leave ten slots.
+        for _ in 0..10 {
+            let error = run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &ada,
+                &namespace,
+                "other",
+                &RunStart::default(),
+            )
+            .await
+            .expect_err("paused");
+            assert_eq!(error.message(), "the pipeline is paused: resume it first");
+        }
+        for attempt in 0..10 {
+            run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &ada,
+                &namespace,
+                "smoke",
+                &RunStart::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("start {attempt}: {}", error.message()));
+        }
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter,
+            &ada,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("the eleventh start in a minute");
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.message(), "too many runs started; wait a minute");
+
+        // Another user has their own ten.
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter,
+            &who("sub-bob", &["analytics"], false),
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("another user is unaffected");
+        assert_eq!(run.state, "queued");
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_are_idempotent_and_return_the_fresh_view() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("brand-new", resource("brand-new", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let paused = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("pause");
+        assert!(paused.paused);
+        assert_eq!(paused.state, "paused");
+        let again = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("pausing a paused pipeline is fine");
+        assert!(again.paused, "the fresh DAG says paused");
+
+        let resumed = resume_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("resume");
+        assert!(!resumed.paused);
+        assert_eq!(
+            resumed.state, "succeeded",
+            "the fresh view carries the last run"
+        );
+        let again = resume_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("resuming a running pipeline is fine");
+        assert!(!again.paused);
+
+        let patches = fake
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| call.starts_with("PATCH /api/v2/dags/stardelt__smoke"))
+            .count();
+        assert_eq!(patches, 4, "two pauses and two resumes reached Airflow");
+
+        let error = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "brand-new",
+        )
+        .await
+        .expect_err("no DAG yet");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "the scheduler has not loaded this pipeline yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_marks_only_active_runs_failed() {
+        const ACTIVE_RUN: &str = "manual__2026-10-20T09:30:00Z";
+        const FAILED_RUN: &str = "manual__2026-10-20T09:00:00Z";
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![
+                run(ACTIVE_RUN, "running"),
+                run(FAILED_RUN, "failed"),
+                run(SMOKE_RUN, "success"),
+            ],
+        );
+        let namespace = crate::cluster::namespace();
+        let member = who("sub-ada", &["analytics"], false);
+
+        for finished in [SMOKE_RUN, FAILED_RUN] {
+            let error = stop_run(
+                Some(&resources),
+                Some(&airflow),
+                &member,
+                &namespace,
+                "smoke",
+                finished,
+            )
+            .await
+            .expect_err("a finished run cannot stop");
+            assert_eq!(error.status(), StatusCode::CONFLICT, "{finished}");
+            assert_eq!(error.message(), "the run is not active");
+        }
+        assert!(
+            !fake
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|call| call.starts_with("PATCH ")),
+            "a finished run is not patched"
+        );
+
+        let stopped = stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+            ACTIVE_RUN,
+        )
+        .await
+        .expect("an active run stops");
+        assert_eq!(stopped.state, "failed");
+        assert_eq!(stopped.run_id, ACTIVE_RUN);
+        let fake = fake.lock().unwrap();
+        let patches = fake
+            .calls
+            .iter()
+            .filter(|call| call.starts_with("PATCH /api/v2/dags/stardelt__smoke/dagRuns/"))
+            .count();
+        assert_eq!(patches, 1, "exactly one PATCH: {:?}", fake.calls);
+        assert_eq!(
+            fake.runs["stardelt__smoke"]
+                .iter()
+                .find(|run| run["dag_run_id"] == ACTIVE_RUN)
+                .expect("the run")["state"],
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_clears_only_a_failed_run() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![run(SMOKE_RUN, "failed"), run(OTHER_RUN, "success")],
+        );
+        let namespace = crate::cluster::namespace();
+        let member = who("sub-ada", &["analytics"], false);
+
+        let retried = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect("a failed run retries");
+        assert_eq!(retried.run_id, SMOKE_RUN);
+        assert_eq!(retried.state, "failed", "the same run, not a new one");
+
+        let fake = fake.lock().unwrap();
+        let clears: Vec<&str> = fake
+            .calls
+            .iter()
+            .map(String::as_str)
+            .filter(|call| call.contains("/clear"))
+            .collect();
+        assert_eq!(
+            clears,
+            vec![
+                "POST /api/v2/dags/stardelt__smoke/dagRuns/manual__2026-10-20T07%3A23%3A50.608876%2B00%3A00/clear"
+            ],
+            "exactly one clear, on this run: {:?}",
+            fake.calls
+        );
+        assert_eq!(fake.clear_bodies.len(), 1);
+        assert_eq!(fake.clear_bodies[0]["only_failed"], json!(true));
+        assert_eq!(fake.clear_bodies[0]["dry_run"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_running_run() {
+        const ACTIVE_RUN: &str = "manual__2026-10-20T09:30:00Z";
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock()
+            .unwrap()
+            .runs
+            .insert("stardelt__smoke".into(), vec![run(ACTIVE_RUN, "running")]);
+
+        let error = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            ACTIVE_RUN,
+        )
+        .await
+        .expect_err("a running run cannot be retried");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "only a failed run can be retried");
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake.calls.iter().any(|call| call.contains("/clear")),
+            "nothing is cleared: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_paused_pipeline() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.runs
+                .insert("stardelt__smoke".into(), vec![run(SMOKE_RUN, "failed")]);
+            let dag = fake
+                .dags
+                .iter_mut()
+                .find(|dag| dag["dag_id"] == "stardelt__smoke")
+                .expect("the smoke DAG");
+            dag["is_paused"] = json!(true);
+        }
+
+        let error = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("a paused pipeline cannot retry");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert!(
+            error.message().starts_with("the pipeline is paused"),
+            "{}",
+            error.message()
+        );
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake.calls.iter().any(|call| call.contains("/clear")),
+            "nothing is cleared: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_an_empty_clear() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.runs
+                .insert("stardelt__smoke".into(), vec![run(SMOKE_RUN, "failed")]);
+            fake.clear_empty = true;
+        }
+
+        let error = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("nothing selected is a refusal");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "this run has no failed tasks to retry");
+    }
+
+    #[tokio::test]
+    async fn stop_ignores_a_run_id_of_another_pipeline() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let error = stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            OTHER_RUN,
+        )
+        .await
+        .expect_err("another pipeline's run id does not resolve under smoke");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such run");
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake
+                .calls
+                .iter()
+                .any(|call| call.starts_with("PATCH ") || call.contains("stardelt__other")),
+            "no PATCH, and the other DAG was never addressed: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn every_action_is_audited_including_refusals() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+        // A `sub` of this test's own: the sink is process-wide, and other tests' records must
+        // not be mistaken for these.
+        let actor = who("sub-audit-196", &["stardelt-admins"], true);
+        let _ = audit::test_sink::take_for("sub-audit-196");
+
+        let started = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &actor,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("run");
+        set_dag_paused(&fake, "stardelt__smoke", true);
+        run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &actor,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("paused");
+        pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("pause");
+        resume_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("resume");
+        stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("the seeded run already succeeded");
+        stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+            &started.run_id,
+        )
+        .await
+        .expect("stop the queued run");
+        let down = AirflowClient::new(
+            reqwest::Client::new(),
+            AirflowConfig {
+                url: "http://127.0.0.1:9".into(),
+                user: "nova-api".into(),
+                password: Secret::new("x"),
+            },
+        );
+        run_now(
+            Some(&resources),
+            Some(&down),
+            &limiter(),
+            &actor,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect_err("Airflow is down");
+
+        let records: Vec<audit::test_sink::Record> = audit::test_sink::take_for("sub-audit-196");
+        let outcomes: Vec<(&str, &str)> = records
+            .iter()
+            .map(|record| (record.action.as_str(), record.outcome.as_str()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("run", "ok"),
+                ("run", "refused:paused"),
+                ("pause", "ok"),
+                ("resume", "ok"),
+                ("stop", "refused:not-active"),
+                ("stop", "ok"),
+                ("run", "error"),
+            ],
+            "one record per action, refusals and errors included"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.pipeline == "smoke" && record.namespace == namespace),
+            "the record names the pipeline: {records:?}"
+        );
+        assert_eq!(
+            records[0].run.as_deref(),
+            Some(started.run_id.as_str()),
+            "a started run is named"
+        );
+        assert_eq!(
+            records[1].run, None,
+            "a refusal before the trigger has no run"
+        );
+        assert_eq!(records[4].run.as_deref(), Some(SMOKE_RUN));
+        // No field of the record can hold the note or log text: there is none to hold it.
+        let serialized = format!("{records:?}");
+        assert!(
+            !serialized.contains("Started from Nova"),
+            "the fixed note text is not repeated in the audit: {serialized}"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_loaded_after_three_minutes() {
+        assert_eq!(
+            pipeline_state(false, false, None, Some(120.0)),
+            "loading",
+            "two minutes is still loading"
+        );
+        assert_eq!(
+            pipeline_state(false, false, None, Some(240.0)),
+            "not-loaded",
+            "four minutes without a DAG is not loading"
+        );
+        assert_eq!(
+            pipeline_state(false, false, None, None),
+            "loading",
+            "without a creationTimestamp there is nothing to compare"
+        );
+        assert_eq!(
+            pipeline_state(false, true, None, Some(600.0)),
+            "idle",
+            "a loaded pipeline is never not-loaded"
+        );
+
+        let resources = memory(&[
+            (
+                "two-minutes",
+                with_created_ago(resource("two-minutes", Some("analytics")), 120),
+            ),
+            (
+                "four-minutes",
+                with_created_ago(resource("four-minutes", Some("analytics")), 240),
+            ),
+        ]);
+        let (airflow, _fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+
+        let young = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &namespace,
+            "two-minutes",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(young.pipeline.state, "loading");
+        assert!(young.pipeline.created_at.is_some(), "createdAt is exposed");
+
+        let old = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &namespace,
+            "four-minutes",
+        )
+        .await
+        .expect("the detail is readable");
+        assert!(!old.pipeline.loaded);
+        assert_eq!(old.pipeline.state, "not-loaded");
+        assert!(old.pipeline.created_at.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Writes: principals, create, update, delete (#210)
+    // -----------------------------------------------------------------------
+
+    const NOT_READY_MESSAGE: &str = "the client credentials are not written yet";
+
+    /// A `ServicePrincipal` as the operator writes it. `None` leaves `status` off, as a resource
+    /// the operator has not seen yet.
+    fn service_principal(name: &str, group: &str, ready: Option<bool>) -> Value {
+        let mut resource = json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": { "name": name, "namespace": crate::cluster::namespace() },
+            "spec": { "ownerGroup": group },
+        });
+        if let Some(ready) = ready {
+            resource["status"] = json!({
+                "ready": ready,
+                "conditions": [{
+                    "type": "Ready",
+                    "status": if ready { "True" } else { "False" },
+                    "reason": if ready { "Ready" } else { "Pending" },
+                    "message": if ready { "the client exists" } else { NOT_READY_MESSAGE },
+                }],
+            });
+        }
+        resource
+    }
+
+    /// A namespace with the `pipeline-analytics` principal ready: what a create needs.
+    fn analytics_ready() -> PipelineResources {
+        memory_with(
+            &[],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        )
+    }
+
+    fn create_body(name: &str, group: &str, sql: &str) -> CreatePipelineRequest {
+        CreatePipelineRequest {
+            name: name.into(),
+            owner_group: group.into(),
+            sql: sql.into(),
+            notebook: None,
+            tasks: None,
+            schedule: Some(ScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "Europe/Berlin".into(),
+            }),
+            params: BTreeMap::new(),
+            options: None,
+            provenance: None,
+            notify: None,
+        }
+    }
+
+    fn update_body(sql: &str) -> UpdatePipelineRequest {
+        UpdatePipelineRequest {
+            sql: sql.into(),
+            notebook: None,
+            tasks: None,
+            schedule: None,
+            params: BTreeMap::new(),
+            options: None,
+            resource_version: None,
+            provenance: None,
+            notify: None,
+        }
+    }
+
+    /// A task-list entry for the tests (`task` is taken by the Airflow run double above).
+    fn pipeline_task(name: &str, sql: &str, depends_on: &[&str]) -> PipelineTaskRequest {
+        PipelineTaskRequest {
+            name: name.into(),
+            sql: sql.into(),
+            notebook: None,
+            depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    /// The defaults `pipeline_resource` writes when a body sends no options.
+    fn default_options() -> PipelineOptionsView {
+        PipelineOptions::default()
+            .resolve()
+            .expect("the defaults are in range")
+    }
+
+    fn create_limiter() -> CreateLimiter {
+        CreateLimiter::default()
+    }
+
+    /// A pipeline Nova wrote, carrying the `resourceVersion` a read would see.
+    fn nova_pipeline(name: &str, group: &str) -> Value {
+        let mut resource = pipeline_resource(
+            name,
+            group,
+            &Statement::Sql("select 1".into()),
+            Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+        );
+        resource["metadata"]["resourceVersion"] = json!("7");
+        resource
+    }
+
+    /// The sentence the ticket specifies, spelled out rather than built by the function under
+    /// test, so a typo in the code cannot hide behind the test.
+    fn missing_principal_sentence(group: &str) -> String {
+        format!(
+            "No principal for this group yet: an administrator creates one with \
+             make sync-principal NAME=pipeline-{group} GROUP={group}"
+        )
+    }
+
+    async fn stored_pipeline(resources: &PipelineResources, name: &str) -> Option<Value> {
+        resources.get(name).await.expect("memory read")
+    }
+
+    // -----------------------------------------------------------------------
+    // The production notebook rule (#819 decision 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn production_refuses_a_hand_scheduled_notebook() {
+        assert_eq!(
+            production_notebook_sentence("prod", true, true, false),
+            Some(PRODUCTION_NOTEBOOK)
+        );
+        assert_eq!(production_notebook_sentence("prod", true, true, true), None);
+        assert_eq!(
+            production_notebook_sentence("prod", false, true, false),
+            None
+        );
+        assert_eq!(
+            production_notebook_sentence("prod", true, false, false),
+            None
+        );
+        assert_eq!(production_notebook_sentence("dev", true, true, false), None);
+        assert_eq!(
+            production_notebook_sentence("test", true, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_notebook_task_list_is_a_notebook_body() {
+        let report = NotebookRequest {
+            name: "report.ipynb".into(),
+            object_version: "v1".into(),
+            params: BTreeMap::new(),
+        };
+        let mixed = [
+            pipeline_task("load", "insert into gold.report select 1", &[]),
+            PipelineTaskRequest {
+                name: "report".into(),
+                sql: String::new(),
+                notebook: Some(report.clone()),
+                depends_on: vec!["load".into()],
+            },
+        ];
+        assert!(runs_a_notebook(None, Some(&mixed)));
+        let sql_only = [pipeline_task("load", "select 1", &[])];
+        assert!(!runs_a_notebook(None, Some(&sql_only)));
+        assert!(runs_a_notebook(Some(&report), None));
+    }
+
+    #[test]
+    fn a_stored_notebook_task_list_runs_a_notebook() {
+        assert!(resource_runs_a_notebook(&json!({
+            "spec": { "tasks": [
+                { "name": "a", "kind": "notebook" },
+                { "name": "b", "kind": "sql" }
+            ] }
+        })));
+        assert!(!resource_runs_a_notebook(&json!({
+            "spec": { "tasks": [{ "name": "a", "kind": "sql" }] }
+        })));
+    }
+
+    #[tokio::test]
+    async fn production_refuses_a_notebook_schedule_without_a_bundle() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let mut state = test_state(None, airflow, store);
+        Arc::get_mut(&mut state).expect("a fresh state").stage_kind = "prod";
+        let namespace = crate::cluster::namespace();
+        let app = router().with_state(state).layer(Extension(principal(who(
+            "sub-ada",
+            &["analytics"],
+            false,
+        ))));
+
+        let hand = json!({
+            "name": "nightly",
+            "ownerGroup": "analytics",
+            "notebook": { "name": "report.ipynb", "objectVersion": "v1" },
+            "schedule": { "cron": "0 3 * * *", "timezone": "UTC" }
+        });
+        let post = |body: &Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/pipelines")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Without the stamp: 400 with exactly the sentence.
+        let response = app.clone().oneshot(post(&hand)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], PRODUCTION_NOTEBOOK);
+
+        // The validate route answers the same sentence as a refusal: 200, `ok: false`.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipelines/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(hand.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["errors"][0]["message"], PRODUCTION_NOTEBOOK);
+
+        // With the stamp the rule lets it through: this state has no cluster.
+        let mut stamped = hand.clone();
+        stamped["provenance"] =
+            json!({ "bundle": "shop", "target": "prod", "revision": "abc1234" });
+        let response = app.clone().oneshot(post(&stamped)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no cluster connection");
+
+        // A dev stage does not know the rule.
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let dev = router()
+            .with_state(test_state(None, airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))));
+        let response = dev.oneshot(post(&hand)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no cluster connection");
+
+        // The update half: an unstamped stored notebook schedule is refused, a stamped one is
+        // not. The stored resource is the stamp's second home.
+        let mut unstamped = nova_pipeline("nightly", "analytics");
+        unstamped["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "notebook",
+              "config": { "notebook": "report.ipynb", "objectVersion": "v1", "params": "{}" } }
+        ]);
+        let mut stamped = unstamped.clone();
+        stamped["metadata"]["labels"][BUNDLE_LABEL] = json!("shop");
+        stamped["metadata"]["labels"][TARGET_LABEL] = json!("prod");
+        let form = json!({
+            "notebook": { "name": "report.ipynb", "objectVersion": "v1" },
+            "schedule": { "cron": "0 3 * * *", "timezone": "UTC" }
+        });
+        for (stored, expected_sentence) in [(unstamped, true), (stamped, false)] {
+            let kube = fake_kube::start_with(
+                vec![stored],
+                vec![service_principal(
+                    "pipeline-analytics",
+                    "analytics",
+                    Some(true),
+                )],
+            )
+            .await;
+            let (store, _store_fake) = crate::secret_store::fake::start().await;
+            let (airflow, _airflow_fake) = fake_airflow::start().await;
+            let mut state = test_state(Some(kube), airflow, store);
+            Arc::get_mut(&mut state).expect("a fresh state").stage_kind = "prod";
+            let app = router().with_state(state).layer(Extension(principal(who(
+                "sub-ada",
+                &["analytics"],
+                false,
+            ))));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/pipelines/{namespace}/nightly"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(form.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            if expected_sentence {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(value["error"], PRODUCTION_NOTEBOOK);
+            } else {
+                assert_ne!(value["error"], PRODUCTION_NOTEBOOK, "{value}");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_cron_table() {
+        for cron in [
+            "0 3 * * *",
+            "*/15 * * * *",
+            "0 9 * * 1-5",
+            "30 6 1 * *",
+            "0 8 * * mon",
+            "0 */2 * * *",
+            "5,35 * * * *",
+        ] {
+            assert_eq!(validate_cron(cron), Ok(()), "{cron} must be accepted");
+        }
+        for (cron, sentence) in [
+            ("* * * * *", CRON_TOO_OFTEN),
+            ("*/2 * * * *", CRON_TOO_OFTEN),
+            ("0 3 * *", CRON_FIELDS),
+            ("@daily", CRON_FIELDS),
+            ("0 3 * * * *", CRON_FIELDS),
+            ("0 25 * * *", CRON_RANGE),
+            ("61 * * * *", CRON_RANGE),
+            ("a b c d e", CRON_RANGE),
+            ("*/0 * * * *", CRON_RANGE),
+            ("5-1 * * * *", CRON_RANGE),
+            ("", CRON_FIELDS),
+        ] {
+            assert_eq!(
+                validate_cron(cron).expect_err(cron),
+                sentence,
+                "{cron:?} must be refused with the field sentence"
+            );
+        }
+        // No shortcuts and no seconds, named months and weekdays in range, `a/n` not in the
+        // grammar, a step larger than the field is still one fire.
+        for cron in [
+            "@hourly",
+            "0 3 * * * *",
+            "0 3 * * mon-fri/0",
+            "0 3 * * jan",
+            "5/10 * * * *",
+            "0 0 * * 8",
+        ] {
+            assert!(validate_cron(cron).is_err(), "{cron} must be refused");
+        }
+        assert_eq!(validate_cron("0 3 1 jan-mar sun"), Ok(()));
+        assert_eq!(validate_cron("0 3 * * 0-7"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn create_writes_the_resource_with_owner_runas_labels_and_defaults() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let view = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("daily-trips", "analytics", "select 1;"),
+        )
+        .await
+        .expect("the pipeline is created");
+
+        assert_eq!(view.name, "daily-trips");
+        assert_eq!(view.owner_group.as_deref(), Some("analytics"));
+        assert_eq!(view.run_as.as_deref(), Some("pipeline-analytics"));
+        assert!(!view.loaded, "Airflow has not seen it yet");
+        assert_eq!(view.state, "loading");
+        assert_eq!(view.schedule.as_deref(), Some("0 3 * * * (Europe/Berlin)"));
+
+        let stored = stored_pipeline(&resources, "daily-trips")
+            .await
+            .expect("the resource is written");
+        assert_eq!(
+            stored,
+            json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "Pipeline",
+                "metadata": {
+                    "name": "daily-trips",
+                    "namespace": crate::cluster::namespace(),
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "stardelt-nova",
+                        "stardelt.io/owner-group": "analytics"
+                    },
+                    "annotations": { "stardelt.io/created-by": "sub-ada" }
+                },
+                "spec": {
+                    "ownerGroup": "analytics",
+                    "runAs": "pipeline-analytics",
+                    "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" },
+                    "tasks": [ { "name": "run", "kind": "sql", "sql": "select 1" } ],
+                    "concurrency": "Forbid",
+                    "retries": { "attempts": 1, "backoff": "5m" },
+                    // The default 120 minutes in the loader's `<n>m` grammar (#223).
+                    "timeout": "120m"
+                }
+            }),
+            "the whole resource, exactly as the ticket specifies it"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_without_schedule_omits_it() {
+        let resources = analytics_ready();
+        let mut body = create_body("on-demand", "analytics", "select 1");
+        body.schedule = None;
+
+        let view = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &who("sub-ada", &["analytics"], false),
+            body,
+        )
+        .await
+        .expect("an on-demand pipeline is created");
+
+        assert_eq!(view.schedule, None);
+        let stored = stored_pipeline(&resources, "on-demand")
+            .await
+            .expect("the resource is written");
+        assert!(
+            stored["spec"].get("schedule").is_none(),
+            "an on-demand pipeline carries no schedule: {stored}"
+        );
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 1");
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_group_the_caller_is_not_in() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("smoke", "finance", "select 1"),
+        )
+        .await
+        .expect_err("not a member of finance");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(error.message(), "you are not a member of the group finance");
+        assert!(
+            resources.list().await.unwrap().is_empty(),
+            "nothing is written for a group the caller is not in"
+        );
+
+        // An administrator is no substitute: they schedule for the groups they belong to.
+        let root = who("sub-root", &["stardelt-admins"], true);
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &root,
+            create_body("smoke", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("an administrator is not a member of analytics");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "you are not a member of the group analytics"
+        );
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_needs_a_ready_principal_of_the_same_group() {
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        // No principal at all.
+        let resources = memory(&[]);
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("no principal");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), missing_principal_sentence("analytics"));
+        assert!(resources.list().await.unwrap().is_empty());
+
+        // The principal exists but is not ready: the condition's message is the sentence.
+        let resources = memory_with(
+            &[],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(false)),
+            )],
+        );
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("not ready");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), NOT_READY_MESSAGE);
+        assert!(resources.list().await.unwrap().is_empty());
+
+        // The right name, but another group's principal: treated as absent.
+        let resources = memory_with(
+            &[],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "finance", Some(true)),
+            )],
+        );
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("another group's principal");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), missing_principal_sentence("analytics"));
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_validates_name_sql_timezone() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+        let long_name = "a".repeat(41);
+
+        for name in [
+            "",
+            "Analytics",
+            "1analytics",
+            "analytics-",
+            long_name.as_str(),
+        ] {
+            let error = create_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &limiter,
+                &ada,
+                create_body(name, "analytics", "select 1"),
+            )
+            .await
+            .expect_err("invalid name");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{name:?}");
+            assert_eq!(error.message(), invalid_name(), "{name:?}");
+        }
+
+        // A blank statement is neither a statement nor a notebook (#237).
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "   "),
+        )
+        .await
+        .expect_err("no statement");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), ONE_OF_STATEMENT_OR_NOTEBOOK);
+
+        for sql in [
+            "x".repeat(MAX_STATEMENT_CHARS + 1),
+            "select 1\0".to_string(),
+            ";".to_string(),
+        ] {
+            let error = create_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &limiter,
+                &ada,
+                create_body("smoke", "analytics", &sql),
+            )
+            .await
+            .expect_err("invalid statement");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(error.message(), invalid_sql());
+        }
+
+        let mut body = create_body("smoke", "analytics", "select 1");
+        body.schedule = Some(ScheduleRequest {
+            cron: "0 3 * * *".into(),
+            timezone: "Mars/Olympus".into(),
+        });
+        let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
+            .await
+            .expect_err("not an IANA zone");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), "unknown timezone");
+
+        for (cron, sentence) in [("* * * * *", CRON_TOO_OFTEN), ("0 3 * *", CRON_FIELDS)] {
+            let mut body = create_body("smoke", "analytics", "select 1");
+            body.schedule = Some(ScheduleRequest {
+                cron: cron.into(),
+                timezone: "UTC".into(),
+            });
+            let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
+                .await
+                .expect_err("invalid cron");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(error.message(), sentence);
+        }
+        assert!(
+            resources.list().await.unwrap().is_empty(),
+            "no refusal wrote anything"
+        );
+
+        // One trailing `;` is dropped from the stored statement; the rest is trimmed.
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("trailing", "analytics", "  select 42 ;  "),
+        )
+        .await
+        .expect("a trailing semicolon is fine");
+        let stored = stored_pipeline(&resources, "trailing")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 42");
+    }
+
+    #[tokio::test]
+    async fn create_twice_is_a_conflict() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "select 1"),
+        )
+        .await
+        .expect("the first create wins");
+
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "select 2"),
+        )
+        .await
+        .expect_err("the name is taken");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "a pipeline with this name already exists");
+        let stored = stored_pipeline(&resources, "smoke")
+            .await
+            .expect("still there");
+        assert_eq!(
+            stored["spec"]["tasks"][0]["sql"], "select 1",
+            "the first pipeline is never overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_is_rate_limited() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        for index in 0..CREATES_PER_HOUR {
+            create_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &limiter,
+                &ada,
+                create_body(&format!("daily-{index}"), "analytics", "select 1"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("create {index}: {}", error.message()));
+        }
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &ada,
+            create_body("one-more", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("the eleventh create in an hour");
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            error.message(),
+            "too many pipelines created this hour; wait before creating another"
+        );
+        assert!(
+            stored_pipeline(&resources, "one-more").await.is_none(),
+            "a rate-limited create writes nothing"
+        );
+        assert_eq!(resources.list().await.unwrap().len(), CREATES_PER_HOUR);
+
+        // Another person has their own ten.
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &who("sub-bob", &["analytics"], false),
+            create_body("bobs-job", "analytics", "select 1"),
+        )
+        .await
+        .expect("another user is unaffected");
+    }
+
+    #[tokio::test]
+    async fn update_changes_the_editable_fields_only() {
+        let mut original = nova_pipeline("smoke", "analytics");
+        original["spec"]["params"] = json!({ "days": "1" });
+        original["spec"]["engine"] = json!("airflow");
+        let resources = memory_with(
+            &[("smoke", original.clone())],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        // The body carries the whole editable state: statement, schedule, params, options.
+        let update = UpdatePipelineRequest {
+            sql: "select 2;".into(),
+            notebook: None,
+            tasks: None,
+            schedule: None,
+            params: BTreeMap::from([
+                ("days".to_string(), "7".to_string()),
+                ("region".to_string(), "eu".to_string()),
+            ]),
+            options: Some(PipelineOptions {
+                retries: Some(0),
+                timeout_minutes: Some(30),
+                ..PipelineOptions::default()
+            }),
+            resource_version: None,
+            provenance: None,
+            notify: None,
+        };
+        let view = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            update,
+        )
+        .await
+        .expect("the update succeeds");
+        assert_eq!(view.schedule, None);
+
+        let stored = stored_pipeline(&resources, "smoke").await.expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 2");
+        assert!(
+            stored["spec"].get("schedule").is_none(),
+            "an omitted schedule is removed: {stored}"
+        );
+        assert_eq!(
+            stored["spec"]["params"],
+            json!({ "days": "7", "region": "eu" }),
+            "the parameter table is replaced, not merged"
+        );
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 0, "backoff": "5m" })
+        );
+        assert_eq!(stored["spec"]["timeout"], json!("30m"));
+        assert_eq!(stored["spec"]["concurrency"], json!("Forbid"));
+        assert_eq!(
+            stored["spec"]["engine"], "airflow",
+            "every field the form does not edit stays"
+        );
+        assert_eq!(stored["spec"]["runAs"], "pipeline-analytics");
+        assert_eq!(stored["metadata"]["resourceVersion"], "7");
+        assert_eq!(
+            stored["metadata"]["annotations"]["stardelt.io/created-by"],
+            "sub-ada"
+        );
+
+        // A new schedule goes back in; the statement changes again.
+        let view = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            UpdatePipelineRequest {
+                sql: "select 3".into(),
+                notebook: None,
+                tasks: None,
+                schedule: Some(ScheduleRequest {
+                    cron: "30 6 * * mon-fri".into(),
+                    timezone: "UTC".into(),
+                }),
+                params: BTreeMap::new(),
+                options: None,
+                resource_version: None,
+                provenance: None,
+                notify: None,
+            },
+        )
+        .await
+        .expect("the second update succeeds");
+        assert_eq!(view.schedule.as_deref(), Some("30 6 * * mon-fri (UTC)"));
+        let stored = stored_pipeline(&resources, "smoke").await.expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 3");
+        assert_eq!(
+            stored["spec"]["schedule"],
+            json!({ "cron": "30 6 * * mon-fri", "timezone": "UTC" })
+        );
+        assert!(
+            stored["spec"].get("params").is_none(),
+            "an omitted table is removed: {stored}"
+        );
+        assert_eq!(stored["spec"]["engine"], "airflow");
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_pipeline_not_created_by_nova() {
+        let mut legacy = nova_pipeline("legacy", "analytics");
+        legacy["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let resources = memory_with(
+            &[("legacy", legacy.clone())],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        for caller in [&ada, &admin()] {
+            let error = update_pipeline(
+                Some(&resources),
+                None,
+                None,
+                None,
+                caller,
+                &namespace,
+                "legacy",
+                update_body("select 2"),
+            )
+            .await
+            .expect_err("kubectl's pipeline is not Nova's to rewrite");
+            assert_eq!(error.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                error.message(),
+                "this pipeline is managed outside Nova (kubectl or Git); change it there"
+            );
+        }
+        assert_eq!(
+            stored_pipeline(&resources, "legacy")
+                .await
+                .expect("unchanged"),
+            legacy
+        );
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_shape_it_cannot_edit() {
+        let mut two_tasks = nova_pipeline("two-tasks", "analytics");
+        two_tasks["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "sql", "sql": "select 1" },
+            { "name": "check", "kind": "sql", "sql": "select 2" }
+        ]);
+        let mut other_name = nova_pipeline("other-name", "analytics");
+        other_name["spec"]["tasks"] = json!([
+            { "name": "load", "kind": "sql", "sql": "select 1" }
+        ]);
+        let mut python_task = nova_pipeline("python-task", "analytics");
+        python_task["spec"]["tasks"] = json!([
+            { "name": "load", "kind": "python" }
+        ]);
+        let resources = memory_with(
+            &[
+                ("two-tasks", two_tasks),
+                ("other-name", other_name),
+                ("python-task", python_task),
+            ],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        // A task list is a shape Nova writes, but a single-statement body cannot edit it; a
+        // shape Nova does not write keeps the form's refusal.
+        for (name, expected) in [
+            ("two-tasks", SEVERAL_TASKS),
+            ("other-name", SEVERAL_TASKS),
+            (
+                "python-task",
+                "this pipeline has a shape the form cannot edit",
+            ),
+        ] {
+            let error = update_pipeline(
+                Some(&resources),
+                None,
+                None,
+                None,
+                &ada,
+                &namespace,
+                name,
+                update_body("select 2"),
+            )
+            .await
+            .expect_err("the form cannot edit this shape");
+            assert_eq!(error.status(), StatusCode::CONFLICT, "{name}");
+            assert_eq!(error.message(), expected, "{name}");
+        }
+        assert_eq!(
+            stored_pipeline(&resources, "two-tasks").await.unwrap()["spec"]["tasks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "a refused update changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_tasks_writes_the_whole_list() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-silver", "analytics", "");
+        body.tasks = Some(vec![
+            pipeline_task(
+                "load",
+                "insert into silver.orders select * from bronze.orders",
+                &[],
+            ),
+            pipeline_task("check", "select count(*) from silver.orders", &["load"]),
+        ]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a task list");
+        let stored = stored_pipeline(&resources, "shop-silver")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"],
+            json!([
+                { "name": "load", "kind": "sql",
+                  "sql": "insert into silver.orders select * from bronze.orders" },
+                { "name": "check", "kind": "sql",
+                  "sql": "select count(*) from silver.orders", "dependsOn": ["load"] }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_tasks_accepts_a_notebook_task() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{\"nbformat\":4}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("nightly-report", "analytics", "");
+        body.tasks = Some(vec![
+            pipeline_task("load", "insert into gold.report select 1", &[]),
+            PipelineTaskRequest {
+                name: "report".into(),
+                sql: String::new(),
+                notebook: Some(NotebookRequest {
+                    name: "report.ipynb".into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::new(),
+                }),
+                depends_on: vec!["load".into()],
+            },
+        ]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("a mixed list");
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][1],
+            json!({
+                "name": "report",
+                "kind": "notebook",
+                "dependsOn": ["load"],
+                "config": { "notebook": "report.ipynb", "objectVersion": version, "params": "{}" }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn task_list_refusals_name_the_task() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let refused = |body: CreatePipelineRequest| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                create_pipeline(Some(resources), None, None, &create_limiter(), ada, body)
+                    .await
+                    .expect_err("refused")
+                    .message()
+                    .to_string()
+            }
+        };
+        let mut cases: Vec<(CreatePipelineRequest, String)> = Vec::new();
+
+        let mut both = create_body("both", "analytics", "select 1");
+        both.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        cases.push((both, ONE_OF_STATEMENT_NOTEBOOK_OR_TASKS.into()));
+
+        let mut empty = create_body("empty", "analytics", "");
+        empty.tasks = Some(Vec::new());
+        cases.push((empty, NO_TASKS.into()));
+
+        let mut many = create_body("many", "analytics", "");
+        many.tasks = Some(
+            (0..31)
+                .map(|at| pipeline_task(&format!("t{at}"), "select 1", &[]))
+                .collect(),
+        );
+        cases.push((many, TOO_MANY_TASKS.into()));
+
+        let mut capital = create_body("capital", "analytics", "");
+        capital.tasks = Some(vec![pipeline_task("Load", "select 1", &[])]);
+        cases.push((
+            capital,
+            format!("task name `Load` is not valid: {TASK_NAME_RULE}"),
+        ));
+
+        let mut twice = create_body("twice", "analytics", "");
+        twice.tasks = Some(vec![
+            pipeline_task("load", "select 1", &[]),
+            pipeline_task("load", "select 2", &[]),
+        ]);
+        cases.push((twice, "task name `load` is used twice".into()));
+
+        let mut itself = create_body("itself", "analytics", "");
+        itself.tasks = Some(vec![pipeline_task("load", "select 1", &["load"])]);
+        cases.push((itself, "task `load` cannot depend on itself".into()));
+
+        let mut unknown = create_body("unknown", "analytics", "");
+        unknown.tasks = Some(vec![pipeline_task("load", "select 1", &["nope"])]);
+        cases.push((
+            unknown,
+            "task `load` depends on `nope`, which is not a task of this pipeline".into(),
+        ));
+
+        let mut cycle = create_body("cycle", "analytics", "");
+        cycle.tasks = Some(vec![
+            pipeline_task("a", "select 1", &["b"]),
+            pipeline_task("b", "select 2", &["a"]),
+        ]);
+        assert_eq!(
+            refused(cycle).await,
+            "task `a` is part of a dependency cycle"
+        );
+
+        let mut wide = create_body("wide", "analytics", "");
+        wide.tasks = Some(vec![pipeline_task(
+            "load",
+            "select 1",
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        )]);
+        assert_eq!(
+            refused(wide).await,
+            format!("task `load`: {TOO_MANY_TASK_DEPENDS_ON}")
+        );
+
+        for (body, expected) in cases {
+            assert_eq!(refused(body).await, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn update_replaces_the_whole_task_list() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let mut body = create_body("shop-silver", "analytics", "");
+        body.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+
+        let mut update = update_body("");
+        update.tasks = Some(vec![
+            pipeline_task("load", "select 2", &[]),
+            pipeline_task("check", "select 3", &["load"]),
+        ]);
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "shop-silver",
+            update,
+        )
+        .await
+        .expect("updated");
+        let stored = stored_pipeline(&resources, "shop-silver")
+            .await
+            .expect("stored");
+        assert_eq!(stored["spec"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 2");
+
+        // A single-statement body on a task list is the sentence decision 5 fixes.
+        let refused = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "shop-silver",
+            update_body("select 9"),
+        )
+        .await
+        .expect_err("a task list is not a statement pipeline");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(refused.message(), SEVERAL_TASKS);
+
+        // And a task list never becomes a statement pipeline, nor the other way round.
+        let mut statement = nova_pipeline("smoke", "analytics");
+        statement["metadata"]["resourceVersion"] = json!("7");
+        let resources = memory_with(
+            &[("smoke", statement)],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let mut tasks_body = update_body("");
+        tasks_body.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        let refused = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            tasks_body,
+        )
+        .await
+        .expect_err("a statement pipeline is not a task list");
+        assert_eq!(refused.message(), STATEMENT_PIPELINE);
+    }
+
+    #[tokio::test]
+    async fn validate_lists_tasks_when_the_list_changed() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-silver", "analytics", "");
+        body.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            body.clone(),
+        )
+        .await
+        .expect("created");
+
+        let same = validate_pipeline(Some(&resources), None, None, &ada, body.clone())
+            .await
+            .expect("an answer");
+        assert_eq!(same.action.as_deref(), Some("update"));
+        assert!(same.changes.is_empty(), "{:?}", same.changes);
+
+        body.tasks = Some(vec![pipeline_task("load", "select 2", &[])]);
+        let drifted = validate_pipeline(Some(&resources), None, None, &ada, body)
+            .await
+            .expect("an answer");
+        assert_eq!(drifted.changes, vec!["tasks".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn update_conflict_on_a_changed_resource_version() {
+        let original = nova_pipeline("smoke", "analytics");
+        let resources = memory_with(
+            &[("smoke", original.clone())],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+
+        // A replace carrying the version read before somebody else wrote is a conflict.
+        let mut stale = original.clone();
+        stale["metadata"]["resourceVersion"] = json!("6");
+        stale["spec"]["tasks"][0]["sql"] = json!("select 9");
+        let error = resources
+            .replace("smoke", stale)
+            .await
+            .expect_err("a stale resourceVersion is a conflict");
+        assert!(matches!(error, ResourceError::Conflict));
+        assert_eq!(
+            stored_pipeline(&resources, "smoke").await.unwrap()["spec"]["tasks"][0]["sql"],
+            "select 1",
+            "the stale write changed nothing"
+        );
+
+        // A resource deleted between the read and the write is the same answer for the caller.
+        assert!(matches!(
+            resources.replace("absent", original).await,
+            Err(ResourceError::Conflict)
+        ));
+
+        let fail = resource_write_fail(ResourceError::Conflict);
+        assert_eq!(fail.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            fail.message(),
+            "the pipeline changed while you edited it: reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_with_a_stale_version_is_refused_before_it_writes() {
+        let resources = memory_with(
+            &[("smoke", nova_pipeline("smoke", "analytics"))],
+            &analytics_principal(),
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let sql_of = |resource: Value| resource["spec"]["tasks"][0]["sql"].clone();
+
+        let mut stale = update_body("select 9");
+        stale.resource_version = Some("6".into());
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            stale,
+        )
+        .await
+        .expect_err("somebody wrote in between");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "the pipeline changed while you edited it: reload"
+        );
+        assert_eq!(
+            sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
+            "select 1",
+            "a refused update writes nothing"
+        );
+
+        // The version the document route handed out is the one an update accepts, once.
+        let read = pipeline_spec(Some(&resources), &ada, &namespace, "smoke")
+            .await
+            .expect("readable")
+            .resource_version
+            .expect("a version");
+        let mut current = update_body("select 9");
+        current.resource_version = Some(read);
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            current.clone(),
+        )
+        .await
+        .expect("the version it read");
+        assert_eq!(
+            sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
+            "select 9"
+        );
+
+        // Somebody else writes meanwhile (the test store does not bump versions by itself, the
+        // cluster does): the version the editor read is stale now.
+        if let PipelineResources::Memory(store) = &resources {
+            store.lock().unwrap().pipelines.get_mut("smoke").unwrap()["metadata"]["resourceVersion"] =
+                json!("8");
+        }
+        current.sql = "select 10".into();
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            current,
+        )
+        .await
+        .expect_err("the stored version moved on");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
+            "select 9",
+            "the stale edit changed nothing"
+        );
+    }
+
+    fn provenance(bundle: &str, target: &str, revision: Option<&str>) -> Provenance {
+        Provenance {
+            bundle: bundle.into(),
+            target: target.into(),
+            revision: revision.map(str::to_string),
+            repository: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deploy_stamps_where_the_pipeline_came_from_and_the_view_shows_it() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("0123abc-dirty")));
+        let view = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+        let deployment = view.deployment.expect("the view shows it");
+        assert_eq!(
+            (
+                deployment.bundle.as_str(),
+                deployment.target.as_str(),
+                deployment.revision.as_deref()
+            ),
+            ("shop-etl", "prod", Some("0123abc-dirty"))
+        );
+        assert!(deployment.deployed_by.is_some() && deployment.deployed_at.is_some());
+
+        let stored = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(
+            stored["metadata"]["labels"]["stardelt.io/bundle"],
+            "shop-etl"
+        );
+        assert_eq!(stored["metadata"]["labels"]["stardelt.io/target"], "prod");
+        assert_eq!(
+            stored["metadata"]["annotations"]["stardelt.io/revision"],
+            "0123abc-dirty"
+        );
+        assert_eq!(
+            stored["metadata"]["labels"]["app.kubernetes.io/managed-by"], "stardelt-nova",
+            "the labels that were there stay"
+        );
+        assert!(stored["metadata"]["annotations"]["stardelt.io/created-by"].is_string());
+
+        let plain = create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("by-hand", "analytics", "select 1"),
+        )
+        .await
+        .expect("created");
+        assert_eq!(
+            plain.deployment, None,
+            "a pipeline made by hand says nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deploy_that_names_something_odd_is_refused_before_anything_is_written() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        for (bundle, target, revision, repository, sentence) in [
+            ("Shop", "prod", None, None, "the bundle name must be"),
+            ("ab", "prod", None, None, "the bundle name must be"),
+            ("shop-etl", "Prod", None, None, "the target must be"),
+            ("shop-etl", "", None, None, "the target must be"),
+            (
+                "shop-etl",
+                "prod",
+                Some("main"),
+                None,
+                "the revision must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                Some("abc"),
+                None,
+                "the revision must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("http://git.example/a"),
+                "the repository must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("https://"),
+                "the repository must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("https:///shop"),
+                "the repository must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("https://ada:tok@git.example/a"),
+                "the repository must be",
+            ),
+        ] {
+            let mut body = create_body("daily-trips", "analytics", "select 1");
+            body.provenance = Some(Provenance {
+                repository: repository.map(str::to_string),
+                ..provenance(bundle, target, revision)
+            });
+            let error = create_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &create_limiter(),
+                &ada,
+                body.clone(),
+            )
+            .await
+            .expect_err("refused");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{bundle} {target}");
+            assert!(error.message().starts_with(sentence), "{}", error.message());
+            let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
+                .await
+                .expect("an answer");
+            assert!(!answer.ok);
+            assert_eq!(answer.errors[0].message, error.message());
+        }
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_digest_ignores_key_order_and_what_a_deploy_does_not_decide() {
+        let one = json!({"spec": {
+            "ownerGroup": "x",
+            "tasks": [{"kind": "run", "sql": "select 1"}],
+            "params": {"a": "1", "b": "2"},
+        }});
+        let same = json!({"spec": {
+            "params": {"b": "2", "a": "1"},
+            "tasks": [{"sql": "select 1", "kind": "run"}],
+            "ownerGroup": "y",
+        }});
+        let other = json!({"spec": {
+            "tasks": [{"kind": "run", "sql": "select 2"}],
+            "params": {"a": "1", "b": "2"},
+        }});
+        assert_eq!(
+            canonical(&json!({"b": [1, {"d": 1, "c": null}], "a": "x"})),
+            r#"{"a":"x","b":[1,{"c":null,"d":1}]}"#
+        );
+        assert_eq!(spec_digest(&one), spec_digest(&same));
+        assert_ne!(spec_digest(&one), spec_digest(&other));
+        for key in ["schedule", "params", "concurrency", "retries", "timeout"] {
+            let mut changed = one.clone();
+            changed["spec"][key] = json!("another");
+            assert_ne!(spec_digest(&one), spec_digest(&changed), "{key} is decided");
+        }
+        assert_eq!(spec_digest(&one).len(), 64);
+    }
+
+    #[tokio::test]
+    async fn a_change_after_the_deploy_shows_as_modified_and_the_next_deploy_clears_it() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+        let created = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+        assert_eq!(
+            created.deployment.expect("stamped").modified,
+            None,
+            "right after the deploy nothing differs"
+        );
+
+        // The form or the YAML editor: no stamp in the body, so the old stamp and digest stay.
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            update_body("select 2"),
+        )
+        .await
+        .expect("updated");
+        let edited = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(deployment_of(&edited).expect("kept").modified, Some(true));
+
+        // The next deploy writes a new digest.
+        let mut deploy = update_body("select 2");
+        deploy.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            deploy,
+        )
+        .await
+        .expect("updated");
+        let deployed = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(deployment_of(&deployed).expect("stamped").modified, None);
+
+        // A pipeline stamped before the digest existed says nothing either way.
+        let mut old = deployed.clone();
+        old["metadata"]["annotations"]
+            .as_object_mut()
+            .unwrap()
+            .remove("stardelt.io/spec-digest");
+        old["spec"]["schedule"] = json!({"cron": "5 4 * * *", "timezone": "UTC"});
+        assert_eq!(deployment_of(&old).expect("stamped").modified, None);
+    }
+
+    #[tokio::test]
+    async fn the_check_says_when_an_update_would_overwrite_a_change_made_after_the_deploy() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let check = |body: CreatePipelineRequest| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                validate_pipeline(Some(resources), None, None, ada, body)
+                    .await
+                    .expect("an answer")
+            }
+        };
+
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            body.clone(),
+        )
+        .await
+        .expect("created");
+        let same = check(body.clone()).await;
+        assert_eq!(same.modified, None, "nothing changed since the deploy");
+
+        // The form or the YAML editor changes it; the next deploy would overwrite that.
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            update_body("select 2"),
+        )
+        .await
+        .expect("updated");
+        let drifted = check(body.clone()).await;
+        assert_eq!(drifted.action.as_deref(), Some("update"));
+        assert_eq!(drifted.modified, Some(true));
+
+        // A create has nothing to overwrite, and a pipeline no deploy touched has no baseline.
+        let mut fresh = create_body("other", "analytics", "select 1");
+        fresh.provenance = body.provenance.clone();
+        assert_eq!(check(fresh).await.modified, None);
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("by-hand", "analytics", "select 1"),
+        )
+        .await
+        .expect("created");
+        let by_hand = check(create_body("by-hand", "analytics", "select 2")).await;
+        assert_eq!(by_hand.modified, None);
+
+        // The deploy itself clears it.
+        let mut deploy = update_body("select 1");
+        deploy.provenance = body.provenance.clone();
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            deploy,
+        )
+        .await
+        .expect("updated");
+        assert_eq!(check(body).await.modified, None);
+    }
+
+    #[tokio::test]
+    async fn an_update_replaces_the_stamp_when_it_names_one_and_keeps_it_when_it_does_not() {
+        let mut stored = nova_pipeline("daily-trips", "analytics");
+        stamp_provenance(
+            &mut stored,
+            &provenance("shop-etl", "prod", Some("aaaaaaa")),
+            "ada",
+        );
+        let resources = memory_with(&[("daily-trips", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        // The check: the same stamp is no change, another commit is, and saying nothing is not.
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+        let same = validate_pipeline(Some(&resources), None, None, &ada, body.clone())
+            .await
+            .expect("an answer");
+        assert!(same.changes.is_empty(), "{:?}", same.changes);
+        body.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
+        let newer = validate_pipeline(Some(&resources), None, None, &ada, body.clone())
+            .await
+            .expect("an answer");
+        assert_eq!(newer.changes, vec!["deployment"]);
+        body.provenance = None;
+        let silent = validate_pipeline(Some(&resources), None, None, &ada, body)
+            .await
+            .expect("an answer");
+        assert!(silent.changes.is_empty());
+
+        // The write: no stamp in the body leaves the stored one alone.
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            update_body("select 2"),
+        )
+        .await
+        .expect("updated");
+        let kept = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(kept["metadata"]["labels"]["stardelt.io/target"], "prod");
+        assert_eq!(
+            kept["metadata"]["annotations"]["stardelt.io/revision"],
+            "aaaaaaa"
+        );
+
+        // A stamp in the body replaces it, and a stamp without a commit removes the old commit.
+        let mut deploy = update_body("select 3");
+        deploy.provenance = Some(provenance("shop-etl", "dev", None));
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            deploy,
+        )
+        .await
+        .expect("updated");
+        let replaced = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(replaced["metadata"]["labels"]["stardelt.io/target"], "dev");
+        assert!(
+            replaced["metadata"]["annotations"]
+                .get("stardelt.io/revision")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_rechecks_the_principal() {
+        let namespace = crate::cluster::namespace();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        // The principal exists but stopped being ready.
+        let resources = memory_with(
+            &[("smoke", nova_pipeline("smoke", "analytics"))],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(false)),
+            )],
+        );
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            update_body("select 2"),
+        )
+        .await
+        .expect_err("not ready any more");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), NOT_READY_MESSAGE);
+        assert_eq!(
+            stored_pipeline(&resources, "smoke").await.unwrap()["spec"]["tasks"][0]["sql"],
+            "select 1"
+        );
+
+        // The principal is gone (an administrator deleted it).
+        let resources = memory_with(&[("smoke", nova_pipeline("smoke", "analytics"))], &[]);
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            update_body("select 2"),
+        )
+        .await
+        .expect_err("no principal");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), missing_principal_sentence("analytics"));
+    }
+
+    #[tokio::test]
+    async fn delete_removes_only_nova_managed_pipelines_the_caller_may_act_on() {
+        let mut legacy = nova_pipeline("legacy", "analytics");
+        legacy["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let resources = memory_with(
+            &[
+                ("mine", nova_pipeline("mine", "analytics")),
+                ("legacy", legacy),
+                ("foreign", nova_pipeline("foreign", "finance")),
+            ],
+            &[],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        delete_pipeline(Some(&resources), &ada, &namespace, "mine")
+            .await
+            .expect("the owner group deletes its own Nova pipeline");
+        assert!(stored_pipeline(&resources, "mine").await.is_none());
+        let error = delete_pipeline(Some(&resources), &ada, &namespace, "mine")
+            .await
+            .expect_err("a deleted pipeline is gone");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+
+        let error = delete_pipeline(Some(&resources), &ada, &namespace, "legacy")
+            .await
+            .expect_err("kubectl's pipeline is not Nova's to delete");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "this pipeline is managed outside Nova (kubectl or Git); change it there"
+        );
+        assert!(
+            stored_pipeline(&resources, "legacy").await.is_some(),
+            "a refused delete removes nothing"
+        );
+
+        let error = delete_pipeline(Some(&resources), &admin(), &namespace, "legacy")
+            .await
+            .expect_err("an administrator does not delete somebody's manifest either");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert!(stored_pipeline(&resources, "legacy").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_of_a_hidden_pipeline_is_404() {
+        let resources = memory_with(&[("foreign", nova_pipeline("foreign", "finance"))], &[]);
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let error = delete_pipeline(Some(&resources), &ada, &namespace, "foreign")
+            .await
+            .expect_err("another group's pipeline");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
+        assert!(
+            stored_pipeline(&resources, "foreign").await.is_some(),
+            "a hidden pipeline is not deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn principals_route_reports_each_group() {
+        let resources = memory_with(
+            &[],
+            &[
+                (
+                    "pipeline-analytics",
+                    service_principal("pipeline-analytics", "analytics", Some(true)),
+                ),
+                (
+                    "pipeline-finance",
+                    service_principal("pipeline-finance", "finance", Some(false)),
+                ),
+            ],
+        );
+        let who = who("sub-ada", &["analytics", "finance", "ops"], false);
+
+        let answer = principal_views(Some(&resources), &who)
+            .await
+            .expect("the principals are readable");
+        assert_eq!(
+            answer.groups,
+            [
+                PrincipalView {
+                    group: "analytics".into(),
+                    principal: Some("pipeline-analytics".into()),
+                    ready: true,
+                    message: None,
+                },
+                PrincipalView {
+                    group: "finance".into(),
+                    principal: Some("pipeline-finance".into()),
+                    ready: false,
+                    message: Some(NOT_READY_MESSAGE.into()),
+                },
+                PrincipalView {
+                    group: "ops".into(),
+                    principal: None,
+                    ready: false,
+                    message: Some(missing_principal_sentence("ops")),
+                },
+            ],
+            "one entry per group, sorted, with the sentence of the ticket"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_principals_route_is_group_scoped() {
+        let resources = memory_with(
+            &[],
+            &[
+                (
+                    "pipeline-analytics",
+                    service_principal("pipeline-analytics", "analytics", Some(true)),
+                ),
+                (
+                    "collector-finance",
+                    service_principal("collector-finance", "finance", Some(false)),
+                ),
+            ],
+        );
+        let who = who("sub-ada", &["analytics"], false);
+        let answer = service_principal_views(Some(&resources), &who)
+            .await
+            .expect("the service principals are readable");
+        assert_eq!(answer.principals.len(), 1);
+        let view = &answer.principals[0];
+        assert_eq!(view.name, "pipeline-analytics");
+        assert_eq!(view.owner_group, "analytics");
+        assert_eq!(view.purpose, "pipeline");
+        assert!(view.audiences.is_empty());
+        assert!(view.ready);
+        assert_eq!(view.message, None);
+    }
+
+    #[tokio::test]
+    async fn service_principals_route_shows_everything_to_an_administrator() {
+        let resources = memory_with(
+            &[],
+            &[
+                (
+                    "pipeline-analytics",
+                    service_principal("pipeline-analytics", "analytics", Some(true)),
+                ),
+                (
+                    "collector-finance",
+                    service_principal("collector-finance", "finance", Some(false)),
+                ),
+            ],
+        );
+        let answer = service_principal_views(Some(&resources), &admin())
+            .await
+            .expect("the service principals are readable");
+        let names: Vec<&str> = answer
+            .principals
+            .iter()
+            .map(|principal| principal.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["collector-finance", "pipeline-analytics"]);
+    }
+
+    #[tokio::test]
+    async fn service_principals_route_reports_purpose_and_why_not_ready() {
+        let principal = json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": {
+                "name": "collector-analytics",
+                "namespace": crate::cluster::namespace(),
+            },
+            "spec": {
+                "ownerGroup": "analytics",
+                "purpose": "collector",
+                "audiences": ["trino", "lakekeeper"]
+            },
+            "status": {
+                "ready": false,
+                "conditions": [{
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "Pending",
+                    "message": NOT_READY_MESSAGE,
+                }],
+            }
+        });
+        let resources = memory_with(&[], &[("collector-analytics", principal)]);
+        let who = who("sub-ada", &["analytics"], false);
+        let answer = service_principal_views(Some(&resources), &who)
+            .await
+            .expect("the service principals are readable");
+        assert_eq!(answer.principals.len(), 1);
+        let view = &answer.principals[0];
+        assert_eq!(view.purpose, "collector");
+        assert_eq!(view.audiences, vec!["trino", "lakekeeper"]);
+        assert!(!view.ready);
+        assert_eq!(view.message.as_deref(), Some(NOT_READY_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn audit_has_lengths_not_text() {
+        let resources = analytics_ready();
+        let actor = who("sub-audit-210", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let limiter = create_limiter();
+        const CANARY: &str = "select 'canary-7f3a'";
+        let _ = audit::test_sink::take_for("sub-audit-210");
+
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &limiter,
+            &actor,
+            create_body("canary", "analytics", CANARY),
+        )
+        .await
+        .expect("create");
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &actor,
+            &namespace,
+            "canary",
+            update_body(CANARY),
+        )
+        .await
+        .expect("update");
+        delete_pipeline(Some(&resources), &actor, &namespace, "canary")
+            .await
+            .expect("delete");
+
+        let records = audit::test_sink::take_for("sub-audit-210");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.action.as_str())
+                .collect::<Vec<_>>(),
+            ["create", "update", "delete"]
+        );
+        assert_eq!(
+            records[0].statement_chars,
+            Some(CANARY.chars().count()),
+            "the create records the statement's length"
+        );
+        assert_eq!(records[0].schedule.as_deref(), Some("0 3 * * *"));
+        assert_eq!(
+            records[1].statement_chars,
+            Some(CANARY.chars().count()),
+            "the update records the statement's length"
+        );
+        assert_eq!(
+            records[2].statement_chars, None,
+            "a delete has no statement"
+        );
+        let serialized = format!("{records:?}");
+        assert!(
+            !serialized.contains("canary-7f3a"),
+            "the statement is never audited: {serialized}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_down_is_503_and_responses_are_not_cacheable() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+        let app = router()
+            .with_state(test_state(None, airflow, store))
+            .layer(Extension(principal(admin())));
+
+        let create = json!({
+            "name": "nightly",
+            "ownerGroup": "stardelt-admins",
+            "sql": "select 1",
+            "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" }
+        });
+        let update = json!({ "sql": "select 2", "schedule": null });
+        let routes: [(&str, String, Option<Value>); 4] = [
+            ("POST", "/pipelines".to_string(), Some(create)),
+            ("GET", "/pipelines/principals".to_string(), None),
+            (
+                "PUT",
+                format!("/pipelines/{namespace}/nightly"),
+                Some(update),
+            ),
+            ("DELETE", format!("/pipelines/{namespace}/nightly"), None),
+        ];
+        for (method, uri, body) in routes {
+            let mut request = Request::builder().method(method).uri(&uri);
+            let body = match body {
+                Some(body) => {
+                    request = request.header("content-type", "application/json");
+                    Body::from(body.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = app
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{method} {uri} is never cached"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "no cluster connection", "{method} {uri}");
+        }
+
+        // The success statuses through the router and the real client (a fake API server).
+        let kube = fake_kube::start_with(
+            vec![],
+            vec![service_principal(
+                "pipeline-analytics",
+                "analytics",
+                Some(true),
+            )],
+        )
+        .await;
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let app = router()
+            .with_state(test_state(Some(kube), airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))));
+
+        // principals: 200 and the ready entry.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines/principals")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["groups"][0]["principal"], "pipeline-analytics");
+        assert_eq!(value["groups"][0]["ready"], true);
+
+        // create: 201 with the new pipeline as `loading`.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipelines")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "nightly",
+                            "ownerGroup": "analytics",
+                            "sql": "select 1",
+                            "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["name"], "nightly");
+        assert_eq!(value["loaded"], false);
+        assert_eq!(value["state"], "loading");
+
+        // update: 200.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/pipelines/{namespace}/nightly"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "sql": "select 2", "schedule": null }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schedule"], Value::Null);
+
+        // delete: 204 and no body.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/pipelines/{namespace}/nightly"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty(), "204 carries no body");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schedule options, the statement check and the next-runs preview (#223)
+    // -----------------------------------------------------------------------
+
+    /// A state whose engine is the fake, for the two routes that need no cluster.
+    async fn check_state(trino_url: &str) -> Arc<AppState> {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        test_state_at(None, airflow, store, trino_url)
+    }
+
+    fn check_body(sql: &str) -> CheckStatementRequest {
+        CheckStatementRequest {
+            sql: sql.into(),
+            params: BTreeMap::new(),
+        }
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn params_and_options_written_to_the_resource() {
+        let resources = analytics_ready();
+        let mut body = create_body("daily-trips", "analytics", "select '${params.day}'");
+        body.params = params(&[("day", "2026-10-01")]);
+        body.options = Some(PipelineOptions {
+            retries: Some(3),
+            backoff_minutes: Some(10),
+            timeout_minutes: Some(360),
+            concurrency: Some("Allow".into()),
+        });
+
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &who("sub-ada", &["analytics"], false),
+            body,
+        )
+        .await
+        .expect("the pipeline is created");
+
+        let stored = stored_pipeline(&resources, "daily-trips")
+            .await
+            .expect("the resource is written");
+        assert_eq!(
+            stored["spec"]["params"],
+            json!({ "day": "2026-10-01" }),
+            "the parameter table is written as given: {stored}"
+        );
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 3, "backoff": "10m" }),
+            "the CRD's retries shape: {stored}"
+        );
+        assert_eq!(
+            stored["spec"]["timeout"],
+            json!("360m"),
+            "the loader's duration grammar: {stored}"
+        );
+        assert_eq!(stored["spec"]["concurrency"], json!("Allow"));
+        assert_eq!(
+            stored["spec"]["tasks"][0]["sql"], "select '${params.day}'",
+            "the statement is stored unexpanded: the loader fills it when the run starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn defaults_when_omitted() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("plain", "analytics", "select 1"),
+        )
+        .await
+        .expect("a create without params and options is fine");
+
+        let stored = stored_pipeline(&resources, "plain").await.expect("written");
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 1, "backoff": "5m" })
+        );
+        assert_eq!(stored["spec"]["timeout"], json!("120m"));
+        assert_eq!(stored["spec"]["concurrency"], json!("Forbid"));
+        assert!(
+            stored["spec"].get("params").is_none(),
+            "no parameter table is written when none is given: {stored}"
+        );
+
+        // The update body describes the whole editable state: an omitted option is the default,
+        // never "keep whatever was there".
+        let mut update = update_body("select 2");
+        update.options = Some(PipelineOptions {
+            retries: Some(4),
+            ..PipelineOptions::default()
+        });
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &crate::cluster::namespace(),
+            "plain",
+            update,
+        )
+        .await
+        .expect("the update succeeds");
+        let stored = stored_pipeline(&resources, "plain").await.expect("written");
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 4, "backoff": "5m" })
+        );
+        assert_eq!(stored["spec"]["timeout"], json!("120m"));
+        assert_eq!(stored["spec"]["concurrency"], json!("Forbid"));
+    }
+
+    #[tokio::test]
+    async fn option_ranges_refused_with_sentences() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+        let too_many: BTreeMap<String, String> = (0..17)
+            .map(|index| (format!("p{index}"), "1".to_string()))
+            .collect();
+        let long_value = "x".repeat(MAX_PARAM_VALUE_CHARS + 1);
+
+        let cases: Vec<(BTreeMap<String, String>, PipelineOptions, &str)> = vec![
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    retries: Some(-1),
+                    ..PipelineOptions::default()
+                },
+                RETRIES_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    retries: Some(6),
+                    ..PipelineOptions::default()
+                },
+                RETRIES_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    backoff_minutes: Some(0),
+                    ..PipelineOptions::default()
+                },
+                BACKOFF_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    backoff_minutes: Some(61),
+                    ..PipelineOptions::default()
+                },
+                BACKOFF_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    timeout_minutes: Some(0),
+                    ..PipelineOptions::default()
+                },
+                TIMEOUT_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    timeout_minutes: Some(721),
+                    ..PipelineOptions::default()
+                },
+                TIMEOUT_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    concurrency: Some("Replace".into()),
+                    ..PipelineOptions::default()
+                },
+                CONCURRENCY_RULE,
+            ),
+            (
+                params(&[("Day", "1")]),
+                PipelineOptions::default(),
+                PARAM_NAMES,
+            ),
+            (
+                params(&[("day", &long_value)]),
+                PipelineOptions::default(),
+                PARAM_VALUE_TOO_LONG,
+            ),
+            (
+                params(&[("day", "a\0b")]),
+                PipelineOptions::default(),
+                PARAM_VALUE_NUL,
+            ),
+            (too_many, PipelineOptions::default(), TOO_MANY_PARAMS),
+        ];
+
+        for (index, (parameters, options, sentence)) in cases.into_iter().enumerate() {
+            let mut body = create_body(&format!("refused-{index}"), "analytics", "select 1");
+            body.params = parameters;
+            body.options = Some(options);
+            let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
+                .await
+                .expect_err("the option is out of range");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sentence}");
+            assert_eq!(error.message(), sentence);
+        }
+        assert!(
+            resources.list().await.unwrap().is_empty(),
+            "a refused option writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_placeholder_refused() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        for (sql, params, sentence) in [
+            (
+                "select '${params.missing}'",
+                params(&[("day", "1")]),
+                "unknown placeholder ${params.missing}",
+            ),
+            (
+                "select '${run.when}'",
+                BTreeMap::new(),
+                "unknown placeholder ${run.when}",
+            ),
+        ] {
+            let mut body = create_body("typo", "analytics", sql);
+            body.params = params;
+            let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
+                .await
+                .expect_err("the loader would fail this run");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sql}");
+            assert_eq!(error.message(), sentence, "{sql}");
+        }
+        assert!(resources.list().await.unwrap().is_empty());
+
+        // The three the loader fills pass, and so does a `${…}` its regex does not match (it
+        // leaves such text in the statement, so Nova must not refuse it).
+        let statement = "select '${run.date}', '${run.id}', '${params.day}', '${a-b}'";
+        let mut body = create_body("defined", "analytics", statement);
+        body.params = params(&[("day", "2026-10-01")]);
+        create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
+            .await
+            .expect("every placeholder is one the loader fills");
+        let stored = stored_pipeline(&resources, "defined")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], statement);
+    }
+
+    #[tokio::test]
+    async fn detail_returns_params_and_options() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        smoke["spec"]["params"] = json!({ "day": "2026-10-01" });
+        smoke["spec"]["retries"] = json!({ "attempts": 3, "backoff": "30m" });
+        smoke["spec"]["timeout"] = json!("6h");
+        smoke["spec"]["concurrency"] = json!("Allow");
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(
+            detail.params.get("day").map(String::as_str),
+            Some("2026-10-01")
+        );
+        assert_eq!(
+            detail.options,
+            PipelineOptionsView {
+                retries: 3,
+                backoff_minutes: 30,
+                timeout_minutes: 360,
+                concurrency: "Allow".into(),
+            }
+        );
+
+        // A resource without the fields answers the defaults, so the dialog always has values.
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(
+            detail.options,
+            PipelineOptionsView {
+                retries: 2,
+                backoff_minutes: 5,
+                // `spec.timeout` is absent in the fixture: the default two hours.
+                timeout_minutes: 120,
+                concurrency: "Forbid".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn check_sends_explain_never_analyze() {
+        let (trino, fake) = fake_trino::start(None).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        let answer = check_statement(&state, &ada, check_body("select 1"))
+            .await
+            .expect("the engine accepts the statement");
+        assert_eq!(
+            answer,
+            CheckStatementResponse {
+                checked: true,
+                ok: Some(true),
+                message: None,
+            }
+        );
+
+        let fake = fake.lock().expect("fake trino");
+        assert_eq!(fake.statements, vec!["EXPLAIN select 1".to_string()]);
+        assert_eq!(fake.sources, vec![SOURCE_SCHEDULE_CHECK.to_string()]);
+        assert_eq!(
+            fake.users,
+            vec!["sub-ada".to_string()],
+            "the check runs as the caller, so the engine's query log names them"
+        );
+        assert!(
+            !fake.statements[0].to_ascii_uppercase().contains("ANALYZE"),
+            "never EXPLAIN ANALYZE: it would run the statement"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_fills_placeholders() {
+        let (trino, fake) = fake_trino::start(None).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        let statement = "select '${run.date}' as d, '${run.id}' as i, '${params.day}' as p";
+        let mut body = check_body(statement);
+        body.params = params(&[("day", "2026-01-01")]);
+        check_statement(&state, &ada, body)
+            .await
+            .expect("the placeholders are filled");
+
+        let today = now_utc().format("%Y-%m-%d").to_string();
+        let fake = fake.lock().expect("fake trino");
+        assert_eq!(
+            fake.statements,
+            vec![format!(
+                "EXPLAIN select '{today}' as d, 'check' as i, '2026-01-01' as p"
+            )],
+            "run.date is today (UTC), run.id is `check`, params as given"
+        );
+        assert!(
+            !fake.statements[0].contains("${"),
+            "no placeholder reaches the engine: {}",
+            fake.statements[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn check_skips_unsupported_kinds() {
+        let (trino, fake) = fake_trino::start(None).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        for sql in [
+            "drop table x",
+            "selec 1",
+            "show tables",
+            "create table t (a int)",
+            "grant select on t to public",
+        ] {
+            let answer = check_statement(&state, &ada, check_body(sql))
+                .await
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message()));
+            assert_eq!(
+                answer,
+                CheckStatementResponse {
+                    checked: false,
+                    ok: None,
+                    message: None,
+                },
+                "{sql} cannot be checked here"
+            );
+        }
+        assert!(
+            fake.lock().expect("fake trino").statements.is_empty(),
+            "a kind of statement Nova cannot check never reaches the engine"
+        );
+
+        // `CREATE … AS …` has a plan, so it is checked.
+        let answer = check_statement(&state, &ada, check_body("CREATE TABLE t AS SELECT 1"))
+            .await
+            .expect("a create-from-query is checkable");
+        assert_eq!(answer.ok, Some(true));
+        assert_eq!(
+            fake.lock().expect("fake trino").statements,
+            vec!["EXPLAIN CREATE TABLE t AS SELECT 1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn check_returns_engine_message_on_error() {
+        let error = json!({
+            "errorName": "SYNTAX_ERROR",
+            "message": "line 1:1: mismatched input 'selec'. Expecting: 'ALTER', 'ANALYZE', ...",
+        });
+        let (trino, _fake) = fake_trino::start(Some(error)).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        let answer = check_statement(&state, &ada, check_body("select 1"))
+            .await
+            .expect("a refused statement is an answer, not a failure");
+        assert!(answer.checked);
+        assert_eq!(answer.ok, Some(false));
+        assert_eq!(
+            answer.message.as_deref(),
+            Some(
+                "SYNTAX_ERROR: line 1:1: mismatched input 'selec'. Expecting: 'ALTER', 'ANALYZE', ..."
+            ),
+            "the engine's own sentence reaches the dialog"
+        );
+        assert!(
+            !answer
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("failureInfo"),
+            "no stack trace in an answer"
+        );
+
+        // An engine that does not answer is 502 (U12), not "the engine said no".
+        let state = check_state("http://127.0.0.1:1").await;
+        let error = check_statement(&state, &ada, check_body("select 1"))
+            .await
+            .expect_err("the engine is unreachable");
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error.message(), crate::trino::ENGINE_UNREACHABLE);
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_a_new_pipeline_and_writes_nothing() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let answer = validate_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            create_body("daily-trips", "analytics", "select 1"),
+        )
+        .await
+        .expect("an answer");
+
+        assert!(answer.ok);
+        assert_eq!(answer.action.as_deref(), Some("create"));
+        assert!(answer.errors.is_empty());
+        assert_eq!(answer.next_runs.len(), 5, "the schedule is previewed");
+        assert!(
+            resources.list().await.unwrap().is_empty(),
+            "a check writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_says_what_create_says_when_a_rule_refuses() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let mut bad_cron = create_body("daily-trips", "analytics", "select 1");
+        bad_cron.schedule = Some(ScheduleRequest {
+            cron: "not a cron".into(),
+            timezone: "Europe/Berlin".into(),
+        });
+        for body in [
+            create_body("smoke", "finance", "select 1"),
+            create_body("daily-trips", "analytics", "  "),
+            bad_cron,
+        ] {
+            let refusal = create_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &create_limiter(),
+                &ada,
+                body.clone(),
+            )
+            .await
+            .expect_err("create refuses it");
+            let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
+                .await
+                .expect("a refusal is an answer, not an error");
+            assert!(!answer.ok);
+            assert_eq!(answer.action, None);
+            assert!(answer.next_runs.is_empty());
+            assert_eq!(
+                answer.errors,
+                vec![ValidationIssue {
+                    message: refusal.message().to_string()
+                }]
+            );
+        }
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_names_an_update_only_for_a_pipeline_the_caller_may_change() {
+        let principals = [
+            (
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            ),
+            (
+                "pipeline-finance",
+                service_principal("pipeline-finance", "finance", Some(true)),
+            ),
+        ];
+        let mut legacy = nova_pipeline("legacy", "analytics");
+        legacy["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let resources = memory_with(
+            &[
+                ("daily-trips", nova_pipeline("daily-trips", "analytics")),
+                ("theirs", nova_pipeline("theirs", "finance")),
+                ("legacy", legacy),
+            ],
+            &principals,
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let own = validate_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            create_body("daily-trips", "analytics", "select 2"),
+        )
+        .await
+        .expect("an answer");
+        assert!(own.ok);
+        assert_eq!(own.action.as_deref(), Some("update"));
+
+        for (name, group, sentence) in [
+            (
+                "theirs",
+                "analytics",
+                "a pipeline with this name already exists",
+            ),
+            (
+                "legacy",
+                "analytics",
+                "this pipeline is managed outside Nova (kubectl or Git); change it there",
+            ),
+        ] {
+            let answer = validate_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &ada,
+                create_body(name, group, "select 2"),
+            )
+            .await
+            .expect("an answer");
+            assert!(!answer.ok, "{name}");
+            assert_eq!(answer.errors[0].message, sentence, "{name}");
+        }
+
+        // A member of both groups still cannot move a pipeline to the other group.
+        let both = who("sub-bob", &["analytics", "finance"], false);
+        let moved = validate_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &both,
+            create_body("theirs", "analytics", "select 2"),
+        )
+        .await
+        .expect("an answer");
+        assert!(!moved.ok);
+        assert_eq!(
+            moved.errors[0].message,
+            "the group of an existing pipeline cannot change"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_lists_what_an_update_would_change() {
+        let resources = memory_with(
+            &[("daily-trips", nova_pipeline("daily-trips", "analytics"))],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let tuned = PipelineOptions {
+            retries: Some(3),
+            ..PipelineOptions::default()
+        };
+
+        let same = create_body("daily-trips", "analytics", "select 1");
+        let mut unscheduled = same.clone();
+        unscheduled.schedule = None;
+        let mut retried = same.clone();
+        retried.options = Some(tuned.clone());
+        let mut everything = create_body("daily-trips", "analytics", "select 2");
+        everything.schedule = None;
+        everything.options = Some(tuned);
+        let mut parametrised = create_body("daily-trips", "analytics", "select '${params.day}'");
+        parametrised.params = BTreeMap::from([("day".to_string(), "2026-11-01".to_string())]);
+
+        for (body, expected) in [
+            (same, vec![]),
+            (
+                create_body("daily-trips", "analytics", "select 2"),
+                vec!["statement"],
+            ),
+            (unscheduled, vec!["schedule"]),
+            (retried, vec!["options"]),
+            (everything, vec!["statement", "schedule", "options"]),
+            (parametrised, vec!["statement", "params"]),
+        ] {
+            let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
+                .await
+                .expect("an answer");
+            assert!(answer.ok, "{answer:?}");
+            assert_eq!(answer.action.as_deref(), Some("update"));
+            assert_eq!(answer.changes, expected);
+        }
+        assert_eq!(
+            stored_pipeline(&resources, "daily-trips").await.unwrap()["spec"]["tasks"][0]["sql"],
+            "select 1",
+            "a check writes nothing"
+        );
+
+        let new = validate_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            create_body("other", "analytics", "select 1"),
+        )
+        .await
+        .expect("an answer");
+        assert_eq!(new.action.as_deref(), Some("create"));
+        assert!(
+            new.changes.is_empty(),
+            "a create changes nothing that exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_refuses_the_updates_that_update_refuses() {
+        let mut notebook = nova_pipeline("report", "analytics");
+        notebook["spec"]["tasks"] = json!([{
+            "name": "run",
+            "kind": "notebook",
+            "config": { "notebook": "report.ipynb", "objectVersion": "v1", "params": "{}" }
+        }]);
+        let mut two_tasks = nova_pipeline("two-tasks", "analytics");
+        two_tasks["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "sql", "sql": "select 1" },
+            { "name": "check", "kind": "sql", "sql": "select 2" }
+        ]);
+        let resources = memory_with(
+            &[("report", notebook), ("two-tasks", two_tasks)],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        for name in ["report", "two-tasks"] {
+            let refusal = update_pipeline(
+                Some(&resources),
+                None,
+                None,
+                None,
+                &ada,
+                &namespace,
+                name,
+                update_body("select 2"),
+            )
+            .await
+            .expect_err("update refuses it");
+            let answer = validate_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &ada,
+                create_body(name, "analytics", "select 2"),
+            )
+            .await
+            .expect("a refusal is an answer");
+            assert!(!answer.ok, "{name}");
+            assert_eq!(answer.action, None, "{name}");
+            assert!(answer.changes.is_empty(), "{name}");
+            assert_eq!(answer.errors[0].message, refusal.message(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_answers_an_anonymous_caller_as_create_does() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let (trino, _fake) = fake_trino::start(None).await;
+        let app = router().with_state(test_state_at(None, airflow, store, &trino));
+        let body = json!({ "name": "daily-trips", "ownerGroup": "analytics", "sql": "select 1" });
+
+        let mut answers = Vec::new();
+        for uri in ["/pipelines", "/pipelines/validate"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{uri}"
+            );
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            answers.push((status, bytes));
+        }
+        assert!(
+            answers[0].0.is_client_error() || answers[0].0 == StatusCode::SERVICE_UNAVAILABLE,
+            "create refuses an anonymous caller: {}",
+            answers[0].0
+        );
+        assert_eq!(answers[0], answers[1], "validate refuses it the same way");
+    }
+
+    fn analytics_principal() -> [(&'static str, Value); 1] {
+        [(
+            "pipeline-analytics",
+            service_principal("pipeline-analytics", "analytics", Some(true)),
+        )]
+    }
+
+    #[tokio::test]
+    async fn spec_is_the_document_that_validate_accepts_unchanged() {
+        let mut stored = nova_pipeline("daily-trips", "analytics");
+        stored["spec"]["params"] = json!({ "day": "2026-11-01" });
+        stored["spec"]["tasks"][0]["sql"] = json!("select '${params.day}'");
+        let resources = memory_with(&[("daily-trips", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let answer = pipeline_spec(Some(&resources), &ada, &namespace, "daily-trips")
+            .await
+            .expect("visible to its group");
+
+        assert_eq!(answer.managed_by, "nova");
+        assert!(answer.editable);
+        assert_eq!(answer.resource_version.as_deref(), Some("7"));
+        let document = answer.document;
+        assert_eq!(document.name, "daily-trips");
+        assert_eq!(document.owner_group.as_deref(), Some("analytics"));
+        assert_eq!(document.sql.as_deref(), Some("select '${params.day}'"));
+        assert_eq!(document.notebook, None);
+        assert_eq!(
+            document.schedule,
+            Some(ScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "Europe/Berlin".into()
+            })
+        );
+        assert_eq!(
+            document.params,
+            BTreeMap::from([("day".to_string(), "2026-11-01".to_string())])
+        );
+        assert_eq!(document.options, default_options());
+
+        // Sent back as it is, the document is an update that changes nothing.
+        let body = CreatePipelineRequest {
+            name: document.name.clone(),
+            owner_group: document.owner_group.clone().unwrap(),
+            sql: document.sql.clone().unwrap(),
+            notebook: None,
+            tasks: None,
+            schedule: document.schedule.clone(),
+            params: document.params.clone(),
+            options: Some(PipelineOptions {
+                retries: Some(document.options.retries),
+                backoff_minutes: Some(document.options.backoff_minutes),
+                timeout_minutes: Some(document.options.timeout_minutes),
+                concurrency: Some(document.options.concurrency.clone()),
+            }),
+            provenance: None,
+            notify: None,
+        };
+        let verdict = validate_pipeline(Some(&resources), None, None, &ada, body)
+            .await
+            .expect("an answer");
+        assert!(verdict.ok, "{verdict:?}");
+        assert_eq!(verdict.action.as_deref(), Some("update"));
+        assert!(verdict.changes.is_empty(), "{:?}", verdict.changes);
+    }
+
+    #[tokio::test]
+    async fn spec_reads_a_notebook_and_a_zone_less_schedule() {
+        let mut stored = nova_pipeline("report", "analytics");
+        stored["spec"]["tasks"] = json!([{
+            "name": "run",
+            "kind": "notebook",
+            "config": {
+                "notebook": "report.ipynb",
+                "objectVersion": "v1",
+                "params": "{\"days\":\"7\"}"
+            }
+        }]);
+        stored["spec"]["schedule"] = json!({ "cron": "0 6 * * *" });
+        let resources = memory_with(&[("report", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let answer = pipeline_spec(
+            Some(&resources),
+            &ada,
+            &crate::cluster::namespace(),
+            "report",
+        )
+        .await
+        .expect("visible");
+
+        assert!(answer.editable);
+        assert_eq!(answer.document.sql, None);
+        assert_eq!(
+            answer.document.notebook,
+            Some(NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: "v1".into(),
+                params: BTreeMap::from([("days".to_string(), "7".to_string())]),
+            })
+        );
+        assert_eq!(
+            answer.document.schedule,
+            Some(ScheduleRequest {
+                cron: "0 6 * * *".into(),
+                timezone: "UTC".into()
+            }),
+            "no zone means UTC"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_shows_a_pipeline_it_does_not_let_you_edit() {
+        let mut legacy = nova_pipeline("legacy", "analytics");
+        legacy["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let mut two_tasks = nova_pipeline("two-tasks", "analytics");
+        two_tasks["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "sql", "sql": "select 1" },
+            { "name": "check", "kind": "sql", "sql": "select 2" }
+        ]);
+        let resources = memory_with(
+            &[("legacy", legacy), ("two-tasks", two_tasks)],
+            &analytics_principal(),
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let outside = pipeline_spec(Some(&resources), &ada, &namespace, "legacy")
+            .await
+            .expect("readable");
+        assert_eq!(outside.managed_by, "other");
+        assert!(!outside.editable, "Nova did not write it");
+        assert_eq!(outside.document.sql.as_deref(), Some("select 1"));
+
+        let odd = pipeline_spec(Some(&resources), &ada, &namespace, "two-tasks")
+            .await
+            .expect("readable");
+        assert_eq!(odd.managed_by, "nova");
+        assert!(!odd.editable, "the form edits exactly one run task");
+        assert_eq!(odd.document.sql, None, "no statement is claimed for it");
+        assert_eq!(odd.document.name, "two-tasks");
+    }
+
+    #[tokio::test]
+    async fn notebook_usage_lists_only_this_groups_pipelines_for_the_notebook() {
+        let notebook = |name: &str, group: &str, file: &str, version: &str| {
+            pipeline_resource(
+                name,
+                group,
+                &Statement::Notebook {
+                    name: file.to_string(),
+                    object_version: version.to_string(),
+                    params: Default::default(),
+                },
+                Some(&("0 3 * * *".to_string(), "UTC".to_string())),
+                &Default::default(),
+                &default_options(),
+                "ann",
+                None,
+            )
+        };
+        let resources = vec![
+            notebook("smoke-daily", "analytics", "smoke.ipynb", "v3"),
+            notebook("other-daily", "analytics", "other.ipynb", "v1"),
+            notebook("fin-daily", "finance", "smoke.ipynb", "v2"),
+        ];
+        let ann = who("sub-ann", &["analytics"], false);
+        let rows = notebook_usage_rows(&resources, &ann, "analytics", "smoke.ipynb");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "smoke-daily");
+        assert_eq!(rows[0].object_version, "v3");
+        assert_eq!(rows[0].cron.as_deref(), Some("0 3 * * *"));
+        // The finance pipeline runs the same file, but the notebook page is group-scoped.
+        assert!(notebook_usage_rows(&resources, &ann, "analytics", "fin-daily").is_empty());
+    }
+
+    #[tokio::test]
+    async fn spec_of_another_groups_pipeline_is_404_and_needs_no_scheduler() {
+        let resources = memory_with(
+            &[("daily-trips", nova_pipeline("daily-trips", "analytics"))],
+            &analytics_principal(),
+        );
+        let eve = who("sub-eve", &["finance"], false);
+        let error = pipeline_spec(
+            Some(&resources),
+            &eve,
+            &crate::cluster::namespace(),
+            "daily-trips",
+        )
+        .await
+        .expect_err("not hers");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+
+        let error = pipeline_spec(None, &eve, &crate::cluster::namespace(), "daily-trips")
+            .await
+            .expect_err("no cluster");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn spec_route_answers_an_anonymous_caller_as_detail_does() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let (trino, _fake) = fake_trino::start(None).await;
+        let app = router().with_state(test_state_at(None, airflow, store, &trino));
+
+        let mut answers = Vec::new();
+        for uri in [
+            "/pipelines/stardelt/daily",
+            "/pipelines/stardelt/daily/spec",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{uri}"
+            );
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            answers.push((status, bytes));
+        }
+        assert_ne!(answers[0].0, StatusCode::NOT_FOUND, "detail is routed");
+        assert_eq!(
+            answers[0], answers[1],
+            "the spec route refuses it the same way"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_without_a_cluster_is_503() {
+        let ada = who("sub-ada", &["analytics"], false);
+        let error = validate_pipeline(
+            None,
+            None,
+            None,
+            &ada,
+            create_body("x", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("no cluster, no answer");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn preview_next_runs_table() {
+        let now = "2026-10-20T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a fixed clock");
+        let table: [(&str, [&str; 5]); 4] = [
+            // Europe/Berlin: the clocks go back on 25 October, so the fifth run is CET.
+            (
+                "0 3 * * *",
+                [
+                    "2026-10-21T03:00:00+02:00",
+                    "2026-10-22T03:00:00+02:00",
+                    "2026-10-23T03:00:00+02:00",
+                    "2026-10-24T03:00:00+02:00",
+                    "2026-10-25T03:00:00+01:00",
+                ],
+            ),
+            (
+                "*/15 * * * *",
+                [
+                    "2026-10-20T14:15:00+02:00",
+                    "2026-10-20T14:30:00+02:00",
+                    "2026-10-20T14:45:00+02:00",
+                    "2026-10-20T15:00:00+02:00",
+                    "2026-10-20T15:15:00+02:00",
+                ],
+            ),
+            (
+                "0 9 * * 1-5",
+                [
+                    "2026-10-21T09:00:00+02:00",
+                    "2026-10-22T09:00:00+02:00",
+                    "2026-10-23T09:00:00+02:00",
+                    "2026-10-26T09:00:00+01:00",
+                    "2026-10-27T09:00:00+01:00",
+                ],
+            ),
+            (
+                "30 6 1 * *",
+                [
+                    "2026-11-01T06:30:00+01:00",
+                    "2026-12-01T06:30:00+01:00",
+                    "2027-01-01T06:30:00+01:00",
+                    "2027-02-01T06:30:00+01:00",
+                    "2027-03-01T06:30:00+01:00",
+                ],
+            ),
+        ];
+
+        for (cron, expected) in table {
+            let answer = preview_schedule(
+                PreviewScheduleRequest {
+                    cron: cron.into(),
+                    timezone: "Europe/Berlin".into(),
+                    count: None,
+                },
+                now,
+            )
+            .unwrap_or_else(|error| panic!("{cron}: {}", error.message()));
+            assert_eq!(
+                answer.runs,
+                expected
+                    .iter()
+                    .map(|run| (*run).to_string())
+                    .collect::<Vec<_>>(),
+                "{cron}"
+            );
+        }
+
+        // 02:30 does not exist on 29 March 2026 (the clocks jump 02:00 → 03:00): it is skipped.
+        let before_the_jump = "2026-03-28T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a fixed clock");
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "30 2 * * *".into(),
+                timezone: "Europe/Berlin".into(),
+                count: Some(3),
+            },
+            before_the_jump,
+        )
+        .expect("a valid cron");
+        assert_eq!(
+            answer.runs,
+            vec![
+                "2026-03-30T02:30:00+02:00".to_string(),
+                "2026-03-31T02:30:00+02:00".to_string(),
+                "2026-04-01T02:30:00+02:00".to_string(),
+            ]
+        );
+
+        // Both day fields restricted: a day matches when either does (croniter's rule).
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 4 1 * 1".into(),
+                timezone: "Europe/Berlin".into(),
+                count: Some(4),
+            },
+            now,
+        )
+        .expect("a valid cron");
+        assert_eq!(
+            answer.runs,
+            vec![
+                "2026-10-26T04:00:00+01:00".to_string(),
+                "2026-11-01T04:00:00+01:00".to_string(),
+                "2026-11-02T04:00:00+01:00".to_string(),
+                "2026-11-09T04:00:00+01:00".to_string(),
+            ]
+        );
+
+        // A cron that can never fire answers no runs (at most 366 days are searched), not an error.
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 0 31 2 *".into(),
+                timezone: "Europe/Berlin".into(),
+                count: Some(5),
+            },
+            now,
+        )
+        .expect("the cron itself is valid");
+        assert!(answer.runs.is_empty(), "31 February never comes");
+    }
+
+    #[test]
+    fn preview_rejects_what_create_rejects() {
+        let now = "2026-10-20T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a fixed clock");
+
+        for (cron, timezone, sentence) in [
+            ("* * * * *", "UTC", CRON_TOO_OFTEN),
+            ("0 3 * *", "UTC", CRON_FIELDS),
+            ("0 25 * * *", "UTC", CRON_RANGE),
+            ("0 3 * * *", "Mars/Olympus", "unknown timezone"),
+        ] {
+            let error = preview_schedule(
+                PreviewScheduleRequest {
+                    cron: cron.into(),
+                    timezone: timezone.into(),
+                    count: None,
+                },
+                now,
+            )
+            .unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{cron}",);
+            assert_eq!(error.message(), sentence, "{cron}");
+        }
+
+        let error = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "UTC".into(),
+                count: Some(11),
+            },
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), COUNT_RANGE);
+
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "UTC".into(),
+                count: Some(1),
+            },
+            now,
+        )
+        .expect("count 1 is fine");
+        assert_eq!(answer.runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn check_and_preview_need_a_signed_in_person() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let (trino, fake) = fake_trino::start(None).await;
+        let app = router().with_state(test_state_at(None, airflow, store, &trino));
+
+        for (uri, body) in [
+            ("/pipelines/check", json!({ "sql": "select 1" })),
+            (
+                "/pipelines/preview-schedule",
+                json!({ "cron": "0 3 * * *", "timezone": "Europe/Berlin" }),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "a refusal is never cached either: {uri}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "not signed in", "{uri}");
+        }
+        assert!(
+            fake.lock().expect("fake trino").statements.is_empty(),
+            "an anonymous caller never reaches the engine"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Notebook schedules (#237)
+    // -----------------------------------------------------------------------
+
+    /// A create body that schedules `notebook` at `version` for `group`, no statement.
+    fn notebook_body(
+        name: &str,
+        group: &str,
+        notebook: &str,
+        version: &str,
+    ) -> CreatePipelineRequest {
+        CreatePipelineRequest {
+            name: name.into(),
+            owner_group: group.into(),
+            sql: String::new(),
+            notebook: Some(NotebookRequest {
+                name: notebook.into(),
+                object_version: version.into(),
+                params: BTreeMap::new(),
+            }),
+            tasks: None,
+            schedule: Some(ScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "Europe/Berlin".into(),
+            }),
+            params: BTreeMap::new(),
+            options: None,
+            provenance: None,
+            notify: None,
+        }
+    }
+
+    fn update_notebook_body(notebook: &str, version: &str) -> UpdatePipelineRequest {
+        UpdatePipelineRequest {
+            sql: String::new(),
+            notebook: Some(NotebookRequest {
+                name: notebook.into(),
+                object_version: version.into(),
+                params: BTreeMap::new(),
+            }),
+            tasks: None,
+            schedule: None,
+            params: BTreeMap::new(),
+            options: None,
+            resource_version: None,
+            provenance: None,
+            notify: None,
+        }
+    }
+
+    /// A notebook pipeline Nova wrote, as a `head_version` needs nothing: the resource only.
+    fn stored_notebook_pipeline(name: &str, group: &str, notebook: &str, version: &str) -> Value {
+        let mut resource = pipeline_resource(
+            name,
+            group,
+            &Statement::Notebook {
+                name: notebook.into(),
+                object_version: version.into(),
+                params: "{}".into(),
+            },
+            Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+        );
+        resource["metadata"]["resourceVersion"] = json!("7");
+        resource
+    }
+
+    #[tokio::test]
+    async fn notebook_request_builds_the_notebook_task() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{\"nbformat\":4}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let mut body = notebook_body("nightly-report", "analytics", "report.ipynb", &version);
+        // Deliberately not sorted: the task's `params` must be, whatever the body's order.
+        body.notebook.as_mut().expect("notebook").params = BTreeMap::from([
+            ("region".to_string(), "eu".to_string()),
+            ("days".to_string(), "7".to_string()),
+        ]);
+
+        let view = create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("a notebook schedule");
+
+        assert!(!view.loaded, "the loader has not seen it yet");
+        assert_eq!(view.state, "loading");
+        assert_eq!(view.tasks.len(), 1);
+        assert_eq!(view.tasks[0].kind, "notebook");
+        assert_eq!(view.tasks[0].sql, None);
+
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"],
+            json!({
+                "ownerGroup": "analytics",
+                "runAs": "pipeline-analytics",
+                "tasks": [{
+                    "name": "run",
+                    "kind": "notebook",
+                    "config": {
+                        "notebook": "report.ipynb",
+                        "objectVersion": version,
+                        "params": "{\"days\":\"7\",\"region\":\"eu\"}",
+                    },
+                }],
+                "concurrency": "Forbid",
+                "retries": { "attempts": 1, "backoff": "5m" },
+                "timeout": "120m",
+                "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" },
+            }),
+            "the notebook task exactly: one config object, params as a sorted JSON string, no sql"
+        );
+        assert!(
+            stored["spec"]["tasks"][0].get("sql").is_none(),
+            "a notebook task carries no statement: {stored}"
+        );
+        assert!(
+            stored["spec"].get("params").is_none(),
+            "the notebook's values live in config.params, not in spec.params: {stored}"
+        );
+        assert_eq!(
+            stored["metadata"]["labels"],
+            json!({
+                MANAGED_BY_LABEL: MANAGED_BY_NOVA,
+                "stardelt.io/owner-group": "analytics",
+            }),
+            "the label set stays what it was: no kind label is added"
+        );
+        assert_eq!(
+            stored["metadata"]["annotations"]["stardelt.io/created-by"],
+            "sub-ada"
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_one_of_sql_and_notebook() {
+        const SENTENCE: &str = "give a statement or a notebook";
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        // Neither: no statement and no notebook.
+        let mut body = notebook_body("either", "analytics", "report.ipynb", &version);
+        body.notebook = None;
+        let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
+            .await
+            .expect_err("neither");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), SENTENCE);
+
+        // Both: the body would have to choose.
+        let mut body = notebook_body("either", "analytics", "report.ipynb", &version);
+        body.sql = "select 1".into();
+        let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
+            .await
+            .expect_err("both");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), SENTENCE);
+
+        // An update says the same: it changes one or the other, never both.
+        let resources_with_pipeline = memory_with(
+            &[(
+                "nightly",
+                stored_notebook_pipeline("nightly", "analytics", "report.ipynb", &version),
+            )],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let mut update = update_notebook_body("report.ipynb", &version);
+        update.sql = "select 1".into();
+        let error = update_pipeline(
+            Some(&resources_with_pipeline),
+            None,
+            Some(&store),
+            None,
+            &ada,
+            &crate::cluster::namespace(),
+            "nightly",
+            update,
+        )
+        .await
+        .expect_err("an update gives one of them too");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), SENTENCE);
+
+        // A blank statement is no statement: the notebook is what runs.
+        let mut body = notebook_body("blank-sql", "analytics", "report.ipynb", &version);
+        body.sql = "  \n\t ".into();
+        create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
+            .await
+            .expect("a blank statement next to a notebook is not a second one");
+        let stored = stored_pipeline(&resources, "blank-sql")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["kind"], "notebook");
+    }
+
+    /// One refused notebook body, with the sentence the ticket names.
+    async fn create_refused(
+        resources: &PipelineResources,
+        store: &NotebookStore,
+        limiter: &CreateLimiter,
+        who: &Identity,
+        notebook: NotebookRequest,
+        expected: &str,
+    ) {
+        let printed = format!("{notebook:?}");
+        let mut body = notebook_body("smoke", "analytics", "report.ipynb", "v1");
+        body.notebook = Some(notebook);
+        let error = create_pipeline(Some(resources), None, Some(store), limiter, who, body)
+            .await
+            .expect_err(&printed);
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{expected}");
+        assert_eq!(error.message(), expected);
+    }
+
+    #[tokio::test]
+    async fn bad_names_and_params_refused_with_sentences() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        for name in [
+            "report",
+            "report.txt",
+            "-report.ipynb",
+            "re/port.ipynb",
+            ".ipynb",
+        ] {
+            create_refused(
+                &resources,
+                &store,
+                &limiter,
+                &ada,
+                NotebookRequest {
+                    name: name.into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::new(),
+                },
+                NOTEBOOK_NAME_RULE,
+            )
+            .await;
+        }
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: format!("{}.ipynb", "a".repeat(129)),
+                object_version: version.clone(),
+                params: BTreeMap::new(),
+            },
+            NOTEBOOK_NAME_RULE,
+        )
+        .await;
+
+        for name in ["re-gion", "re.gion", "", "1region", "reg ion", "region!"] {
+            create_refused(
+                &resources,
+                &store,
+                &limiter,
+                &ada,
+                NotebookRequest {
+                    name: "report.ipynb".into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::from([(name.to_string(), "eu".to_string())]),
+                },
+                NOTEBOOK_PARAM_NAMES,
+            )
+            .await;
+        }
+
+        let too_many: BTreeMap<String, String> = (0..=MAX_NOTEBOOK_PARAMS)
+            .map(|i| (format!("p{i}"), "1".to_string()))
+            .collect();
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: too_many,
+            },
+            NOTEBOOK_TOO_MANY_PARAMS,
+        )
+        .await;
+
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: BTreeMap::from([(
+                    "region".to_string(),
+                    "x".repeat(MAX_NOTEBOOK_PARAM_VALUE_CHARS + 1),
+                )]),
+            },
+            NOTEBOOK_PARAM_VALUE,
+        )
+        .await;
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: BTreeMap::from([("region".to_string(), "eu\0us".to_string())]),
+            },
+            NOTEBOOK_PARAM_VALUE,
+        )
+        .await;
+
+        // Every value fits, the JSON text does not: 32 × 200 characters is over 4096.
+        let long: BTreeMap<String, String> = (0..MAX_NOTEBOOK_PARAMS)
+            .map(|i| (format!("p{i}"), "y".repeat(200)))
+            .collect();
+        assert!(
+            serde_json::to_string(&long).expect("json").chars().count()
+                > MAX_NOTEBOOK_PARAMS_JSON_CHARS
+        );
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: long,
+            },
+            NOTEBOOK_PARAMS_TOO_LONG,
+        )
+        .await;
+
+        assert!(
+            stored_pipeline(&resources, "smoke").await.is_none(),
+            "a refused body writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_version_refused_400() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+        let sentence = "that notebook version does not exist in group analytics";
+
+        // A deleted (or never published) version of a notebook that does exist.
+        for pinned in ["v99".to_string(), "v1 ".to_string(), "v".repeat(129)] {
+            let body = notebook_body("smoke", "analytics", "report.ipynb", &pinned);
+            let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
+                .await
+                .expect_err("no such version");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{pinned:?}");
+            assert_eq!(error.message(), sentence, "{pinned:?}");
+        }
+
+        // A notebook nobody published.
+        let body = notebook_body("smoke", "analytics", "missing.ipynb", &version);
+        let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
+            .await
+            .expect_err("no such notebook");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), sentence);
+
+        assert!(
+            stored_pipeline(&resources, "smoke").await.is_none(),
+            "nothing is pinned to bytes that do not exist"
+        );
+        assert!(!s3.is_empty());
+    }
+
+    #[tokio::test]
+    async fn s3_unconfigured_503() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        // No `NOVA_S3_*`: Nova cannot prove the version exists, so it schedules nothing.
+        let body = notebook_body("smoke", "analytics", "report.ipynb", "v1");
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("no store");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "notebook storage is not configured");
+        assert!(stored_pipeline(&resources, "smoke").await.is_none());
+
+        // A statement pipeline needs no store at all: nothing changed for it.
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("statement", "analytics", "select 1"),
+        )
+        .await
+        .expect("a statement schedule still works without S3");
+    }
+
+    #[tokio::test]
+    async fn foreign_group_403() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("finance/budget.ipynb", b"{}", "fin");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+
+        // The owner group must be one of the caller's own — an administrator included.
+        for caller in [&ada, &admin()] {
+            let body = notebook_body("their-budget", "finance", "budget.ipynb", &version);
+            let error = create_pipeline(
+                Some(&resources),
+                None,
+                Some(&store),
+                &create_limiter(),
+                caller,
+                body,
+            )
+            .await
+            .expect_err("another group's notebook");
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.message(), "you are not a member of the group finance");
+        }
+        assert!(stored_pipeline(&resources, "their-budget").await.is_none());
+
+        // A notebook pipeline of another group is hidden: 404, exactly like an absent one,
+        // so a schedule never tells an outsider that the notebook exists.
+        let resources = memory_with(
+            &[(
+                "budget",
+                stored_notebook_pipeline("budget", "finance", "budget.ipynb", &version),
+            )],
+            &[],
+        );
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            None,
+            &ada,
+            &crate::cluster::namespace(),
+            "budget",
+            update_notebook_body("budget.ipynb", &version),
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
+    }
+
+    #[tokio::test]
+    async fn update_changes_version_and_params_not_kind() {
+        let s3 = FakeS3::start().await;
+        let first = s3.put_raw("analytics/report.ipynb", b"{\"v\":1}", "ada");
+        let second = s3.put_raw("analytics/report.ipynb", b"{\"v\":2}", "ada");
+        let store = notebook_store(&s3.base);
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let mut body = notebook_body("nightly-report", "analytics", "report.ipynb", &first);
+        body.notebook.as_mut().expect("notebook").params =
+            BTreeMap::from([("days".to_string(), "1".to_string())]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("create");
+
+        // The version and the parameters change; the notebook and the kind stay.
+        let mut update = update_notebook_body("report.ipynb", &second);
+        update.notebook.as_mut().expect("notebook").params = BTreeMap::from([
+            ("region".to_string(), "eu".to_string()),
+            ("days".to_string(), "7".to_string()),
+        ]);
+        update.schedule = Some(ScheduleRequest {
+            cron: "30 6 * * mon-fri".into(),
+            timezone: "UTC".into(),
+        });
+        let view = update_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-report",
+            update,
+        )
+        .await
+        .expect("the update succeeds");
+        assert_eq!(view.schedule.as_deref(), Some("30 6 * * mon-fri (UTC)"));
+
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][0],
+            json!({
+                "name": "run",
+                "kind": "notebook",
+                "config": {
+                    "notebook": "report.ipynb",
+                    "objectVersion": second,
+                    "params": "{\"days\":\"7\",\"region\":\"eu\"}",
+                },
+            }),
+            "the whole notebook state is written, and the kind does not change"
+        );
+        assert!(
+            stored["spec"]["tasks"][0].get("sql").is_none(),
+            "a notebook pipeline never grows a statement: {stored}"
+        );
+
+        // `sql` on a notebook pipeline: the schema would have to change, so it is refused.
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-report",
+            update_body("select 2"),
+        )
+        .await
+        .expect_err("a notebook pipeline runs a notebook");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), NOTEBOOK_PIPELINE);
+        assert_eq!(
+            stored_pipeline(&resources, "nightly-report")
+                .await
+                .expect("unchanged")["spec"]["tasks"][0]["config"]["objectVersion"],
+            second,
+            "a refused update changes nothing"
+        );
+
+        // And a statement pipeline does not turn into a notebook one.
+        let mut statement = create_body("nightly-sql", "analytics", "select 1");
+        statement.schedule = None;
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            statement,
+        )
+        .await
+        .expect("create a statement pipeline");
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-sql",
+            update_notebook_body("report.ipynb", &second),
+        )
+        .await
+        .expect_err("a statement pipeline runs a statement");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), STATEMENT_PIPELINE);
+        assert_eq!(
+            stored_pipeline(&resources, "nightly-sql")
+                .await
+                .expect("unchanged")["spec"]["tasks"][0]["sql"],
+            "select 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_returns_notebook_fields() {
+        let version = "v-7f3a";
+        let resources = memory_with(
+            &[(
+                "nightly",
+                stored_notebook_pipeline("nightly", "analytics", "report.ipynb", version),
+            )],
+            &[],
+        );
+        let (airflow, _fake) = fake_airflow::start().await;
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &namespace,
+            "nightly",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(
+            detail.pipeline.tasks,
+            vec![TaskSpecView {
+                name: "run".into(),
+                kind: "notebook".into(),
+                sql: None,
+                notebook: Some("report.ipynb".into()),
+                object_version: Some(version.into()),
+                notebook_params: Some(BTreeMap::new()),
+                depends_on: vec![],
+            }],
+            "the edit dialog gets the version and the parameters it must prefill"
+        );
+
+        // The list stays small: the fields are the detail's, like `sql` since #218.
+        let list = list_pipelines(Some(&resources), Some(&airflow), &ada)
+            .await
+            .expect("the list succeeds");
+        assert_eq!(
+            list.pipelines[0].tasks,
+            vec![TaskSpecView {
+                name: "run".into(),
+                kind: "notebook".into(),
+                sql: None,
+                notebook: None,
+                object_version: None,
+                notebook_params: None,
+                depends_on: vec![],
+            }]
+        );
+
+        // A statement pipeline keeps carrying its `sql` and none of the notebook fields.
+        let resources = memory(&[("smoke", nova_pipeline("smoke", "analytics"))]);
+        let detail = pipeline_detail(Some(&resources), Some(&airflow), &ada, &namespace, "smoke")
+            .await
+            .expect("the detail is readable");
+        assert_eq!(
+            detail.pipeline.tasks,
+            vec![TaskSpecView {
+                name: "run".into(),
+                kind: "sql".into(),
+                sql: Some("select 1".into()),
+                notebook: None,
+                object_version: None,
+                notebook_params: None,
+                depends_on: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn task_specs_carry_the_dependencies() {
+        let spec = json!({
+            "tasks": [
+                { "name": "load", "kind": "sql", "sql": "insert into silver.orders select 1" },
+                { "name": "check", "kind": "sql",
+                  "sql": "select count(*) from silver.orders", "dependsOn": ["load"] }
+            ]
+        });
+        let tasks = task_specs(&spec, false);
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks[0].depends_on.is_empty(), "load waits for nothing");
+        assert_eq!(tasks[1].depends_on, vec!["load".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn audit_has_no_param_values() {
+        const CANARY: &str = "CANARY-param-4b1d";
+        const SUB: &str = "sub-audit-237";
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let resources = analytics_ready();
+        let ada = who(SUB, &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let _ = audit::test_sink::take_for(SUB);
+
+        let mut body = notebook_body("nightly-report", "analytics", "report.ipynb", &version);
+        body.notebook.as_mut().expect("notebook").params = BTreeMap::from([
+            ("region".to_string(), CANARY.to_string()),
+            ("days".to_string(), "7".to_string()),
+        ]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("create");
+
+        let mut update = update_notebook_body("report.ipynb", &version);
+        update.notebook.as_mut().expect("notebook").params =
+            BTreeMap::from([("region".to_string(), CANARY.to_string())]);
+        update_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-report",
+            update,
+        )
+        .await
+        .expect("update");
+
+        let records = audit::test_sink::take_for(SUB);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.action.as_str())
+                .collect::<Vec<_>>(),
+            ["create", "update"]
+        );
+        for record in &records {
+            assert_eq!(record.kind, "notebook", "the audit says what it runs");
+            assert_eq!(record.notebook_group.as_deref(), Some("analytics"));
+            assert_eq!(record.notebook.as_deref(), Some("report.ipynb"));
+            assert_eq!(record.version.as_deref(), Some(version.as_str()));
+            assert_eq!(
+                record.statement_chars,
+                Some(0),
+                "a notebook has no statement to measure"
+            );
+        }
+        assert_eq!(records[0].schedule.as_deref(), Some("0 3 * * *"));
+        assert_eq!(
+            records[1].schedule, None,
+            "the update's body carries no schedule, so it removes it"
+        );
+        let serialized = format!("{records:?}");
+        assert!(
+            !serialized.contains(CANARY),
+            "no parameter value is ever audited: {serialized}"
+        );
+        assert!(
+            !serialized.contains("region"),
+            "not even a parameter name: {serialized}"
+        );
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert!(
+            stored["spec"]["tasks"][0]["config"]["params"]
+                .as_str()
+                .expect("params")
+                .contains(CANARY),
+            "the value is in the resource, where papermill reads it"
+        );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_answers_the_three_pipeline_reads() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .nest("/api", router())
+            .with_state(crate::router_tests::test_state());
+        for (uri, want) in [
+            ("/api/pipelines", "daily_revenue"),
+            ("/api/pipelines", "ingest_orders"),
+            ("/api/pipelines/principals", "analytics"),
+            ("/api/service-principals", "pipeline-analytics"),
+            ("/api/pipelines/stardelt/daily_revenue", "daily_revenue"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(want),
+                "{uri} answered without {want}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        // A name the samples do not carry answers the same 404 a real instance gives.
+        let missing = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/pipelines/stardelt/nope")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `spec.notify` is written under the CRD's keys and read back as the document's shape
+    /// (nova#815 decision 1); a pipeline without one carries no key.
+    #[test]
+    fn pipeline_notify_is_written_and_read_back() {
+        let notify = PipelineNotify {
+            on_failure: vec!["pager".into()],
+            ..PipelineNotify::default()
+        };
+        let resource = pipeline_resource(
+            "daily-trips",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            Some(&notify),
+        );
+        assert_eq!(spec_of(&resource)["notify"]["onFailure"], json!(["pager"]));
+
+        let document = spec_response(&resource).document;
+        assert_eq!(document.notify, Some(notify));
+        let printed = serde_json::to_value(&document).expect("the document serialises");
+        assert_eq!(printed["notify"]["onFailure"], json!(["pager"]));
+
+        let plain = nova_pipeline("no-notify", "analytics");
+        let bare = serde_json::to_value(spec_response(&plain).document).expect("serialises");
+        assert!(
+            bare.get("notify").is_none(),
+            "a pipeline without notify carries no key: {bare}"
+        );
+        assert_eq!(notify_of(spec_of(&plain)), None);
+    }
+
+    /// The operator's sentences, word for word, in its order (`crd.rs`,
+    /// `PipelineSpec::validate`).
+    #[test]
+    fn pipeline_notify_refuses_bad_names() {
+        let six = PipelineNotify {
+            on_success: ["a", "b", "c", "d", "e", "f"].map(str::to_string).to_vec(),
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            six.check_shape().expect_err("six names"),
+            "notify.onSuccess names at most 5 destinations"
+        );
+
+        let padded = PipelineNotify {
+            on_failure: vec![" pager".into()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            padded.check_shape().expect_err("a padded name"),
+            "notify.onFailure holds ` pager`, which has leading or trailing whitespace"
+        );
+
+        let blank = PipelineNotify {
+            on_recovered: vec!["   ".into()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            blank.check_shape().expect_err("a blank name"),
+            "notify.onRecovered holds `   `, which is not a destination name (1 to 64 characters)"
+        );
+
+        let long = "x".repeat(65);
+        let too_long = PipelineNotify {
+            on_failure: vec![long.clone()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            too_long.check_shape().expect_err("too long"),
+            format!(
+                "notify.onFailure holds `{long}`, which is not a destination name (1 to 64 characters)"
+            )
+        );
+
+        let twice = PipelineNotify {
+            on_success: vec!["pager".into(), "pager".into()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            twice.check_shape().expect_err("a duplicate"),
+            "notify.onSuccess names `pager` twice"
+        );
+
+        assert_eq!(PipelineNotify::default().check_shape(), Ok(()));
+    }
+
+    /// `None` leaves the stored notifications alone, an all-empty `Some` removes them, a filled
+    /// `Some` replaces them — a form save must not wipe what a bundle deployed.
+    #[test]
+    fn an_update_without_notify_keeps_it_an_empty_one_removes_it() {
+        let stored = pipeline_resource(
+            "daily-trips",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            Some(&PipelineNotify {
+                on_failure: vec!["pager".into()],
+                ..PipelineNotify::default()
+            }),
+        );
+        let statement = Statement::Sql("select 2".into());
+
+        let kept = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            None,
+        );
+        assert_eq!(
+            spec_of(&kept)["tasks"][0]["sql"],
+            json!("select 2"),
+            "the update itself is written"
+        );
+        assert_eq!(spec_of(&kept)["notify"]["onFailure"], json!(["pager"]));
+
+        let removed = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            Some(&PipelineNotify::default()),
+        );
+        assert!(
+            spec_of(&removed).get("notify").is_none(),
+            "an all-empty notify removes the key: {}",
+            spec_of(&removed)
+        );
+
+        let replaced = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            Some(&PipelineNotify {
+                on_success: vec!["digest".into()],
+                ..PipelineNotify::default()
+            }),
+        );
+        assert_eq!(
+            spec_of(&replaced)["notify"],
+            json!({ "onSuccess": ["digest"], "onFailure": [], "onRecovered": [] })
+        );
+    }
+
+    /// The group check reads the store: a name of another group is a 400 with the sentence, and
+    /// no store at all is a 503.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_notify_check_reads_the_group() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
+             VALUES ('A', 'pager', 'email', '{\"recipients\": [\"oncall@example.com\"]}'::jsonb, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("the destination is stored");
+        let notify = PipelineNotify {
+            on_failure: vec!["pager".into()],
+            ..PipelineNotify::default()
+        };
+        assert!(
+            check_notify(Some(&pool), "A", Some(&notify)).await.is_ok(),
+            "group A owns pager"
+        );
+        let other = check_notify(Some(&pool), "B", Some(&notify))
+            .await
+            .expect_err("group B does not own pager");
+        assert_eq!(other.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(other.message(), "there is no destination named pager in B");
+        let no_store = check_notify(None, "A", Some(&notify))
+            .await
+            .expect_err("no state store");
+        assert_eq!(no_store.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            no_store.message(),
+            "this needs Nova's database, and this installation has none; ask your administrator"
+        );
+    }
+
+    /// The same rule through the two routes: a create is a 400 with the sentence, and the
+    /// validate route answers it as `ok: false`, 200 (nova#815 slice b acceptance).
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_foreign_destination_is_refused_by_create_and_validate() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
+             VALUES ('finance', 'ledger', 'email', '{\"recipients\": [\"oncall@example.com\"]}'::jsonb, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("the destination is stored");
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.notify = Some(PipelineNotify {
+            on_failure: vec!["ledger".into()],
+            ..PipelineNotify::default()
+        });
+
+        let refusal = create_pipeline(
+            Some(&resources),
+            Some(&pool),
+            None,
+            &create_limiter(),
+            &ada,
+            body.clone(),
+        )
+        .await
+        .expect_err("finance's destination is not analytics'");
+        assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refusal.message(),
+            "there is no destination named ledger in analytics"
+        );
+
+        let answer = validate_pipeline(Some(&resources), Some(&pool), None, &ada, body)
+            .await
+            .expect("a refusal is an answer, not an error");
+        assert!(!answer.ok);
+        assert_eq!(answer.action, None);
+        assert_eq!(
+            answer.errors,
+            vec![ValidationIssue {
+                message: "there is no destination named ledger in analytics".into()
+            }]
+        );
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_run_queries_read_the_tags_the_loader_sends() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        // Two statements of the run, one statement of the same run id in another pipeline,
+        // and one statement of another run of this pipeline: only the first two may answer.
+        let seed = [
+            (
+                "rq-1",
+                "{stardelt-pipeline,pipeline=stardelt/mobility-medallion,task=gold_kpis,run=scheduled__2026-11-14T03:00:00+00:00}",
+                "select 'a' from t",
+                6000_i64,
+            ),
+            (
+                "rq-2",
+                "{stardelt-pipeline,pipeline=stardelt/mobility-medallion,task=quality_gate,run=scheduled__2026-11-14T03:00:00+00:00}",
+                "select 'b' from t",
+                700_i64,
+            ),
+            (
+                "rq-3",
+                "{stardelt-pipeline,pipeline=stardelt/other,task=gold_kpis,run=scheduled__2026-11-14T03:00:00+00:00}",
+                "select 'c' from t",
+                9999_i64,
+            ),
+            (
+                "rq-4",
+                "{stardelt-pipeline,pipeline=stardelt/mobility-medallion,task=gold_kpis,run=scheduled__2026-11-13T03:00:00+00:00}",
+                "select 'd' from t",
+                9999_i64,
+            ),
+        ];
+        for (id, tags, sql, wall) in seed {
+            sqlx::query(
+                "INSERT INTO query_log (query_id, state, principal, client_tags, sql_text, sql_hash, created_at, started_at, wall_ms) \
+                 VALUES ($1, 'FINISHED', 'svc-pipeline', $2::text[], $3, $4, now(), now(), $5)",
+            )
+            .bind(id).bind(tags).bind(sql).bind(format!("h-{id}")).bind(wall)
+            .execute(&pool).await.unwrap();
+        }
+        let queries = run_queries_for(
+            &pool,
+            "stardelt",
+            "mobility-medallion",
+            "scheduled__2026-11-14T03:00:00+00:00",
+            false,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<&str> = queries.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["rq-1", "rq-2"]); // slowest first; other pipeline and other run excluded
+        assert_eq!(queries[0].task_id.as_deref(), Some("gold_kpis"));
+        let redacted = run_queries_for(
+            &pool,
+            "stardelt",
+            "mobility-medallion",
+            "scheduled__2026-11-14T03:00:00+00:00",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !redacted[0].sql.contains("'a'"),
+            "the literal is redacted: {}",
+            redacted[0].sql
+        );
+    }
+}

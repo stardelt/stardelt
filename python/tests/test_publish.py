@@ -1,0 +1,291 @@
+"""Tests for ``stardelt.publish`` (stardelt/publish.py).
+
+A fake Nova (one PUT route on a local HTTP server) stands in for the real
+service: it records the request and answers the shape backend/src/notebooks.rs
+returns. What it cannot prove — the real object store, the group policy and the
+public TLS hop — the dev-cluster check in platform#291 covers.
+
+The token canary is asserted absent from every result, print and error: the
+helper holds the person's credential and must never leak it into a notebook.
+"""
+
+import base64
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
+import requests
+
+import stardelt
+from stardelt import bundle
+from stardelt.publish import MAX_PUBLISH_BYTES
+
+CANARY = "canary-token-291"
+
+NOTEBOOK = json.dumps(
+    {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {},
+        "cells": [
+            {
+                "cell_type": "code",
+                "metadata": {"tags": ["parameters"]},
+                "source": ["run_date = \"2026-10-30\""],
+                "outputs": [],
+                "execution_count": None,
+            }
+        ],
+    }
+).encode()
+
+
+def _jwt(groups=("analytics",)):
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"sub": "sub-alice", "groups": list(groups)}).encode()
+    ).decode()
+    return f"header.{payload.rstrip('=')}.{CANARY}"
+
+
+class FakeNova:
+    """Records every PUT and answers with ``reply`` under ``status``."""
+
+    def __init__(self):
+        self.requests = []
+        self.status = 200
+        self.reply = {
+            "name": "demo.ipynb",
+            "group": "analytics",
+            "objectVersion": "v-3",
+            "sha256": "d1e2f3",
+            "size": len(NOTEBOOK),
+            "parameters": [{"name": "run_date", "default": "2026-10-30"}],
+        }
+
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # silence
+                pass
+
+            def do_PUT(self):
+                length = int(self.headers.get("Content-Length", 0))
+                fake.requests.append(
+                    {
+                        "method": self.command,
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization"),
+                        "content_type": self.headers.get("Content-Type"),
+                        "source": self.headers.get("X-Stardelt-Source"),
+                        "body": self.rfile.read(length),
+                    }
+                )
+                raw = json.dumps(fake.reply).encode()
+                self.send_response(fake.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
+@pytest.fixture
+def nova(monkeypatch):
+    fake = FakeNova()
+    monkeypatch.setenv("STARDELT_NOVA_URL", fake.url)
+    monkeypatch.setenv("TRINO_TOKEN", _jwt())
+    monkeypatch.delenv("PIPELINE_TOKEN_URL", raising=False)
+    monkeypatch.delenv("PIPELINE_CLIENT_SECRET", raising=False)
+    return fake
+
+
+@pytest.fixture
+def notebook(tmp_path):
+    path = tmp_path / "demo.ipynb"
+    path.write_bytes(NOTEBOOK)
+    return path
+
+
+def test_publish_sends_bearer_and_body(nova, notebook, capsys):
+    result = stardelt.publish(notebook, group="analytics")
+
+    assert result == {
+        "name": "demo.ipynb",
+        "group": "analytics",
+        "version": "v-3",
+        "sha256": "d1e2f3",
+        "parameters": [{"name": "run_date", "default": "2026-10-30"}],
+    }
+    assert "'version': 'v-3'" in capsys.readouterr().out
+
+    assert len(nova.requests) == 1
+    request = nova.requests[0]
+    assert request["method"] == "PUT"
+    assert request["path"] == "/api/notebooks/analytics/demo.ipynb"
+    assert request["authorization"] == f"Bearer {_jwt()}"
+    assert request["content_type"] == "application/json"
+    assert request["body"] == NOTEBOOK
+
+
+def test_publish_sends_the_source_of_a_git_file(nova, notebook, monkeypatch):
+    source = {"repository": "https://github.com/acme/repo", "commit": "0" * 40, "path": "demo.ipynb", "clean": True}
+    monkeypatch.setattr(bundle, "source_of", lambda path: source)
+
+    stardelt.publish(notebook, group="analytics")
+
+    assert nova.requests[0]["source"] == json.dumps(source, separators=(",", ":"))
+
+
+def test_publish_outside_git_sends_no_source_header(nova, notebook):
+    stardelt.publish(notebook, group="analytics")
+
+    assert nova.requests[0]["source"] is None
+
+
+def test_publish_uses_the_api_url_when_set(nova, notebook, monkeypatch):
+    monkeypatch.setenv("STARDELT_NOVA_URL", "http://public.invalid")
+    monkeypatch.setenv("STARDELT_NOVA_API_URL", nova.url)
+    stored = stardelt.publish(notebook)
+    assert stored["name"] == notebook.name
+
+
+def test_group_defaults_to_the_only_group(nova, notebook):
+    stardelt.publish(notebook)
+
+    assert nova.requests[0]["path"] == "/api/notebooks/analytics/demo.ipynb"
+
+
+def test_ambiguous_group_is_an_error(nova, notebook, monkeypatch):
+    monkeypatch.setenv("TRINO_TOKEN", _jwt(("analytics", "finance")))
+
+    with pytest.raises(ValueError) as exc:
+        stardelt.publish(notebook)
+
+    message = str(exc.value)
+    assert "analytics" in message and "finance" in message
+    assert nova.requests == []
+
+
+def test_server_error_is_one_line(nova, notebook):
+    nova.status = 403
+    nova.reply = {"error": "you are not a member of the group finance"}
+
+    with pytest.raises(RuntimeError) as exc:
+        stardelt.publish(notebook, group="finance")
+
+    assert str(exc.value) == (
+        "stardelt.publish failed: you are not a member of the group finance"
+    )
+    assert "\n" not in str(exc.value)
+
+
+def test_large_file_refused_locally(nova, tmp_path):
+    path = tmp_path / "big.ipynb"
+    path.write_bytes(b"x" * (MAX_PUBLISH_BYTES + 1))
+
+    with pytest.raises(ValueError) as exc:
+        stardelt.publish(path)
+
+    assert "5 MiB" in str(exc.value)
+    assert nova.requests == []
+
+
+def test_no_token_in_repr_or_errors(nova, notebook, capsys):
+    result = stardelt.publish(notebook)
+    printed = capsys.readouterr().out
+    assert CANARY not in repr(result)
+    assert CANARY not in printed
+    assert nova.requests[0]["authorization"] == f"Bearer {_jwt()}"
+
+    # Worst case: something between the pod and Nova echoes the header back.
+    nova.status = 500
+    nova.reply = {"error": f"upstream said Bearer {_jwt()}"}
+    with pytest.raises(RuntimeError) as exc:
+        stardelt.publish(notebook)
+    assert CANARY not in str(exc.value)
+    assert "<token>" in str(exc.value)
+
+
+class _FakeResponse:
+    """What ``requests.put`` answers in the off-platform tests: the stored version."""
+
+    status_code = 200
+
+    def __init__(self):
+        self.reply = {
+            "name": "demo.ipynb",
+            "group": "analytics",
+            "objectVersion": "v-3",
+            "sha256": "d1e2f3",
+            "parameters": [],
+        }
+
+    def json(self):
+        return self.reply
+
+
+def _stored_login(tmp_path, host="https://nova.example"):
+    """A sign-in file as ``stardelt login`` leaves it, for the off-platform path."""
+    path = tmp_path / "config" / "stardelt" / "credentials.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "issuer": "https://id.example/realms/stardelt",
+                "client_id": "stardelt-dev",
+                "token_endpoint": "https://id.example/realms/stardelt/protocol/openid-connect/token",
+                "access_token": "stored-token",
+                "refresh_token": "stored-refresh",
+                "expires_at": 9999999999,
+                "host": host,
+            }
+        )
+    )
+    return path
+
+
+def test_off_platform_uses_the_login_host_and_token(monkeypatch, tmp_path, notebook):
+    monkeypatch.delenv("STARDELT_NOVA_URL", raising=False)
+    monkeypatch.delenv("TRINO_TOKEN", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("STARDELT_TOKEN", "t")
+    _stored_login(tmp_path)
+
+    sent = []
+
+    def fake_put(url, **kwargs):
+        sent.append((url, kwargs))
+        return _FakeResponse()
+
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    result = stardelt.publish(notebook, group="g", name="n")
+
+    assert result["version"] == "v-3"
+    assert len(sent) == 1
+    url, kwargs = sent[0]
+    assert url == "https://nova.example/api/notebooks/g/n"
+    assert kwargs["headers"]["Authorization"] == "Bearer t"
+    assert kwargs["data"] == NOTEBOOK
+
+
+def test_not_on_the_platform_and_not_signed_in(monkeypatch, tmp_path, notebook):
+    monkeypatch.delenv("STARDELT_NOVA_URL", raising=False)
+    monkeypatch.delenv("STARDELT_TOKEN", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+
+    with pytest.raises(RuntimeError) as exc:
+        stardelt.publish(notebook, group="g")
+
+    assert "stardelt login" in str(exc.value)
+
+
+def test_cli_notebook_publish(nova, notebook):
+    from stardelt import cli
+
+    assert cli.main(["notebook", "publish", str(notebook), "--group", "g"]) == 0
+    assert nova.requests[0]["path"] == "/api/notebooks/g/demo.ipynb"

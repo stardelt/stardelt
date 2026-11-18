@@ -1,0 +1,8 @@
+# CloudNative-PG operator, pinned by digest (platform#1615).
+#
+# The chart's `image.tag` is the operator Deployment's image. Without it the operator floats on
+# whatever tag the chart version happens to name, and an operator upgrade silently moves it:
+# the four Clusters it manages name their Postgres image separately (manifests/*.yaml,
+# chart/values.yaml), so the two are pinned independently on purpose.
+image:
+  tag: "1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"

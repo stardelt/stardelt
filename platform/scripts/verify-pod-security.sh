@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Every running pod is admitted by a Pod Security namespace at the level given (`--level`, default
+# `restricted`; #1096 question 5).
+#
+#   NS=stardelt bash scripts/verify-pod-security.sh --allow '^seaweedfs-' --allow '^lakekeeper-'
+#   NS=stardelt bash scripts/verify-pod-security.sh --level baseline
+#
+# Read-only for the platform: each live pod's spec is re-admitted with a server-side dry run into a
+# scratch namespace labelled `pod-security.kubernetes.io/enforce=$level`, which is deleted
+# again. `--allow <regex>` names a pod that is a known exception; the reason belongs in the comment
+# beside the flag in the Makefile. A pattern that matches no refusal is reported (drop it), and a
+# refusal outside the list fails the run.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+NS="${NS:-${NAMESPACE:-stardelt}}"
+PROBE="${POD_SECURITY_PROBE_NS:-stardelt-pss-probe}"
+level=restricted
+allow=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --allow) allow+=("${2:?--allow needs a regular expression}"); shift 2 ;;
+    --level)
+      level="${2:?--level needs baseline or restricted}"
+      case "$level" in
+        baseline|restricted) ;;
+        *) echo "unknown --level: $level (baseline or restricted)" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
+command -v jq >/dev/null 2>&1 || { echo "UNVERIFIED (jq not found)"; exit 3; }
+tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp"
+  kubectl delete namespace "$PROBE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+# A previous run killed before its trap: remove what it left, then wait until the name is gone.
+# `--wait=true` returns when the deletion is accepted; the namespace can stay Terminating for a
+# while, and recreating it then fails. Wait for NotFound, with a bound (platform#1211).
+kubectl delete namespace "$PROBE" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+  kubectl get namespace "$PROBE" >/dev/null 2>&1 || break
+  sleep 1
+done
+if kubectl get namespace "$PROBE" >/dev/null 2>&1; then
+  echo "the probe namespace $PROBE is still terminating after 30 s; wait and retry, or set POD_SECURITY_PROBE_NS to another name" >&2
+  exit 1
+fi
+if ! kubectl create namespace "$PROBE" >/dev/null; then
+  echo "cannot create the probe namespace $PROBE (the API server's message is above)" >&2
+  exit 1
+fi
+if ! kubectl label namespace "$PROBE" \
+    pod-security.kubernetes.io/enforce="$level" \
+    pod-security.kubernetes.io/enforce-version=latest >/dev/null; then
+  echo "cannot label the probe namespace $PROBE $level (the API server's message is above)" >&2
+  exit 1
+fi
+
+plural() { [ "$1" -eq 1 ] && echo exception || echo exceptions; }
+
+total=0 passed=0 failed=0 allowed=0
+: > "$tmp/allowed"
+: > "$tmp/refused"
+
+for pod in $(kubectl -n "$NS" get pods -o json \
+    | jq -r '.items[] | select(.status.phase=="Running") | .metadata.name' | sort); do
+  # The list and the get are two API calls; a pipeline task pod or a CronJob pod can finish
+  # between them. A pod that is gone cannot violate the floor — skip it, do not abort the scan
+  # (2026-11-16: a finished demo pod turned a green floor into exit 1).
+  if ! kubectl -n "$NS" get pod "$pod" -o json >"$tmp/pod.read" 2>"$tmp/pod.err"; then
+    echo "– $pod: gone before the probe (skipped)"
+    continue
+  fi
+  total=$((total + 1))
+  # The pod spec as the API server sees it, with only what a scratch namespace cannot carry
+  # removed: its identity, the node it is pinned to, and a priority class it may not have.
+  jq --arg name "probe-$total" --arg ns "$PROBE" '
+      .metadata = {name: $name, namespace: $ns}
+      | .spec.serviceAccountName = "default"
+      | del(.status, .spec.nodeName, .spec.priorityClassName)
+    ' "$tmp/pod.read" >"$tmp/pod.json"
+  if kubectl -n "$PROBE" create --dry-run=server -f "$tmp/pod.json" >/dev/null 2>"$tmp/err"; then
+    passed=$((passed + 1))
+    continue
+  fi
+  reason="$(grep -o "violates PodSecurity \"$level:latest\": .*" "$tmp/err" | head -1 | cut -c1-200 || true)"
+  [ -n "$reason" ] || reason="$(head -1 "$tmp/err")"
+  matched=""
+  for pattern in ${allow[@]+"${allow[@]}"}; do
+    if printf '%s\n' "$pod" | grep -Eq "$pattern"; then matched="$pattern"; break; fi
+  done
+  if [ -n "$matched" ]; then
+    allowed=$((allowed + 1))
+    printf '%s\t%s\n' "$pod" "$matched" >> "$tmp/allowed"
+    echo "– $pod: known exception ($matched)"
+  else
+    failed=$((failed + 1))
+    printf '%s\t%s\n' "$pod" "$reason" >> "$tmp/refused"
+    echo "✗ $pod: $reason"
+  fi
+done
+
+for pattern in ${allow[@]+"${allow[@]}"}; do
+  if ! grep -Fq "$pattern" "$tmp/allowed"; then
+    echo "note: --allow '$pattern' matched no refusal; drop it from the Makefile"
+  fi
+done
+
+if [ "$failed" -gt 0 ]; then
+  echo "FAIL ($passed of $total pods admitted, $failed refused, $allowed known $(plural "$allowed"))"
+  exit 1
+fi
+if [ "$passed" -lt 5 ]; then
+  echo "UNVERIFIED ($passed of $total pods admitted; install the platform first)"
+  exit 3
+fi
+echo "PASS ($passed of $total pods admitted by $level, $allowed known $(plural "$allowed"))"

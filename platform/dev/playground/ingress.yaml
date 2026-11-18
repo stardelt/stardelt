@@ -1,0 +1,252 @@
+# Playground ingresses. The wildcard A record (*.alpha.dev.stardelt.io) points at
+# the node, and ingress-nginx binds :80/:443 there, so each host only needs a
+# certificate.
+#
+# Not every backend exists in every profile (e.g. Superset/Airflow/JupyterHub are
+# not in `install-core`). An Ingress to a Service without endpoints simply 503s —
+# harmless. Nova's Apps page probes the services and shows what is actually up.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nova
+  namespace: stardelt
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Nova (axum default) rejects bodies over 2 MiB and closes the connection while
+    # nginx is still sending, which surfaces as a 502. Cap at the same 2 MiB here so
+    # nginx answers 413 itself (#56).
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [alpha.dev.stardelt.io]
+      secretName: nova-tls
+  rules:
+    - host: alpha.dev.stardelt.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nova
+                port:
+                  number: 8080
+---
+# The notebook publish route takes up to 5 MiB (`MAX_NOTEBOOK_BYTES` in nova's
+# backend/src/notebooks.rs), above the 2 MiB cap of the Ingress before. Same host, its own
+# path and its own limit: 6m is the 5 MiB plus the HTTP framing. Everything else on the
+# host keeps the 2 MiB cap (#437). No `tls` block and no issuer: the host's certificate
+# comes from the `nova` Ingress above.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nova-notebooks
+  namespace: stardelt
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "6m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: alpha.dev.stardelt.io
+      http:
+        paths:
+          - path: /api/notebooks
+            pathType: Prefix
+            backend:
+              service:
+                name: nova
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trino
+  namespace: stardelt
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [trino.alpha.dev.stardelt.io]
+      secretName: trino-tls
+  rules:
+    - host: trino.alpha.dev.stardelt.io
+      http:
+        # Only what external SQL clients need (platform#181): statements, and the
+        # OAuth2 token/callback endpoints of `--external-authentication`. The
+        # engine UI, /v1/query and /v1/info fall through to nginx's 404;
+        # administrators open the UI through a port-forward (docs/identity.md, "Trino: the query engine behind the identity").
+        paths:
+          - path: /v1/statement
+            pathType: Prefix
+            backend:
+              service:
+                name: trino
+                port:
+                  number: 8080
+          - path: /oauth2
+            pathType: Prefix
+            backend:
+              service:
+                name: trino
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: superset
+  namespace: stardelt
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [superset.alpha.dev.stardelt.io]
+      secretName: superset-tls
+  rules:
+    - host: superset.alpha.dev.stardelt.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: superset
+                port:
+                  number: 8088
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: airflow
+  namespace: stardelt
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [airflow.alpha.dev.stardelt.io]
+      secretName: airflow-tls
+  rules:
+    - host: airflow.alpha.dev.stardelt.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: airflow-api-server
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jupyterhub
+  namespace: stardelt
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [jupyter.alpha.dev.stardelt.io]
+      secretName: jupyterhub-tls
+  rules:
+    - host: jupyter.alpha.dev.stardelt.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: proxy-public
+                port:
+                  number: 80
+---
+# Platform IdP (Keycloak, `make install-identity`). Keycloak's login responses
+# carry large cookies/headers, so the proxy buffer is raised from nginx's 4k.
+#
+# Publish the realm's public surface and the `stardelt` realm's admin console —
+# never the master realm, which controls every other realm. The paths are
+# ingress-nginx regexes (`use-regex`; the Kubernetes API requires them to start
+# with `/`, so the `(/|$)` group is what keeps a match to the exact segment):
+# `/admin/realms/stardelt` matches that realm and its children only, while
+# `/admin/realms/master`, `/admin/master/console/`, `/realms/master`, `/health`
+# and `/metrics` fall through to ingress-nginx's default 404. The same set is
+# hard-coded in chart/templates/ingress.yaml.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: stardelt
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    # The paths below are ingress-nginx regexes; the `(/|$)` group is what keeps
+    # each one to its exact segment (Kubernetes requires the path to start with a
+    # `/`, so a leading `^` cannot be written here).
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [id.alpha.dev.stardelt.io]
+      secretName: keycloak-tls
+  rules:
+    - host: id.alpha.dev.stardelt.io
+      http:
+        paths:
+          # Sign-in and token endpoints for realm `stardelt`, plus the account
+          # console. Without /resources the sign-in page renders unstyled.
+          - path: '/realms/stardelt(/|$)'
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: '/resources(/|$)'
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: '/robots\.txt$'
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          # The `stardelt` realm's admin console: the app under /admin/<realm>/…
+          # and the REST API it calls under /admin/realms/<realm>/… . This is how
+          # platform admins reach the Users page (Nova links here). The master
+          # realm is not matched: `/admin/realms/master` is a different segment.
+          - path: '/admin/stardelt(/|$)'
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: '/admin/realms/stardelt(/|$)'
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          # The console asks for the server profile on load (Keycloak 26) and shows
+          # an error alert without it. Keycloak authorises the call itself: a realm
+          # admin gets 200, `analyst` 403 — it is not master-realm information.
+          - path: '/admin/serverinfo$'
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080

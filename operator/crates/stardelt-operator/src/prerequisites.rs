@@ -1,0 +1,1735 @@
+//! The non-Helm objects a Lakehouse needs (decision D17). Pure builders: they
+//! return typed objects and touch no cluster; `controller.rs` applies them with
+//! [`crate::objects`].
+
+use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use k8s_openapi::{
+    api::{
+        batch::v1::{CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec},
+        core::v1::{
+            Capabilities, ConfigMap, Container, EnvVar, EnvVarSource, Namespace,
+            PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, Secret,
+            SecretKeySelector, SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+        },
+    },
+    apimachinery::pkg::apis::meta::v1::OwnerReference,
+};
+use kube::core::{DynamicObject, ObjectMeta, TypeMeta};
+use serde_json::json;
+
+use crate::{crd::Profile, network_policy, objects::labels};
+
+/// Secret every object-storage consumer reads (same keys as stardelt-platform).
+pub const S3_SECRET: &str = "stardelt-s3-creds";
+/// Secret holding the S3 identities JSON that the SeaweedFS gateway reads.
+pub const S3_CONFIG_SECRET: &str = "seaweedfs-s3-config";
+/// CloudNative-PG Cluster that stores the catalog.
+pub const CATALOG_CLUSTER: &str = "lakekeeper-pg";
+/// The CloudNativePG plugin that owns `ObjectStore` (barman-cloud).
+const BARMAN_PLUGIN: &str = "barman-cloud.cloudnative-pg.io";
+/// Default bucket when `spec.storage.bucket` is unset.
+pub const DEFAULT_BUCKET: &str = "lakehouse";
+/// Bootstrap script (accept terms, create the warehouse, refresh its credential).
+pub const BOOTSTRAP_SCRIPT: &str = include_str!("lakekeeper_bootstrap.sh");
+
+/// Name of the Iceberg warehouse in the catalog and of the Trino catalog in front of it.
+/// `lakekeeper_bootstrap.sh` and `values/trino.yaml` hard-code the same word.
+pub const WAREHOUSE: &str = "warehouse";
+
+/// The aws-cli pod that creates the notebooks and archive buckets — the same digest `pg_dump.rs`
+/// uses, so a re-pushed `2.17.0` tag cannot change one operator pod and not another.
+pub const AWS_CLI_IMAGE: &str =
+    "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73";
+
+/// A generated S3 key pair.
+#[derive(Clone, PartialEq, Eq)]
+pub struct S3Keys {
+    pub access_key: String,
+    pub secret_key: String,
+}
+
+impl std::fmt::Debug for S3Keys {
+    // Never print the secret.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("S3Keys { .. }")
+    }
+}
+
+fn random_hex(bytes: usize) -> Result<String, getrandom::Error> {
+    let mut buf = vec![0u8; bytes];
+    getrandom::fill(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+impl S3Keys {
+    /// 20-character access key and 40-character secret key (hex).
+    pub fn generate() -> Result<Self, getrandom::Error> {
+        Ok(Self {
+            access_key: random_hex(10)?,
+            secret_key: random_hex(20)?,
+        })
+    }
+}
+
+/// The namespace the platform is installed into. Same floor as the platform repo's
+/// `manifests/namespace.yaml` (platform#1096 question 5): `baseline` is enforced, so no
+/// privileged, hostNetwork or hostPath pod; `restricted` is only warned and audited while
+/// Lakekeeper's `opa` sidecar does not pass it (#1095). The four SeaweedFS pods pass
+/// `restricted` since operator#860 (uid/gid 65534, `emptyDir` logs).
+pub fn platform_namespace(name: &str) -> Namespace {
+    Namespace {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    "app.kubernetes.io/part-of".to_string(),
+                    "stardelt".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/enforce".to_string(),
+                    "baseline".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/enforce-version".to_string(),
+                    "latest".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/audit".to_string(),
+                    "restricted".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/audit-version".to_string(),
+                    "latest".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/warn".to_string(),
+                    "restricted".to_string(),
+                ),
+                (
+                    "pod-security.kubernetes.io/warn-version".to_string(),
+                    "latest".to_string(),
+                ),
+            ])),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// In-cluster S3 endpoint of the SeaweedFS gateway the operator installs.
+pub fn s3_endpoint(namespace: &str) -> String {
+    format!("http://seaweedfs-s3.{namespace}.svc.cluster.local:8333")
+}
+
+fn meta(name: &str, namespace: &str, lakehouse: &str, component: &str) -> ObjectMeta {
+    ObjectMeta {
+        name: Some(name.into()),
+        namespace: Some(namespace.into()),
+        labels: Some(labels(lakehouse, component)),
+        ..Default::default()
+    }
+}
+
+/// Metadata of an object that belongs to the platform rather than to a Lakehouse:
+/// no `stardelt.io/lakehouse`, because identity is not scoped to one Lakehouse.
+fn platform_meta(name: &str, namespace: &str, component: &str) -> ObjectMeta {
+    ObjectMeta {
+        name: Some(name.into()),
+        namespace: Some(namespace.into()),
+        labels: Some(BTreeMap::from([
+            (
+                "app.kubernetes.io/part-of".to_string(),
+                "stardelt".to_string(),
+            ),
+            ("stardelt.io/component".to_string(), component.to_string()),
+        ])),
+        ..Default::default()
+    }
+}
+
+fn string_data(pairs: &[(&str, String)]) -> Option<BTreeMap<String, String>> {
+    Some(
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
+}
+
+/// `stardelt-s3-creds`: what Trino, Airflow, CNPG backups and the bootstrap Job read.
+pub fn s3_creds_secret(lakehouse: &str, namespace: &str, bucket: &str, keys: &S3Keys) -> Secret {
+    Secret {
+        metadata: meta(S3_SECRET, namespace, lakehouse, "seaweedfs"),
+        type_: Some("Opaque".into()),
+        string_data: string_data(&[
+            ("access-key", keys.access_key.clone()),
+            ("secret-key", keys.secret_key.clone()),
+            ("endpoint", s3_endpoint(namespace)),
+            ("bucket", bucket.to_string()),
+            ("region", "us-east-1".to_string()),
+        ]),
+        ..Default::default()
+    }
+}
+
+/// `seaweedfs-s3-config`: the same key pair as the gateway's S3 identity.
+pub fn seaweedfs_config_secret(lakehouse: &str, namespace: &str, keys: &S3Keys) -> Secret {
+    let identities = json!({"identities": [{
+        "name": "stardelt",
+        "credentials": [{"accessKey": keys.access_key, "secretKey": keys.secret_key}],
+        "actions": ["Admin", "Read", "Write"],
+    }]});
+    Secret {
+        metadata: meta(S3_CONFIG_SECRET, namespace, lakehouse, "seaweedfs"),
+        type_: Some("Opaque".into()),
+        string_data: string_data(&[("seaweedfs_s3_config", identities.to_string())]),
+        ..Default::default()
+    }
+}
+
+/// The CloudNative-PG `Cluster` for the catalog (single instance, like the platform manifest).
+pub fn catalog_cluster(lakehouse: &str, namespace: &str, profile: Profile) -> DynamicObject {
+    let size = match profile {
+        Profile::Demo => "2Gi",
+        _ => "10Gi",
+    };
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "Cluster".into(),
+        }),
+        metadata: meta(CATALOG_CLUSTER, namespace, lakehouse, "lakekeeper"),
+        data: json!({"spec": {
+            "instances": 1,
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2",
+            "storage": {"size": size},
+            "plugins": continuous_backup(CATALOG_CLUSTER),
+            "bootstrap": {"initdb": {"database": "lakekeeper", "owner": "lakekeeper"}},
+            "resources": {
+                "requests": {"cpu": "50m", "memory": "256Mi"},
+                "limits": {"cpu": "1", "memory": "512Mi"},
+            },
+            "postgresql": {"parameters": {"max_connections": "150"}},
+            "probes": {"startup": {"failureThreshold": 120}},
+        }}),
+    }
+}
+
+/// The continuous backup of a platform database. The form is the barman-cloud plugin
+/// (CloudNativePG 1.32.0 removes `spec.backup.barmanObjectStore`); the plugin reads the
+/// `ObjectStore` named here, rendered by [`barman_cloud_object_stores`] in the same namespace.
+/// No `retentionPolicy` here: CloudNativePG warns that it is inert under a plugin, and the
+/// store carries the same 14 days.
+fn continuous_backup(cluster: &str) -> serde_json::Value {
+    json!([{
+        "name": BARMAN_PLUGIN,
+        "enabled": true,
+        "isWALArchiver": true,
+        "parameters": {"barmanObjectName": format!("{cluster}-backups")},
+    }])
+}
+
+/// The CloudNative-PG `Cluster` that stores Keycloak's state (realms, users, sessions),
+/// for `identity.mode: platform`. Mirrors `manifests/keycloak.yaml` in stardelt-platform.
+pub fn keycloak_pg_cluster(namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "Cluster".into(),
+        }),
+        metadata: platform_meta("keycloak-pg", namespace, "keycloak-pg"),
+        data: json!({"spec": {
+            "instances": 1,
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
+            "storage": {"size": "1Gi"},
+            "plugins": continuous_backup("keycloak-pg"),
+            "bootstrap": {"initdb": {"database": "keycloak", "owner": "keycloak"}},
+            "resources": {
+                "requests": {"cpu": "50m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "256Mi"},
+            },
+            "postgresql": {"parameters": {"max_connections": "150"}},
+            "probes": {"startup": {"failureThreshold": 120}},
+        }}),
+    }
+}
+
+/// The daily base backup of the identity database. Mirrors the platform manifest.
+pub fn keycloak_pg_backup(namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "ScheduledBackup".into(),
+        }),
+        metadata: platform_meta("keycloak-pg-daily", namespace, "keycloak-pg"),
+        data: json!({"spec": {
+            "schedule": "0 45 2 * * *",
+            "immediate": true,
+            "backupOwnerReference": "self",
+            "method": "plugin",
+            "pluginConfiguration": {"name": BARMAN_PLUGIN},
+            "cluster": {"name": "keycloak-pg"},
+        }}),
+    }
+}
+
+/// The CloudNative-PG `Cluster` of the catalog's permission store (O5). Mirrors
+/// `stardelt-platform/manifests/openfga-pg.yaml`.
+pub fn openfga_pg_cluster(namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "Cluster".into(),
+        }),
+        metadata: platform_meta("openfga-pg", namespace, "openfga-pg"),
+        data: json!({"spec": {
+            "instances": 1,
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
+            "storage": {"size": "1Gi"},
+            "plugins": continuous_backup("openfga-pg"),
+            "bootstrap": {"initdb": {"database": "openfga", "owner": "openfga"}},
+            "resources": {
+                "requests": {"cpu": "50m", "memory": "256Mi"},
+                "limits": {"cpu": "1", "memory": "2Gi"},
+            },
+            "postgresql": {"parameters": {"max_connections": "150"}},
+            "probes": {"startup": {"failureThreshold": 120}},
+        }}),
+    }
+}
+
+/// The daily base backup of the permission store; same window as the catalog's.
+pub fn openfga_pg_backup(namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "ScheduledBackup".into(),
+        }),
+        metadata: platform_meta("openfga-pg-daily", namespace, "openfga-pg"),
+        data: json!({"spec": {
+            "schedule": "0 30 2 * * *",
+            "immediate": true,
+            "backupOwnerReference": "self",
+            "method": "plugin",
+            "pluginConfiguration": {"name": BARMAN_PLUGIN},
+            "cluster": {"name": "openfga-pg"},
+        }}),
+    }
+}
+
+/// The daily base backup of the catalog database. Mirrors the platform manifest.
+pub fn catalog_pg_backup(lakehouse: &str, namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "ScheduledBackup".into(),
+        }),
+        metadata: meta("lakekeeper-pg-daily", namespace, lakehouse, "lakekeeper"),
+        data: json!({"spec": {
+            "schedule": "0 30 2 * * *",
+            "immediate": true,
+            "backupOwnerReference": "self",
+            "method": "plugin",
+            "pluginConfiguration": {"name": BARMAN_PLUGIN},
+            "cluster": {"name": CATALOG_CLUSTER},
+        }}),
+    }
+}
+
+/// The barman-cloud `ObjectStore`s, one per platform database (platform#1234, the operator twin):
+/// the plugin form of each `Cluster`'s backup configuration. The destination path, the credentials
+/// Secret, the gzip settings and the 14-day retention are the same values the native
+/// `barmanObjectStore` blocks carried ([`continuous_backup`]); the plugin writes under
+/// `s3://backups/<cluster>/` as well, so both forms continue the same archive chain. Every platform
+/// `Cluster` names one, through [`continuous_backup`].
+pub fn barman_cloud_object_stores(namespace: &str) -> Vec<DynamicObject> {
+    ["nova-pg", "lakekeeper-pg", "openfga-pg", "keycloak-pg"]
+        .iter()
+        .map(|cluster| barman_cloud_object_store(namespace, cluster))
+        .collect()
+}
+
+fn barman_cloud_object_store(namespace: &str, cluster: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "barmancloud.cnpg.io/v1".into(),
+            kind: "ObjectStore".into(),
+        }),
+        metadata: platform_meta(&format!("{cluster}-backups"), namespace, cluster),
+        data: json!({"spec": {
+            "retentionPolicy": "14d",
+            "configuration": {
+                "destinationPath": "s3://backups/",
+                "endpointURL": s3_endpoint(namespace),
+                "s3Credentials": {
+                    "accessKeyId": {"name": S3_SECRET, "key": "access-key"},
+                    "secretAccessKey": {"name": S3_SECRET, "key": "secret-key"},
+                    "region": {"name": S3_SECRET, "key": "region"},
+                },
+                "wal": {"compression": "gzip", "maxParallel": 2},
+                "data": {"compression": "gzip"},
+            },
+        }}),
+    }
+}
+
+/// CloudNative-PG `Cluster` that stores Nova's state (saved queries, settings, the query log).
+pub const NOVA_CLUSTER: &str = "nova-pg";
+
+/// The CloudNative-PG `Cluster` of Nova: a database of its own, so Nova never shares one with the
+/// catalog or the identity provider. Mirrors `manifests/nova-pg.yaml` in stardelt-platform,
+/// including its three hardening settings: the PostgreSQL image is pinned (an apply must not
+/// track the CloudNative-PG default and start a major upgrade), `max_connections` is 150 (the
+/// default 100 was filled by clients stuck in authentication during an outage) and the startup
+/// probe tolerates a long recovery. CloudNative-PG generates Secret `nova-pg-app`; its `uri` key
+/// is the complete URL that `NOVA_DATABASE_URL` reads.
+pub fn nova_pg_cluster(namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "Cluster".into(),
+        }),
+        metadata: platform_meta(NOVA_CLUSTER, namespace, NOVA_CLUSTER),
+        data: json!({"spec": {
+            "instances": 1,
+            "imageName": "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4",
+            "storage": {"size": "1Gi"},
+            "plugins": continuous_backup(NOVA_CLUSTER),
+            "bootstrap": {"initdb": {"database": "nova", "owner": "nova"}},
+            "resources": {
+                "requests": {"cpu": "50m", "memory": "256Mi"},
+                "limits": {"cpu": "500m", "memory": "2Gi"},
+            },
+            "postgresql": {"parameters": {"max_connections": "150"}},
+            "probes": {"startup": {"failureThreshold": 120}},
+        }}),
+    }
+}
+
+/// The daily base backup of Nova's database, 15 minutes after the identity database
+/// (`0 45 2`) and 30 after the catalog's, as in the platform manifest.
+pub fn nova_pg_backup(namespace: &str) -> DynamicObject {
+    DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "postgresql.cnpg.io/v1".into(),
+            kind: "ScheduledBackup".into(),
+        }),
+        metadata: platform_meta("nova-pg-daily", namespace, NOVA_CLUSTER),
+        data: json!({"spec": {
+            "schedule": "0 0 3 * * *",
+            "immediate": true,
+            "backupOwnerReference": "self",
+            "method": "plugin",
+            "pluginConfiguration": {"name": BARMAN_PLUGIN},
+            "cluster": {"name": NOVA_CLUSTER},
+        }}),
+    }
+}
+
+/// Where the object store of a Lakehouse is, as recorded in Secret `stardelt-s3-creds`
+/// (written by the operator for `seaweedfs`, by the user for `byoS3`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct S3Location {
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+}
+
+/// Name of the discovery ConfigMap of a Lakehouse.
+pub fn discovery_config_map_name(lakehouse: &str) -> String {
+    format!("{lakehouse}-discovery")
+}
+
+/// `<lakehouse>-discovery`: the connection contract of a Lakehouse. Consumers (notebooks,
+/// jobs, dashboards, external tools) read these keys instead of hard-coding hostnames.
+/// The URLs are fully qualified, so they resolve from any namespace. No credentials:
+/// those stay in Secret `stardelt-s3-creds`. `trino_url` comes from `identity::trino_url`:
+/// the HTTPS listener when Trino authenticates, the plain endpoint otherwise.
+pub fn discovery_config_map(
+    lakehouse: &str,
+    namespace: &str,
+    s3: &S3Location,
+    trino_url: &str,
+    owner: OwnerReference,
+) -> ConfigMap {
+    let mut metadata = meta(
+        &discovery_config_map_name(lakehouse),
+        namespace,
+        lakehouse,
+        "discovery",
+    );
+    metadata.owner_references = Some(vec![owner]);
+    ConfigMap {
+        metadata,
+        data: string_data(&[
+            ("lakehouse", lakehouse.to_string()),
+            (
+                "catalogUri",
+                format!("http://lakekeeper.{namespace}.svc.cluster.local:8181/catalog"),
+            ),
+            ("warehouse", WAREHOUSE.to_string()),
+            ("s3Endpoint", s3.endpoint.clone()),
+            ("s3Bucket", s3.bucket.clone()),
+            ("s3Region", s3.region.clone()),
+            ("trinoUrl", trino_url.to_string()),
+            ("trinoCatalog", WAREHOUSE.to_string()),
+        ]),
+        ..Default::default()
+    }
+}
+
+/// Name of the bootstrap Job. It changes when the access key, bucket, endpoint or
+/// script change, so a rotated key or a new script gets a fresh Job (Job specs are
+/// immutable).
+fn bootstrap_job_name_for(keys: &S3Keys, bucket: &str, endpoint: &str, script: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    (&keys.access_key, bucket, endpoint, script).hash(&mut hasher);
+    format!("lakekeeper-bootstrap-{:08x}", hasher.finish() as u32)
+}
+
+/// [`bootstrap_job_name_for`] for the embedded script.
+pub fn bootstrap_job_name(keys: &S3Keys, bucket: &str, endpoint: &str) -> String {
+    bootstrap_job_name_for(keys, bucket, endpoint, BOOTSTRAP_SCRIPT)
+}
+
+fn secret_env(name: &str, key: &str) -> EnvVar {
+    EnvVar {
+        name: name.into(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: S3_SECRET.into(),
+                key: key.into(),
+                optional: None,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Bucket for published notebooks (Nova's publish route writes a new object version per publish,
+/// so the bucket must keep versions). SeaweedFS' chart can create a bucket but not switch
+/// versioning on, so [`notebooks_bucket_job`] does both and keeps executed run copies under
+/// `_runs/` for 30 days.
+pub const NOTEBOOKS_BUCKET: &str = "notebooks";
+/// Creates [`NOTEBOOKS_BUCKET`], turns versioning on and keeps executed run copies under `_runs/`
+/// for 30 days (idempotent).
+pub const NOTEBOOKS_BUCKET_SCRIPT: &str = include_str!("notebooks_bucket.sh");
+
+fn notebooks_bucket_job_name_for(endpoint: &str, script: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    (NOTEBOOKS_BUCKET, endpoint, script).hash(&mut hasher);
+    format!("notebooks-bucket-{:08x}", hasher.finish() as u32)
+}
+
+/// Name of the notebooks-bucket Job. It changes when the endpoint or the script changes: a Job
+/// spec is immutable, and a changed script must run again to reach an existing bucket.
+pub fn notebooks_bucket_job_name(endpoint: &str) -> String {
+    notebooks_bucket_job_name_for(endpoint, NOTEBOOKS_BUCKET_SCRIPT)
+}
+
+/// The Job that creates the versioned notebooks bucket with the AWS CLI, against the object store
+/// of the Lakehouse, with its credentials from Secret `stardelt-s3-creds`, and keeps executed run
+/// copies under `_runs/` for 30 days. Mirrors `scripts/create-notebooks-bucket.sh` in
+/// stardelt-platform.
+pub fn notebooks_bucket_job(
+    lakehouse: &str,
+    namespace: &str,
+    name: &str,
+    owner: OwnerReference,
+) -> Job {
+    let mut metadata = meta(name, namespace, lakehouse, "notebooks-bucket");
+    metadata.owner_references = Some(vec![owner]);
+    Job {
+        metadata,
+        spec: Some(JobSpec {
+            ttl_seconds_after_finished: Some(600),
+            backoff_limit: Some(4),
+            template: PodTemplateSpec {
+                spec: Some(PodSpec {
+                    restart_policy: Some("OnFailure".into()),
+                    automount_service_account_token: Some(false),
+                    containers: vec![Container {
+                        name: "bucket".into(),
+                        image: Some(AWS_CLI_IMAGE.into()),
+                        command: Some(vec!["sh".into(), "-c".into()]),
+                        args: Some(vec![NOTEBOOKS_BUCKET_SCRIPT.to_string()]),
+                        env: Some(vec![
+                            EnvVar {
+                                name: "BUCKET".into(),
+                                value: Some(NOTEBOOKS_BUCKET.into()),
+                                ..Default::default()
+                            },
+                            secret_env("AWS_ACCESS_KEY_ID", "access-key"),
+                            secret_env("AWS_SECRET_ACCESS_KEY", "secret-key"),
+                            secret_env("AWS_ENDPOINT_URL", "endpoint"),
+                            secret_env("AWS_DEFAULT_REGION", "region"),
+                        ]),
+                        security_context: Some(SecurityContext {
+                            allow_privilege_escalation: Some(false),
+                            capabilities: Some(Capabilities {
+                                drop: Some(vec!["ALL".into()]),
+                                add: None,
+                            }),
+                            seccomp_profile: Some(SeccompProfile {
+                                type_: "RuntimeDefault".into(),
+                                localhost_profile: None,
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Destination of the object-store archive: a copy of the live bucket outside itself
+/// (`design/operator-parity.md`, O8; platform#462). Append-only — the sync never deletes.
+pub const ARCHIVE_BUCKET: &str = "lakehouse-backup";
+/// Creates [`ARCHIVE_BUCKET`] (idempotent; no versioning).
+pub const ARCHIVE_BUCKET_SCRIPT: &str = include_str!("archive_bucket.sh");
+/// The nightly archive CronJob.
+pub const ARCHIVE_JOB: &str = "lakehouse-backup";
+
+/// Name of the archive-bucket Job. It changes when the endpoint changes, because a Job spec is
+/// immutable and a new object store needs the bucket again (same rule as
+/// [`notebooks_bucket_job_name`], line 385).
+pub fn archive_bucket_job_name(endpoint: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    (ARCHIVE_BUCKET, endpoint).hash(&mut hasher);
+    format!("archive-bucket-{:08x}", hasher.finish() as u32)
+}
+
+/// Pod Security `restricted` for the two aws-cli Jobs (platform#1096 question 5): the
+/// image runs as root by default. 65534 with HOME=/tmp is measured for `aws s3 sync`
+/// against the platform's store (2026-11-13); HOME is set on the containers below.
+fn archive_pod_security_context() -> PodSecurityContext {
+    PodSecurityContext {
+        run_as_non_root: Some(true),
+        run_as_user: Some(65534),
+        run_as_group: Some(65534),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".into(),
+            localhost_profile: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// The Job that creates the archive destination bucket.
+pub fn archive_bucket_job(
+    lakehouse: &str,
+    namespace: &str,
+    name: &str,
+    owner: OwnerReference,
+) -> Job {
+    let mut metadata = meta(name, namespace, lakehouse, "archive-bucket");
+    metadata.owner_references = Some(vec![owner]);
+    Job {
+        metadata,
+        spec: Some(JobSpec {
+            ttl_seconds_after_finished: Some(600),
+            backoff_limit: Some(4),
+            template: PodTemplateSpec {
+                spec: Some(PodSpec {
+                    restart_policy: Some("OnFailure".into()),
+                    automount_service_account_token: Some(false),
+                    security_context: Some(archive_pod_security_context()),
+                    containers: vec![Container {
+                        name: "bucket".into(),
+                        image: Some(AWS_CLI_IMAGE.into()),
+                        command: Some(vec!["sh".into(), "-c".into()]),
+                        args: Some(vec![ARCHIVE_BUCKET_SCRIPT.to_string()]),
+                        env: Some(vec![
+                            EnvVar {
+                                name: "BUCKET".into(),
+                                value: Some(ARCHIVE_BUCKET.into()),
+                                ..Default::default()
+                            },
+                            secret_env("AWS_ACCESS_KEY_ID", "access-key"),
+                            secret_env("AWS_SECRET_ACCESS_KEY", "secret-key"),
+                            secret_env("AWS_ENDPOINT_URL", "endpoint"),
+                            secret_env("AWS_DEFAULT_REGION", "region"),
+                            EnvVar {
+                                name: "HOME".into(),
+                                value: Some("/tmp".into()),
+                                ..Default::default()
+                            },
+                        ]),
+                        security_context: Some(SecurityContext {
+                            allow_privilege_escalation: Some(false),
+                            capabilities: Some(Capabilities {
+                                drop: Some(vec!["ALL".into()]),
+                                add: None,
+                            }),
+                            seccomp_profile: Some(SeccompProfile {
+                                type_: "RuntimeDefault".into(),
+                                localhost_profile: None,
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+pub fn archive_cron_job(namespace: &str, lakehouse: &str) -> CronJob {
+    let metadata = meta(ARCHIVE_JOB, namespace, lakehouse, "lakehouse-backup");
+    let script = "echo \"› source:      s3://${SOURCE_BUCKET}\"\necho \"› destination: s3://${DEST_BUCKET}\"\nexec aws s3 sync \"s3://${SOURCE_BUCKET}\" \"s3://${DEST_BUCKET}\" --endpoint-url \"${AWS_ENDPOINT_URL}\" --no-progress\n";
+    CronJob {
+        metadata: metadata.clone(),
+        spec: CronJobSpec {
+            schedule: "15 3 * * *".into(),
+            concurrency_policy: Some("Forbid".into()),
+            successful_jobs_history_limit: Some(3),
+            failed_jobs_history_limit: Some(3),
+            starting_deadline_seconds: None,
+            suspend: None,
+            time_zone: None,
+            job_template: JobTemplateSpec {
+                metadata: None,
+                spec: Some(JobSpec {
+                    backoff_limit: Some(1),
+                    template: PodTemplateSpec {
+                        metadata: Some(metadata),
+                        spec: Some(PodSpec {
+                            restart_policy: Some("Never".into()),
+                            automount_service_account_token: Some(false),
+                            security_context: Some(archive_pod_security_context()),
+                            containers: vec![Container {
+                                name: "s3-sync".into(),
+                                image: Some(AWS_CLI_IMAGE.into()),
+                                command: Some(vec!["/bin/sh".into(), "-ec".into()]),
+                                args: Some(vec![script.to_string()]),
+                                env: Some(vec![
+                                    secret_env("AWS_ENDPOINT_URL", "endpoint"),
+                                    secret_env("AWS_ACCESS_KEY_ID", "access-key"),
+                                    secret_env("AWS_SECRET_ACCESS_KEY", "secret-key"),
+                                    secret_env("AWS_DEFAULT_REGION", "region"),
+                                    secret_env("SOURCE_BUCKET", "bucket"),
+                                    EnvVar {
+                                        name: "DEST_BUCKET".into(),
+                                        value: Some(ARCHIVE_BUCKET.into()),
+                                        ..Default::default()
+                                    },
+                                    EnvVar {
+                                        name: "HOME".into(),
+                                        value: Some("/tmp".into()),
+                                        ..Default::default()
+                                    },
+                                ]),
+                                resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+                                    requests: Some(
+                                        [
+                                            (
+                                                "cpu".into(),
+                                                k8s_openapi::apimachinery::pkg::api::resource::Quantity("50m".into()),
+                                            ),
+                                            (
+                                                "memory".into(),
+                                                k8s_openapi::apimachinery::pkg::api::resource::Quantity("128Mi".into()),
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .collect(),
+                                    ),
+                                    limits: Some(
+                                        [
+                                            (
+                                                "cpu".into(),
+                                                k8s_openapi::apimachinery::pkg::api::resource::Quantity("1".into()),
+                                            ),
+                                            (
+                                                "memory".into(),
+                                                k8s_openapi::apimachinery::pkg::api::resource::Quantity("512Mi".into()),
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .collect(),
+                                    ),
+                                    ..Default::default()
+                                }),
+                                security_context: Some(SecurityContext {
+                                    allow_privilege_escalation: Some(false),
+                                    capabilities: Some(Capabilities {
+                                        drop: Some(vec!["ALL".into()]),
+                                        add: None,
+                                    }),
+                                    seccomp_profile: Some(SeccompProfile {
+                                        type_: "RuntimeDefault".into(),
+                                        localhost_profile: None,
+                                    }),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }),
+                    },
+                    ..Default::default()
+                }),
+            },
+        },
+        status: None,
+    }
+}
+
+/// The Job that bootstraps Lakekeeper and creates or refreshes the `warehouse`.
+pub fn bootstrap_job(lakehouse: &str, namespace: &str, name: &str, owner: OwnerReference) -> Job {
+    let mut metadata = meta(name, namespace, lakehouse, "lakekeeper-bootstrap");
+    metadata.owner_references = Some(vec![owner]);
+    Job {
+        metadata,
+        spec: Some(JobSpec {
+            ttl_seconds_after_finished: Some(600),
+            backoff_limit: Some(4),
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(BTreeMap::from([(
+                        network_policy::BOOTSTRAP_POD_LABEL.to_string(),
+                        network_policy::BOOTSTRAP_POD_VALUE.to_string(),
+                    )])),
+                    ..ObjectMeta::default()
+                }),
+                spec: Some(PodSpec {
+                    restart_policy: Some("OnFailure".into()),
+                    automount_service_account_token: Some(false),
+                    containers: vec![Container {
+                        name: "bootstrap".into(),
+                        image: Some("curlimages/curl:8.10.1".into()),
+                        command: Some(vec!["/bin/sh".into(), "-c".into()]),
+                        args: Some(vec![BOOTSTRAP_SCRIPT.to_string()]),
+                        volume_mounts: Some(vec![
+                            VolumeMount {
+                                name: "catalog-principal".into(),
+                                mount_path: "/var/run/secrets/catalog-principal".into(),
+                                read_only: Some(true),
+                                ..VolumeMount::default()
+                            },
+                            VolumeMount {
+                                name: "catalog-trino".into(),
+                                mount_path: "/var/run/secrets/catalog-trino".into(),
+                                read_only: Some(true),
+                                ..VolumeMount::default()
+                            },
+                        ]),
+                        env: Some(vec![
+                            EnvVar {
+                                name: "LK".into(),
+                                value: Some("http://lakekeeper:8181".into()),
+                                ..Default::default()
+                            },
+                            secret_env("S3_ENDPOINT", "endpoint"),
+                            secret_env("S3_BUCKET", "bucket"),
+                            secret_env("S3_REGION", "region"),
+                            secret_env("S3_ACCESS_KEY", "access-key"),
+                            secret_env("S3_SECRET_KEY", "secret-key"),
+                        ]),
+                        security_context: Some(SecurityContext {
+                            allow_privilege_escalation: Some(false),
+                            capabilities: Some(Capabilities {
+                                drop: Some(vec!["ALL".into()]),
+                                add: None,
+                            }),
+                            seccomp_profile: Some(SeccompProfile {
+                                type_: "RuntimeDefault".into(),
+                                localhost_profile: None,
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    volumes: Some(vec![
+                        Volume {
+                            name: "catalog-principal".into(),
+                            secret: Some(SecretVolumeSource {
+                                secret_name: Some("sp-catalog-operator".into()),
+                                optional: Some(true),
+                                ..SecretVolumeSource::default()
+                            }),
+                            ..Volume::default()
+                        },
+                        Volume {
+                            name: "catalog-trino".into(),
+                            secret: Some(SecretVolumeSource {
+                                secret_name: Some("sp-catalog-trino".into()),
+                                optional: Some(true),
+                                ..SecretVolumeSource::default()
+                            }),
+                            ..Volume::default()
+                        },
+                    ]),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kube::ResourceExt;
+
+    use super::*;
+
+    fn keys() -> S3Keys {
+        S3Keys {
+            access_key: "AK".into(),
+            secret_key: "SK".into(),
+        }
+    }
+
+    #[test]
+    fn the_platform_namespace_carries_the_pod_security_floor() {
+        let ns = platform_namespace("lab");
+        assert_eq!(ns.metadata.name.as_deref(), Some("lab"));
+        let labels = ns.metadata.labels.expect("labels");
+        assert_eq!(
+            labels.get("app.kubernetes.io/part-of").map(String::as_str),
+            Some("stardelt")
+        );
+        for key in [
+            "pod-security.kubernetes.io/enforce",
+            "pod-security.kubernetes.io/enforce-version",
+            "pod-security.kubernetes.io/audit",
+            "pod-security.kubernetes.io/audit-version",
+            "pod-security.kubernetes.io/warn",
+            "pod-security.kubernetes.io/warn-version",
+        ] {
+            assert!(labels.contains_key(key), "missing {key}");
+        }
+        assert_eq!(labels["pod-security.kubernetes.io/enforce"], "baseline");
+        assert_eq!(labels["pod-security.kubernetes.io/warn"], "restricted");
+    }
+
+    #[test]
+    fn generated_keys_have_the_documented_length_and_differ() {
+        let a = S3Keys::generate().unwrap();
+        let b = S3Keys::generate().unwrap();
+        assert_eq!((a.access_key.len(), a.secret_key.len()), (20, 40));
+        assert_ne!(a, b);
+        assert_eq!(format!("{a:?}"), "S3Keys { .. }");
+    }
+
+    #[test]
+    fn creds_secret_carries_the_five_consumer_keys() {
+        let s = s3_creds_secret("main", "data", "lakehouse", &keys());
+        let d = s.string_data.unwrap();
+        for k in ["access-key", "secret-key", "endpoint", "bucket", "region"] {
+            assert!(d.contains_key(k), "missing {k}");
+        }
+        assert_eq!(
+            d["endpoint"],
+            "http://seaweedfs-s3.data.svc.cluster.local:8333"
+        );
+        assert_eq!(s.metadata.name.as_deref(), Some("stardelt-s3-creds"));
+    }
+
+    #[test]
+    fn gateway_config_has_the_same_key_pair() {
+        let s = seaweedfs_config_secret("main", "data", &keys());
+        let json: serde_json::Value =
+            serde_json::from_str(&s.string_data.unwrap()["seaweedfs_s3_config"]).unwrap();
+        let cred = &json["identities"][0]["credentials"][0];
+        assert_eq!(
+            (cred["accessKey"].as_str(), cred["secretKey"].as_str()),
+            (Some("AK"), Some("SK"))
+        );
+    }
+
+    #[test]
+    fn catalog_cluster_is_sized_by_profile() {
+        let demo = catalog_cluster("main", "data", Profile::Demo);
+        let full = catalog_cluster("main", "data", Profile::Full);
+        assert_eq!(demo.data["spec"]["storage"]["size"], "2Gi");
+        assert_eq!(full.data["spec"]["storage"]["size"], "10Gi");
+        assert_eq!(
+            demo.data["spec"]["bootstrap"]["initdb"]["database"],
+            "lakekeeper"
+        );
+        assert_eq!(demo.metadata.name.as_deref(), Some("lakekeeper-pg"));
+    }
+
+    #[test]
+    fn keycloak_pg_cluster_mirrors_the_platform_manifest() {
+        let cluster = keycloak_pg_cluster("stardelt");
+        assert_eq!(
+            cluster
+                .types
+                .as_ref()
+                .map(|t| (t.api_version.as_str(), t.kind.as_str())),
+            Some(("postgresql.cnpg.io/v1", "Cluster"))
+        );
+        assert_eq!(cluster.metadata.name.as_deref(), Some("keycloak-pg"));
+        assert_eq!(cluster.metadata.namespace.as_deref(), Some("stardelt"));
+        let spec = &cluster.data["spec"];
+        assert_eq!(spec["instances"], 1);
+        assert_eq!(spec["storage"]["size"], "1Gi");
+        assert_eq!(spec["bootstrap"]["initdb"]["database"], "keycloak");
+        assert_eq!(spec["bootstrap"]["initdb"]["owner"], "keycloak");
+        assert_eq!(spec["resources"]["requests"]["cpu"], "50m");
+        assert_eq!(spec["resources"]["requests"]["memory"], "128Mi");
+        assert_eq!(spec["resources"]["limits"]["cpu"], "500m");
+        assert_eq!(spec["resources"]["limits"]["memory"], "256Mi");
+        let plugin = &spec["plugins"][0];
+        assert_eq!(plugin["name"], BARMAN_PLUGIN);
+        assert_eq!(plugin["enabled"], true);
+        assert_eq!(plugin["isWALArchiver"], true);
+        assert_eq!(
+            plugin["parameters"]["barmanObjectName"],
+            "keycloak-pg-backups"
+        );
+        assert!(spec["backup"].get("barmanObjectStore").is_none());
+        // The endpoint still follows the namespace — on the ObjectStore now.
+        assert_eq!(
+            barman_cloud_object_store("lab", "keycloak-pg").data["spec"]["configuration"]["endpointURL"],
+            "http://seaweedfs-s3.lab.svc.cluster.local:8333"
+        );
+    }
+
+    #[test]
+    fn keycloak_pg_backup_is_the_daily_barman_schedule() {
+        let backup = keycloak_pg_backup("stardelt");
+        assert_eq!(
+            backup
+                .types
+                .as_ref()
+                .map(|t| (t.api_version.as_str(), t.kind.as_str())),
+            Some(("postgresql.cnpg.io/v1", "ScheduledBackup"))
+        );
+        assert_eq!(backup.metadata.name.as_deref(), Some("keycloak-pg-daily"));
+        assert_eq!(backup.metadata.namespace.as_deref(), Some("stardelt"));
+        let spec = &backup.data["spec"];
+        assert_eq!(spec["schedule"], "0 45 2 * * *");
+        assert_eq!(spec["immediate"], true);
+        assert_eq!(spec["backupOwnerReference"], "self");
+        assert_eq!(spec["method"], "plugin");
+        assert_eq!(spec["pluginConfiguration"]["name"], BARMAN_PLUGIN);
+        assert_eq!(spec["cluster"]["name"], "keycloak-pg");
+    }
+
+    #[test]
+    fn the_openfga_cluster_uses_its_own_database_and_backup() {
+        let cluster = openfga_pg_cluster("data");
+        assert_eq!(
+            cluster.data["spec"]["bootstrap"]["initdb"]["database"],
+            "openfga"
+        );
+        assert_eq!(cluster.data["spec"]["storage"]["size"], "1Gi");
+        assert_eq!(
+            cluster.data["spec"]["plugins"][0]["parameters"]["barmanObjectName"],
+            "openfga-pg-backups"
+        );
+        let backup = openfga_pg_backup("data");
+        assert_eq!(backup.data["spec"]["cluster"]["name"], "openfga-pg");
+        assert_eq!(backup.data["spec"]["schedule"], "0 30 2 * * *");
+        assert_eq!(backup.data["spec"]["method"], "plugin");
+        assert_eq!(
+            backup.data["spec"]["pluginConfiguration"]["name"],
+            BARMAN_PLUGIN
+        );
+    }
+
+    #[test]
+    fn keycloak_pg_objects_carry_the_platform_labels() {
+        for (object, name) in [
+            (keycloak_pg_cluster("stardelt"), "keycloak-pg"),
+            (keycloak_pg_backup("stardelt"), "keycloak-pg-daily"),
+        ] {
+            assert_eq!(object.metadata.name.as_deref(), Some(name));
+            assert_eq!(object.metadata.namespace.as_deref(), Some("stardelt"));
+            let labels = object.metadata.labels.as_ref().expect("labels");
+            assert_eq!(labels["app.kubernetes.io/part-of"], "stardelt");
+            assert_eq!(labels["stardelt.io/component"], "keycloak-pg");
+            assert!(
+                !labels.contains_key("stardelt.io/lakehouse"),
+                "platform-scoped objects are not tied to a Lakehouse"
+            );
+        }
+    }
+
+    #[test]
+    fn nova_pg_cluster_mirrors_the_platform_manifest() {
+        let cluster = nova_pg_cluster("stardelt");
+        assert_eq!(
+            cluster
+                .types
+                .as_ref()
+                .map(|t| (t.api_version.as_str(), t.kind.as_str())),
+            Some(("postgresql.cnpg.io/v1", "Cluster"))
+        );
+        assert_eq!(cluster.metadata.name.as_deref(), Some("nova-pg"));
+        assert_eq!(cluster.metadata.namespace.as_deref(), Some("stardelt"));
+        let spec = &cluster.data["spec"];
+        assert_eq!(spec["instances"], 1);
+        assert_eq!(
+            spec["imageName"],
+            "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4"
+        );
+        assert_eq!(spec["storage"]["size"], "1Gi");
+        assert_eq!(spec["bootstrap"]["initdb"]["database"], "nova");
+        assert_eq!(spec["bootstrap"]["initdb"]["owner"], "nova");
+        assert_eq!(spec["resources"]["requests"]["cpu"], "50m");
+        assert_eq!(spec["resources"]["requests"]["memory"], "256Mi");
+        assert_eq!(spec["resources"]["limits"]["cpu"], "500m");
+        assert_eq!(spec["resources"]["limits"]["memory"], "2Gi");
+        assert_eq!(spec["postgresql"]["parameters"]["max_connections"], "150");
+        assert_eq!(spec["probes"]["startup"]["failureThreshold"], 120);
+        let plugin = &spec["plugins"][0];
+        assert_eq!(plugin["name"], BARMAN_PLUGIN);
+        assert_eq!(plugin["enabled"], true);
+        assert_eq!(plugin["isWALArchiver"], true);
+        assert_eq!(plugin["parameters"]["barmanObjectName"], "nova-pg-backups");
+        assert!(spec["backup"].get("barmanObjectStore").is_none());
+        // The endpoint still follows the namespace — on the ObjectStore now.
+        assert_eq!(
+            barman_cloud_object_store("lab", "nova-pg").data["spec"]["configuration"]["endpointURL"],
+            "http://seaweedfs-s3.lab.svc.cluster.local:8333"
+        );
+    }
+
+    #[test]
+    fn nova_pg_backup_runs_after_the_other_two_databases() {
+        let backup = nova_pg_backup("stardelt");
+        assert_eq!(
+            backup
+                .types
+                .as_ref()
+                .map(|t| (t.api_version.as_str(), t.kind.as_str())),
+            Some(("postgresql.cnpg.io/v1", "ScheduledBackup"))
+        );
+        assert_eq!(backup.metadata.name.as_deref(), Some("nova-pg-daily"));
+        assert_eq!(backup.metadata.namespace.as_deref(), Some("stardelt"));
+        let spec = &backup.data["spec"];
+        assert_eq!(spec["schedule"], "0 0 3 * * *");
+        assert_eq!(spec["immediate"], true);
+        assert_eq!(spec["backupOwnerReference"], "self");
+        assert_eq!(spec["method"], "plugin");
+        assert_eq!(spec["pluginConfiguration"]["name"], BARMAN_PLUGIN);
+        assert_eq!(spec["cluster"]["name"], "nova-pg");
+    }
+
+    #[test]
+    fn nova_pg_objects_carry_the_platform_labels() {
+        for (object, name) in [
+            (nova_pg_cluster("stardelt"), "nova-pg"),
+            (nova_pg_backup("stardelt"), "nova-pg-daily"),
+        ] {
+            assert_eq!(object.metadata.name.as_deref(), Some(name));
+            let labels = object.metadata.labels.as_ref().expect("labels");
+            assert_eq!(labels["app.kubernetes.io/part-of"], "stardelt");
+            assert_eq!(labels["stardelt.io/component"], "nova-pg");
+            assert!(
+                !labels.contains_key("stardelt.io/lakehouse"),
+                "platform-scoped objects are not tied to a Lakehouse"
+            );
+        }
+    }
+
+    #[test]
+    fn keycloak_and_nova_databases_share_one_backup_form_with_different_stores() {
+        assert_eq!(
+            keycloak_pg_cluster("stardelt").data["spec"]["backup"],
+            nova_pg_cluster("stardelt").data["spec"]["backup"]
+        );
+        assert_eq!(
+            keycloak_pg_cluster("stardelt").data["spec"]["plugins"][0]["parameters"]["barmanObjectName"],
+            "keycloak-pg-backups"
+        );
+        assert_eq!(
+            nova_pg_cluster("stardelt").data["spec"]["plugins"][0]["parameters"]["barmanObjectName"],
+            "nova-pg-backups"
+        );
+    }
+
+    #[test]
+    fn every_cluster_names_an_object_store_the_operator_creates() {
+        let namespace = "stardelt";
+        let clusters = [
+            catalog_cluster("lakehouse", namespace, Profile::Full),
+            keycloak_pg_cluster(namespace),
+            openfga_pg_cluster(namespace),
+            nova_pg_cluster(namespace),
+        ];
+        let stores: Vec<String> = barman_cloud_object_stores(namespace)
+            .iter()
+            .map(|store| store.metadata.name.clone().expect("ObjectStore name"))
+            .collect();
+        for cluster in clusters {
+            let name = cluster.metadata.name.clone().expect("Cluster name");
+            let store = cluster.data["spec"]["plugins"][0]["parameters"]["barmanObjectName"]
+                .as_str()
+                .expect("barmanObjectName");
+            assert!(
+                stores.iter().any(|candidate| candidate == store),
+                "{name} names {store}, which is not one of {stores:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_scheduled_backup_uses_the_plugin() {
+        for backup in [
+            catalog_pg_backup("lakehouse", "stardelt"),
+            keycloak_pg_backup("stardelt"),
+            openfga_pg_backup("stardelt"),
+            nova_pg_backup("stardelt"),
+        ] {
+            let spec = &backup.data["spec"];
+            assert_eq!(
+                spec["method"],
+                "plugin",
+                "{}",
+                backup.metadata.name.as_deref().unwrap()
+            );
+            assert_eq!(
+                spec["pluginConfiguration"]["name"], BARMAN_PLUGIN,
+                "method: plugin without pluginConfiguration creates no Backup (measured on platform#1236)"
+            );
+        }
+    }
+
+    #[test]
+    fn barman_cloud_object_stores_mirror_the_platform_manifest() {
+        let stores = barman_cloud_object_stores("stardelt");
+        let names: Vec<_> = stores.iter().map(|s| s.name_any()).collect();
+        assert_eq!(
+            names,
+            [
+                "nova-pg-backups",
+                "lakekeeper-pg-backups",
+                "openfga-pg-backups",
+                "keycloak-pg-backups"
+            ]
+        );
+        for store in &stores {
+            assert_eq!(store.types.as_ref().unwrap().kind, "ObjectStore");
+            assert_eq!(
+                store.types.as_ref().unwrap().api_version,
+                "barmancloud.cnpg.io/v1"
+            );
+            let spec = &store.data["spec"];
+            assert_eq!(spec["retentionPolicy"], json!("14d"));
+            assert_eq!(
+                spec["configuration"]["destinationPath"],
+                json!("s3://backups/")
+            );
+            assert_eq!(
+                spec["configuration"]["endpointURL"],
+                json!("http://seaweedfs-s3.stardelt.svc.cluster.local:8333")
+            );
+            assert_eq!(
+                spec["configuration"]["s3Credentials"]["accessKeyId"]["name"],
+                json!(S3_SECRET)
+            );
+            assert_eq!(spec["configuration"]["wal"]["maxParallel"], json!(2));
+            assert_eq!(spec["configuration"]["data"]["compression"], json!("gzip"));
+        }
+    }
+
+    #[test]
+    fn job_name_changes_with_the_access_key() {
+        let other = S3Keys {
+            access_key: "AK2".into(),
+            secret_key: "SK".into(),
+        };
+        let a = bootstrap_job_name(&keys(), "lakehouse", "http://s3");
+        assert_eq!(a, bootstrap_job_name(&keys(), "lakehouse", "http://s3"));
+        assert_ne!(a, bootstrap_job_name(&other, "lakehouse", "http://s3"));
+        assert!(a.starts_with("lakekeeper-bootstrap-"));
+    }
+
+    #[test]
+    fn bootstrap_job_name_changes_with_the_script() {
+        let a = bootstrap_job_name_for(&keys(), "lakehouse", "http://s3", "script-a");
+        let b = bootstrap_job_name_for(&keys(), "lakehouse", "http://s3", "script-b");
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            bootstrap_job_name_for(&keys(), "lakehouse", "http://s3", "script-a")
+        );
+    }
+
+    #[test]
+    fn bootstrap_job_mounts_the_catalog_principal() {
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        let job = bootstrap_job("main", "data", "lakekeeper-bootstrap-1", owner);
+        let p = job.spec.unwrap().template.spec.unwrap();
+        let c = &p.containers[0];
+        let m = c.volume_mounts.as_ref().unwrap().first().unwrap();
+        assert_eq!(m.name, "catalog-principal");
+        assert_eq!(m.mount_path, "/var/run/secrets/catalog-principal");
+        let v = p.volumes.as_ref().unwrap().first().unwrap();
+        let s = v.secret.as_ref().unwrap();
+        assert_eq!(s.secret_name.as_deref(), Some("sp-catalog-operator"));
+        assert_eq!(s.optional, Some(true));
+        // Trino's own catalog client rides along: the script's `grant data_admin` reads it.
+        let m = c.volume_mounts.as_ref().unwrap().get(1).unwrap();
+        assert_eq!(m.name, "catalog-trino");
+        assert_eq!(m.mount_path, "/var/run/secrets/catalog-trino");
+        assert_eq!(m.read_only, Some(true));
+        let v = p.volumes.as_ref().unwrap().get(1).unwrap();
+        let s = v.secret.as_ref().unwrap();
+        assert_eq!(s.secret_name.as_deref(), Some("sp-catalog-trino"));
+        assert_eq!(s.optional, Some(true));
+    }
+
+    #[test]
+    fn the_bootstrap_script_writes_the_project_grant() {
+        for needle in [
+            "/management/v1/permissions/project/assignments",
+            "\"type\":\"%s\"",
+            "grant project_admin \"$CRED_DIR\"",
+            "grant data_admin /var/run/secrets/catalog-trino",
+            "authz-backend",
+            "AUTH_ARGS=\"-H @$AUTH_FILE\"",
+        ] {
+            assert!(
+                BOOTSTRAP_SCRIPT.contains(needle),
+                "the script lacks `{needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_job_reads_the_s3_secret_and_refreshes_the_credential() {
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        let job = bootstrap_job("main", "data", "lakekeeper-bootstrap-1", owner);
+        let c = &job.spec.unwrap().template.spec.unwrap().containers[0];
+        let envs: Vec<_> = c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(
+            envs,
+            [
+                "LK",
+                "S3_ENDPOINT",
+                "S3_BUCKET",
+                "S3_REGION",
+                "S3_ACCESS_KEY",
+                "S3_SECRET_KEY"
+            ]
+        );
+        assert!(c.args.as_ref().unwrap()[0].contains("storage-credential"));
+        assert_eq!(job.metadata.owner_references.unwrap()[0].name, "main");
+    }
+
+    #[test]
+    fn the_notebooks_bucket_job_creates_and_versions_the_bucket_with_the_s3_secret() {
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        let job = notebooks_bucket_job("main", "data", "notebooks-bucket-1", owner);
+        assert_eq!(job.metadata.namespace.as_deref(), Some("data"));
+        assert_eq!(
+            job.metadata.owner_references.expect("owner")[0].name,
+            "main"
+        );
+        let pod = job.spec.expect("spec").template.spec.expect("pod");
+        assert_eq!(pod.restart_policy.as_deref(), Some("OnFailure"));
+        let c = &pod.containers[0];
+        assert_eq!(c.image.as_deref(), Some(AWS_CLI_IMAGE));
+        let env: Vec<(&str, Option<&str>)> = c
+            .env
+            .as_ref()
+            .expect("env")
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.value_from
+                        .as_ref()
+                        .and_then(|v| v.secret_key_ref.as_ref())
+                        .map(|s| s.key.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("BUCKET", None),
+                ("AWS_ACCESS_KEY_ID", Some("access-key")),
+                ("AWS_SECRET_ACCESS_KEY", Some("secret-key")),
+                ("AWS_ENDPOINT_URL", Some("endpoint")),
+                ("AWS_DEFAULT_REGION", Some("region")),
+            ]
+        );
+        assert_eq!(
+            c.env.as_ref().expect("env")[0].value.as_deref(),
+            Some("notebooks")
+        );
+        let script = &c.args.as_ref().expect("args")[0];
+        assert!(script.contains("put-bucket-versioning"));
+        assert!(script.contains("Status=Enabled"));
+        assert!(script.contains("head-bucket"), "an existing bucket is kept");
+        assert!(script.contains("put-bucket-lifecycle-configuration"));
+        assert!(script.contains("_runs/"));
+        assert!(script.contains("run copies kept"));
+    }
+
+    #[test]
+    fn the_notebooks_bucket_job_name_follows_the_endpoint() {
+        let a = notebooks_bucket_job_name("http://seaweedfs-s3.data.svc.cluster.local:8333");
+        assert_eq!(
+            a,
+            notebooks_bucket_job_name("http://seaweedfs-s3.data.svc.cluster.local:8333")
+        );
+        assert_ne!(
+            a,
+            notebooks_bucket_job_name("http://seaweedfs-s3.other.svc.cluster.local:8333")
+        );
+        assert!(a.starts_with("notebooks-bucket-"));
+    }
+
+    #[test]
+    fn the_notebooks_bucket_job_name_covers_the_script() {
+        let endpoint = "http://seaweedfs-s3.data.svc.cluster.local:8333";
+        let first = notebooks_bucket_job_name_for(endpoint, "set -e");
+        assert_eq!(first, notebooks_bucket_job_name_for(endpoint, "set -e"));
+        assert_ne!(
+            first,
+            notebooks_bucket_job_name_for(endpoint, "set -e\n# a changed script")
+        );
+        assert!(first.starts_with("notebooks-bucket-"));
+    }
+
+    #[test]
+    fn the_archive_bucket_job_creates_the_destination_bucket_without_versioning() {
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        let job = archive_bucket_job("main", "data", "archive-bucket-1", owner);
+        let pod = job.spec.expect("spec").template.spec.expect("pod");
+        assert_eq!(pod.restart_policy.as_deref(), Some("OnFailure"));
+        let c = &pod.containers[0];
+        assert_eq!(c.image.as_deref(), Some(AWS_CLI_IMAGE));
+        let env: Vec<(&str, Option<&str>)> = c
+            .env
+            .as_ref()
+            .expect("env")
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.value_from
+                        .as_ref()
+                        .and_then(|v| v.secret_key_ref.as_ref())
+                        .map(|s| s.key.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("BUCKET", None),
+                ("AWS_ACCESS_KEY_ID", Some("access-key")),
+                ("AWS_SECRET_ACCESS_KEY", Some("secret-key")),
+                ("AWS_ENDPOINT_URL", Some("endpoint")),
+                ("AWS_DEFAULT_REGION", Some("region")),
+                ("HOME", None),
+            ]
+        );
+        assert_eq!(
+            c.env.as_ref().expect("env")[0].value.as_deref(),
+            Some("lakehouse-backup")
+        );
+        assert_eq!(
+            c.env.as_ref().expect("env")[5].value.as_deref(),
+            Some("/tmp")
+        );
+        let script = &c.args.as_ref().expect("args")[0];
+        assert!(script.contains("create-bucket"));
+        assert!(!script.contains("put-bucket-versioning"));
+    }
+
+    #[test]
+    fn the_archive_cron_job_copies_the_live_bucket_into_the_archive_every_night() {
+        let cj = archive_cron_job("data", "main");
+        assert_eq!(cj.metadata.name.as_deref(), Some("lakehouse-backup"));
+        assert_eq!(cj.spec.schedule, "15 3 * * *");
+        let job_spec = cj.spec.job_template.spec.as_ref().unwrap();
+        assert_eq!(job_spec.backoff_limit, Some(1));
+        let pod_spec = job_spec.template.spec.as_ref().unwrap();
+        assert_eq!(pod_spec.restart_policy.as_deref(), Some("Never"));
+        assert_eq!(pod_spec.automount_service_account_token, Some(false));
+        let c = &pod_spec.containers[0];
+        assert_eq!(c.name, "s3-sync");
+        assert_eq!(c.image.as_deref(), Some(AWS_CLI_IMAGE));
+        let env: Vec<(&str, Option<&str>)> = c
+            .env
+            .as_ref()
+            .expect("env")
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.value_from
+                        .as_ref()
+                        .and_then(|v| v.secret_key_ref.as_ref())
+                        .map(|s| s.key.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("AWS_ENDPOINT_URL", Some("endpoint")),
+                ("AWS_ACCESS_KEY_ID", Some("access-key")),
+                ("AWS_SECRET_ACCESS_KEY", Some("secret-key")),
+                ("AWS_DEFAULT_REGION", Some("region")),
+                ("SOURCE_BUCKET", Some("bucket")),
+                ("DEST_BUCKET", None),
+                ("HOME", None),
+            ]
+        );
+        assert_eq!(
+            c.env.as_ref().expect("env")[5].value.as_deref(),
+            Some("lakehouse-backup")
+        );
+        assert_eq!(
+            c.env.as_ref().expect("env")[6].value.as_deref(),
+            Some("/tmp")
+        );
+        let script = &c.args.as_ref().expect("args")[0];
+        assert!(script.contains("aws s3 sync"));
+        assert!(!script.contains("--delete"));
+    }
+
+    #[test]
+    fn the_archive_jobs_declare_the_restricted_pod_fields() {
+        let pod = |spec: k8s_openapi::api::core::v1::PodSpec| {
+            let sc = spec.security_context.clone().expect("pod securityContext");
+            assert_eq!(sc.run_as_non_root, Some(true));
+            assert_eq!(sc.run_as_user, Some(65534));
+            assert_eq!(sc.run_as_group, Some(65534));
+            assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+            spec
+        };
+        let cj = archive_cron_job("data", "main");
+        let cron = cj
+            .spec
+            .job_template
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .clone()
+            .unwrap();
+        pod(cron);
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        let job = archive_bucket_job("main", "data", "archive-bucket-1", owner);
+        pod(job.spec.expect("spec").template.spec.expect("pod"));
+    }
+
+    #[test]
+    fn the_archive_bucket_job_name_follows_the_endpoint() {
+        let a = archive_bucket_job_name("http://seaweedfs-s3.data.svc.cluster.local:8333");
+        assert_eq!(
+            a,
+            archive_bucket_job_name("http://seaweedfs-s3.data.svc.cluster.local:8333")
+        );
+        assert_ne!(
+            a,
+            archive_bucket_job_name("http://seaweedfs-s3.other.svc.cluster.local:8333")
+        );
+        assert!(a.starts_with("archive-bucket-"));
+    }
+
+    #[test]
+    fn the_notebooks_bucket_is_the_one_nova_publishes_to() {
+        assert_eq!(NOTEBOOKS_BUCKET, crate::nova::NOTEBOOK_BUCKET);
+    }
+
+    #[test]
+    fn catalog_pg_backup_is_the_daily_barman_schedule() {
+        let backup = catalog_pg_backup("main", "data");
+        assert_eq!(
+            backup
+                .types
+                .as_ref()
+                .map(|t| (t.api_version.as_str(), t.kind.as_str())),
+            Some(("postgresql.cnpg.io/v1", "ScheduledBackup"))
+        );
+        assert_eq!(backup.metadata.name.as_deref(), Some("lakekeeper-pg-daily"));
+        assert_eq!(backup.metadata.namespace.as_deref(), Some("data"));
+        let spec = &backup.data["spec"];
+        assert_eq!(spec["schedule"], "0 30 2 * * *");
+        assert_eq!(spec["immediate"], true);
+        assert_eq!(spec["backupOwnerReference"], "self");
+        assert_eq!(spec["method"], "plugin");
+        assert_eq!(spec["pluginConfiguration"]["name"], BARMAN_PLUGIN);
+        assert_eq!(spec["cluster"]["name"], "lakekeeper-pg");
+    }
+
+    #[test]
+    fn the_catalog_cluster_pins_postgresql_17_and_keeps_its_hardening() {
+        let cluster = catalog_cluster("main", "data", Profile::Full);
+        assert_eq!(
+            cluster.data["spec"]["imageName"],
+            "ghcr.io/cloudnative-pg/postgresql:17.7-system-trixie@sha256:08775f8bdeb112878b8f2ef63578c47959ee332fc9e076d5d6735a710c4500e2"
+        );
+        assert_eq!(
+            cluster.data["spec"]["plugins"][0]["parameters"]["barmanObjectName"],
+            "lakekeeper-pg-backups"
+        );
+        assert!(
+            cluster.data["spec"]["backup"]
+                .get("barmanObjectStore")
+                .is_none(),
+            "the native barmanObjectStore form is gone"
+        );
+        assert_eq!(
+            cluster.data["spec"]["postgresql"]["parameters"]["max_connections"],
+            "150"
+        );
+        assert_eq!(
+            cluster.data["spec"]["probes"]["startup"]["failureThreshold"],
+            120
+        );
+    }
+
+    #[test]
+    fn the_keycloak_cluster_pins_postgresql_18_and_keeps_its_hardening() {
+        let cluster = keycloak_pg_cluster("stardelt");
+        assert_eq!(
+            cluster.data["spec"]["imageName"],
+            "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4"
+        );
+        assert_eq!(
+            cluster.data["spec"]["postgresql"]["parameters"]["max_connections"],
+            "150"
+        );
+        assert_eq!(
+            cluster.data["spec"]["probes"]["startup"]["failureThreshold"],
+            120
+        );
+    }
+
+    #[test]
+    fn every_cluster_pins_its_postgres_image_by_digest() {
+        for cluster in [
+            catalog_cluster("main", "data", Profile::Full),
+            keycloak_pg_cluster("stardelt"),
+            openfga_pg_cluster("stardelt"),
+            nova_pg_cluster("stardelt"),
+        ] {
+            let image = cluster.data["spec"]["imageName"]
+                .as_str()
+                .expect("every Cluster names its postgres image");
+            assert!(
+                image.contains("@sha256:"),
+                "{} runs the floating tag {image}",
+                cluster.metadata.name.as_deref().unwrap_or("?")
+            );
+        }
+    }
+
+    fn location() -> S3Location {
+        S3Location {
+            endpoint: "http://seaweedfs-s3.data.svc.cluster.local:8333".into(),
+            bucket: "lakehouse".into(),
+            region: "us-east-1".into(),
+        }
+    }
+
+    #[test]
+    fn discovery_config_map_publishes_the_connection_keys() {
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        let cm = discovery_config_map(
+            "main",
+            "data",
+            &location(),
+            "https://trino.data.svc.cluster.local:8443",
+            owner,
+        );
+        assert_eq!(cm.metadata.name.as_deref(), Some("main-discovery"));
+        assert_eq!(cm.metadata.namespace.as_deref(), Some("data"));
+        let labels = cm.metadata.labels.as_ref().unwrap();
+        assert_eq!(labels["stardelt.io/lakehouse"], "main");
+        assert_eq!(labels["stardelt.io/component"], "discovery");
+        assert_eq!(cm.metadata.owner_references.unwrap()[0].name, "main");
+        let data = cm.data.unwrap();
+        let expected = [
+            ("lakehouse", "main"),
+            (
+                "catalogUri",
+                "http://lakekeeper.data.svc.cluster.local:8181/catalog",
+            ),
+            ("warehouse", "warehouse"),
+            (
+                "s3Endpoint",
+                "http://seaweedfs-s3.data.svc.cluster.local:8333",
+            ),
+            ("s3Bucket", "lakehouse"),
+            ("s3Region", "us-east-1"),
+            ("trinoUrl", "https://trino.data.svc.cluster.local:8443"),
+            ("trinoCatalog", "warehouse"),
+        ];
+        assert_eq!(data.len(), expected.len(), "unexpected keys: {data:?}");
+        for (key, value) in expected {
+            assert_eq!(data[key], value, "key {key}");
+        }
+    }
+
+    #[test]
+    fn discovery_config_map_holds_no_credential() {
+        let cm = discovery_config_map(
+            "main",
+            "data",
+            &location(),
+            "https://trino.data.svc.cluster.local:8443",
+            OwnerReference::default(),
+        );
+        for key in cm.data.unwrap().keys() {
+            let key = key.to_lowercase();
+            assert!(
+                !key.contains("secret") && !key.contains("accesskey"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn helper_images_are_pinned_by_digest() {
+        assert_eq!(
+            AWS_CLI_IMAGE,
+            "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
+        );
+    }
+}

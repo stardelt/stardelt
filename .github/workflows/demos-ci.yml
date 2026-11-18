@@ -1,0 +1,116 @@
+name: "demos / CI"
+
+on:
+  push:
+    branches: [main]
+    paths: ["demos/**", ".github/workflows/demos-ci.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["demos/**", ".github/workflows/demos-ci.yml"]
+
+defaults:
+  run:
+    working-directory: demos
+
+jobs:
+  lint:
+    name: Lint (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install hadolint
+        run: |
+          curl -sSL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
+            -o /usr/local/bin/hadolint
+          chmod +x /usr/local/bin/hadolint
+
+      - name: hadolint airflow Dockerfile
+        run: hadolint images/airflow/Dockerfile
+
+  python-tests:
+    name: Pipeline loader tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        # The principal's Pod override is built with the Kubernetes client models, at the same
+        # version range the Airflow Kubernetes provider (and so the demo image) resolves.
+        run: python -m pip install pytest "httpx==0.28.1" "kubernetes>=35.0.0,!=36.0.0,<37.0.0"
+
+      - name: pytest
+        run: python -m pytest -q tests
+
+  bundle-validate:
+    name: The shop bundle passes the released validator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the released CLI
+        run: python -m pip install "stardelt @ git+https://github.com/stardelt/stardelt-python@v0.3.0"
+
+      - name: Validate the shop bundle
+        run: python -m stardelt bundle validate examples/shop-bundle
+
+  image-airflow:
+    name: Build + push airflow demo image
+    runs-on: ubuntu-latest
+    # Only on push to main (not on PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, python-tests]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build and push ghcr.io/stardelt/airflow:demo
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: demos
+          file: demos/images/airflow/Dockerfile
+          push: true
+          tags: ghcr.io/stardelt/airflow:demo
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # The push job above runs only on main, so without this a pull request would merge an
+  # image that has never been built.
+  image-airflow-check:
+    name: Build airflow demo image (no push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build ghcr.io/stardelt/airflow:demo (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: demos
+          file: demos/images/airflow/Dockerfile
+          push: false
+          cache-from: type=gha

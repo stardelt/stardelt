@@ -1,0 +1,26 @@
+{
+  "spark-4.1-py3.11": {
+    "image": "ghcr.io/stardelt/spark:dev@sha256:be8f2010850894247e909302ac283fa8b9e3ecf596b3747ce2db4390e19e7c7b",
+    "sparkVersion": "4.1.4",
+    "serviceAccount": "spark-executor",
+    "sparkConf": {
+      "spark.kubernetes.container.image.pullPolicy": "IfNotPresent",
+      "spark.kubernetes.container.image.pullSecrets": "ghcr-creds",
+      "spark.kubernetes.executor.podNamePrefix": "stardelt-spark",
+      "spark.kubernetes.executor.label.stardelt.io/spark-connect": "executor",
+      "spark.kubernetes.executor.secretKeyRef.AWS_ACCESS_KEY_ID": "stardelt-s3-creds:access-key",
+      "spark.kubernetes.executor.secretKeyRef.AWS_SECRET_ACCESS_KEY": "stardelt-s3-creds:secret-key",
+      "spark.cleaner.periodicGC.interval": "5min",
+      "spark.sql.shuffle.partitions": "8",
+      "spark.ui.enabled": "false",
+      "spark.connect.grpc.binding.address": "0.0.0.0",
+      "spark.connect.grpc.binding.port": "15002",
+      "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+      "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+      "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+      "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider",
+      "spark.hadoop.fs.s3a.connection.ssl.enabled": "true",
+      "spark.hadoop.fs.s3a.path.style.access": "false"
+    }
+  }
+}

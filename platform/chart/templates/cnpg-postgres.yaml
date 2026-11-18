@@ -1,0 +1,68 @@
+{{- if .Values.postgres.enabled }}
+# CloudNative-PG Cluster backing Lakekeeper's catalog metadata.
+# Single instance (dev default). The operator creates secrets
+# `lakekeeper-pg-app` (user creds) and `lakekeeper-pg-superuser` automatically.
+#
+# The Cluster is named `lakekeeper-pg` because `lakekeeper.externalDatabase`
+# points at the `lakekeeper-pg-rw` service — change both together.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: lakekeeper-pg
+  namespace: {{ .Release.Namespace }}
+spec:
+  instances: {{ .Values.postgres.instances }}
+  # Pinned: without `imageName` a Cluster tracks the operator's default image and
+  # starts a major upgrade the next time the operator ships one.
+  imageName: {{ .Values.postgres.image }}
+  storage:
+    size: {{ .Values.postgres.storage.size }}
+    {{- with .Values.storage.className }}
+    storageClass: {{ . }}
+    {{- end }}
+  {{- if .Values.postgres.backup.enabled }}
+  # Backup through the barman-cloud plugin (CloudNativePG 1.30; the native
+  # `spec.backup` object store is removed in 1.32). The plugin reads
+  # ObjectStore/lakekeeper-pg-backups from `templates/cnpg-objectstore.yaml`.
+  backup:
+    retentionPolicy: {{ .Values.postgres.backup.retentionPolicy | quote }}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      enabled: true
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: lakekeeper-pg-backups
+  {{- end }}
+  bootstrap:
+    initdb:
+      database: lakekeeper
+      owner: lakekeeper
+  resources:
+    {{- toYaml .Values.postgres.resources | nindent 4 }}
+{{- if .Values.postgres.backup.enabled }}
+---
+# Daily base backup on top of the continuous WAL archiving above. WAL alone
+# recovers to a point in time; a base backup makes the restore fast instead of
+# replaying every segment since the volume was created. Equivalent to
+# manifests/cnpg-backup-schedule.yaml.
+#
+# `immediate: true` takes a first backup right away, which is what makes a fresh
+# install verifiable — `kubectl -n <namespace> get backups` shows one completed.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: lakekeeper-pg-daily
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: {{ .Values.postgres.backup.schedule | quote }}
+  immediate: true
+  # Keep the Backup objects after the schedule is deleted, so deleting this CR
+  # cannot delete the only record of what was taken.
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  cluster:
+    name: lakekeeper-pg
+{{- end }}
+{{- end }}

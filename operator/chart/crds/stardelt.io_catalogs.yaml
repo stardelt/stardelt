@@ -1,0 +1,276 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: catalogs.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: Catalog
+    plural: catalogs
+    shortNames:
+    - cat
+    singular: catalog
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A data domain: a catalog with its storage location, an owner group and grants.'
+        properties:
+          spec:
+            description: |-
+              One data domain inside the catalog software of a `Lakehouse`: its storage, its owner and its
+              grants. `metadata.name` is the name users type (`finance.orders`) and the name of the
+              catalog's warehouse; there is no alias.
+            properties:
+              description:
+                maxLength: 500
+                nullable: true
+                type: string
+              displayName:
+                maxLength: 100
+                nullable: true
+                type: string
+              grants:
+                default: []
+                items:
+                  description: One group, one verb. Subjects are groups, never people.
+                  properties:
+                    group:
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                      type: string
+                    verb:
+                      description: |-
+                        What a grant lets a group do with a catalog (decision D21, internal note
+                        `design/multitenant-catalogs.md` §5.2). Six verbs exist; `use` belongs to compute (`SqlWarehouse`)
+                        and is not a data verb. There is no deny, no `ALL PRIVILEGES` and no per-column verb.
+                      enum:
+                      - browse
+                      - select
+                      - write
+                      - create
+                      - manage
+                      type: string
+                  required:
+                  - group
+                  - verb
+                  type: object
+                maxItems: 50
+                type: array
+              lakehouseRef:
+                description: The `Lakehouse` that hosts a catalog or a warehouse.
+                properties:
+                  name:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              maintenance:
+                default:
+                  excludeTables: []
+                  expireSnapshots:
+                    retention: 7d
+                  optimize:
+                    fileSizeThreshold: 128MB
+                    minSmallFiles: 20
+                  removeOrphanFiles:
+                    retention: 7d
+                  schedule: 0 2 * * *
+                description: |-
+                  The automatic Iceberg maintenance policy (platform#129): compaction, snapshot expiry and
+                  orphan-file removal, daily at 02:00 unless changed. On by default.
+                properties:
+                  excludeTables:
+                    default: []
+                    description: Tables (`schema.table`) this policy never touches.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                  expireSnapshots:
+                    default:
+                      retention: 7d
+                    description: |-
+                      Snapshot expiry. The engine's minimum is 7 days (`iceberg.expire-snapshots.min-retention`),
+                      so `retention` is a minimum, not a preference. The schema refuses a shorter retention;
+                      `MaintenanceSpec::validate` repeats the rule because no controller runs it yet.
+                    properties:
+                      retention:
+                        default: 7d
+                        pattern: ^([7-9]|[1-9][0-9]+)d$
+                        type: string
+                    type: object
+                  optimize:
+                    default:
+                      fileSizeThreshold: 128MB
+                      minSmallFiles: 20
+                    description: 'Compaction: files smaller than the threshold are rewritten when at least `minSmallFiles` exist.'
+                    properties:
+                      fileSizeThreshold:
+                        default: 128MB
+                        pattern: ^[1-9][0-9]*(MB|GB)$
+                        type: string
+                      minSmallFiles:
+                        default: 20
+                        format: int32
+                        minimum: 1.0
+                        type: integer
+                    type: object
+                  removeOrphanFiles:
+                    default:
+                      retention: 7d
+                    description: |-
+                      Orphan-file removal. The engine's minimum is 7 days
+                      (`iceberg.remove-orphan-files.min-retention`). The schema refuses a shorter retention;
+                      `MaintenanceSpec::validate` repeats the rule because no controller runs it yet.
+                    properties:
+                      retention:
+                        default: 7d
+                        pattern: ^([7-9]|[1-9][0-9]+)d$
+                        type: string
+                    type: object
+                  schedule:
+                    default: 0 2 * * *
+                    description: |-
+                      Five-field cron; the default is 02:00 every day. A `Catalog` that keeps this
+                      default is staggered by name at reconcile time (operator#490); any other value is
+                      applied verbatim.
+                    pattern: ^(\S+\s+){4}\S+$
+                    type: string
+                type: object
+              managedAccess:
+                default: false
+                description: 'True: the owner cannot grant on this catalog; only platform administrators can.'
+                type: boolean
+              owner:
+                description: Exactly one group. Ownership means `manage` and does not mean `select`.
+                maxLength: 64
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              storage:
+                description: 'Where a catalog''s data files live. Omitted: the `Lakehouse`''s storage defaults.'
+                nullable: true
+                properties:
+                  bucket:
+                    description: An isolated bucket per catalog.
+                    maxLength: 63
+                    minLength: 3
+                    nullable: true
+                    pattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+                    type: string
+                  credentialSecretRef:
+                    description: 'The per-catalog storage identity. A reference only: the Secret is never part of this resource.'
+                    nullable: true
+                    properties:
+                      key:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  keyPrefix:
+                    description: Required where all catalogs share one bucket (the demo profile); no leading slash, no `..`.
+                    maxLength: 512
+                    nullable: true
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
+                    type: string
+                type: object
+            required:
+            - lakehouseRef
+            - owner
+            type: object
+            x-kubernetes-validations:
+            - message: each group may hold each verb once
+              rule: self.grants.all(g, self.grants.exists_one(h, h.group == g.group && h.verb == g.verb))
+            - message: storage.keyPrefix must not contain .. or //
+              rule: '!has(self.storage) || !has(self.storage.keyPrefix) || (!self.storage.keyPrefix.contains(''..'') && !self.storage.keyPrefix.contains(''//''))'
+          status:
+            nullable: true
+            properties:
+              catalogName:
+                description: The Trino catalog name actually rendered.
+                nullable: true
+                type: string
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              maintenance:
+                description: The newest finished maintenance Job's result (operator#476 slice c).
+                nullable: true
+                properties:
+                  lastResult:
+                    description: '`Succeeded` when the Job succeeded, `Failed` otherwise.'
+                    nullable: true
+                    type: string
+                  lastRun:
+                    description: The Job's `status.completionTime`, RFC 3339.
+                    nullable: true
+                    type: string
+                  tablesDone:
+                    description: The summary line's `tablesDone`; absent when the log held no summary.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  tablesFailed:
+                    description: The summary line's `tablesFailed`; absent when the log held no summary.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+              warehouseId:
+                description: The Lakekeeper warehouse id, so Nova and the access bridge never guess it by name.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Catalog
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

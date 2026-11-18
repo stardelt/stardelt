@@ -1,0 +1,32 @@
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.rest-catalog.uri=http://lakekeeper.stardelt.svc.cluster.local:8181/catalog
+iceberg.rest-catalog.warehouse=@NAME@
+iceberg.rest-catalog.vended-credentials-enabled=false
+# The caller's own identity: client id and secret come from Secret
+# svc-catalog-trino via the coordinator's and worker's env (helm-values/trino.yaml);
+# each Trino JVM does its own client-credentials exchange and refreshes the token
+# before it expires. The endpoint is the realm's token endpoint, built from
+# ConfigMap stardelt-identity's issuerUrl — no secret and no token in this file.
+iceberg.rest-catalog.security=OAUTH2
+iceberg.rest-catalog.oauth2.server-uri=${ENV:CATALOG_TOKEN_URL}
+iceberg.rest-catalog.oauth2.credential=${ENV:CATALOG_CLIENT_ID}:${ENV:CATALOG_CLIENT_SECRET}
+# Without this Iceberg asks for `scope=catalog`, which this realm does not have.
+iceberg.rest-catalog.oauth2.scope=openid
+fs.s3.enabled=true
+s3.endpoint=http://seaweedfs-s3.stardelt.svc.cluster.local:8333
+s3.region=us-east-1
+s3.path-style-access=true
+s3.aws-access-key=${ENV:S3_ACCESS_KEY}
+s3.aws-secret-key=${ENV:S3_SECRET_KEY}
+# Single-replica SeaweedFS volume server can't sustain Trino's default
+# parallel HTTP range requests (broken pipe / connection reset). Throttle
+# both connection pool and the Iceberg metadata enumeration threads.
+s3.max-connections=16
+iceberg.split-manager-threads=4
+iceberg.metadata.parallelism=2
+# Worker-local file-system cache for object-store reads (platform#134).
+# Trino 483+ (platform#1002): the directories, size and TTL moved out of the
+# catalog into the node-level cache manager in helm-values/trino.yaml; a
+# catalog only turns caching on. The measured win is recorded there.
+fs.cache.enabled=true

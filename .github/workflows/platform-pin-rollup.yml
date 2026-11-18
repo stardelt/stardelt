@@ -1,0 +1,53 @@
+name: "platform / Pin rollup"
+on:
+  schedule: [{ cron: "*/30 * * * *" }]
+  # GitHub's scheduler on this repository fires the */30 cron about every eight hours
+  # (measured 2026-11-09..11). A push to main that rebuilds an image must roll its pin
+  # now, not eight hours later; the cron stays as a backstop.
+  workflow_run:
+    workflows: ["platform / Image"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency: { group: platform-pin-rollup, cancel-in-progress: true }
+defaults:
+  run:
+    working-directory: platform
+
+jobs:
+  rollup:
+    # A PR build pushes no image, so it must not roll the pins. A push to main and a manual
+    # Image run both push one, so both roll: a dispatched rebuild that moves a digest would
+    # otherwise wait for the next cron — the same delay this trigger exists to remove
+    # (platform#1013).
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # A push made with GITHUB_TOKEN triggers no pull_request workflow, so the two
+          # required checks never report and every pin cycle needs an admin merge
+          # (platform#1069). PIN_TOKEN is a fine-grained token on this repository only;
+          # checkout persists it, so the script's `git push` is a user push. Falls back
+          # to GITHUB_TOKEN where the secret is absent (platform#648 behaviour).
+          token: ${{ secrets.PIN_TOKEN || github.token }}
+      - name: Install Helm
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
+        with:
+          # Exact version, for the reason in ci.yml: a partial pin resolves through
+          # the get.helm.sh metadata and fails the job.
+          version: "3.19.0"
+      - name: Lint the script
+        run: bash -n scripts/pin-rollup.sh && shellcheck scripts/pin-rollup.sh
+      # `helm lint chart` renders the umbrella chart's templates. Its sub-charts are
+      # not fetched here on purpose: GitHub release downloads have answered 504 twice
+      # in one day, and a roll must not depend on that weather. The pins live in
+      # helm-values/ and manifests/, not in chart/, so the templates are what matters.
+      - name: Roll the pins, refresh the rolling PR
+        run: OPEN_PR=1 bash scripts/pin-rollup.sh
+        env:
+          GH_TOKEN: ${{ secrets.PIN_TOKEN || github.token }}
+          PIN_TOKEN_SET: ${{ secrets.PIN_TOKEN != '' }}

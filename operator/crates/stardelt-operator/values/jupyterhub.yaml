@@ -1,0 +1,250 @@
+hub:
+  # Pinned by digest (the twin of stardelt-platform#1605): the chart defaults this to its
+  # appVersion tag, which moves on an upgrade. The string is
+  # stardelt-platform/helm-values/jupyterhub.yaml:27.
+  image:
+    name: quay.io/jupyterhub/k8s-hub
+    tag: "4.4.5@sha256:6ce210488f5598e2dd5130d82e84d9f74b72538b66895861240bd84926ec50bd"
+  config:
+    GenericOAuthenticator:
+      admin_groups:
+      - stardelt-admins
+      allowed_groups:
+      - stardelt-admins
+      - stardelt-users
+      auth_state_groups_key: oauth_user.groups
+      auto_login: true
+      client_id: jupyterhub
+      login_service: Single sign-on
+      manage_groups: true
+      scope:
+      - openid
+      - profile
+      - email
+      username_claim: preferred_username
+    JupyterHub:
+      authenticator_class: generic-oauth
+  extraConfig: {}
+  extraEnv:
+    STARDELT_OIDC_CLIENT_SECRET:
+      valueFrom:
+        secretKeyRef:
+          key: jupyterhub
+          name: stardelt-oidc-clients
+          optional: true
+    STARDELT_OIDC_ISSUER_URL:
+      valueFrom:
+        configMapKeyRef:
+          key: issuerUrl
+          name: stardelt-identity
+          optional: true
+    STARDELT_TRINO_URL:
+      valueFrom:
+        configMapKeyRef:
+          name: stardelt-identity
+          key: trinoUrl
+          optional: true
+    # Nova's public origin, the one allowed to frame the hub and the servers.
+    # From the identity contract, never from this file.
+    STARDELT_NOVA_URL:
+      valueFrom:
+        configMapKeyRef:
+          name: stardelt-identity
+          key: publicUrl
+          optional: true
+  # Nova shows and controls the person's workspace (stardelt-nova#652 W3): state,
+  # start, stop — never access:servers, so Nova cannot open a server or run code.
+  # The chart generates the service token into Secret `hub`, key
+  # `hub.services.nova.apiToken`, which Nova reads as NOVA_JUPYTERHUB_API_TOKEN.
+  services:
+    nova: {}
+  loadRoles:
+    nova-workspace:
+      description: Nova reads workspace state and starts or stops servers for the signed-in person
+      services: [nova]
+      scopes: ["read:servers", "servers", "read:users:activity", "read:users:name"]
+  # Prometheus text on /hub/metrics (#607): JupyterHub requires the read:metrics
+  # scope unless this is false; the NetworkPolicy rule below is then the gate.
+  # Same as stardelt-platform/helm-values/jupyterhub.yaml.
+  authenticatePrometheus: false
+  # The chart's own hub NetworkPolicy is on by default and admits only pods
+  # labelled hub.jupyter.org/network-access-hub: "true". Nova is a service, not a
+  # spawner-connected pod, so it needs the API port by its own pod label.
+  networkPolicy:
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: nova
+        ports:
+          - port: 8081
+            protocol: TCP
+      # The customer's Prometheus in any namespace may read /hub/metrics, and
+      # nothing else: 8081 only, same gate label as the other endpoints (#607).
+      - from:
+          - namespaceSelector: {}
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: prometheus
+        ports:
+          - port: 8081
+            protocol: TCP
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 50m
+      memory: 256Mi
+# The idle culler stops a server nobody uses (upstream default 3600). Nova counts
+# down from this number, so it must equal NOVA_WORKSPACE_IDLE_SECONDS in
+# src/nova.rs — the test below ties the two.
+cull:
+  timeout: 3600
+proxy:
+  chp:
+    # Pinned by digest (platform#1605). The string is helm-values/jupyterhub.yaml:390.
+    image:
+      name: quay.io/jupyterhub/configurable-http-proxy
+      tag: "5.4.0@sha256:7977d796d372642aa9eb962ff36590b3019f8f24493fcf9f1d07d2c81e8e6080"
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+  service:
+    type: ClusterIP
+  traefik:
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+singleuser:
+  # Pinned by digest (platform#1605): the chart's network-tools image.
+  networkTools:
+    image:
+      name: quay.io/jupyterhub/k8s-network-tools
+      tag: "4.4.5@sha256:58d5d96d850b103d0acd8576b1e5ff9f5f4c19aefbdc889f415db0830774e420"
+  # z2jh appends a privileged `block-cloud-metadata` init container (runAsUser 0, NET_ADMIN)
+  # unless this is false, and a `restricted` Pod Security namespace refuses the whole notebook
+  # pod over it. The single-user NetworkPolicy below is deny-by-default and excludes
+  # 169.254.169.254/32, so the metadata endpoint stays unreachable without the container.
+  # Twin: stardelt-platform helm-values/jupyterhub.yaml (platform#1217).
+  cloudMetadata:
+    blockWithIptables: false
+  cpu:
+    guarantee: 0.1
+    limit: 1
+  defaultUrl: /lab
+  extraEnv:
+    SPARK_REMOTE: sc://spark-connect.__NAMESPACE__.svc.cluster.local:15002
+    STARDELT_SECRET_STORE_URL: http://openbao.__NAMESPACE__.svc.cluster.local:8200
+    STARDELT_NOVA_URL:
+      valueFrom:
+        configMapKeyRef:
+          name: stardelt-identity
+          key: publicUrl
+          optional: true
+    # The same Nova by its in-cluster Service, for the notebook's own HTTP calls
+    # (`stardelt.publish()`, `stardelt.api.Client`): a visitor's pod has no public
+    # egress (stardelt-platform#1101), so the public origin above is unreachable from
+    # it (stardelt-platform#1229). The public origin stays — it is also the hub's
+    # `frame-ancestors` origin (`15-framing`). Twin: stardelt-platform#1254.
+    STARDELT_NOVA_API_URL: http://nova.__NAMESPACE__.svc.cluster.local:8080
+  image:
+    # The digest is a copy of the platform's pin and must be bumped in both repositories; the
+    # test `notebook_task_image_matches_the_single_user_image` fails when values/airflow.yaml
+    # disagrees.
+    name: ghcr.io/stardelt/jupyter-singleuser
+    tag: "dev@sha256:3f42884742d0a06ab1b187ba2da97c8e29f07c0491be9c4d1c1265f8a18bab83"
+    pullSecrets:
+      - name: ghcr-creds
+  memory:
+    guarantee: 256M
+    limit: 1G
+  startTimeout: 300
+  storage:
+    type: dynamic
+    capacity: 2Gi
+    extraVolumes:
+      - name: trino-ca
+        secret:
+          secretName: trino-ca
+          optional: true
+          items:
+            - key: tls.crt
+              path: ca.crt
+    extraVolumeMounts:
+      - name: trino-ca
+        mountPath: /etc/stardelt/trino-ca
+        readOnly: true
+  lifecycleHooks:
+    postStart:
+      exec:
+        command:
+          - bash
+          - -c
+          - 'cp -n /opt/stardelt/notebooks/*.ipynb "$HOME/" || true'
+  networkPolicy:
+    egressAllowRules:
+      # Public egress comes from the NetworkPolicy notebook-public-egress, members only (platform#1101).
+      nonPrivateIPs: false
+    egress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: trino
+                app.kubernetes.io/component: coordinator
+        ports:
+          - port: 8443
+            protocol: TCP
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: spark-connect
+        ports:
+          - port: 15002
+            protocol: TCP
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: openbao
+        ports:
+          - port: 8200
+            protocol: TCP
+      # Nova's API, in-cluster (stardelt-platform#1229): the public origin is unreachable
+      # from a visitor's pod (platform#1101), so the notebook calls the Service. Same
+      # namespace, so no namespaceSelector.
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: nova
+        ports:
+          - port: 8080
+            protocol: TCP
+# The scheduler that places a notebook pod and the pause containers the puller and the
+# placeholder use are chart images too: pin them by digest (platform#1605), not at the chart's
+# default tag. The strings are stardelt-platform/helm-values/jupyterhub.yaml:602-615.
+scheduling:
+  userScheduler:
+    image:
+      name: registry.k8s.io/kube-scheduler
+      tag: "v1.30.14@sha256:74a5cf9cfa9fcc2246f68c650f1f5c7add20da2145f13800fd97ba1d69fc06c8"
+  userPlaceholder:
+    image:
+      name: registry.k8s.io/pause
+      tag: "3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+prePuller:
+  pause:
+    image:
+      name: registry.k8s.io/pause
+      tag: "3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+  hook:
+    image:
+      name: quay.io/jupyterhub/k8s-image-awaiter
+      tag: "4.4.5@sha256:29de1a6dc23305505d81bf96172aa20889925e42723be24751b0824e35ed73a0"
