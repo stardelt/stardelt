@@ -20,6 +20,20 @@ master:
   resources:
     requests: { cpu: "50m", memory: "128Mi" }
     limits:   { cpu: "1",   memory: "256Mi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 
 volume:
   replicas: 1
@@ -39,6 +53,20 @@ volume:
   resources:
     requests: { cpu: "200m", memory: "512Mi" }
     limits:   { cpu: "2",    memory: "2Gi"  }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 
 filer:
   replicas: 1
@@ -54,6 +82,20 @@ filer:
   resources:
     requests: { cpu: "50m", memory: "128Mi" }
     limits:   { cpu: "1",   memory: "512Mi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 
 s3:
   enabled: true
@@ -83,6 +125,20 @@ s3:
   resources:
     requests: { cpu: "100m", memory: "256Mi" }
     limits:   { cpu: "2",    memory: "5.5Gi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}
 
 # The object store's own web UI for cluster administrators (buckets, users, policies, file browser),
 # decision D28. ClusterIP only: there is no ingress and none may be added; reach it with
@@ -97,3 +153,17 @@ admin:
   resources:
     requests: { cpu: "20m", memory: "64Mi" }
     limits:   { cpu: "500m", memory: "256Mi" }
+  # Pod Security `restricted` (platform#1095): the chart renders these two blocks only when
+  # `enabled: true`, and drops the key itself. uid 65534 is the probe user above.
+  podSecurityContext:
+    enabled: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    fsGroup: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+    seccompProfile: {type: RuntimeDefault}

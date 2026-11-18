@@ -159,12 +159,11 @@ verify-metrics: _context ## Every metrics endpoint a scraper can reach answers P
 verify-warehouse-scale: _context ## The three writers of a warehouse's scale state agree
 	@NS=$(NAMESPACE) bash scripts/verify-warehouse-scale.sh
 
-# The `--allow` patterns are the accepted exceptions of #1096 question 5, each with its reason:
-# SeaweedFS sets none of chart 4.25.1's securityContext/logs keys (the chart's defaults declare no
-# security context and log to hostPath); Lakekeeper's `opa` sidecar has no value key in chart 0.14.0.
+# The `--allow` pattern is the one accepted exception of #1096 question 5, with its reason:
+# Lakekeeper's `opa` sidecar has no value key in chart 0.14.0. SeaweedFS carries both chart
+# keys (helm-values/seaweedfs.yaml, platform#1758) and needs no exception.
 verify-pod-security: _context ## Every running pod is admitted by a `restricted` Pod Security namespace (#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh \
-	  --allow '^seaweedfs-' \
 	  --allow '^lakekeeper-'
 
 verify-pod-security-baseline: _context ## Every running pod is admitted by a `baseline` Pod Security namespace (#1096)
