@@ -1660,7 +1660,7 @@ mod tests {
             .as_str()
             .expect("a digest");
         assert_eq!(
-            digest, "sha256:eb5b58bb7345c7bc9da9eb65d6d0ddee8dfdc0e189f4f315f3cba09bf0cd3c81",
+            digest, "sha256:e281fea621f0a4bbd7d0c14a7c6ede1e9187bb231747e922b2a0ca262f0b1723",
             "the golden Airflow image must be the Airflow 3.2.2 build (demos#77) with the loader's access_control (platform#493) and the PEGELONLINE demo DAGs (demos#46); and a notebook task's CONN_ variables (demos#64); and the refusal of a connection without a synced Secret (demos#65)"
         );
         let worker = values["env"]

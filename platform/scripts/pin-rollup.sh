@@ -86,6 +86,7 @@ short() { printf '%s' "${1#sha256:}" | cut -c1-8; }
 
 OP_FILE="helm-values/operator.yaml"
 NOVA_FILE="manifests/nova-deployment.yaml"
+OPERATOR_DIR="${OPERATOR_DIR:-../operator}"
 SPARK_FILE="manifests/spark.yaml"
 AIRFLOW_FILE="helm-values/airflow.yaml"
 AIRFLOW_GROUP_FILE="manifests/airflow-group-roles.yaml"
@@ -161,6 +162,7 @@ for c in "${changes[@]}"; do echo "$c"; done
 # One commit holds the operator's golden copies too (D49): a roll that moves a platform pin without
 # its twin is red on main the moment the PR merges (#168), so write the twin first and let the check
 # below refuse a roll it cannot finish.
+# The operator's paths must also be in the git add below, or the twin is written and dropped.
 bash scripts/sync-operator-goldens.sh
 
 # The PR's own checks are suppressed for a bot push; the two pin guards are the only
@@ -239,7 +241,13 @@ git config user.email "41898282+github-actions[bot]@users.noreply.github.com" 2>
 branch="chore/pin-rollup"
 git switch -C "$branch"
 git add "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" "$AIRFLOW_FILE" "$AIRFLOW_GROUP_FILE" "$SUPERSET_FILE" "$SUPERSET_GROUP_FILE" \
-  "$JUPYTER_FILE" chart/values.yaml chart/files/spark-runtimes.json
+  "$JUPYTER_FILE" chart/values.yaml chart/files/spark-runtimes.json \
+  "$OPERATOR_DIR/crates/stardelt-operator/src/provision.rs" \
+  "$OPERATOR_DIR/crates/stardelt-operator/values/airflow.yaml" \
+  "$OPERATOR_DIR/crates/stardelt-operator/values/spark.yaml" \
+  "$OPERATOR_DIR/crates/stardelt-operator/values/superset.yaml" \
+  "$OPERATOR_DIR/crates/stardelt-operator/values/jupyterhub.yaml" \
+  "$OPERATOR_DIR/crates/stardelt-operator/src/values.rs"
 git commit -m "chore(pins): rollup image digests
 
 $(for c in "${changes[@]}"; do echo "- $c"; done)"
