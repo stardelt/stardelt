@@ -34,6 +34,10 @@ def test_pipeline_names_the_committed_notebooks():
         assert VERSION.match(task["config"]["objectVersion"])
 
 
+def test_the_demo_pipeline_is_not_scheduled():
+    assert "schedule" not in pipeline()["spec"]
+
+
 def test_notebooks_are_nbformat_4_and_use_the_native_helper():
     for path in notebooks():
         notebook = json.loads(path.read_text(encoding="utf-8"))

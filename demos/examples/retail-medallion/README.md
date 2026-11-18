@@ -7,8 +7,9 @@ orders plus 200 stores and 5 000 products and writes them to `retailref.referenc
 bronze data.
 
 It runs as the Pipeline `retail-medallion` (`pipeline.yaml`): two `notebook` tasks (`ingest`, then
-`gold`), scheduled `0 5 * * *` in `Europe/Berlin`, as the ServicePrincipal
-`pipeline-retail-analytics` (`runAs`) for the owner group `retail-analytics`.
+`gold`), as the ServicePrincipal `pipeline-retail-analytics` (`runAs`) for the owner group
+`retail-analytics`. It is not scheduled: its Spark ingest cannot reach a Connect server until
+platform#1096 lands (platform#1713).
 
 The `objectVersion` values in `pipeline.yaml` are the versions the two notebooks had when they were
 uploaded to the lab. Uploading the same file again through Nova stores a new version, so the

@@ -13,9 +13,6 @@ spec:
     attempts: 1
     backoff: 2m
   runAs: pipeline-retail-analytics
-  schedule:
-    cron: 0 5 * * *
-    timezone: Europe/Berlin
   tasks:
     - config:
         notebook: retail_spark_ingest.ipynb
