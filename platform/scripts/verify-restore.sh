@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Restore the catalog's Postgres from its backup into a scratch namespace, check that
 # the restored database has tables, and delete the namespace again (platform#1512).
+# The check proves the catalog's contents, not only its schema: one psql call counts the
+# relations, and the warehouse, namespace and tabular rows the catalog cannot work without
+# (a restore that carried only _sqlx_migrations must fail).
 #
 # The backup is the barman-cloud plugin's object store (manifests/cnpg-objectstore.yaml,
 # ObjectStore lakekeeper-pg-backups); manifests/cnpg-restore-proof.yaml reads it through a
@@ -43,15 +46,17 @@ if ! kubectl -n "$NS" wait cluster/lakekeeper-pg-restore --for=condition=Ready -
   exit 1
 fi
 
-n=$(kubectl -n "$NS" exec lakekeeper-pg-restore-1 -c postgres -- \
+read -r n warehouses namespaces tabulars < <(kubectl -n "$NS" exec lakekeeper-pg-restore-1 -c postgres -- \
   psql -U postgres -d lakekeeper -tAc \
-  "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")
-n=${n//[[:space:]]/}
+  "select (select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')), (select count(*) from public.warehouse), (select count(*) from public.namespace), (select count(*) from public.tabular)" \
+  | tr '|' ' ')
+n=${n//[[:space:]]/}; warehouses=${warehouses//[[:space:]]/}
+namespaces=${namespaces//[[:space:]]/}; tabulars=${tabulars//[[:space:]]/}
 
-if [ "${n:-0}" -gt 0 ]; then
-  echo "verify-restore: PASS (catalog database restored, $n tables)"
+if [ "${n:-0}" -gt 0 ] && [ "${warehouses:-0}" -gt 0 ] && [ "${tabulars:-0}" -gt 0 ]; then
+  echo "verify-restore: PASS (catalog database restored, $n relations, $warehouses warehouses, $namespaces namespaces, $tabulars tabulars)"
   exit 0
 fi
 
-echo "verify-restore: FAIL (restored database has no tables)" >&2
+echo "verify-restore: FAIL (the restored catalog is empty: $n relations, $warehouses warehouses, $namespaces namespaces, $tabulars tabulars)" >&2
 exit 1
