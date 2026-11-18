@@ -30,11 +30,11 @@ fi
 local_sha="$(sha256sum "$LOCAL" | cut -d' ' -f1)"
 remote_sha="$(sha256sum "$remote" | cut -d' ' -f1)"
 if [[ "$local_sha" == "$remote_sha" ]]; then
-  echo "✓ $LOCAL matches stardelt-platform main ($remote_sha)"
+  echo "✓ $LOCAL matches platform/scripts/access-sync-job.py in stardelt/stardelt main ($remote_sha)"
   exit 0
 fi
 
-echo "✗ $LOCAL is not stardelt-platform's script: local $local_sha, platform $remote_sha" >&2
+echo "✗ $LOCAL is not the platform's access-sync script: local $local_sha, platform $remote_sha" >&2
 diff -u "$remote" "$LOCAL" >&2 || true
 echo "  copy the platform file over it (platform#1539/#1549 was this drift)" >&2
 exit 1

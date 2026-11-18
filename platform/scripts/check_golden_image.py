@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     operator_dir = (
         args.operator_dir
         or os.environ.get("OPERATOR_DIR")
-        or str(REPO.parent / "stardelt-operator")
+        or str(REPO.parent / "operator")
     )
 
     operator_digest = (args.operator_digest or "").strip()
