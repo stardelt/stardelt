@@ -198,6 +198,18 @@ def compare(
     ], 1
 
 
+def compare_source(nova_in_source: str, nova_pin_digest: str) -> tuple[list[str], int]:
+    """One `✓`/`✗` line for the source half: the operator's working tree against this tree's pin."""
+    if not nova_in_source or not nova_pin_digest:
+        return ["✗ could not read NOVA_IMAGE in the operator's " + PROVISION_RS + " or the Nova pin in "
+                + NOVA_MANIFEST], 3
+    if nova_in_source == nova_pin_digest:
+        return ["✓ the operator's source ships NOVA_IMAGE %s, the pin in %s"
+                % (_short(nova_in_source), NOVA_MANIFEST)], 0
+    return ["✗ the operator's source ships NOVA_IMAGE %s, the pin in %s is %s"
+            % (_short(nova_in_source), NOVA_MANIFEST, _short(nova_pin_digest))], 1
+
+
 def _read(path: Path) -> str:
     try:
         return path.read_text()
@@ -217,6 +229,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the stardelt-operator checkout (default: $OPERATOR_DIR, else ../operator)",
     )
+    parser.add_argument(
+        "--source",
+        action="store_true",
+        help="judge $OPERATOR_DIR's provision.rs in this work tree instead of the pinned image's commit "
+             "(no registry call)",
+    )
     args = parser.parse_args(argv)
 
     operator_dir = (
@@ -234,6 +252,14 @@ def main(argv: list[str] | None = None) -> int:
 
     pins = nova_pin(_read(REPO / NOVA_MANIFEST))
     nova_pin_digest = pins[0] if pins else ""
+
+    if args.source:
+        lines, code = compare_source(
+            nova_image_of(_read(Path(operator_dir) / PROVISION_RS)), nova_pin_digest
+        )
+        for line in lines:
+            print(line)
+        return code
 
     if not operator_digest:
         lines, code = compare("", "", "", nova_pin_digest)

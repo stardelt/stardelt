@@ -10,6 +10,7 @@ from pathlib import Path
 
 from scripts.check_golden_image import (
     compare,
+    compare_source,
     nova_image_at,
     nova_image_of,
     nova_pin,
@@ -105,6 +106,23 @@ class CompareTest(unittest.TestCase):
         lines, code = compare("", "b" * 40, DIGEST_A, DIGEST_A)
         self.assertEqual(code, 3)
         self.assertTrue(lines[0].startswith("✗"))
+
+
+class CompareSourceTest(unittest.TestCase):
+    def test_local_source_with_this_tree_s_pin_passes(self):
+        lines, code = compare_source(DIGEST_A, DIGEST_A)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("✓"))
+        self.assertIn("aaaaaaaa…", lines[0])
+
+    def test_a_pin_the_source_does_not_carry_fails_and_names_both_digests(self):
+        lines, code = compare_source(DIGEST_A, DIGEST_B)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("✗"))
+        self.assertIn("aaaaaaaa…", lines[0])
+        self.assertIn("bbbbbbbb…", lines[0])
 
 
 class NovaImageAtTest(unittest.TestCase):
