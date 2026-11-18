@@ -29,3 +29,5 @@ perf/results/
 
 # Throwaway fresh-node configs (dev/hetzner-k3s/fresh-node.sh); never committed.
 dev/hetzner-k3s/.fresh-*.yaml
+# The domain a fresh-node run created for itself, so `down` can remove exactly that record.
+dev/hetzner-k3s/.fresh-*.domain

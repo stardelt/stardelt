@@ -6,7 +6,7 @@ laptop, so the product deploys here.
 
 ## What you get
 
-- One node (default **`cx33`**, 4 vCPU / 8 GB, **~€10/month**) with **one master**; workloads
+- One node (default **`cpx32`**, 4 vCPU / 8 GB) with **one master**; workloads
   are scheduled on it (`schedule_workloads_on_masters: true`).
 - A private network, firewall (SSH/API restricted to your IP; 80/443 open), Hetzner CCM + CSI
   driver, system-upgrade-controller and metrics-server.
@@ -41,8 +41,8 @@ below and runs `hetzner-k3s create`. Re-running is safe (hetzner-k3s is idempote
 ## Deploy stardelt
 
 ```sh
-make install-core SLIM=1    # core: storage + catalog + query + Nova (fits cx33)
-# or, on a 16 GB node (NODE_TYPE=cx43):
+make install-core SLIM=1    # core: storage + catalog + query + Nova (fits cpx32)
+# or, on a 16 GB node (NODE_TYPE=cpx42):
 make install                # full: + Airflow + Superset
 ```
 
@@ -54,7 +54,7 @@ Then set up ingress + TLS from [dev/playground](../playground).
 |---|---|---|
 | `CLUSTER_NAME` | `stardelt-dev` | cluster name |
 | `K3S_VERSION` | `v1.37.1+k3s1` | see `hetzner-k3s releases` |
-| `NODE_TYPE` | `cx33` | 4 vCPU / 8 GB (~€10/mo); `cx43` = 16 GB (~€19/mo) |
+| `NODE_TYPE` | `cpx32` | 4 vCPU / 8 GB; `cpx42` = 16 GB for the demo profile |
 | `LOCATION` | `nbg1` | `nbg1` \| `fsn1` \| `hel1` \| `ash` \| `hil` |
 | `INGRESS_HOST` | `alpha.dev.stardelt.io` | playground hostname |
 | `ALLOW_IPV4` / `ALLOW_IPV6` | your current public IPs | SSH + API allowlist (plain address = /32 or /128, or a CIDR) |

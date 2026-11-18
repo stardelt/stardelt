@@ -107,7 +107,8 @@ upsert() {
 
 remove() {
   local name="$1" id
-  id="$(record_id "$name")"
+  id="$(cf GET "/zones/$ZID/dns_records?name=$name" | jq -r --arg t "$TYPE" \
+    '(.result[] | select(.type == $t) | .id) // empty' | head -1)"
   if [ -z "$id" ]; then
     echo "{\"action\":\"absent\",\"name\":\"$name\"}"
     return
