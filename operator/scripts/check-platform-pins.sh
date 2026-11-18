@@ -12,7 +12,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PLANNER=crates/stardelt-operator/src/planner.rs
-URL="https://raw.githubusercontent.com/stardelt/stardelt-platform/main/Makefile"
+URL="https://raw.githubusercontent.com/stardelt/stardelt/main/platform/Makefile"
+# In this repository the platform is the sibling folder: read it there unless the caller chose a file.
+_sibling="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/platform/Makefile"
+if [[ -z "${PLATFORM_MAKEFILE:-}" && -f "$_sibling" ]]; then PLATFORM_MAKEFILE="$_sibling"; fi
 
 makefile="$(mktemp)"
 trap 'rm -f "$makefile"' EXIT

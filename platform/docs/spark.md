@@ -25,7 +25,7 @@ sc://spark-connect.stardelt.svc.cluster.local:15002
 ```
 
 From a notebook, `spark` is already there: the single-user image loads the pinned release of
-`stardelt/stardelt-python` into every kernel, and its `spark` opens the session on first use with
+`python/` (the `stardelt` library) into every kernel, and its `spark` opens the session on first use with
 every catalog Trino lists for you and your token (a named cluster: set `STARDELT_CLUSTER`):
 
 ```python
@@ -146,7 +146,7 @@ memory up to its default cap of 1g plus about 0.4g of metaspace, code and thread
 2.4 GiB (arithmetic, not a measurement). When a call fails
 that way, write the result to a table (`df.writeTo("<catalog>.<schema>.<table>").createOrReplace()`)
 and read it back, or aggregate first; do not raise the limit. The
-[notebook cheat sheet](https://github.com/stardelt/stardelt-python/blob/v0.1.0/stardelt/README.md#keeping-the-shared-driver-healthy)
+[notebook cheat sheet](https://github.com/stardelt/stardelt/blob/python/v0.1.0/python/stardelt/README.md#keeping-the-shared-driver-healthy)
 (platform#374) has the patterns that keep the driver small.
 
 ## Catalog wiring

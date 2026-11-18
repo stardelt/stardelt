@@ -64,7 +64,7 @@ and, with it, a way to query the warehouse **as themselves**.
   token. The package is private, like Superset, so
   the pod pulls with the `ghcr-creds` secret.
 * **The notebook library.** The `stardelt` package lives in its own repository,
-  [`stardelt/stardelt-python`](https://github.com/stardelt/stardelt-python) (MIT): the `%sql` magic,
+  [`python/`](https://github.com/stardelt/stardelt/tree/main/python) (MIT): the `%sql` magic,
   the `spark`/`display` names every kernel gets, its tests and its releases.
   The image installs **one pinned release** of it, not a vendored copy. The pin lives in the
   `Makefile` — `STARDELT_LIB_REF` (the commit) and `STARDELT_LIB_TAG` (the release it belongs to,
@@ -74,7 +74,7 @@ and, with it, a way to query the warehouse **as themselves**.
   CI) fails the build when the Dockerfile's pin and the Makefile's disagree, when the pin is not a
   full SHA, or when the Dockerfile stops installing that pin. That check is offline, so it never
   asks the remote: the daily pin-freshness check (`scripts/check_pin_freshness.py`) does — it
-  compares `STARDELT_LIB_TAG` with the tag's commit in `stardelt/stardelt-python` and fails when
+  compares `STARDELT_LIB_TAG` with the tag's commit (`python/<tag>` in `stardelt/stardelt`) and fails when
   the release the platform names is not the release its pinned commit is. To bump it: change both
   places (the Makefile and the `ARG` default in `images/jupyter/Dockerfile`), merge, and pin the new
   image digest as described under [Jupyter single-user image](development.md#jupyter-single-user-image).

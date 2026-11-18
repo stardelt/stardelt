@@ -41,10 +41,9 @@ HELM_FLAGS := --namespace $(NAMESPACE) --create-namespace --wait --timeout 10m
 SUPERSET_IMAGE := ghcr.io/stardelt/superset:dev
 JUPYTER_IMAGE  := ghcr.io/stardelt/jupyter-singleuser:dev
 
-# The stardelt notebook library (stardelt/stardelt-python) — the release the
-# notebook image installs (platform#417). The library lives in its own
-# repository, with its own versions and tests; the platform consumes one
-# pinned release of it.
+# The stardelt notebook library (../python in this repository) — the release the
+# notebook image installs (platform#417). The library has its own versions
+# (tags python/v*) and tests; the platform consumes one pinned release of it.
 #
 # Pinned by commit SHA, not by tag: a moving tag is not an upgrade path, the
 # same rule the image pins follow (scripts/pin-image.sh). The tag names the
@@ -54,7 +53,7 @@ JUPYTER_IMAGE  := ghcr.io/stardelt/jupyter-singleuser:dev
 # A bump changes the ARG default in images/jupyter/Dockerfile as well (the
 # check script wants both), and that file is what makes CI rebuild the
 # notebook image.
-STARDELT_LIB_REF := 17a262fc5ff7caee24165b361192d4f0fb2a0a9a
+STARDELT_LIB_REF := 15dff221646fab7ae8c82c1d39c01ca781a3fad0
 STARDELT_LIB_TAG := v0.4.1
 
 # The image tag the dev channel follows. `dev` moves on every merge; every merged

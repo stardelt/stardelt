@@ -41,8 +41,8 @@ Outside this repository, next to it in the workspace: `stardelt-docs/` (public d
   `jupyter-singleuser`, `spark`, `stardelt-cli`, `airflow`. Every pinned digest stays valid; pin by digest.
 - **Release tags carry the folder:** `operator/v*`, `nova/v*`, `platform/v*`, `python/v*`,
   `python/jupyterlab-v*`. Image tags drop the prefix (`stardelt-cli:v0.4.1`).
-- **Until #128 lands**, the notebook library is still installed from the archived `stardelt-python` tags.
-  Do not cut a library release before then.
+- **The notebook library installs from here:** `stardelt @ git+https://github.com/stardelt/stardelt@<commit or python/vX.Y.Z>#subdirectory=python`
+  (#128). Nothing builds from the archived repositories; they are private.
 - **Pin rollup.** `platform-pin-rollup.yml` refreshes the pins in one PR (`chore/pin-rollup`) after each
   `platform / Image` run, with auto-merge.
 

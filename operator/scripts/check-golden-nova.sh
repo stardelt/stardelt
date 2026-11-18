@@ -13,7 +13,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PROVISION=crates/stardelt-operator/src/provision.rs
 PLATFORM_FILE="${PLATFORM_NOVA_FILE:-}"
-PLATFORM_URL="https://raw.githubusercontent.com/stardelt/stardelt-platform/main/manifests/nova-deployment.yaml"
+PLATFORM_URL="https://raw.githubusercontent.com/stardelt/stardelt/main/platform/manifests/nova-deployment.yaml"
+# In this repository the platform is the sibling folder: read it there unless the caller chose a file.
+_sibling="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/platform/manifests/nova-deployment.yaml"
+if [[ -z "${PLATFORM_FILE:-}" && -f "$_sibling" ]]; then PLATFORM_FILE="$_sibling"; fi
 
 die() { echo "check-golden-nova: $*" >&2; exit 2; }
 

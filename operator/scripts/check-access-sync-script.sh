@@ -11,7 +11,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 LOCAL=crates/stardelt-operator/src/access_sync_job.py
-URL="https://raw.githubusercontent.com/stardelt/stardelt-platform/main/scripts/access-sync-job.py"
+URL="https://raw.githubusercontent.com/stardelt/stardelt/main/platform/scripts/access-sync-job.py"
+# In this repository the platform is the sibling folder: read it there unless the caller chose a file.
+_sibling="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/platform/scripts/access-sync-job.py"
+if [[ -z "${PLATFORM_JOB:-}" && -f "$_sibling" ]]; then PLATFORM_JOB="$_sibling"; fi
 
 remote="$(mktemp)"
 trap 'rm -f "$remote"' EXIT

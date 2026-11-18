@@ -449,9 +449,8 @@ jobs:
         run: python3 -m unittest scripts.tests.test_chart_heavy_toggle -v
 
   # ---------------------------------------------------------------------------
-  # Notebook helper (stardelt/stardelt-python): the library has its own
-  # repository; check it out at the release the platform pins, install it the
-  # way the notebook image does and run its tests
+  # Notebook helper (python/): check out the release the platform pins, install
+  # it the way the notebook image does and run its tests
   # ---------------------------------------------------------------------------
   notebook-helper:
     name: Notebook helper (pytest)
@@ -468,9 +467,8 @@ jobs:
       - name: Check out the pinned library release
         uses: actions/checkout@v7
         with:
-          repository: stardelt/stardelt-python
           ref: ${{ steps.pin.outputs.ref }}
-          path: platform/stardelt-python
+          path: platform/pinned
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -484,12 +482,12 @@ jobs:
           # `[jupyter]` on purpose: that is what images/jupyter/Dockerfile installs,
           # and since v0.1.5 the library's test_sqlmagic imports IPython at module
           # level — a bare install fails collection here while the image works.
-          pip install "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt-python@${{ steps.pin.outputs.ref }}"
+          pip install "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt@${{ steps.pin.outputs.ref }}#subdirectory=python"
           pip install pytest
 
       - name: Run the library's tests
         # From the library root: the suite imports `tests.test_stardelt`, which
         # only resolves with that directory on sys.path (no tests/__init__.py).
         run: |
-          cd stardelt-python
+          cd pinned/python
           python -m pytest tests -q

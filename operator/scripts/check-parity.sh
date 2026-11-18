@@ -14,7 +14,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 STEPS=parity/steps.tsv
 PLANNER=crates/stardelt-operator/src/planner.rs
 SRC=crates/stardelt-operator/src
-URL="https://raw.githubusercontent.com/stardelt/stardelt-platform/main/Makefile"
+URL="https://raw.githubusercontent.com/stardelt/stardelt/main/platform/Makefile"
+# In this repository the platform is the sibling folder: read it there unless the caller chose a file.
+_sibling="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/platform/Makefile"
+if [[ -z "${PLATFORM_MAKEFILE:-}" && -f "$_sibling" ]]; then PLATFORM_MAKEFILE="$_sibling"; fi
 
 # Steps that are not called from the `install:` recipe but are part of the
 # platform's install path all the same.

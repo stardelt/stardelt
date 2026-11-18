@@ -11,6 +11,6 @@ kind: frontend-and-server
 labextension_name: '@stardelt/jupyterlab'
 project_short_description: 'stardelt inside JupyterLab: theme, top bar, catalog, publish'
 python_name: stardelt_jupyterlab
-repository: https://github.com/stardelt/stardelt-python
+repository: https://github.com/stardelt/stardelt
 test: true
 
