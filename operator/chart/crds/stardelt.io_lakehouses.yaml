@@ -12,7 +12,11 @@ spec:
     singular: lakehouse
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Waiting
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: A managed Trino + catalog + Iceberg unit on object storage.
