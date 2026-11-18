@@ -597,7 +597,7 @@
     {
       "clientId": "stardelt-mcp",
       "name": "MCP agents",
-      "description": "Public client for MCP-capable agents (stardelt-nova#112): browser flow with PKCE to a loopback address and the device grant for a command line. Every token carries the audience <nova host>/mcp (the realm's `aud-mcp` mapper), which is what Nova's /mcp endpoint validates (NOVA_MCP_AUDIENCE).",
+      "description": "Public client for MCP-capable agents (stardelt-nova#112): browser flow with PKCE to a loopback address, device grant for a command line. Tokens carry the audience <nova host>/mcp (mapper aud-mcp), which Nova's /mcp endpoint validates.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
