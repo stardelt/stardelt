@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Roll the six image pins to the digests their tags resolve to right now, in one PR.
+# Roll the seven image pins (operator, nova, spark, loader, superset, notebook) to the digests
+# their tags resolve to right now, in one PR.
 # The fourth is the pipeline loader, `ghcr.io/stardelt/airflow:demo` (tag `demo`, not `dev`);
 # the fifth is the BI image, `ghcr.io/stardelt/superset:dev` (two files); the sixth is the
 # notebook image, `ghcr.io/stardelt/jupyter-singleuser:dev`, pinned in three files

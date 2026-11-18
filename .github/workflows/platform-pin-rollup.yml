@@ -2,10 +2,12 @@ name: "platform / Pin rollup"
 on:
   schedule: [{ cron: "*/30 * * * *" }]
   # GitHub's scheduler on this repository fires the */30 cron about every eight hours
-  # (measured 2026-11-09..11). A push to main that rebuilds an image must roll its pin
-  # now, not eight hours later; the cron stays as a backstop.
+  # (measured 2026-11-09..11). A push to main that rebuilds a pinned image must roll its pin
+  # now, not eight hours later; the cron stays as a backstop. Since D49 the pinned images come
+  # from four workflows: platform / Image, operator / Image, nova / Image and demos / CI
+  # (which pushes the Airflow loader, `ghcr.io/stardelt/airflow:demo`).
   workflow_run:
-    workflows: ["platform / Image"]
+    workflows: ["platform / Image", "operator / Image", "nova / Image", "demos / CI"]
     types: [completed]
   workflow_dispatch:
 permissions:
@@ -21,7 +23,7 @@ jobs:
     # A PR build pushes no image, so it must not roll the pins. A push to main and a manual
     # Image run both push one, so both roll: a dispatched rebuild that moves a digest would
     # otherwise wait for the next cron — the same delay this trigger exists to remove
-    # (platform#1013).
+    # (platform#1013). The guard is per workflow, so it covers all four Image/push workflows.
     if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
     runs-on: ubuntu-latest
     steps:
