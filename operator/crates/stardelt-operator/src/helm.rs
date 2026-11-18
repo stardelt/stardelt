@@ -189,9 +189,17 @@ pub fn is_deployed(status_json: &str) -> bool {
         .is_some_and(|v| v["info"]["status"] == "deployed")
 }
 
-/// True when any revision in `helm history -o json` output carries [`OWNER_MARKER`].
+/// True when any revision in `helm history -o json` output carries [`OWNER_MARKER`], or when
+/// no revision ever got past `failed`. Helm writes its error over our `--description`, so the
+/// operator's own failed first install has no marker. A release that never deployed runs
+/// nobody's platform, so retrying it takes nothing over (fresh-node run, stardelt-platform#293).
 pub fn is_owned(history_json: &str) -> bool {
-    history_json.contains(OWNER_MARKER)
+    if history_json.contains(OWNER_MARKER) {
+        return true;
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(history_json).is_ok_and(|revisions| {
+        !revisions.is_empty() && revisions.iter().all(|r| r["status"] == "failed")
+    })
 }
 
 /// True when `helm status -o json` reports one of the three `pending-*` states a killed Helm run
@@ -513,6 +521,32 @@ mod tests {
         let foreign = r#"[{"revision":1,"description":"Install complete"}]"#;
         assert!(is_owned(&mine));
         assert!(!is_owned(foreign));
+    }
+
+    #[test]
+    fn a_release_whose_every_revision_failed_is_ours_to_retry() {
+        let failed = r#"[{"revision":1,"status":"failed","description":"Release \"cnpg\" failed: 1 error occurred"}]"#;
+        assert!(is_owned(failed));
+    }
+
+    #[test]
+    fn a_foreign_release_that_deployed_stays_foreign() {
+        let foreign = r#"[{"revision":1,"status":"deployed","description":"Install complete"}]"#;
+        assert!(!is_owned(foreign));
+    }
+
+    #[test]
+    fn a_foreign_release_that_deployed_then_failed_stays_foreign() {
+        let foreign = r#"[
+            {"revision":1,"status":"deployed","description":"Install complete"},
+            {"revision":2,"status":"failed","description":"Upgrade failed"}
+        ]"#;
+        assert!(!is_owned(foreign));
+    }
+
+    #[test]
+    fn an_unreadable_history_is_not_owned() {
+        assert!(!is_owned("not json"));
     }
 
     #[test]
