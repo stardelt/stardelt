@@ -90,18 +90,19 @@ RUN chmod 0644 /opt/spark/jars/iceberg-spark-runtime.jar /opt/spark/jars/iceberg
 
 # --- Python on the workers: the notebook's Python minor ----------------------
 # Python code travels to a worker as a pickle: the notebook pickles it on the
-# client (Python 3.11, pyspark 4.2.0), the executor unpickles and runs it.
+# client (Python 3.13, pyspark 4.2.0), the executor unpickles and runs it.
 # PySpark compares *minor* versions and refuses anything else —
 #
 #   [PYTHON_VERSION_MISMATCH] Python in worker has different version: 3.10
-#   than that in driver: 3.11, PySpark cannot run with different minor versions
+#   than that in driver: 3.13, PySpark cannot run with different minor versions
 #
 # — which is every UDF, pandas UDF, mapInPandas/applyInPandas, foreach and
 # foreachPartition (platform#369). The Ubuntu `python3` in this image (3.10.12)
 # stays: it belongs to Spark's own scripts. The workers get a standalone CPython
 # from python-build-standalone (PSF licence, the `install_only` archive for
-# x86_64-linux-gnu), checksum-verified at build time like the jars above. 3.11.17
-# is the current 3.11 patch; only the minor version has to match the notebook.
+# x86_64-linux-gnu), checksum-verified at build time like the jars above. 3.13.16
+# is the 3.13 patch of the 20261020 release; only the minor version has to match
+# the notebook.
 # keep both on the same Python minor: Spark Connect UDFs fail otherwise
 # The archive's minor must equal the notebook image's `ARG STARDELL_PYTHON_MINOR`:
 # `scripts/check-python-parity.sh` fails `make lint` when the two drift apart.
@@ -112,9 +113,9 @@ RUN chmod 0644 /opt/spark/jars/iceberg-spark-runtime.jar /opt/spark/jars/iceberg
 # CLI's five dependencies below, nothing else is installed — a library a user
 # imports inside a UDF is not on the executor, and that is stated in the
 # quickstart.
-ADD --checksum=sha256:dd5bcc096cfb1b2d63805576b4799126350170ba29476baa28256c317ea08e32 \
-    https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.11.17%2B20261020-x86_64-unknown-linux-gnu-install_only.tar.gz \
-    /tmp/python-3.11.tar.gz
+ADD --checksum=sha256:0ad293ecda8ea93a28e4a6b5e9cc20ae74be15aafed75be04418b8f82bd0d0da \
+    https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16%2B20261020-x86_64-unknown-linux-gnu-install_only.tar.gz \
+    /tmp/python-3.13.tar.gz
 # One RUN: extract, install, and chmod in the same layer, so the `chmod -R` only
 # touches metadata of files this layer creates (a later chmod would copy the
 # whole tree up into a second layer). `a+rX` because uid 185 runs the image.
@@ -123,15 +124,15 @@ ADD --checksum=sha256:dd5bcc096cfb1b2d63805576b4799126350170ba29476baa28256c317e
 # `pyspark/sql/connect/utils.py:check_dependencies`). They are the versions the
 # S0a spike ran with. Do not bump numpy/pandas/pyarrow here: their minor versions
 # must equal the notebook image's (`scripts/check-python-parity.sh`).
-RUN mkdir -p /opt/python311 \
-    && tar -xzf /tmp/python-3.11.tar.gz --strip-components=1 -C /opt/python311 \
-    && rm /tmp/python-3.11.tar.gz \
-    && /opt/python311/bin/python3 -m pip install --no-cache-dir \
-        numpy==2.0.2 pandas==2.2.3 pyarrow==18.1.0 \
+RUN mkdir -p /opt/python313 \
+    && tar -xzf /tmp/python-3.13.tar.gz --strip-components=1 -C /opt/python313 \
+    && rm /tmp/python-3.13.tar.gz \
+    && /opt/python313/bin/python3 -m pip install --no-cache-dir \
+        numpy==2.5.4 pandas==2.2.3 pyarrow==18.1.0 \
         pyyaml==6.0.3 grpcio==1.85.1 grpcio-status==1.85.1 \
         googleapis-common-protos==1.76.0 zstandard==0.25.0 \
-    && chmod -R a+rX /opt/python311 \
-    && /opt/python311/bin/python3 -c "import sys, numpy, pandas, pyarrow, yaml, grpc, grpc_status, google.protobuf, zstandard; \
+    && chmod -R a+rX /opt/python313 \
+    && /opt/python313/bin/python3 -c "import sys, numpy, pandas, pyarrow, yaml, grpc, grpc_status, google.protobuf, zstandard; \
         print('worker python', sys.version.split()[0], '| numpy', numpy.__version__, \
               '| pandas', pandas.__version__, '| pyarrow', pyarrow.__version__, \
               '| pyyaml', yaml.__version__, '| grpcio', grpc.__version__, \
@@ -141,8 +142,8 @@ RUN mkdir -p /opt/python311 \
 # through these. Set here, once, rather than in the ConfigMap: a pod that runs
 # this image outside the Deployment — a debug shell, a future job — gets the
 # same interpreter. `spark.pyspark.python` stays unset on purpose; one place.
-ENV PYSPARK_PYTHON=/opt/python311/bin/python3 \
-    PYSPARK_DRIVER_PYTHON=/opt/python311/bin/python3
+ENV PYSPARK_PYTHON=/opt/python313/bin/python3 \
+    PYSPARK_DRIVER_PYTHON=/opt/python313/bin/python3
 
 # Starts the Connect server in the foreground and fills in the one address that
 # only exists at runtime (the driver's pod IP). See the file for the details.

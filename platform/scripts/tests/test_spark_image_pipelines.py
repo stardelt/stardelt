@@ -34,7 +34,7 @@ class SparkImagePipelinesTest(unittest.TestCase):
 
     def test_the_worker_python_pins_are_unchanged(self):
         text = DOCKERFILE.read_text()
-        for pin in ("numpy==2.0.2", "pandas==2.2.3", "pyarrow==18.1.0"):
+        for pin in ("numpy==2.5.4", "pandas==2.2.3", "pyarrow==18.1.0"):
             self.assertIn(pin, text, f"images/spark/Dockerfile no longer pins {pin} (parity gate)")
 
 

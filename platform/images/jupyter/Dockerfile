@@ -29,13 +29,13 @@
 # arbitrary code, so Jupyter Server's `frame-ancestors` list is a deliberate
 # choice: exactly `'self'` plus Nova's origin, which the hub passes at spawn
 # from the identity contract. The config file documents the mechanism.
-# Python 3.11 (3.11.10 in the 2024-10-07 base image). Keep both on the same
+# Python 3.13 (3.13.18 in the 2026-11-16 base image). Keep both on the same
 # Python minor: Spark Connect UDFs fail otherwise — the Spark image installs its
-# own CPython 3.11 for the workers and must stay on this minor (platform#369).
+# own CPython 3.13 for the workers and must stay on this minor (platform#369).
 # The single-user image's Python minor. `scripts/check-python-parity.sh` compares it with the
 # Spark image's worker Python on every `make lint`; both move together or not at all.
-ARG STARDELL_PYTHON_MINOR=3.11
-FROM quay.io/jupyter/scipy-notebook:2024-10-07@sha256:21dadfd1d23dcd66f685a95633afaca9cfbe42683987325ccc8c7cd062e45184
+ARG STARDELL_PYTHON_MINOR=3.13
+FROM quay.io/jupyter/scipy-notebook:2026-11-16@sha256:9d1087eda0dadd6e98763b346fcaa34aa10153067092fac39380669265c3c268
 
 USER ${NB_UID}
 
@@ -48,18 +48,17 @@ USER ${NB_UID}
 # that late uninstall deletes the new `package.json`, so `labextension list`
 # no longer shows `@jupyterlab/git`. Uninstall first, in its own invocation.
 # The Spark workers run these exact versions of pandas, pyarrow and numpy
-# (images/spark/Dockerfile installs them into its own Python 3.11): a pandas UDF
+# (images/spark/Dockerfile installs them into its own Python 3.13): a pandas UDF
 # pickles pandas objects on this side and rebuilds them there (platform#369).
 # The Spark Connect client is on the SAME Spark line as the server image
 # (apache/spark:4.1.4): a newer client reads the server's settings in the old
 # spelling -- `spark.sql.session.localRelationSizeLimit` comes back as `3221225472b`
 # -- and every createDataFrame dies with `invalid literal for int()` (platform#399).
 # scripts/check-spark-parity.sh fails the build when the two drift apart.
-# The base stays `2024-10-07`: every dated Docker Stacks tag after it is Python
-# 3.13 and the Spark workers are on CPython 3.11, so the Python minor moves only
-# with the Spark decision (platform#973). The notebook UI is therefore taken
-# from PyPI -- `notebook`, `jupyterlab` and `jupyter_server` are pinned here and
-# move together. JupyterLab 4.6.6 requires `jupyter-server>=2.19,<3` (PyPI
+# The base stays `2026-11-16` and is already Python 3.13 (the same minor the
+# Spark workers run, platform#369). The notebook UI is still taken from PyPI --
+# `notebook`, `jupyterlab` and `jupyter_server` are pinned here and move
+# together. JupyterLab 4.6.6 requires `jupyter-server>=2.19,<3` (PyPI
 # metadata), which is why 2.21.1 is pinned beside it; `notebook` 7.6.5 requires
 # `jupyterlab>=4.6.6,<4.7`, which is why the base's 7.2.2 (which requires
 # `jupyterlab<4.3`) is replaced rather than kept.
