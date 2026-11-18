@@ -716,6 +716,15 @@ export type PublishedNotebook = {
   uploadedBy: string
 }
 
+/** Where a published version came from, as the publisher reported it (#819). A claim: Nova
+ * stores it and does not check it against a Git server. */
+export type NotebookSource = {
+  repository: string
+  commit: string
+  path: string
+  clean: boolean
+}
+
 /** One immutable published version of a notebook (`GET …/versions`), newest first. */
 export type NotebookVersion = {
   objectVersion: string
@@ -723,6 +732,8 @@ export type NotebookVersion = {
   uploadedAt: string
   uploadedBy: string
   sha256: string
+  /** Where the version came from; `null` when the publisher sent no X-Stardelt-Source header. */
+  source: NotebookSource | null
 }
 
 /** One parameter of a notebook's tagged `parameters` cell: the name and its default as text. */

@@ -1,14 +1,45 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, api, type PipelineView } from '../api'
+import { ApiError, api, type NotebookSource, type PipelineView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import NotebookFrame from '../components/NotebookFrame'
 import ScheduleDialog from '../components/ScheduleDialog'
-import { formatBytes, formatTime, shortVersion } from '../format'
+import { formatBytes, formatTime, shortRevision, shortVersion } from '../format'
 import { diffNotebooks } from '../notebookDiff'
 import { renderNotebook } from '../notebookHtml'
 import { RunStateBadge, formatWhen, runDuration } from './Pipelines'
+
+/** Where a version came from (#819): `commit abc1234 · <repository>`, or that it was published
+ * by hand. Only an `https://` repository becomes a link — the value is a publisher's claim, so
+ * never link another scheme. */
+function VersionSource({ source, page = false }: { source: NotebookSource | null; page?: boolean }) {
+  if (!source) {
+    return (
+      <span className="text-text-mute">
+        {page ? 'Not from Git — published by hand.' : 'published by hand'}
+      </span>
+    )
+  }
+  const linked = source.repository.startsWith('https://')
+  return (
+    <span
+      className="break-all"
+      title={`${source.path} at ${source.commit}${source.clean ? '' : ' (uncommitted changes)'}`}
+    >
+      {page && 'From Git: '}
+      <span className="font-mono text-xs">commit {shortRevision(source.commit)}</span>
+      {' · '}
+      {linked ? (
+        <a href={source.repository} target="_blank" rel="noreferrer" className="underline">
+          {source.repository.replace(/^https?:\/\//, '')}
+        </a>
+      ) : (
+        source.repository
+      )}
+    </span>
+  )
+}
 
 /**
  * One published notebook (stardelt-nova#517): its versions, newest first, the parameters of the
@@ -84,6 +115,11 @@ export default function NotebookDetail() {
               {shortVersion(latest.objectVersion)}
             </p>
           )}
+          {latest && (
+            <p className="text-sm mt-0.5">
+              <VersionSource source={latest.source} page />
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -135,6 +171,7 @@ export default function NotebookDetail() {
                 <th scope="col" className="th px-3 py-2.5">Size</th>
                 <th scope="col" className="th px-3 py-2.5">Published</th>
                 <th scope="col" className="th px-3 py-2.5">Published by</th>
+                <th scope="col" className="th px-3 py-2.5">From Git</th>
                 <th scope="col" className="th px-3 py-2.5">sha256</th>
                 <th scope="col" className="th px-3 py-2.5"><span className="sr-only">Actions</span></th>
               </tr>
@@ -165,6 +202,7 @@ export default function NotebookDetail() {
                     <td className="td px-3 tabular-nums">{formatBytes(version.size)}</td>
                     <td className="td px-3 whitespace-nowrap">{formatTime(version.uploadedAt)}</td>
                     <td className="td px-3">{version.uploadedBy}</td>
+                    <td className="td px-3"><VersionSource source={version.source} /></td>
                     <td className="td px-3"><span className="font-mono text-xs">{version.sha256.slice(0, 12)}</span></td>
                     <td className="td px-3 text-right">
                       <button
