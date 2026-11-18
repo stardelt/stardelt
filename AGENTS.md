@@ -34,6 +34,8 @@ Outside this repository, next to it in the workspace: `stardelt-docs/` (public d
 - **Worktrees.** `git worktree add .wt-<slug> -b <branch> origin/main` from this root. Never commit on `main`.
 - **Issues.** Issues and PRs are `#N` here, labelled `area/<folder>`. Something left behind in an archived
   repository is `stardelt/stardelt-<name>#N`.
+- **The human version.** `CONTRIBUTING.md` carries the same rules for a person: where a change goes,
+  what is generated, the recipes and the rules that hold everywhere.
 
 ## Images and releases
 
