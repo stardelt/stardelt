@@ -2703,6 +2703,51 @@ test.describe('pipelines', () => {
     await down.context.close()
   })
 
+  test('deployments: the record lists what each deploy put on a stage, newest first, and who deployed it', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const commit = '0123abcdef0123abcdef0123abcdef0123abcdef'
+    const records = [
+      {
+        id: 7, bundle: 'shop-etl', ownerGroup: 'shop', target: 'prod', revision: commit,
+        repository: 'https://git.example/shop', status: 'applied', actor: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        actorName: evil,
+        pipelines: [{ namespace: 'stardelt', name: 'load', action: 'updated' }, { namespace: 'stardelt', name: 'nightly', action: 'created' }],
+        createdAt: '2026-11-17T21:00:00Z',
+      },
+      {
+        id: 6, bundle: 'shop-etl', ownerGroup: 'shop', target: 'dev', revision: `${commit}-dirty`,
+        repository: null, status: 'failed', actor: 'ada', actorName: null, pipelines: [], createdAt: '2026-11-17T20:00:00Z',
+      },
+    ]
+    const { context, page } = await open(browser, {
+      rows: [pipeline({ name: 'load', deployment: { bundle: 'shop-etl', target: 'prod', revision: commit } })],
+      start: '/deployments',
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      read: (route, path, method) => {
+        if (method !== 'GET' || path !== '/api/deployments') return false
+        json(route, records)
+        return true
+      },
+    })
+    const section = page.locator('section', { has: page.getByRole('heading', { name: 'Recorded deployments' }) })
+    await expect(section.locator('tbody tr')).toHaveCount(2)
+    expect(await section.locator('tbody tr td:nth-child(2)').allTextContents()).toEqual(['shop-etl · prod', 'shop-etl · dev'])
+    const prod = section.locator('tr', { hasText: 'shop-etl · prod' })
+    await expect(prod).toContainText('0123abc')
+    await expect(prod).toContainText('2 pipelines')
+    await expect(prod).toContainText('Applied')
+    await expect(prod).toContainText(evil)
+    const dev = section.locator('tr', { hasText: 'shop-etl · dev' })
+    await expect(dev).toContainText('0123abc (uncommitted changes)')
+    await expect(dev).toContainText('Failed')
+    await expect(dev).toContainText('ada')
+    expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss ?? 0)).toBe(0)
+    expect(await auditPage(page), 'desktop').toEqual([])
+    await page.setViewportSize({ width: 360, height: 740 })
+    expect(await auditPage(page), 'phone').toEqual([])
+    await context.close()
+  })
+
   test('log viewer', async ({ browser }) => {
     const failed = run({ state: 'failed', note: null })
     const detail = {

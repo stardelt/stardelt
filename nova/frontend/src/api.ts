@@ -910,6 +910,25 @@ export type RunsListRow = {
  *  group the caller can see, sorted; the filters do not narrow it (#750). */
 export type RunsListResponse = { runs: RunsListRow[]; groups: string[] }
 
+/** One row of the deployment record (`GET /api/deployments`, design nova#357): one bundle deploy. */
+export type DeploymentRecord = {
+  id: number
+  bundle: string
+  ownerGroup: string
+  target: string
+  /** The commit deployed, `-dirty` appended for uncommitted changes; null when it was not a checkout. */
+  revision: string | null
+  repository: string | null
+  status: 'applied' | 'failed' | string
+  /** The pipelines the deploy wrote or removed. */
+  pipelines: { namespace: string; name: string; action: string }[]
+  /** The `sub` of the person who recorded the deploy. */
+  actor: string
+  /** The name the sign-in provided (stardelt-nova#1094); null for a row recorded before it was stored. */
+  actorName: string | null
+  createdAt: string
+}
+
 /** One pipeline in the list: the resource plus what the scheduler says about it. */
 /**
  * Where `stardelt bundle deploy` published a pipeline from (stardelt-nova#397): the bundle, the
@@ -1630,6 +1649,10 @@ export const api = {
   me:           ()                            => jget<Me>('/api/me'),
   stagesCompare: (peer: string, keep401 = false) =>
     jget<StageComparison>(`/api/stages/compare?peer=${encodeURIComponent(peer)}`, keep401),
+  /** The newest deployment rows the caller may see (`GET /api/deployments`), newest first, at most 50.
+   * `keep401` is for dev auth mode: there is no sign-in there, so the 401 is a sentence about the
+   * install, not a session to renew (nova#671). */
+  deploymentRecords: (keep401 = false) => jget<DeploymentRecord[]>('/api/deployments', keep401),
   /** The caller's personal settings as one JSON object (`{}` when none). */
   settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
   putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),

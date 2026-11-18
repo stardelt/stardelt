@@ -18,9 +18,9 @@
 //!   and target; older rows beyond that window are deleted when the next row of that bundle and
 //!   target is recorded (design nova#357).
 //!
-//! Without a state store (`NOVA_DATABASE_URL` unset) both routes answer
-//! `503 {"error":"this needs Nova's database, …"}`, and a caller whose identity is missing
-//! answers `401`. Every write writes one line on the `audit` target with the caller, the
+//! The state store is checked first: without one (`NOVA_DATABASE_URL` unset) both routes
+//! answer `503 {"error":"this needs Nova's database, …"}`, whatever the caller; with one and
+//! a caller whose identity is missing, `401`. Every write writes one line on the `audit` target with the caller, the
 //! row's id, the bundle and the target — never the rendered resources.
 
 use std::sync::Arc;
@@ -223,11 +223,11 @@ pub async fn list(
     Query(q): Query<ListParams>,
     caller: Option<Extension<Principal>>,
 ) -> Response {
-    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
-        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
-    };
     let Some(pool) = s.db.as_ref() else {
         return unavailable();
+    };
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
     let sql = format!(
         "SELECT {ROW_COLUMNS} FROM deployment \
@@ -273,11 +273,11 @@ pub async fn record(
     if let Err(message) = validate(&new) {
         return error(StatusCode::BAD_REQUEST, &message);
     }
-    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
-        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
-    };
     let Some(pool) = s.db.as_ref() else {
         return unavailable();
+    };
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
     if !may_record(&caller.identity, &new.owner_group) {
         return error(
@@ -410,6 +410,28 @@ mod tests {
         new.pipelines = (0..=MAX_PIPELINES).map(pipeline).collect();
         let err = validate(&new).expect_err("201 pipelines");
         assert!(err.contains("200"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_answers_503_before_401_without_a_state_store() {
+        let response = list(
+            State(crate::router_tests::test_state_with_db(None)),
+            Query(ListParams::default()),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn record_answers_503_before_401_without_a_state_store() {
+        let response = record(
+            State(crate::router_tests::test_state_with_db(None)),
+            None,
+            ApiJson(deployment("applied")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// One row straight into the store: the route needs a caller, and the test needs a

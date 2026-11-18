@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, type PipelineView, type StageRow } from '../api'
+import { api, errorMessage, type PipelineView, type StageRow } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { SkeletonTable } from '../components/Skeleton'
 import { shortRevision } from '../format'
@@ -178,6 +178,79 @@ function StageCompare({ peer, keep401 }: { peer: string; keep401: boolean }) {
   )
 }
 
+/** The newest recorded deploys (`GET /api/deployments`, design nova#357): one row per bundle deploy.
+ * Renders nothing while the record is loading or empty — the stage sections above already say what
+ * this stage runs. `keep401` lets the refusal reach the page in dev auth mode (nova#671). */
+function RecordedDeploys({ keep401 }: { keep401: boolean }) {
+  const records = useQuery({
+    queryKey: ['deployment-records', keep401],
+    queryFn: () => api.deploymentRecords(keep401),
+    retry: false,
+    staleTime: 30_000,
+  })
+  if (records.isError) {
+    return (
+      <section aria-labelledby="recorded-deploys" className="space-y-2">
+        <h2 id="recorded-deploys" className="text-lg font-semibold">Recorded deployments</h2>
+        <div className="card px-5 py-3 text-sm text-text-mute">{errorMessage(records.error)}</div>
+      </section>
+    )
+  }
+  // A body that is not an array is no record either: the page must not go down on it.
+  const rows = Array.isArray(records.data) ? records.data : []
+  if (rows.length === 0) return null
+  return (
+    <section aria-labelledby="recorded-deploys" className="space-y-2">
+      <div className="min-w-0">
+        <h2 id="recorded-deploys" className="text-lg font-semibold">Recorded deployments</h2>
+        <p className="text-sm text-text-mute">
+          Newest first, at most 50: what each deploy put on a stage, from which commit, and who deployed it.
+        </p>
+      </div>
+      <div className="card relative overflow-x-auto">
+        <table className="w-full text-sm">
+          <caption className="sr-only">The newest recorded bundle deploys, newest first.</caption>
+          <thead className="bg-bg-soft/50">
+            <tr>
+              <th scope="col" className="th px-5 py-2.5">When</th>
+              <th scope="col" className="th px-3 py-2.5">Bundle · stage</th>
+              <th scope="col" className="th px-3 py-2.5">Commit</th>
+              <th scope="col" className="th px-3 py-2.5">Deployed by</th>
+              <th scope="col" className="th px-3 py-2.5">Status</th>
+              <th scope="col" className="th px-3 py-2.5">Pipelines</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((record) => {
+              const when = formatWhen(record.createdAt)
+              return (
+                <tr key={record.id} className="border-t border-border/70 hover:bg-bg-soft/30">
+                  <td className="td px-5 whitespace-nowrap" title={when.title}>{when.text}</td>
+                  <td className="td px-3 font-mono text-xs break-words">{record.bundle} · {record.target}</td>
+                  <td className="td px-3 font-mono text-xs" title={record.revision ?? undefined}>
+                    {record.revision ? shortRevision(record.revision) : '—'}
+                  </td>
+                  <td className="td px-3 break-words">{record.actorName ?? record.actor}</td>
+                  <td className="td px-3">
+                    {record.status === 'failed' ? (
+                      <span className="badge border-bad/40 bg-bad/10 text-bad">Failed</span>
+                    ) : (
+                      <span className="badge border-accent/40 bg-accent/10 text-accent">Applied</span>
+                    )}
+                  </td>
+                  <td className="td px-3">
+                    {record.pipelines.length === 1 ? '1 pipeline' : `${record.pipelines.length} pipelines`}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
 export default function Deployments() {
   const list = useQuery({ queryKey: ['pipelines'], queryFn: api.pipelines, refetchInterval: 30_000 })
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
@@ -320,6 +393,8 @@ export default function Deployments() {
           </section>
         )
       })}
+
+      {me.data && <RecordedDeploys keep401={me.data.auth_mode !== 'oidc'} />}
     </div>
   )
 }
