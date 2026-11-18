@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { ApiError, api, errorMessage, type DeploymentView, type PipelineView } from '../api'
+import { ApiError, api, errorMessage, type DeploymentView, type PipelineDetail as PipelineDetailView, type PipelineView, type RunStart } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
+import RunNowDialog from '../components/RunNowDialog'
 import ScheduleDialog from '../components/ScheduleDialog'
 import { SkeletonTable } from '../components/Skeleton'
 import { formatDurationMs, formatTime, relativeTime } from '../format'
@@ -158,7 +159,7 @@ export function usePipelineActions(refetch: () => Promise<unknown> | void) {
   const [pending, setPending] = useState<string | null>(null)
   const inFlight = useRef(false)
 
-  async function act(pipeline: PipelineView, action: PipelineAction) {
+  async function act(pipeline: PipelineView, action: PipelineAction, start?: RunStart) {
     if (inFlight.current) return
     inFlight.current = true
     setPending(`${action}:${pipeline.name}`)
@@ -166,8 +167,13 @@ export function usePipelineActions(refetch: () => Promise<unknown> | void) {
     setNotice(null)
     try {
       if (action === 'run') {
-        await api.startPipelineRun(pipeline.namespace, pipeline.name)
-        setNotice(`Started a run of ${pipeline.name}.`)
+        await api.startPipelineRun(pipeline.namespace, pipeline.name, start)
+        // Naming the date is what tells a run for another day from a run for today.
+        setNotice(
+          start?.runDate
+            ? `Started a run of ${pipeline.name} for ${start.runDate}.`
+            : `Started a run of ${pipeline.name}.`,
+        )
       } else if (action === 'pause') {
         await api.pausePipeline(pipeline.namespace, pipeline.name)
       } else {
@@ -232,12 +238,29 @@ export function PipelineActions({
   pipeline,
   pending,
   onAct,
+  withRunForm = false,
+  onRun,
+  error = null,
 }: {
-  pipeline: PipelineView
+  pipeline: PipelineView | PipelineDetailView
   pending: string | null
   onAct: (pipeline: PipelineView, action: PipelineAction) => void | Promise<void>
+  /** The page's Run now asks for a date and values; the list's is the fast path (no dialog). */
+  withRunForm?: boolean
+  onRun?: (start: RunStart) => void
+  /** The API's refusal sentence, shown inside the dialog while it is open. */
+  error?: string | null
 }) {
+  const [asking, setAsking] = useState(false)
+  const submitted = useRef(false)
   const disabled = pending !== null
+  // The run either started (close: the notice on the page says so) or was refused (stay
+  // open with the API's sentence, so the date can be corrected and pressed again).
+  useEffect(() => {
+    if (!submitted.current || pending !== null || error) return
+    submitted.current = false
+    setAsking(false)
+  }, [pending, error])
   if (!pipeline.canRun && !pipeline.canEdit) return null
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -247,7 +270,7 @@ export function PipelineActions({
         aria-label={`Run now ${pipeline.name}`}
         disabled={disabled || pipeline.paused}
         title={pipeline.paused ? 'Resume the pipeline first' : undefined}
-        onClick={() => void onAct(pipeline, 'run')}
+        onClick={() => (withRunForm ? setAsking(true) : void onAct(pipeline, 'run'))}
       >
         <Icon name="play" className="w-3.5 h-3.5" />
         Run now
@@ -273,6 +296,18 @@ export function PipelineActions({
           Pause
         </button>
       ))}
+      {asking && withRunForm && 'params' in pipeline && onRun && (
+        <RunNowDialog
+          pipeline={pipeline}
+          pending={pending !== null}
+          error={error}
+          onClose={() => setAsking(false)}
+          onRun={(start) => {
+            submitted.current = true
+            onRun(start)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -607,6 +642,7 @@ function Row({
       </td>
       <td className="td px-3">
         <div className="flex justify-end">
+          {/* The list is the fast path: its Run now posts `{}` and opens no dialog (nova#817). */}
           {!demo && <PipelineActions pipeline={pipeline} pending={pending} onAct={onAct} />}
         </div>
       </td>

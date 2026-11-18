@@ -144,7 +144,14 @@ export default function PipelineDetail() {
         </div>
         {!demo && (
           <div className="flex flex-wrap items-center gap-2">
-            <PipelineActions pipeline={pipeline} pending={actions.pending} onAct={actions.act} />
+            <PipelineActions
+              pipeline={pipeline}
+              pending={actions.pending}
+              onAct={actions.act}
+              withRunForm
+              onRun={(start) => void actions.act(pipeline, 'run', start)}
+              error={actions.error}
+            />
             {pipeline.canEdit && (
               <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
                 Edit schedule

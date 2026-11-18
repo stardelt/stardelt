@@ -1098,6 +1098,9 @@ export type PipelineDetail = PipelineView & {
   airflowUrl?: string | null
 }
 
+/** The body of `POST …/runs`: a date and parameter values for this run only (nova#817). */
+export type RunStart = { runDate?: string; params?: Record<string, string> }
+
 /** `POST /api/pipelines/validate`: what a create or an update of this document would do, without doing it. */
 export type ValidatePipelineResponse = {
   ok: boolean
@@ -1810,7 +1813,8 @@ export const api = {
   pipeline:     (ns: string, name: string)    => jget<PipelineDetail>(`/api/pipelines/${seg(ns)}/${seg(name)}`),
   validatePipeline: (req: CreatePipelineRequest) => jpost<ValidatePipelineResponse>('/api/pipelines/validate', req),
   pipelineSpec: (ns: string, name: string)    => jget<PipelineSpec>(`/api/pipelines/${seg(ns)}/${seg(name)}/spec`),
-  startPipelineRun: (ns: string, name: string) => jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, {}),
+  startPipelineRun: (ns: string, name: string, start: RunStart = {}) =>
+    jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, start),
   pausePipeline: (ns: string, name: string)   => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/pause`, {}),
   resumePipeline: (ns: string, name: string)  => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/resume`, {}),
   pipelineRun:  (ns: string, name: string, runId: string) =>
