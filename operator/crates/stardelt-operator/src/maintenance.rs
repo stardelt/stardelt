@@ -28,15 +28,15 @@ use crate::objects::FIELD_MANAGER;
 
 /// Prefix of the CronJob name; the catalog name follows (`maint-<catalog>`).
 pub const JOB_PREFIX: &str = "maint-";
-/// The CLI image (stardelt/stardelt-python#62), pinned by digest: the digest is what runs and
-/// the `:dev` tag is kept for readability only, as in `values/*.yaml`.
+/// The CLI image, pinned by digest under the immutable release tag `v0.4.1`: the digest is
+/// what runs, and the tag is what `scripts/check-cli-image.sh` compares against the registry.
 ///
-/// This is the build of `stardelt/stardelt` `2b707c40` (PR #89: the package declares
-/// stardelt/stardelt as its source after the D49 merge), which also names its commit in
-/// `org.opencontainers.image.revision`:
-/// `_fetch_token` posts with `verify=certifi.where()`, so the identity endpoint's public
-/// certificate verifies while the Trino connection keeps `REQUESTS_CA_BUNDLE` (operator#653).
-pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:dev@sha256:f7d7f587c1caa4267e15dd595b0f12f9089203d505a3357819b50d98af08b11a";
+/// This is the build of `stardelt/stardelt` `15dff221` (tag `python/v0.4.1`), which also names
+/// its commit in `org.opencontainers.image.revision`: `_fetch_token` posts with
+/// `verify=certifi.where()`, so the identity endpoint's public certificate verifies while the
+/// Trino connection keeps `REQUESTS_CA_BUNDLE` (operator#653). A new release moves `IMAGE` and
+/// nothing else does.
+pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:v0.4.1@sha256:47e12f49fdf810042fdc74d77a813a186941861c3e00ea4faa97c792c98fb81e";
 
 pub fn job_name(catalog: &str) -> String {
     format!("{JOB_PREFIX}{catalog}")

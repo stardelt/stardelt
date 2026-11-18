@@ -79,6 +79,10 @@ install a tag from Git, as above. `python/v0.2.0` is the first release that cont
 CLI image as `ghcr.io/stardelt/stardelt-cli:v<version>`; `:dev` stays the moving development
 tag. A release states the platform versions it was tested against (the table above).
 
+A new release also moves the operator's maintenance image: bump
+`operator/crates/stardelt-operator/src/maintenance.rs` `IMAGE` to the new release tag's digest;
+`cd operator && bash scripts/check-cli-image.sh` proves the constant and the tag agree.
+
 ## Development
 
 ```bash
