@@ -9,6 +9,7 @@ round-trip dtypes — the dev-cluster check in the ticket covers.
 import base64
 import json
 import os
+import socket
 import sys
 import time
 import types
@@ -670,6 +671,8 @@ def fake_spark(monkeypatch):
     monkeypatch.setattr(stardelt, "_SPARK_SESSION", None)
     monkeypatch.setattr(stardelt, "_SPARK_TOKEN", None)
     monkeypatch.setattr(stardelt, "_SPARK_REMOTE", None)
+    # The fake endpoint is not a socket: keep the reachability probe out of the fixture.
+    monkeypatch.setattr(stardelt, "_reachable", lambda remote, timeout=3.0: None)
     # spark() is platform-only: this fixture is a hub pod.
     monkeypatch.setenv("TRINO_URL", "https://trino.example:8443")
     monkeypatch.setenv("SPARK_REMOTE", "sc://spark.example:15002")
@@ -687,6 +690,29 @@ def visible_catalogs(monkeypatch):
     monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse", "bronze"))
     monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
     return ["warehouse", "bronze"]
+
+
+def test_unreachable_endpoint_fails_in_seconds():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="not reachable at 127.0.0.1:"):
+        stardelt._reachable(f"sc://127.0.0.1:{port}")
+    assert time.monotonic() - started < 5
+
+
+def test_reachable_never_prints_the_parameters():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    with pytest.raises(RuntimeError) as caught:
+        stardelt._reachable(f"sc://127.0.0.1:{port}/;token=SECRET")
+    assert "SECRET" not in str(caught.value)
 
 
 def test_sets_catalog_conf_for_visible_names_only(fake_spark, visible_catalogs):
