@@ -6,6 +6,13 @@
 #   make demo-sts-off YES=1             # the rollback: sts-enabled=false
 #   bash scripts/demo-sts.sh --off      # the same, without make
 #
+#   make demo-sts-visitors-check        # read-only: do bronze, silver and gold vend?
+#   make demo-sts-visitors YES=1        # the visitor set of #201: bronze, silver and gold
+#   make demo-sts-visitors-off YES=1    # the rollback of the above
+#
+# `--visitors` is `--check|--on|--off` for each of `VISITOR_WAREHOUSES` (`bronze silver gold`),
+# one warehouse at a time; `playground` is written by Trino and is not part of it.
+#
 # The demo sandbox (`manifests/spark-demo-sandbox.yaml`) carries no storage credential by
 # design: no `AWS_*`, no Secret. A visitor's `spark` session can therefore compute, but it
 # cannot read a data file. With `sts-enabled=true` on a warehouse Lakekeeper vends a
@@ -29,6 +36,7 @@ umask 077
 
 NS="${NAMESPACE:-stardelt}"
 WAREHOUSE="${WAREHOUSE:-gold}"
+VISITOR_WAREHOUSES=(bronze silver gold)
 YES="${YES:-0}"
 LK_PORT="${LK_PORT:-18181}"
 ROLE_ARN="${ROLE_ARN:-arn:aws:iam::000000000000:role/stardelt}"
@@ -38,8 +46,11 @@ case "${1:-}" in
   --check) mode=check ;;
   --on) mode=on ;;
   --off) mode=off ;;
+  --visitors) mode=visitors; visitors_mode=--check ;;
+  --visitors-on) mode=visitors; visitors_mode=--on ;;
+  --visitors-off) mode=visitors; visitors_mode=--off ;;
   "") ;;
-  *) echo "demo-sts: unexpected argument '$1' (accepted: --check, --on, --off)" >&2; exit 2 ;;
+  *) echo "demo-sts: unexpected argument '$1' (accepted: --check, --on, --off, --visitors, --visitors-on, --visitors-off)" >&2; exit 2 ;;
 esac
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/demo-sts.XXXXXX")"
@@ -55,6 +66,15 @@ trap cleanup EXIT INT TERM
 for tool in kubectl curl jq python3 base64; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing tool: $tool" >&2; exit 1; }
 done
+
+# The visitor set of #201: the same path, once per warehouse, so a single flip stays as it was.
+if [ "$mode" = "visitors" ]; then
+  rc=0
+  for w in "${VISITOR_WAREHOUSES[@]}"; do
+    WAREHOUSE="$w" YES="$YES" bash "${BASH_SOURCE[0]}" "$visitors_mode" || rc=1
+  done
+  exit "$rc"
+fi
 
 # --- port-forward ------------------------------------------------------------------------
 kubectl -n "$NS" port-forward svc/lakekeeper "$LK_PORT:8181" >/dev/null 2>&1 &

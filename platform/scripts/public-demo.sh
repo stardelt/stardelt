@@ -44,7 +44,8 @@
 # `modify` and not the `write` the pipeline principal holds (#373), fixed by
 # `make demo-dbt-grant YES=1`. Row 23 is the public-database pipeline (#79 point 2), fixed by
 # `make demo-public-db YES=1`. Row 24 is the demo's stream (#79 point 3), fixed by
-# `make demo-stream YES=1`.
+# `make demo-stream YES=1`. Row 25 is the three visitor catalogs' vended credentials, fixed by
+# `make demo-sts-visitors YES=1` (#201 slice a).
 #
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
@@ -195,6 +196,7 @@ if [ "$mode" = check ]; then
       22) check_22 || rc=1 ;;
       23) check_23 || rc=1 ;;
       24) check_24 || rc=1 ;;
+      25) check_25 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -809,6 +811,19 @@ PY
     fi
   }
 
+  # 25. The sandbox has no static key, so every catalog a visitor's notebook reads must vend its
+  # credential (stardelt/stardelt#201 slice a): bronze, silver and gold.
+  check_25() {
+    local out
+    if out="$(NAMESPACE="$NAMESPACE" bash scripts/demo-sts.sh --visitors 2>&1)"; then
+      check_msg="bronze, silver and gold vend table-scoped storage credentials"
+    else
+      check_msg="$(printf '%s\n' "$out" | grep -m1 'sts-enabled=false')"
+      check_fix="make demo-sts-visitors YES=1"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -838,6 +853,7 @@ PY
   render 22
   render 23
   render 24
+  render 25
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then

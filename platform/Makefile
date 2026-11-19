@@ -935,6 +935,14 @@ demo-sts-off: _context ## The rollback of demo-sts: sts-enabled=false on the war
 	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=false on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi
 	@NAMESPACE=$(NAMESPACE) YES=1 WAREHOUSE=$(or $(WAREHOUSE),gold) bash scripts/demo-sts.sh --off
 
+.PHONY: demo-sts-visitors demo-sts-visitors-check demo-sts-visitors-off
+demo-sts-visitors: _context ## Flip the three visitor catalogs to vended credentials (lab only; needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-sts.sh --visitors-on
+demo-sts-visitors-check: _context ## Read-only: do bronze, silver and gold vend table-scoped credentials
+	@NAMESPACE=$(NAMESPACE) bash scripts/demo-sts.sh --visitors
+demo-sts-visitors-off: _context ## The rollback: sts-enabled=false on bronze, silver and gold (needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-sts.sh --visitors-off
+
 .PHONY: demo-connection demo-connection-off
 demo-connection: _context ## The demo's first Connection: RNAcentral's public PostgreSQL, its secret in OpenBao and the managed store (lab only; needs YES=1)
 	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-connection.sh
