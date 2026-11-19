@@ -224,6 +224,66 @@ class VerifyRestarts(unittest.TestCase):
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertIn("verify-restarts: PASS", done.stdout)
 
+    def test_an_error_exit_at_the_node_stall_is_not_fatal(self):
+        pods = deployment_pods("nova") + [
+            pod("nova-6df9-x", "nova-6df9c8d5b", restarts=2,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(60)}),
+            pod("user-scheduler-7d-z", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Unknown", "exitCode": 255,
+                            "finishedAt": seconds_ago(55)}),
+        ]
+        done = self.run_script(pods, ROWS="nova")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        line = [ln for ln in done.stdout.splitlines() if "nova" in ln][0]
+        self.assertTrue(line.startswith("!"), line)
+        self.assertIn("node-caused exit(s)", line)
+        self.assertIn("verify-restarts: PASS", done.stdout)
+        self.assertNotIn("✗", done.stdout)
+
+    def test_an_error_exit_far_from_the_node_stall_still_fails(self):
+        pods = deployment_pods("nova") + [
+            pod("nova-6df9-x", "nova-6df9c8d5b", restarts=2,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(600)}),
+            pod("user-scheduler-7d-z", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Unknown", "exitCode": 255,
+                            "finishedAt": seconds_ago(60)}),
+        ]
+        done = self.run_script(pods, ROWS="nova")
+        self.assertEqual(done.returncode, 1)
+        line = [ln for ln in done.stdout.splitlines() if "nova" in ln][0]
+        self.assertTrue(line.startswith("✗"), line)
+        self.assertIn("verify-restarts: FAIL (1 Deployment(s) had a container crash within 3600s)",
+                      done.stdout)
+
+    def test_an_oom_killed_exit_is_never_node_caused(self):
+        pods = deployment_pods("nova") + [
+            pod("nova-6df9-x", "nova-6df9c8d5b", restarts=2,
+                terminated={"reason": "OOMKilled", "exitCode": 137,
+                            "finishedAt": seconds_ago(60)}),
+            pod("user-scheduler-7d-z", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Unknown", "exitCode": 255,
+                            "finishedAt": seconds_ago(55)}),
+        ]
+        done = self.run_script(pods, ROWS="nova")
+        self.assertEqual(done.returncode, 1)
+        line = [ln for ln in done.stdout.splitlines() if "nova" in ln][0]
+        self.assertTrue(line.startswith("✗"), line)
+        self.assertIn("OOMKilled exit=137", line)
+
+    def test_the_node_stall_window_is_read_from_the_environment(self):
+        pods = deployment_pods("nova") + [
+            pod("nova-6df9-x", "nova-6df9c8d5b", restarts=2,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(60)}),
+            pod("user-scheduler-7d-z", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Unknown", "exitCode": 255,
+                            "finishedAt": seconds_ago(55)}),
+        ]
+        done = self.run_script(pods, ROWS="nova", RESTART_NODE_STALL_WINDOW="2")
+        self.assertEqual(done.returncode, 1)
+
     def test_the_statefulset_pod_is_not_matched_by_the_name_prefix(self):
         pods = deployment_pods("nova", replicas=1) + [
             pod("nova-pg-1", "nova-pg", owner_kind="StatefulSet"),

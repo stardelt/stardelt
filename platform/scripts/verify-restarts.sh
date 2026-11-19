@@ -25,6 +25,11 @@
 #    within RESTART_MAX_AGE_SECONDS (default 3600) makes the row `✗` and the check exit 1.
 #    A crash older than the window is still printed on the row but does not fail — the
 #    incident's history stays visible.
+#  - the node's own stall produces two exit shapes: `Unknown` (exit 255) on pods the runtime lost and
+#    `Error` (exit 1) on components that held a Lease or a leader election ("leader election lost").
+#    An `Error` exit within RESTART_NODE_STALL_WINDOW (default 120) seconds of an `Unknown`/exit=255
+#    exit in the same namespace is the node's, not the component's: the row keeps `!` and says so
+#    (stardelt/stardelt#60, measured 2026-11-19T02:39:54Z).
 #
 # Pods are matched by owner, not by name prefix: `nova-` also matches the StatefulSet pod
 # `nova-pg-1`, so a pod counts only when `ownerReferences[0].kind == "ReplicaSet"` and the
@@ -87,6 +92,7 @@ rows = [r for r in (os.environ.get("RESTART_ROWS") or "").split(",") if r]
 
 MAX_AGE = int(os.environ.get("RESTART_MAX_AGE") or "3600")
 NS_NAME = os.environ.get("RESTART_NS") or "stardelt"
+NODE_STALL_WINDOW = int(os.environ.get("RESTART_NODE_STALL_WINDOW") or "120")
 
 owned = {}
 for pod in pods:
@@ -129,6 +135,29 @@ def _epoch(ts):
         return None
 
 
+def node_stall_stamps(pods):
+    """Every `Unknown`/exit=255 termination in the namespace — the node stall's signature."""
+    stamps = []
+    for pod in pods:
+        for status in (pod.get("status") or {}).get("containerStatuses") or []:
+            term = ((status.get("lastState") or {}).get("terminated") or {})
+            if not term.get("finishedAt"):
+                continue
+            if term.get("reason") == "Unknown" or term.get("exitCode") == 255:
+                stamp = _epoch(term["finishedAt"])
+                if stamp is not None:
+                    stamps.append(stamp)
+    return stamps
+
+
+def node_caused(term, stalls):
+    """`Error` inside a node stall's window is the node, not the component (stardelt/stardelt#60)."""
+    if term[0] != "Error":
+        return False
+    stamp = _epoch(term[2])
+    return stamp is not None and any(abs(stamp - s) <= NODE_STALL_WINDOW for s in stalls)
+
+
 def crash_of(pod):
     """The newest exit the node did not cause, as (reason, exitCode, finishedAt), or None.
 
@@ -160,6 +189,7 @@ not_ready = 0
 crashed = 0
 found = 0
 now = int(time.time())
+stalls = node_stall_stamps(pods)
 for name in rows:
     pods = pods_of(name)
     if not pods:
@@ -190,6 +220,7 @@ for name in rows:
             finished,
         )
     crashes = []
+    node_rows = []
     for pod in pods:
         term = crash_of(pod)
         if term is None:
@@ -197,6 +228,9 @@ for name in rows:
         finished_epoch = _epoch(term[2])
         if finished_epoch is None or finished_epoch < now - MAX_AGE:
             continue  # unparseable or older than the window: printed with the row, never fatal
+        if node_caused(term, stalls):
+            node_rows.append((pod, term))
+            continue
         crashes.append((pod, term))
     if crashes:
         pod, (reason, code, finished) = crashes[0]
@@ -205,6 +239,13 @@ for name in rows:
         crashed += 1
         lines.append(row("✗", name, text))
         continue
+    if node_rows:
+        pod, (reason, code, finished) = node_rows[0]
+        stamp = _epoch(finished)
+        nearest = min(abs(stamp - s) for s in stalls)
+        mark = "!"
+        text += "; %d node-caused exit(s) within %ds: %s exit=%s at %s (%ds of an unknown exit=255) — see stardelt/stardelt#60" % (
+            len(node_rows), MAX_AGE, reason, "?" if code is None else code, finished, nearest)
     lines.append(row(mark, name, text))
 
 for line in lines:
