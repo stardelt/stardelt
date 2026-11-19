@@ -28,6 +28,8 @@ VARIABLE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 CONNECTION = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 USE = re.compile(r"\$\{var\.([A-Za-z0-9_]+)\}")
 NOTEBOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\.ipynb$")
+DBT_KEYS = ("project", "select", "batches", "threads", "vars")
+DBT_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
 MIGRATION = re.compile(r"^\d{3}_[a-z0-9_]+\.sql$")
 CATALOG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # A migration statement that names a table whose change can have downstream impact. Only the
@@ -162,8 +164,32 @@ def _notebook_problems(where, notebook, files):
     return problems
 
 
+def _dbt_problems(where, dbt):
+    """What a ``dbt`` task must say, offline — the loader's own rules and sentences."""
+    if dbt is None:
+        return []
+    if not isinstance(dbt, dict):
+        return [(where, "dbt must be a mapping: project, and one of select and batches")]
+    problems = [(where, f"dbt tasks accept only project, select, batches, threads and vars (found `{key}`)") for key in dbt if key not in DBT_KEYS]
+    if not isinstance(dbt.get("project"), str) or not DBT_PROJECT.match(dbt["project"]):
+        problems.append((where, "a dbt task needs project (a directory under /opt/dbt/projects in the tool image)"))
+    if ("select" in dbt) == ("batches" in dbt):
+        problems.append((where, "a dbt task needs exactly one of select (one dbt selector) and batches (a list of 1 to 8 selectors, run in order)"))
+    if "select" in dbt and (not isinstance(dbt["select"], str) or not dbt["select"].strip()):
+        problems.append((where, "a dbt task needs exactly one of select (one dbt selector) and batches (a list of 1 to 8 selectors, run in order)"))
+    if "batches" in dbt and not (isinstance(dbt["batches"], list) and 1 <= len(dbt["batches"]) <= 8 and all(isinstance(item, str) and item.strip() for item in dbt["batches"])):
+        problems.append((where, "a dbt task needs exactly one of select (one dbt selector) and batches (a list of 1 to 8 selectors, run in order)"))
+    threads = dbt.get("threads", 4)
+    if not isinstance(threads, int) or isinstance(threads, bool) or not 1 <= threads <= 16:
+        problems.append((where, "dbt threads must be a whole number from 1 to 16 (default 4)"))
+    if "vars" in dbt and not (isinstance(dbt["vars"], dict) and all(isinstance(value, str) for value in dbt["vars"].values())):
+        problems.append((where, "dbt vars must be a mapping of string values"))
+    return problems
+
+
 def _task_problems(where, tasks, files):
-    """What a ``tasks`` list must say, offline: names, one source each, and the dependency graph."""
+    """What a ``tasks`` list must say, offline: names, one source each (``sql``, ``sqlFile``, ``notebook``
+    or ``dbt``), and the dependency graph."""
     problems = []
     if not isinstance(tasks, list) or not tasks:
         return [(where, "tasks must be a non-empty list")]
@@ -182,9 +208,10 @@ def _task_problems(where, tasks, files):
         if name in names:
             problems.append((at, "the name is used twice"))
         names.append(name)
-        given = [k for k in ("sql", "sqlFile", "notebook") if k in task]
+        given = [k for k in ("sql", "sqlFile", "notebook", "dbt") if k in task]
         if len(given) != 1:
-            problems.append((at, "give exactly one of sql, sqlFile or notebook"))
+            problems.append((at, "give exactly one of sql, sqlFile, notebook or dbt"))
+        problems.extend(_dbt_problems(at, task.get("dbt")))
         if "sqlFile" in task and task["sqlFile"] not in files:
             problems.append((at, f"sqlFile {task['sqlFile']!r} is not among the bundle's files"))
         problems.extend(_notebook_problems(at, task.get("notebook"), files))
@@ -334,6 +361,8 @@ def validate(directory, target=None):
                 )
             if doc.get("ownerGroup", owner) != owner:
                 problems.append((f"{relative} ({tname})", f"ownerGroup {doc['ownerGroup']!r} is not the bundle's group {owner!r}"))
+            if "dbt" in doc:
+                problems.append((f"{relative} ({tname})", "a dbt run is a task: put it under tasks: with a name"))
             if "tasks" in doc:
                 if [k for k in ("sql", "sqlFile", "notebook") if k in doc]:
                     problems.append(
