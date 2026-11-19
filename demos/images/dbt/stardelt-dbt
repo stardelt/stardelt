@@ -57,4 +57,11 @@ if [ -n "${PIPELINE_TRINO_CA_FILE:-}" ]; then
   export DBT_TRINO_CA="$PIPELINE_TRINO_CA_FILE"
 fi
 
-exec /opt/dbt/bin/dbt "$@"
+# The log carries dbt's result in words (#112). `set +e` only around dbt: the summary must
+# not swallow the task's status, and a summary that fails must not fail a good run.
+set +e
+/opt/dbt/bin/dbt "$@"
+status=$?
+set -e
+python3 /opt/dbt-run-summary.py "${DBT_TARGET_PATH:-/tmp/dbt-target}/run_results.json" || true
+exit "$status"

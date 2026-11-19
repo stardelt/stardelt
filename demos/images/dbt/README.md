@@ -42,7 +42,12 @@ A missing one prints its name to stderr and exits 2. The other two are optional 
   `dags/stardelt_pipelines/trino.py`), because a token lives five minutes; the host is
   `PIPELINE_TRINO_URL` without scheme and without port (the port stays in `profiles.yml`).
 
-Then it `exec`s `dbt` with the caller's arguments, so a task runs e.g.
+Then it runs `dbt` with the caller's arguments and prints the result in words (#112): the node
+counts (`dbt: 5 nodes — 1 model, 1 seed, 3 tests`), the status counts
+(`dbt: 3 passed, 1 failed, 1 warning`), then one `✗` line per failed node and one `!` line per
+warned one, each with dbt's one-line message. A run that failed before its first node has no
+`run_results.json` and prints `dbt: no run_results.json at <path>`. The exit code is always
+dbt's own; a summary that fails never fails a good run. A task runs e.g.
 
 ```console
 $ docker run --rm -v "$PWD/examples/shop:/work" -w /work ghcr.io/stardelt/dbt:demo \
