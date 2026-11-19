@@ -36,6 +36,11 @@ models:
       +database: silver
       +schema: shop_dbt
       +materialized: view
+      # Trino writes `trino.run-as-owner` for a SECURITY DEFINER view, and Lakekeeper 0.15
+      # refuses that property unless Trino is a configured trusted engine (stardelt#393).
+      # The staging views are internal to this project: the marts read them as the pipeline
+      # principal, so they run with the querying identity instead.
+      +view_security: invoker
       +tags: [load]
     marts:
       +database: gold

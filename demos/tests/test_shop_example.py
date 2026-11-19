@@ -78,6 +78,16 @@ def test_the_shop_overrides_the_relation_listing_without_the_system_catalog():
     assert "macros" in project["macro-paths"]
 
 
+def test_the_staging_views_run_as_the_querying_identity():
+    project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
+    staging = project["models"]["shop"]["staging"]
+    assert staging["+materialized"] == "view"
+    assert staging["+view_security"] == "invoker", (
+        "Trino writes trino.run-as-owner for a SECURITY DEFINER view, and Lakekeeper refuses "
+        "that property without a trusted engine; the staging views are internal to this project"
+    )
+
+
 def test_every_dbt_batch_tag_selects_a_resource_and_the_seeds_come_first():
     project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
     tags = set()
