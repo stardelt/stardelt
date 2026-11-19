@@ -9,10 +9,17 @@
 # "Initial job has not accepted any resources", and every other verify-* target still passed
 # because they read what the pods are, not what they do.
 #
-# The pod carries `component: singleuser-server` because NetworkPolicy spark-connect-ingress
-# admits port 15002 only from a pod with that label (manifests/spark.yaml). It is the notebook
-# image, not Spark's: pyspark, pandas and pyarrow are already in it and the Spark image ships
-# no client. The image comes from helm-values/jupyterhub.yaml, never from a literal here.
+# The pod carries all three JupyterHub labels because two NetworkPolicies must both admit it, and
+# only their union gives a client pod a working path (measured 2026-11-19):
+#   * `component: singleuser-server` is spark-connect-ingress's admission rule for 15002
+#     (manifests/spark.yaml);
+#   * the chart's `singleuser` policy selects `app: jupyterhub, component: singleuser-server,
+#     release: jupyterhub` and is the only egress policy that allows DNS (53 to CoreDNS) and
+#     15002 on that label set. With `component` alone the pod is selected by
+#     `notebook-public-egress` only — `0.0.0.0/0` except the private ranges — so `getent hosts`
+#     fails and the connect never happens, and the check could only ever print UNVERIFIED.
+# It is the notebook image, not Spark's: pyspark, pandas and pyarrow are already in it and the
+# Spark image ships no client. The image comes from helm-values/jupyterhub.yaml, never a literal.
 #
 # PASS = the server ran both jobs. FAIL = it did not. UNVERIFIED (exit 3) = the client pod never
 # started or never reached the server, so nothing about the query path was measured.
@@ -35,9 +42,10 @@ CLIENT_IMAGE="ghcr.io/stardelt/jupyter-singleuser:dev@${client_digest}"
 trap 'kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1 || true' EXIT
 trap 'kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1 || true; exit 130' INT
 
-# The `component: singleuser-server` label is the NetworkPolicy's admission rule for 15002, and
-# no `stardelt.io/group.visitors` label may be set (that would be the public demo's pod, which
-# the policy refuses).
+# The labels are the egress and ingress admission rules for 15002, and both policies must admit
+# the pod (see the header): the chart's `singleuser` policy for DNS + 15002, and
+# spark-connect-ingress for `component: singleuser-server`. No `stardelt.io/group.visitors` label
+# may be set (that would be the public demo's pod, which the policy refuses).
 if ! out="$(kubectl -n "$NS" apply -f - 2>&1 <<EOF
 apiVersion: v1
 kind: Pod
@@ -46,6 +54,8 @@ metadata:
   namespace: ${NS}
   labels:
     app.kubernetes.io/name: verify-spark-query
+    app: jupyterhub
+    release: jupyterhub
     component: singleuser-server
 spec:
   restartPolicy: Never
