@@ -203,6 +203,7 @@ function notebookFrom(pipeline: PipelineDetail | undefined): {
   name: string
   objectVersion: string
   params: Record<string, string>
+  connection: string
 } | null {
   const task = pipeline?.tasks.find((candidate) => candidate.kind === 'notebook')
   if (!task) return null
@@ -210,6 +211,7 @@ function notebookFrom(pipeline: PipelineDetail | undefined): {
     name: typeof task.notebook === 'string' ? task.notebook : '',
     objectVersion: typeof task.objectVersion === 'string' ? task.objectVersion : '',
     params: task.notebookParams ?? {},
+    connection: typeof task.connection === 'string' ? task.connection : '',
   }
 }
 
@@ -695,10 +697,13 @@ export default function ScheduleDialog({
       concurrency: options.concurrency,
     }
     // Exactly one of the statement and the notebook (#237): the API refuses both or neither.
+    // The connection is preserved, not edited: the dialog has no control for it, and an omitted
+    // field makes `updated_resource` remove it (#382).
     const notebookBody = {
       name: notebookName,
       objectVersion: pinnedVersion,
       params: notebookParamTable,
+      connection: storedNotebook?.connection || null,
     }
     // The checked names in the order the list answers them (newest first). A name the list does
     // not hold — the destinations route failed — keeps its place after them rather than being
