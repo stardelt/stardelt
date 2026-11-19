@@ -272,32 +272,10 @@ pub fn cron_job(
     }
 }
 
-/// The conditions after replacing the one of `next`'s type and keeping every other one, so a
-/// controller patch never wipes `CatalogReady`/`GrantsReady`/`Drift` (the access-sync job
-/// writes the whole array with a merge-patch).
-///
-/// The replaced condition keeps the `lastTransitionTime` of an existing condition of the same
-/// type *and* the same status: only a change of `status` moves the timestamp, which is the
-/// Kubernetes convention. `next` therefore carries `Timestamp::now()` and a repeated no-op
-/// reconcile still writes the same bytes — without this a status patch lands on every pass, the
-/// watch reports "object updated" and the controller reconciles itself (~9×/s per catalog,
-/// stardelt#272).
+/// The conditions after replacing the one of `next`'s type and keeping every other one; see
+/// [`crate::conditions::merge_condition`] for why the transition time only moves with the status.
 pub fn merge_condition(existing: &[Condition], next: Condition) -> Vec<Condition> {
-    let holding = existing
-        .iter()
-        .find(|c| c.type_ == next.type_ && c.status == next.status)
-        .map(|c| c.last_transition_time.clone());
-    let next = Condition {
-        last_transition_time: holding.unwrap_or(next.last_transition_time),
-        ..next
-    };
-    let mut conditions: Vec<Condition> = existing
-        .iter()
-        .filter(|c| c.type_ != next.type_)
-        .cloned()
-        .collect();
-    conditions.push(next);
-    conditions
+    crate::conditions::merge_condition(existing, next)
 }
 
 /// The summary line `stardelt maintenance run` writes last:

@@ -7,6 +7,7 @@
 
 pub mod access_sync;
 pub mod airflow;
+pub mod conditions;
 pub mod connection;
 pub mod controller;
 pub mod crd;

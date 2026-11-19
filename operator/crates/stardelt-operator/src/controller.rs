@@ -217,18 +217,15 @@ fn ready_condition(
     message: Option<String>,
 ) -> Condition {
     let status = if phase == "Ready" { "True" } else { "False" };
-    let last_transition_time = match previous {
-        Some(p) if p.status == status => p.last_transition_time.clone(),
-        _ => Some(now.to_string()),
-    };
-    Condition {
-        type_: "Ready".into(),
-        status: status.into(),
-        reason: Some(phase.into()),
+    crate::conditions::set_condition(
+        previous.map(std::slice::from_ref).unwrap_or(&[]),
+        "Ready",
+        status,
+        phase,
         message,
-        last_transition_time,
-        observed_generation: generation,
-    }
+        generation,
+        now,
+    )
 }
 
 fn now_rfc3339() -> String {

@@ -226,18 +226,15 @@ pub(crate) fn ready_condition(
     now: &str,
 ) -> Condition {
     let status = if ready { "True" } else { "False" };
-    let last_transition_time = match previous {
-        Some(p) if p.status == status => p.last_transition_time.clone(),
-        _ => Some(now.to_string()),
-    };
-    Condition {
-        type_: "Ready".into(),
-        status: status.into(),
-        reason: Some(reason.into()),
+    crate::conditions::set_condition(
+        previous.map(std::slice::from_ref).unwrap_or(&[]),
+        "Ready",
+        status,
+        reason,
         message,
-        last_transition_time,
-        observed_generation: generation,
-    }
+        generation,
+        now,
+    )
 }
 
 pub async fn reconcile_connection(
