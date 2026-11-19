@@ -94,6 +94,13 @@ s3:
   enabled: true
   enableAuth: true
   existingConfigSecret: seaweedfs-s3-config
+  # The same document carries the STS/IAM half (`sts.signingKey`, `policy`, `policies`, `roles`);
+  # the gateway reads it a second time for STS (stardelt/stardelt#256, twin #262, spike #248).
+  # The identities pass logs `invalid policy` for the keys it ignores; `-iam.config` loads them.
+  # A `byoS3` document without the half logs one `Failed to load IAM configuration` and still
+  # serves the identities (measured, #239 Q2) — the flag is not a hard dependency.
+  extraArgs:
+    - -iam.config=/etc/sw/seaweedfs_s3_config
   # Pod Security `baseline` refuses hostPath, and the chart defaults every component's log
   # volume to one (stardelt-platform#1096 question 5). Logs are disposable, not data.
   logs:

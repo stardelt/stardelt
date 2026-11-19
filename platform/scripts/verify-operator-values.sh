@@ -183,6 +183,9 @@ attempt() { # component [extra args...] -> one read; 0 when every probe of it pa
         volume="$(printf '%s\n' "$out" | section_of volume)"
         check_contains "seaweedfs: volume sizing block" "$volume" "name: data"
         check_contains "seaweedfs: volume size" "$volume" "size: $SEAWEEDFS_VOLUME_SIZE"
+        local s3
+        s3="$(printf '%s\n' "$out" | section_of s3)"
+        check_contains "seaweedfs: STS flag" "$s3" "-iam.config=/etc/sw/seaweedfs_s3_config"
         ;;
       external-secrets)
         check_contains "external-secrets: image" "$out" "$ESO"

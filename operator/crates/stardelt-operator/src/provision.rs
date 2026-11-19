@@ -41,9 +41,10 @@ use crate::{
         CATALOG_CLUSTER, DEFAULT_BUCKET, NOVA_CLUSTER, S3_CONFIG_SECRET, S3_SECRET, S3Keys,
         S3Location, archive_bucket_job, archive_bucket_job_name, archive_cron_job,
         barman_cloud_object_stores, bootstrap_job, bootstrap_job_name, catalog_cluster,
-        catalog_pg_backup, discovery_config_map, discovery_config_map_name, keycloak_pg_backup,
-        keycloak_pg_cluster, notebooks_bucket_job, notebooks_bucket_job_name, nova_pg_backup,
-        nova_pg_cluster, openfga_pg_backup, openfga_pg_cluster, platform_namespace,
+        catalog_pg_backup, config_document_has_sts, config_document_names_identity,
+        discovery_config_map, discovery_config_map_name, generate_sts_signing_key,
+        keycloak_pg_backup, keycloak_pg_cluster, notebooks_bucket_job, notebooks_bucket_job_name,
+        nova_pg_backup, nova_pg_cluster, openfga_pg_backup, openfga_pg_cluster, platform_namespace,
         s3_creds_secret, s3_endpoint, seaweedfs_config_secret,
     },
     secrets, spark, superset,
@@ -202,6 +203,11 @@ pub fn read_keys(secret: &Secret) -> Option<S3Keys> {
     })
 }
 
+/// `sts-signing-key` of `stardelt-s3-creds`, written by this operator since stardelt/stardelt#262.
+fn read_sts_key(secret: &Secret) -> Option<String> {
+    text(secret, "sts-signing-key")
+}
+
 /// Where the object store is, if `stardelt-s3-creds` has `endpoint`, `bucket` and `region`.
 pub fn read_location(secret: &Secret) -> Option<S3Location> {
     Some(S3Location {
@@ -291,14 +297,63 @@ pub async fn ensure_s3_secrets(ctx: &Context, lh: &Lakehouse, namespace: &str) -
             Err(e) => return status(NAME, false, e.to_string()),
         },
     };
+    // The STS signing key lives beside the key pair (stardelt/stardelt#256/#262). An install
+    // from before it has none: generate one and add it; never rotate one that exists.
+    let sts = match existing.as_ref().and_then(read_sts_key) {
+        Some(key) => key,
+        None if dry_run => {
+            return status(
+                NAME,
+                false,
+                "planned (dry-run): would add sts-signing-key to stardelt-s3-creds",
+            );
+        }
+        None => match generate_sts_signing_key() {
+            Ok(key) => {
+                if existing.is_some() {
+                    let patch = json!({"stringData": {"sts-signing-key": key}});
+                    if let Err(e) = secrets
+                        .patch(S3_SECRET, &PatchParams::default(), &Patch::Merge(&patch))
+                        .await
+                    {
+                        return status(NAME, false, e.to_string());
+                    }
+                }
+                key
+            }
+            Err(e) => return status(NAME, false, e.to_string()),
+        },
+    };
     if existing.is_none() {
-        let secret = s3_creds_secret(&lakehouse, namespace, &bucket(lh), &keys);
+        let secret = s3_creds_secret(&lakehouse, namespace, &bucket(lh), &keys, &sts);
         if let Err(e) = apply(&ctx.client, namespace, &secret, false).await {
             return status(NAME, false, e.to_string());
         }
     }
+    let mut foreign = false;
     match secrets.get_opt(S3_CONFIG_SECRET).await {
-        Ok(Some(_)) => {}
+        Ok(Some(found)) => {
+            let document = text(&found, "seaweedfs_s3_config").unwrap_or_default();
+            if !config_document_has_sts(&document) {
+                if config_document_names_identity(&document, &keys.access_key) {
+                    if dry_run {
+                        return status(
+                            NAME,
+                            false,
+                            "planned (dry-run): would rewrite seaweedfs-s3-config with the STS half",
+                        );
+                    }
+                    let secret = seaweedfs_config_secret(&lakehouse, namespace, &keys, &sts);
+                    if let Err(e) = apply(&ctx.client, namespace, &secret, false).await {
+                        return status(NAME, false, e.to_string());
+                    }
+                } else {
+                    // An administrator's own document: never replaced (it may name a
+                    // different identity we know nothing about).
+                    foreign = true;
+                }
+            }
+        }
         Ok(None) if dry_run => {
             return status(
                 NAME,
@@ -307,12 +362,19 @@ pub async fn ensure_s3_secrets(ctx: &Context, lh: &Lakehouse, namespace: &str) -
             );
         }
         Ok(None) => {
-            let secret = seaweedfs_config_secret(&lakehouse, namespace, &keys);
+            let secret = seaweedfs_config_secret(&lakehouse, namespace, &keys, &sts);
             if let Err(e) = apply(&ctx.client, namespace, &secret, false).await {
                 return status(NAME, false, e.to_string());
             }
         }
         Err(e) => return status(NAME, false, e.to_string()),
+    }
+    if foreign {
+        return status(
+            NAME,
+            !dry_run,
+            "present; seaweedfs-s3-config names a different identity, so the STS half was not added",
+        );
     }
     status(
         NAME,
@@ -3084,6 +3146,23 @@ mod tests {
         data.insert("secret-key".to_string(), ByteString(b"SK".to_vec()));
         secret.data = Some(data);
         assert_eq!(read_keys(&secret).unwrap().access_key, "AK");
+    }
+
+    #[test]
+    fn read_sts_key_is_additive() {
+        let mut data = BTreeMap::new();
+        data.insert("access-key".to_string(), ByteString(b"AK".to_vec()));
+        let mut secret = Secret {
+            data: Some(data.clone()),
+            ..Default::default()
+        };
+        assert!(
+            read_sts_key(&secret).is_none(),
+            "an install from before #262"
+        );
+        data.insert("sts-signing-key".to_string(), ByteString(b"STS".to_vec()));
+        secret.data = Some(data);
+        assert_eq!(read_sts_key(&secret).as_deref(), Some("STS"));
     }
 
     #[test]

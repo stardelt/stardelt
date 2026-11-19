@@ -310,6 +310,10 @@ mod tests {
             seaweedfs["global"]["seaweedfs"]["createClusterRole"],
             serde_json::json!(false)
         );
+        assert_eq!(
+            seaweedfs["s3"]["extraArgs"],
+            serde_json::json!(["-iam.config=/etc/sw/seaweedfs_s3_config"])
+        );
     }
 
     #[test]
