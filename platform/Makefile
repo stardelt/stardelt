@@ -684,6 +684,21 @@ install-spark: deps _context ## Install the Spark Connect endpoint (Iceberg on t
 	  echo "› spark-connect pod guard: skipped — ValidatingAdmissionPolicy needs Kubernetes 1.30+"; \
 	fi
 	@kubectl -n $(NAMESPACE) apply -f manifests/spark-confmap-janitor.yaml
+	@# The token-checking front (stardelt#84 Q4, spike #208). Additive: nothing points at it
+	@# yet. The apply and the rollout are one logical line and the sub-make another, because a
+	@# logical line carrying $(MAKE) is executed whole under `make -n` (test_make_dry_run).
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
+	  echo "› Spark Connect front: Envoy jwt_authn at spark.$(BASE_DOMAIN) (audience spark-connect)"; \
+	  sed -e "s|__BASE_DOMAIN__|$(BASE_DOMAIN)|g" manifests/spark-connect-auth.yaml | kubectl apply -f -; \
+	  kubectl -n $(NAMESPACE) rollout status deploy/spark-connect-auth --timeout=5m; \
+	else \
+	  echo "› Spark Connect front: skipped — no platform IdP (stardelt-identity ConfigMap)"; \
+	fi
+	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
+	  $(MAKE) --no-print-directory sync-spark-audience; \
+	else \
+	  echo "› Spark Connect audience: skipped — no platform IdP (stardelt-identity ConfigMap)"; \
+	fi
 	@$(MAKE) spark-confmap-janitor-config
 	@kubectl -n $(NAMESPACE) get configmap stardelt-spark-runtimes -o name
 	@echo "Spark Connect ready: sc://spark-connect.$(NAMESPACE).svc.cluster.local:15002 (in-cluster only)"
@@ -1199,6 +1214,12 @@ sync-nova-audience: _context ## Converge the live realm so hub and dev-client to
 .PHONY: sync-catalog-audience
 sync-catalog-audience: _context ## Converge the live realm so hub and dev-client tokens carry the catalog's audience (idempotent)
 	@NAMESPACE=$(NAMESPACE) bash scripts/keycloak-sync-catalog-audience.sh
+
+# The audience `spark-connect` on the notebook hub's and the developer client's tokens, so a
+# token-carrying Connect client passes the Envoy front (stardelt#84 Q4, spike #208).
+.PHONY: sync-spark-audience
+sync-spark-audience: _context ## Converge the live realm so hub and dev-client tokens carry Spark Connect's audience (idempotent)
+	@NAMESPACE=$(NAMESPACE) bash scripts/keycloak-sync-spark-audience.sh
 
 # External Secrets Operator (decision D23): syncs a secret store into Kubernetes Secrets. Opt-in.
 external-secrets: deps _context _helm-repos ## Install External Secrets Operator (opt-in)

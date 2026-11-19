@@ -372,6 +372,15 @@ spec:
         - podSelector:
             matchLabels:
               stardelt.io/spark-connect: executor
+    # The token-checking front (manifests/spark-connect-auth.yaml): the only path a
+    # client outside this namespace will take, and the only one that verifies a token.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spark-connect-auth
+      ports:
+        - protocol: TCP
+          port: 15002
     # The customer's Prometheus (stardelt-operator#607): read-only, on the UI port.
     # A NetworkPolicy selects ports, not paths, so this admits the driver's UI too —
     # jobs, stages and the redacted environment page. That is the accepted exposure

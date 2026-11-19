@@ -20,6 +20,9 @@
 # more Deployments read by the tag they carry (`tag:`). The Kafka broker is a StrimziPodSet pod and
 # the entity operator a two-container Deployment, read by `refpod:`/`refdeploy:` (#1631).
 #
+# The Spark Connect front (manifests/spark-connect-auth.yaml) joined them in #231: Envoy comes
+# from Docker Hub, so its row is `any-image`.
+#
 #   scripts/verify-pins.sh
 #   ROWS=access-sync,demo-reset scripts/verify-pins.sh   # only these rows (the test uses it)
 #
@@ -48,6 +51,7 @@ rows=(
   "nova|nova|manifests/nova-deployment.yaml|image"
   "stardelt-operator|stardelt-operator|helm-values/operator.yaml|tag"
   "spark|spark-connect|manifests/spark.yaml|image"
+  "spark-connect-auth|spark-connect-auth|manifests/spark-connect-auth.yaml|any-image"
   "superset|superset|helm-values/superset.yaml|tag"
   "superset-worker|superset-worker|helm-values/superset.yaml|tag"
   "airflow|airflow-api-server|helm-values/airflow.yaml|worker-tag"
