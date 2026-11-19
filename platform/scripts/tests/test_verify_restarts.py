@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -75,6 +76,10 @@ def deployment_pods(name, replicas=1, restarts=0, ready=True):
             ready=ready, restarts=restarts)
         for i in range(replicas)
     ]
+
+
+def seconds_ago(seconds):
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class VerifyRestarts(unittest.TestCase):
@@ -152,6 +157,72 @@ class VerifyRestarts(unittest.TestCase):
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertIn("last exit Error exit=1 at 2026-11-17T13:52:57Z", done.stdout)
         self.assertNotIn("2026-11-17T13:40:00Z", done.stdout)
+
+    def test_a_crash_inside_the_window_fails_with_a_cross(self):
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(60)}),
+        ]
+        done = self.run_script(pods, ROWS="user-scheduler")
+        self.assertEqual(done.returncode, 1)
+        line = [ln for ln in done.stdout.splitlines() if "user-scheduler" in ln][0]
+        self.assertTrue(line.startswith("✗"), line)
+        self.assertIn("Error exit=1", line)
+        self.assertIn("verify-restarts: FAIL (1 Deployment(s) had a container crash within 3600s)",
+                      done.stdout)
+
+    def test_the_nodes_own_restart_inside_the_window_is_never_fatal(self):
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Unknown", "exitCode": 255,
+                            "finishedAt": seconds_ago(60)}),
+        ]
+        done = self.run_script(pods, ROWS="user-scheduler")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        line = [ln for ln in done.stdout.splitlines() if "user-scheduler" in ln][0]
+        self.assertTrue(line.startswith("!"), line)
+        self.assertIn("verify-restarts: PASS", done.stdout)
+
+    def test_a_container_still_restarting_on_its_own_is_named_and_fails(self):
+        pods = [
+            pod("nova-6df9-x", "nova-6df9c8d5b", restarts=3,
+                terminated={"reason": "OOMKilled", "exitCode": 137,
+                            "finishedAt": seconds_ago(30)}),
+            pod("nova-6df9-y", "nova-6df9c8d5b", restarts=2,
+                terminated={"reason": "OOMKilled", "exitCode": 137,
+                            "finishedAt": seconds_ago(20)}),
+        ]
+        done = self.run_script(pods, ROWS="nova")
+        self.assertEqual(done.returncode, 1)
+        line = [ln for ln in done.stdout.splitlines() if "nova" in ln][0]
+        self.assertTrue(line.startswith("✗"), line)
+        self.assertIn("2 crash(es) within 3600s: OOMKilled exit=137", line)
+        self.assertIn("read kubectl -n stardelt logs nova-6df9-x --previous", line)
+
+    def test_a_crash_older_than_the_window_is_printed_and_never_fails(self):
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(2 * 3600)}),
+        ]
+        done = self.run_script(pods, ROWS="user-scheduler", RESTART_MAX_AGE_SECONDS="3600")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        line = [ln for ln in done.stdout.splitlines() if "user-scheduler" in ln][0]
+        self.assertTrue(line.startswith("!"), line)
+        self.assertIn("last exit Error exit=1", line)
+        self.assertNotIn("crash(es) within", line)
+        self.assertIn("verify-restarts: PASS", done.stdout)
+
+    def test_the_window_is_read_from_restart_max_age_seconds(self):
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(120)}),
+        ]
+        done = self.run_script(pods, ROWS="user-scheduler", RESTART_MAX_AGE_SECONDS="60")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertIn("verify-restarts: PASS", done.stdout)
 
     def test_the_statefulset_pod_is_not_matched_by_the_name_prefix(self):
         pods = deployment_pods("nova", replicas=1) + [
