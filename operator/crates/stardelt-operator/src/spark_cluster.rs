@@ -816,13 +816,11 @@ pub async fn reconcile_spark_cluster(
 
     tracing::info!(cluster = %name, %namespace, %phase, "reconciled");
 
-    let requeue = if phase == "Starting" {
-        30
-    } else if phase == "Running" && spec.idle_stop_minutes > 0 {
-        60
-    } else {
-        300
-    };
+    // The phase comes from the `SparkConnect`'s status, and the controller now watches that
+    // object, so this is a resync, not a poll. `idle_stop_minutes` is 15 or more on every
+    // shipped size (`preset`), so a 5-minute idle check still stops a cluster inside the minute
+    // the object asks for.
+    let requeue = if phase == "Starting" { 30 } else { 300 };
     Ok(Action::requeue(Duration::from_secs(requeue)))
 }
 
@@ -1604,8 +1602,8 @@ mod tests {
             reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
                 .await
                 .expect("reconcile");
-        // A Running cluster with `idleStopMinutes > 0` is the 60 s idle poll (ticket #461).
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        // A Running cluster is the 300 s resync now that the `SparkConnect` is watched (ticket #497).
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(log.contains("\"phase\":\"Running\""), "{log}");
         assert!(
@@ -2033,7 +2031,7 @@ mod tests {
         let action = reconcile_spark_cluster(Arc::new(c), ctx(client))
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(!log.contains("\"state\":\"Stopped\""), "{log}");
         assert!(!log.contains("/events"), "{log}");

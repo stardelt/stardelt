@@ -875,7 +875,9 @@ pub async fn reconcile_stream_app(
     )
     .await?;
     tracing::info!(stream = %name, %namespace, %phase, %reason, "reconciled");
-    Ok(Action::requeue(Duration::from_secs(60)))
+    // The phase comes from the `SparkApplication`'s status, and the controller now watches that
+    // object, so this is a resync, not a poll.
+    Ok(Action::requeue(Duration::from_secs(300)))
 }
 
 pub(crate) fn error_policy(obj: Arc<StreamApp>, err: &kube::Error, ctx: Arc<Context>) -> Action {
@@ -1802,7 +1804,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(log.contains("\"phase\":\"Failed\""), "{log}");
         assert!(
@@ -1868,7 +1870,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(
             log.contains("DELETE") && log.contains("/sparkapplications/orders"),
@@ -1940,7 +1942,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(app), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(!log.contains("DELETE "), "{log}");
         assert!(log.contains("\"phase\":\"Failed\""), "{log}");
@@ -2052,7 +2054,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(log.contains("\"phase\":\"Running\""), "{log}");
         assert!(log.contains("\"reason\":\"Restarting\""), "{log}");
@@ -2107,7 +2109,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(log.contains("\"phase\":\"Running\""), "{log}");
         assert!(log.contains("\"reason\":\"Running\""), "{log}");
