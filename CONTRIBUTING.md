@@ -227,3 +227,6 @@ you submit.
 One version for the whole repository, `0.0.N` until `0.1.0` (stardelt/stardelt#2). Never edit a
 version by hand: `python3 scripts/release/stamp-version.py 0.0.N` writes it into every folder, and
 `--check 0.0.N` proves they agree.
+
+A release is cut by hand: `gh workflow run release.yml -f version=0.0.N` (a dry run that uploads
+the files), then `-f dry_run=false` to open the release PR. Merging that PR publishes the release.
