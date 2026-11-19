@@ -5,6 +5,8 @@ import { expect, test } from '@playwright/test'
 
 test('the Compute page lists the shared cluster and offers no buttons for it', async ({ page }) => {
   await page.goto('/compute')
+  // The header names the page (#337): without the map entry it reads "Not found".
+  await expect(page.locator('header')).toContainText('Compute')
   const main = page.locator('main')
   await expect(main.getByRole('heading', { name: 'Compute' })).toBeVisible()
   await expect(main.getByText('Shared', { exact: true })).toBeVisible()
