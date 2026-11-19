@@ -302,9 +302,12 @@ verify-fresh-node: _context ## The operator install is up: instance Ready, Pod S
 check-spark-runtimes-live: _context ## The live Spark runtime catalogue matches chart/files/spark-runtimes.json
 	@NAMESPACE=$(NAMESPACE) bash scripts/check-spark-runtimes.sh --live
 
-.PHONY: verify-operator-values
+.PHONY: verify-operator-values verify-operator-quiet
 verify-operator-values: _context ## The running operator carries the golden values the pins were merged with
 	@bash scripts/verify-operator-values.sh
+
+verify-operator-quiet: _context ## The operator is quiet on an idle cluster: no status write, <2 reconciles per object, <50 m CPU, <50 KB/s (#274 rule 7)
+	@NS=$(NAMESPACE) bash scripts/verify-operator-quiet.sh
 
 .PHONY: verify-connections
 verify-connections: _context ## The live connection path is wired (CRD field, reader Role, loader image)
