@@ -2492,7 +2492,7 @@ pub async fn ensure_access_sync(
 /// (decision D-op-5 of `design/operator-parity.md`: a constant per operator release).
 /// `stardelt-platform`'s `scripts/check-operator-pins.sh` compares this constant with its pin
 /// (stardelt-platform#759).
-pub const NOVA_IMAGE: &str = "ghcr.io/stardelt/nova:dev@sha256:7a31907c089a35e998d246cb8838ae922db50eb3e98a6dc0b48ffce00ac05df9";
+pub const NOVA_IMAGE: &str = "ghcr.io/stardelt/nova:dev@sha256:5620259af24d999c8493d944b9a5348cee58083024ec729d9a17ebfa9a9a009d";
 
 /// Secrets the Nova Deployment reads and cannot start without: the state store's URL
 /// (created by CloudNative-PG), the object-store keys (created with the Lakehouse) and the
