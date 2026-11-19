@@ -901,8 +901,8 @@ pub struct IngestionSourceStatus {
 }
 
 /// What a pipeline task does — the task contract behind `Pipeline`
-/// (master spec §5, plugs 6, 7 and 12). `sql` and `notebook` run today
-/// (scheduled jobs phases J0 and J1); `python`, `dbt` and `quality` are
+/// (master spec §5, plugs 6, 7 and 12). `sql`, `notebook` (scheduled jobs
+/// phases J0 and J1) and `dbt` run today; `python` and `quality` are
 /// accepted so manifests can be written ahead of their runtimes.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -914,9 +914,11 @@ pub enum TaskKind {
     Notebook,
     /// Python transform. Accepted; no runtime yet.
     Python,
-    /// dbt-core model run. Accepted; no runtime yet.
+    /// dbt-core: `dbt build` of one selector (models and their tests) in the dbt tool image.
     Dbt,
-    /// Data-quality gate (Soda + dbt tests). Accepted; no runtime yet.
+    /// Data-quality gate: the SQL assertions in `checks` (a check passes when its
+    /// query returns no rows). Accepted; no runtime yet (#114). dbt tests run
+    /// inside a `dbt` task.
     Quality,
 }
 
