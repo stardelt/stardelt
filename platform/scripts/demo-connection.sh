@@ -119,9 +119,9 @@ store_out="$(bash scripts/eso-openbao-store.sh managed 2>&1)" \
   || fail "scripts/eso-openbao-store.sh managed failed: $store_out"
 printf '%s\n' "$store_out" | awk '/^› store openbao-managed: /'
 
-# 2. The secret values, written and never read back.
-{ printf 'user=%s password=%s\n' "$USER" "$PASSWORD"; } \
-  | bao_root kv put "$SECRET_PATH" - >/dev/null
+# 2. The secret values, written and never read back: `user` is a public name, the password
+# travels only as the stdin of the exec (`password=-` reads its value from stdin).
+printf '%s' "$PASSWORD" | bao_root kv put "$SECRET_PATH" user="$USER" password=- >/dev/null
 echo "› secret $SECRET_PATH: written"
 
 # 3. The Connection; the operator turns it into the ExternalSecret of the Secret conn-rnacentral.
