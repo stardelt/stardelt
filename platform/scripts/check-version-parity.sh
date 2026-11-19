@@ -8,6 +8,7 @@
 #
 # It also checks that the operator's image in helm-values/operator.yaml carries a digest (stardelt-platform#519).
 #   bash scripts/check-version-parity.sh
+# (throwaway: a comment-only change, to watch ci gate wait for platform / CI)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
