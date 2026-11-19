@@ -26,6 +26,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomRe
 use kube::{
     Api, Client, ResourceExt,
     api::{DeleteParams, ListParams, Patch, PatchParams},
+    core::DynamicObject,
     runtime::{Controller, controller::Action, watcher},
 };
 use serde_json::json;
@@ -150,6 +151,14 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         Api::<StreamApp>::all(client.clone()),
         watcher::Config::default(),
     )
+    .owns_with(
+        Api::<DynamicObject>::all_with(
+            client.clone(),
+            &crate::objects::spark_application_resource(),
+        ),
+        crate::objects::spark_application_resource(),
+        watcher::Config::default(),
+    )
     .run(
         |obj, ctx| {
             crate::metrics::timed(
@@ -163,6 +172,11 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
 
     let spark_clusters = Controller::new(
         Api::<SparkCluster>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .owns_with(
+        Api::<DynamicObject>::all_with(client.clone(), &crate::objects::spark_connect_resource()),
+        crate::objects::spark_connect_resource(),
         watcher::Config::default(),
     )
     .run(
