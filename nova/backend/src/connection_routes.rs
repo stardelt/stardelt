@@ -444,6 +444,49 @@ fn usable_by(resource: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The groups a connection's `spec.viewers` names, as the resource carries them.
+fn viewers_of(resource: &Value) -> Vec<String> {
+    resource["spec"]["viewers"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The connections a person sees only because their group is in `spec.viewers`: read-only,
+/// built from the resource and never from the store, so no value can be read.
+fn viewed_connections(rows: &[Value], groups: &[String]) -> Vec<ConnectionView> {
+    rows.iter()
+        .filter(|r| {
+            let scope = r["spec"]["scope"].as_str().unwrap_or("personal");
+            let owner = r["spec"]["ownerGroup"].as_str();
+            // A member (or an administrator) already gets the row from the store path.
+            !(scope == "group" && owner.is_some_and(|g| groups.iter().any(|own| own == g)))
+        })
+        .filter(|r| viewers_of(r).iter().any(|v| groups.iter().any(|g| g == v)))
+        .filter_map(|r| {
+            let scope = match r["spec"]["scope"].as_str()? {
+                "group" => Scope::Group,
+                "managed" => Scope::Managed,
+                _ => return None,
+            };
+            Some(connections::view_from_store(
+                resource_name(r),
+                scope,
+                r["spec"]["ownerGroup"].as_str(),
+                usable_by(r),
+                &meta_from_resource(r),
+                connections::sync_from_resource(r),
+                false,
+            ))
+        })
+        .collect()
+}
+
 /// What the store kept, rebuilt from a `Connection` resource whose secret is gone. A half-finished
 /// delete leaves the resource behind; the row is what lets the person retry the delete.
 fn meta_from_resource(resource: &Value) -> SecretMeta {
@@ -919,6 +962,12 @@ async fn list_connections(
                 .await?,
             );
         }
+    }
+
+    // A group named in a connection's `viewers` sees it read-only (#79 point 5). No store
+    // call: the row is the resource's own settings, never a secret value.
+    if !who.is_admin {
+        rows.extend(viewed_connections(&cluster_rows, &who.groups));
     }
 
     // Managed: administrators only; a managed value cannot be read, so the resources are the index.
@@ -3460,6 +3509,51 @@ mod tests {
             .expect_err("no policy");
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert!(err.message().contains("finance"));
+    }
+
+    fn connection_row(name: &str, scope: &str, owner: Option<&str>, viewers: &[&str]) -> Value {
+        json!({
+            "metadata": { "name": name },
+            "spec": {
+                "scope": scope,
+                "ownerGroup": owner,
+                "usableBy": ["visitors"],
+                "type": "postgresql",
+                "config": { "host": "hh-pgsql-public.ebi.ac.uk", "port": "5432" },
+                "secret": { "keys": ["user", "password"] },
+                "viewers": viewers,
+            },
+            "status": { "conditions": [{ "type": "Ready", "status": "True" }] },
+        })
+    }
+
+    #[test]
+    fn viewed_connections_are_read_only_and_never_ask_the_store() {
+        let rows = vec![
+            connection_row("rnacentral", "managed", None, &["visitors"]),
+            connection_row("sales-db", "group", Some("sales"), &["visitors"]),
+            connection_row("private", "managed", None, &[]),
+        ];
+        let visitor = vec!["visitors".to_string()];
+        let seen = viewed_connections(&rows, &visitor);
+        assert_eq!(
+            seen.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            ["rnacentral", "sales-db"]
+        );
+        assert!(seen.iter().all(|v| !v.member), "a viewer row is read-only");
+        assert_eq!(seen[0].kind, "postgresql");
+        assert_eq!(
+            seen[0].config.get("host").map(String::as_str),
+            Some("hh-pgsql-public.ebi.ac.uk")
+        );
+        assert_eq!(seen[0].secret_keys, ["user", "password"]);
+        assert!(
+            viewed_connections(&rows, &["sales".to_string()])
+                .iter()
+                .all(|v| v.name != "sales-db"),
+            "a member gets the store row, not this one"
+        );
+        assert!(viewed_connections(&rows, &[]).is_empty());
     }
 
     /// Demo mode has neither a principal nor a store, so this goes through `Caller::Demo`; the

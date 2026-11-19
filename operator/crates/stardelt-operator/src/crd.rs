@@ -1591,6 +1591,18 @@ pub struct ConnectionSpec {
     #[serde(default, rename = "usableBy", skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 20), inner(length(min = 1, max = 64)))]
     pub usable_by: Vec<String>,
+    /// Groups that may SEE this connection in Nova — its name, type, settings and the secret's
+    /// key names — and nothing else. Creating, rotating and deleting stay with the scope's owner.
+    /// Absent means nobody but the owner's group (or an administrator).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        length(max = 16),
+        inner(
+            length(min = 1, max = 64),
+            regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+        )
+    )]
+    pub viewers: Vec<String>,
     #[serde(rename = "type")]
     pub type_: ConnectionType,
     /// Non-secret settings, for example `host`, `port`, `database`, `bucket`, `baseUrl`.
@@ -1648,6 +1660,12 @@ impl ConnectionSpec {
                     );
                 }
             }
+        }
+        if self.viewers.len() > 16 {
+            return Err("viewers holds at most 16 groups".to_string());
+        }
+        if let Some(bad) = self.viewers.iter().find(|group| !group_name_ok(group)) {
+            return Err(format!("viewers holds `{bad}`, which is not a group name"));
         }
         if let Some(secret) = &self.secret
             && let Some(path) = &secret.remote_ref
@@ -5072,6 +5090,43 @@ mod tests {
             }
         }
         spec
+    }
+
+    #[test]
+    fn connection_viewers_are_optional_group_names() {
+        let c = connection(crm(
+            serde_json::json!({ "viewers": ["visitors", "analytics"] }),
+        ));
+        assert_eq!(
+            c.spec.viewers,
+            vec!["visitors".to_string(), "analytics".to_string()]
+        );
+        assert_eq!(c.spec.validate("crm-db"), Ok(()));
+
+        let empty = connection(crm(serde_json::json!({})));
+        assert!(
+            !serde_json::to_value(&empty.spec)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("viewers"),
+            "an empty viewers list is left out of the spec"
+        );
+
+        let bad = connection(crm(
+            serde_json::json!({ "viewers": ["visitors", "bad group!"] }),
+        ));
+        assert_eq!(
+            bad.spec.validate("crm-db").unwrap_err(),
+            "viewers holds `bad group!`, which is not a group name"
+        );
+        let many = connection(crm(serde_json::json!({
+            "viewers": vec!["visitors"; 17]
+        })));
+        assert_eq!(
+            many.spec.validate("crm-db").unwrap_err(),
+            "viewers holds at most 16 groups"
+        );
     }
 
     #[test]
