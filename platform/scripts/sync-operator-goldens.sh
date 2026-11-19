@@ -37,6 +37,10 @@ rows=(
   "spark|manifests/spark.yaml|crates/stardelt-operator/values/spark.yaml"
   "superset|helm-values/superset.yaml|crates/stardelt-operator/values/superset.yaml"
   "notebook|helm-values/jupyterhub.yaml|crates/stardelt-operator/values/jupyterhub.yaml|^[[:space:]]+tag: \"dev@sha256:"
+  # The notebook image's fifth copy: PIPELINE_NOTEBOOK_IMAGE in the airflow values, on both
+  # paths. The pattern names the `value:` line — the `- name: PIPELINE_NOTEBOOK_IMAGE` line
+  # above it carries no digest.
+  "notebook-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|jupyter-singleuser:dev@sha256:"
 )
 
 changed=""
@@ -80,7 +84,7 @@ PY
 done
 
 if [ -z "$changed" ]; then
-  echo "sync-operator-goldens: no drift (nova, loader, spark, superset, notebook)"
+  echo "sync-operator-goldens: no drift (nova, loader, spark, superset, notebook, notebook-airflow)"
   exit 0
 fi
 echo "sync-operator-goldens: moved${changed}; proving it with check-operator-pins.sh"
