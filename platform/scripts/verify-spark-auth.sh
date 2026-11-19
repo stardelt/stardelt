@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# Three measurements through the shared Connect front (stardelt/stardelt#84 Q4, spike #208,
-# front built in stardelt/stardelt#231), all with tokens Keycloak really signed:
+# Four measurements through the shared Connect front (stardelt/stardelt#84 Q4, spike #208,
+# front built in stardelt/stardelt#231, authorization added in stardelt/stardelt#404), all with
+# tokens Keycloak really signed:
 #
 #   1. a token with `aud spark-connect`, for the real user `analyst`, runs range(10) through
 #      https://spark.<baseDomain> and gets 10;
 #   2. a client with no token, same host, is refused with `Jwt is missing`;
 #   3. a token without the audience (admin-cli's password grant) is refused too — the audience
-#      is enforced, not decorative.
+#      is enforced, not decorative;
+#   4. a token that is signed, carries the audience, and belongs to a person in `visitors` only
+#      is refused with PERMISSION_DENIED — the front checks the `groups` claim, so a valid
+#      token is not yet a member (stardelt/stardelt#404).
 #
-#   make verify-spark-auth      (NS=…, BASE_DOMAIN=…, SPARK_USER=…, TIMEOUT=… to override)
+#   make verify-spark-auth      (NS=…, BASE_DOMAIN=…, SPARK_USER=…, VISITOR_USER=…, TIMEOUT=… to override)
 #
 # A curl at the ingress only shows the unsigned refusal: a misconfigured JWKS, a wrong issuer,
 # a missing audience and an upstream that downgrades to HTTP/1 all look the same from outside.
@@ -28,8 +32,9 @@
 # The realm user is `SPARK_USER`, not `USER`: the environment's `USER` is the login name of
 # whoever runs the check, so it can never default to a realm account.
 #
-# PASS = a signed query ran 10 rows and both negative lines were refused. FAIL = one of the
-# three judgements (or a token without the audience) did not hold. UNVERIFIED (exit 3) = the
+# PASS = a signed query ran 10 rows, both negative lines were refused, and the visitors line
+# was refused or skipped (no visitors-only user in the Secret). FAIL = one of the judgements
+# (or a token without the audience, or a visitor's token) did not hold. UNVERIFIED (exit 3) = the
 # check could not run at all (a tool or the Secret is missing, the client pod never started);
 # a check that could not run never prints PASS or FAIL.
 set -euo pipefail
@@ -37,6 +42,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
 BASE_DOMAIN="${BASE_DOMAIN:-alpha.dev.stardelt.io}"
 SPARK_USER="${SPARK_USER:-analyst}"
+# The visitor leg: the public demo's person is `demo`, in `visitors` only. It has no key in
+# `dev-seed-users` on the lab (its password is public and fixed), so the leg is skipped there
+# unless a visitors-only person was seeded into the Secret.
+VISITOR_USER="${VISITOR_USER:-demo}"
 TIMEOUT="${TIMEOUT:-300}"
 POD=verify-spark-auth
 
@@ -110,8 +119,31 @@ case "$out" in
                    exit 1 ;;
 esac
 
-kubectl -n "$NS" create secret generic "$POD-token" \
-  --from-file=signed="$tmp/signed" --from-file=noaud="$tmp/noaud" \
+# 3. The visitor leg (stardelt/stardelt#404): a real token for a person who is in `visitors`
+#    only. Its password can only come from `dev-seed-users`; when that key is missing the leg is
+#    skipped, not failed — the lab's `demo` has a fixed public password in the realm instead.
+visitor=skipped
+kubectl -n "$NS" get secret dev-seed-users -o jsonpath="{.data.$VISITOR_USER}" 2>&1 \
+  | base64 -d > "$tmp/visitor-pw" || true
+if [ -s "$tmp/visitor-pw" ]; then
+  chmod 600 "$tmp/visitor-pw"
+  if ! out="$(ISSUER="$ISSUER" USER="$VISITOR_USER" PASSWORD_FILE="$tmp/visitor-pw" \
+        TOKEN_FILE="$tmp/visitor" python3 scripts/mint-user-token.py 2>&1)"; then
+    printf '%s\n' "$out" | tail -n 5
+    echo "verify-spark-auth: FAIL (could not mint a token for $VISITOR_USER through the device grant)"
+    exit 1
+  fi
+  printf '%s\n' "$out"
+  case "$out" in
+    *aud=*spark-connect*) visitor=token ;;
+    *) echo "verify-spark-auth: FAIL ($VISITOR_USER's token carries no spark-connect audience — run 'make sync-spark-audience' (stardelt#231) and try again)"
+       exit 1 ;;
+  esac
+fi
+
+secret_args=(--from-file=signed="$tmp/signed" --from-file=noaud="$tmp/noaud")
+[ "$visitor" = token ] && secret_args+=(--from-file=visitor="$tmp/visitor")
+kubectl -n "$NS" create secret generic "$POD-token" "${secret_args[@]}" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # The client is the spawn image the hub runs; `scripts/check-notebook-image-pin.sh` keeps the
@@ -123,8 +155,8 @@ if [ -z "$client_digest" ]; then
 fi
 CLIENT_IMAGE="ghcr.io/stardelt/jupyter-singleuser:dev@${client_digest}"
 
-# The client. Both the URL builder and the three lines are the measurement: a token in the URL
-# forces TLS, so all three legs take the same ingress → Envoy path and differ only in the header.
+# The client. Both the URL builder and the four lines are the measurement: a token in the URL
+# forces TLS, so all four legs take the same ingress → Envoy path and differ only in the header.
 # (`spark.$BASE_DOMAIN`, never `$BASE_DOMAIN`: that is Nova and answers 405.)
 cat > "$tmp/client.py" <<'PY'
 import os
@@ -135,6 +167,8 @@ from pyspark.sql import SparkSession
 BASE = os.environ["BASE_DOMAIN"]
 SIGNED = os.environ["SIGNED_TOKEN"]
 NOAUD = os.environ["NOAUD_TOKEN"]
+# Unset when the pod's optional secret key has no value: the visitor leg was skipped.
+VISITOR = os.environ.get("VISITOR_TOKEN") or ""
 
 
 def first_line(exc):
@@ -173,6 +207,11 @@ print("signed=" + query("sc://spark.%s:443/;use_ssl=true;token=%s" % (BASE, SIGN
                         lambda s: s.range(10).count()), flush=True)
 print("noaud=" + query("sc://spark.%s:443/;use_ssl=true;token=%s" % (BASE, NOAUD),
                        lambda s: s.range(10).count()), flush=True)
+if VISITOR:
+    print("visitor=" + query("sc://spark.%s:443/;use_ssl=true;token=%s" % (BASE, VISITOR),
+                             lambda s: s.range(10).count()), flush=True)
+else:
+    print("visitor=skipped (no visitors-only user)", flush=True)
 PY
 
 kubectl -n "$NS" create configmap "$POD-script" --from-file=client.py="$tmp/client.py" \
@@ -208,6 +247,12 @@ spec:
         - name: NOAUD_TOKEN
           valueFrom:
             secretKeyRef: { name: ${POD}-token, key: noaud }
+        # Optional: the secret has no "visitor" key when the visitors leg was skipped, and the
+        # pod must still start (an env reference to a missing key would hold it in
+        # CreateContainerConfigError and turn the whole check into UNVERIFIED).
+        - name: VISITOR_TOKEN
+          valueFrom:
+            secretKeyRef: { name: ${POD}-token, key: visitor, optional: true }
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
@@ -259,6 +304,7 @@ logs="$(kubectl -n "$NS" logs "$POD" 2>&1 || true)"
 unsigned="$(printf '%s\n' "$logs" | grep -m1 '^unsigned=' || true)"
 signed="$(printf '%s\n' "$logs" | grep -m1 '^signed=' || true)"
 noaud="$(printf '%s\n' "$logs" | grep -m1 '^noaud=' || true)"
+visitor="$(printf '%s\n' "$logs" | grep -m1 '^visitor=' || true)"
 
 [ "$signed" = "signed=10" ] || fail "$logs" "a signed query did not run 10 rows: ${signed:-no answer}"
 case "$unsigned" in
@@ -275,6 +321,18 @@ case "$noaud" in
   noaud=refused*) ;;
   *) fail "$logs" "a token without the audience was admitted: ${noaud:-no answer}" ;;
 esac
+# A signed token with the audience, held by a person in `visitors` only: the RBAC filter answers
+# 403, which gRPC maps to PERMISSION_DENIED. A visitor admitted is the finding this leg exists for.
+case "$visitor" in
+  "visitor=skipped (no visitors-only user)") ;;
+  visitor=refused*PERMISSION_DENIED*) ;;
+  visitor=refused*) fail "$logs" "a visitor's token was refused, but not with PERMISSION_DENIED: ${visitor:-no answer}" ;;
+  *) fail "$logs" "a visitor's signed token was admitted: ${visitor:-no answer}" ;;
+esac
 
-printf '%s\n' "$unsigned" "$signed" "$noaud"
-echo "verify-spark-auth: PASS (a signed query ran 10 rows; an unsigned call and a token without the audience were refused)"
+printf '%s\n' "$unsigned" "$signed" "$noaud" "$visitor"
+if [ "$visitor" = "visitor=skipped (no visitors-only user)" ]; then
+  echo "verify-spark-auth: PASS (a signed query ran 10 rows; an unsigned call and a token without the audience were refused; visitor leg skipped: no visitors-only user)"
+else
+  echo "verify-spark-auth: PASS (a signed query ran 10 rows; an unsigned call, a token without the audience and a visitor's token were refused)"
+fi
