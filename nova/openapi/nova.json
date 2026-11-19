@@ -13183,6 +13183,13 @@
               }
             ]
           },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.description`: one line about what the pipeline does; absent for most."
+          },
           "lastRun": {
             "oneOf": [
               {
