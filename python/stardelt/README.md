@@ -22,10 +22,9 @@ key = stardelt.connection("weather-api")          # what the platform adds: secr
 `stardelt.sql`, `stardelt.spark` and `stardelt.write_df` are deprecated in 0.4 and removed in 0.5.
 
 Pure Python, MIT. This repository is the library's home: the platform's
-notebook image installs a **pinned release** of it, and both this repository's
-CI (`tests/`) and the platform's `notebook-helper` job run the tests at that
-pinned ref. The full contract is the docstrings in `__init__.py` — this file
-exists so the build backend has a readme.
+notebook image installs it from the same commit, and `python / CI` runs the
+tests at every commit. The full contract is the docstrings in `__init__.py` —
+this file exists so the build backend has a readme.
 
 ## The Nova API client: `stardelt.api`
 

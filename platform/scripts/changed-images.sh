@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Print, one per line, which of the platform-built images changed between two commits:
-# superset, jupyter, spark.
+# superset, jupyter, spark. The notebook image (jupyter) also changes when python/ or demos/
+# changes: it installs both from its own commit (stardelt/stardelt#2).
 #
 # Usage: bash scripts/changed-images.sh <base-sha> [<head-sha>]
 #
@@ -31,7 +32,10 @@ if printf '%s\n' "$changed" | grep -qxE '\.github/workflows/(platform-)?image\.y
 fi
 
 for name in $all; do
-  if printf '%s\n' "$changed" | grep -qE "^(platform/)?images/$name/"; then
+  pattern="^(platform/)?images/$name/"
+  # The notebook image installs python/ and demos/ from its own commit (stardelt/stardelt#2).
+  [ "$name" = jupyter ] && pattern="^((platform/)?images/jupyter/|python/|demos/)"
+  if printf '%s\n' "$changed" | grep -qE "$pattern"; then
     printf '%s\n' "$name"
   fi
 done

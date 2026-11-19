@@ -19,10 +19,10 @@ on:
   push:
     branches: [main]
     tags: ["platform/v*"]
-    paths: ["platform/images/**", ".github/workflows/platform-image.yml"]
+    paths: ["platform/images/**", "python/**", "demos/**", ".github/workflows/platform-image.yml"]
   pull_request:
     branches: [main]
-    paths: ["platform/images/**", ".github/workflows/platform-image.yml"]
+    paths: ["platform/images/**", "python/**", "demos/**", ".github/workflows/platform-image.yml"]
   workflow_dispatch:
 
 permissions:
@@ -152,12 +152,6 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
-      - name: Read the pinned stardelt library ref
-        id: lib
-        # The Makefile holds the pin (STARDELT_LIB_REF) and the image installs
-        # that release of the library (platform#417).
-        run: echo "ref=$(make -s print-stardelt-lib-ref)" >> "$GITHUB_OUTPUT"
-
       - name: Platform release the image belongs to
         id: runtime
         # The top bar of `stardelt-jupyterlab` shows this (`STARDELT_RUNTIME`),
@@ -172,8 +166,10 @@ jobs:
           context: platform/images/jupyter
           file: platform/images/jupyter/Dockerfile
           build-args: |
-            STARDELT_LIB_REF=${{ steps.lib.outputs.ref }}
             STARDELT_RUNTIME=${{ steps.runtime.outputs.label }}
+          build-contexts: |
+            stardelt-python=python
+            stardelt-demos=demos
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

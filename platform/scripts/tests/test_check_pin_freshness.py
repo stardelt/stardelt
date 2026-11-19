@@ -11,18 +11,12 @@ from pathlib import Path
 
 from scripts.check_pin_freshness import (
     compare,
-    compare_lib_tag,
     exit_code,
-    lib_ahead_line,
     parse_pins,
     pin_text,
 )
 
 REPO = Path(__file__).resolve().parents[2]
-
-# The notebook library's pinned commit (Makefile STARDELT_LIB_REF) and the tag before it.
-REF = "681e873441db08519437df72fa352c6f07216727"
-V030 = "fb56e46d46dc37f396c1b80aa3e527ed6e7aa440"
 
 
 class ParsePinsTest(unittest.TestCase):
@@ -111,37 +105,6 @@ class CompareTest(unittest.TestCase):
         )
         self.assertIn("demo resolves to dddddddd…", stale[0])
         self.assertNotIn(" dev@", stale[0])
-
-
-class CompareLibTagTest(unittest.TestCase):
-    def test_the_tag_is_the_release_of_the_pinned_commit(self):
-        line = compare_lib_tag("v0.4.0", REF, REF)
-        self.assertTrue(line.startswith("✓"), line)
-        self.assertIn("v0.4.0", line)
-        self.assertIn("681e8734…", line)
-        self.assertEqual(exit_code([line]), 0)
-
-    def test_a_tag_that_is_another_commit_fails(self):
-        line = compare_lib_tag("v0.3.0", REF, V030)
-        self.assertTrue(line.startswith("✗"), line)
-        for needle in ("v0.3.0", "681e8734…", "fb56e46d…", "STARDELT_LIB_TAG"):
-            self.assertIn(needle, line)
-        self.assertEqual(exit_code([line]), 1)
-
-
-class LibAheadLineTest(unittest.TestCase):
-    """A release is owed when main's python/ moved past the pinned tag."""
-
-    def test_lib_ahead_line_is_silent_when_main_is_the_tag(self):
-        self.assertEqual(lib_ahead_line(0, "", "v0.4.1", REF), "")
-
-    def test_lib_ahead_line_names_the_count_and_the_newest_commit(self):
-        line = lib_ahead_line(8, "ad80664f", "v0.4.1", REF)
-        self.assertTrue(line.startswith("! "), line)
-        for needle in ("8 commit(s)", "python/v0.4.1@", "ad80664f", "STARDELT_LIB_REF"):
-            self.assertIn(needle, line)
-        # Advisory: it is not a '✗', so the plain run still exits 0.
-        self.assertEqual(exit_code([line]), 0)
 
 
 class PinTextTest(unittest.TestCase):
