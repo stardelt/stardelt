@@ -1,0 +1,166 @@
+# The public demo's Spark: a second Connect server that shares nothing with the platform's
+# (stardelt/stardelt#201 slice 1). Local mode, so the driver creates no executor pods and this
+# namespace needs no Role; no ServiceAccount token; `restricted` Pod Security; egress to the data
+# plane only. Storage access (vended credentials) is slice 2 — until then a session can compute but
+# cannot read a table.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stardelt-demo-spark
+  labels:
+    app.kubernetes.io/part-of: stardelt
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-demo
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-demo-config
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+data:
+  spark-defaults.conf: |
+    # Local mode: no executors, no pod creates, no Kubernetes client. Two threads is the whole
+    # cluster; a visitor's job is capped by them and by spark.driver.maxResultSize.
+    spark.master                        local[2]
+    spark.driver.memory                 2g
+    spark.driver.maxResultSize          256m
+    spark.sql.shuffle.partitions        8
+    spark.ui.enabled                    false
+    spark.connect.grpc.binding.address  0.0.0.0
+    spark.connect.grpc.binding.port     15002
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-demo
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: spark-demo }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+    spec:
+      serviceAccountName: spark-demo
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-creds
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 185
+        fsGroup: 185
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: spark-demo
+          image: __SPARK_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["/opt/spark/bin/stardelt-connect-server"]
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
+          ports:
+            - name: connect
+              containerPort: 15002
+              protocol: TCP
+          readinessProbe:
+            tcpSocket: { port: connect }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: connect }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            # The design's ceiling (2 CPU, 4 GiB) is the limit; the request is what the shared
+            # 16 GB node must reserve for an idle demo.
+            requests: { cpu: "250m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "4Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: spark-defaults
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: spark-defaults
+          configMap:
+            name: spark-demo-config
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-demo
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: spark-demo
+  ports:
+    - name: connect
+      port: 15002
+      targetPort: connect
+      protocol: TCP
+---
+# Who may reach it, and where it may go. Ingress: the visitor's notebook pod (the hub's demo hook
+# sets both labels, helm-values/jupyterhub.yaml:532) and nothing else — no other namespace, no
+# other pod. Egress: DNS, the S3 gateway and Lakekeeper for slice 2, and no internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spark-demo
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: spark-demo }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: stardelt }
+          podSelector:
+            matchLabels:
+              component: singleuser-server
+              stardelt.io/group.visitors: "true"
+      ports:
+        - protocol: TCP
+          port: 15002
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: stardelt }
+      ports:
+        - protocol: TCP
+          port: 8333
+        - protocol: TCP
+          port: 8181

@@ -82,7 +82,7 @@ CHART_EXTRA ?=
 # client redirect URIs on the app subdomains. Same default as `dev-dns`.
 BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
-.PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-auth verify-spark-query dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
+.PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
@@ -247,6 +247,10 @@ verify-spark-query: _context ## One query through the shared Spark Connect serve
 .PHONY: verify-spark-config
 verify-spark-config: _context ## The ConfigMap that pins the Spark executor image carries manifests/spark.yaml's digest
 	@NS=$(NAMESPACE) bash scripts/verify-spark-config.sh
+
+.PHONY: verify-spark-demo-sandbox
+verify-spark-demo-sandbox: _context ## The demo Spark sandbox: restricted PSS, no token, no internet, data plane reachable
+	@NS=$(NAMESPACE) bash scripts/verify-spark-demo-sandbox.sh
 
 .PHONY: verify-spark-auth
 verify-spark-auth: _context ## The shared Connect front: a signed query runs, an unsigned call and a token without the audience are refused (manual; starts one pod)
@@ -707,6 +711,22 @@ install-spark: deps _context ## Install the Spark Connect endpoint (Iceberg on t
 	@kubectl -n $(NAMESPACE) get configmap stardelt-spark-runtimes -o name
 	@echo "Spark Connect ready: sc://spark-connect.$(NAMESPACE).svc.cluster.local:15002 (in-cluster only)"
 	@NS=$(NAMESPACE) bash scripts/verify-compute.sh
+
+# ---------------------------------------------------------------------------
+# The public demo's Spark sandbox (stardelt/stardelt#201 slice 1): a second Connect server in
+# its own namespace, local mode, no ServiceAccount token, no Role, `restricted` Pod Security and
+# egress to the data plane only. Additive: nothing points at it yet. Not part of `make install`;
+# the sandbox is opt-in like `install-spark`.
+# ---------------------------------------------------------------------------
+.PHONY: install-spark-demo
+install-spark-demo: _context ## The public demo's Spark sandbox: local mode, no token, no cluster rights (stardelt#201)
+	@img=$$(awk '/^ *image: ghcr.io\/stardelt\/spark:/{print $$2; exit}' manifests/spark.yaml); \
+	if [ -z "$$img" ]; then echo "install-spark-demo: no Spark image line in manifests/spark.yaml" >&2; exit 1; fi; \
+	sed -e "s|__SPARK_IMAGE__|$$img|g" manifests/spark-demo-sandbox.yaml | kubectl apply -f -
+	@kubectl -n stardelt get secret ghcr-creds -o json \
+	  | python3 -c 'import json,sys; s=json.load(sys.stdin); s["metadata"]={"name":"ghcr-creds","namespace":"stardelt-demo-spark"}; print(json.dumps(s))' \
+	  | kubectl apply -f -
+	@kubectl -n stardelt-demo-spark rollout status deploy/spark-demo --timeout=5m
 
 # ---------------------------------------------------------------------------
 # The Kubeflow Spark Operator (D42): the controller that runs a `StreamApp` as a
