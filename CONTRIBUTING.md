@@ -221,3 +221,9 @@ Check out the repositories side by side, then:
 
 Skills do not replace your judgment: you stay [the author](https://stardelt.io/docs/developer#using-an-ai-assistant) of what
 you submit.
+
+## Versions
+
+One version for the whole repository, `0.0.N` until `0.1.0` (stardelt/stardelt#2). Never edit a
+version by hand: `python3 scripts/release/stamp-version.py 0.0.N` writes it into every folder, and
+`--check 0.0.N` proves they agree.
