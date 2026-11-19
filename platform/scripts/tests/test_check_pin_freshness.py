@@ -168,5 +168,30 @@ class PinTextTest(unittest.TestCase):
         self.assertTrue(any("judging origin/main" in n for n in notes), notes)
 
 
+    def test_an_explicit_rev_wins_over_origin_main(self):
+        first = self.git("rev-parse", "HEAD")
+        self.write("c")
+        self.git("add", "pins.yaml")
+        self.git(
+            "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "head moves"
+        )
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        text, notes = pin_text(self.dir, "pins.yaml", first)
+        self.assertIn("a" * 64, text)
+        self.assertNotIn("c" * 64, text)
+        self.assertTrue(any("judging " + first[:7] in n for n in notes), notes)
+
+    def test_an_explicit_rev_with_a_clean_tree_prints_no_notes(self):
+        text, notes = pin_text(self.dir, "pins.yaml", "HEAD")
+        self.assertIn("a" * 64, text)
+        self.assertEqual(notes, [])
+
+    def test_an_unresolvable_rev_says_so_and_judges_the_working_tree(self):
+        self.write("f")
+        text, notes = pin_text(self.dir, "pins.yaml", "no-such-ref")
+        self.assertIn("f" * 64, text)
+        self.assertTrue(any("does not resolve, judging the working tree" in n for n in notes), notes)
+
+
 if __name__ == "__main__":
     unittest.main()

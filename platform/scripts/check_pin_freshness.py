@@ -131,26 +131,44 @@ def resolve_digest(app: str, tag: str = "dev") -> tuple[str | None, str]:
     return digest, ""
 
 
-def pin_text(repo: Path, manifest: str) -> tuple[str, list[str]]:
+def pin_text(repo: Path, manifest: str, rev: str = "") -> tuple[str, list[str]]:
     """The committed text of `manifest`, and a note when the working tree differs.
 
     A pin belongs to a commit. A rollout leaves the checkout dirty, and a dirty file made
     this script print a row about a digest `main` does not carry (2026-11-15: the operator
     in the tree, the Nova pin now). Read `origin/main` when it resolves, else `HEAD`, else
     the file — and say when the working tree is not what was judged.
+
+    `rev` names the commit to judge instead (a release proves the commit it is cutting,
+    stardelt/stardelt#449): `origin/main` is the wrong tree when that commit is behind it.
+    The rows then name the commit's short sha.
     """
     path = repo / manifest
     notes: list[str] = []
-    rev = ""
-    for candidate in ("origin/main", "HEAD"):
+    explicit = bool(rev)
+    if explicit:
         proc = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", candidate],
+            [
+                "git", "-C", str(repo), "rev-parse", "--short=7", "--verify", "--quiet",
+                f"{rev}^{{commit}}",
+            ],
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0:
-            rev = candidate
-            break
+        if proc.returncode != 0:
+            notes.append(f"! {manifest}: {rev} does not resolve, judging the working tree")
+            return path.read_text(), notes
+        rev = labelled = proc.stdout.strip()
+    else:
+        for candidate in ("origin/main", "HEAD"):
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", candidate],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                rev = labelled = candidate
+                break
     if not rev:
         notes.append(f"! {manifest}: no git revision to read, judging the working tree")
         return path.read_text(), notes
@@ -164,16 +182,16 @@ def pin_text(repo: Path, manifest: str) -> tuple[str, list[str]]:
         ["git", "-C", str(repo), "show", f"{rev}:{prefix}{manifest}"], capture_output=True, text=True
     )
     if proc.returncode != 0:
-        notes.append(f"! {manifest}: not in {rev}, judging the working tree")
+        notes.append(f"! {manifest}: not in {labelled}, judging the working tree")
         return path.read_text(), notes
-    if rev == "HEAD":
+    if not explicit and rev == "HEAD":
         notes.append(f"! {manifest}: origin/main does not resolve here, judging HEAD")
     try:
         on_disk = path.read_text()
     except OSError:
         on_disk = proc.stdout
     if on_disk != proc.stdout:
-        notes.append(f"! {manifest} differs in the working tree; judging {rev}")
+        notes.append(f"! {manifest} differs in the working tree; judging {labelled}")
     return proc.stdout, notes
 
 
@@ -189,13 +207,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="fail when an advisory '!' line was printed, not only on a '✗'",
     )
+    parser.add_argument(
+        "--rev",
+        default="",
+        help="the commit whose pins are judged, e.g. the release commit "
+        "(default: origin/main, then HEAD, then the working tree)",
+    )
     args = parser.parse_args(argv)
 
     lines: list[str] = []
     notes: list[str] = []
     offline_failed = False
     for app, manifest, kind, tag in APPS:
-        text, file_notes = pin_text(REPO, manifest)
+        text, file_notes = pin_text(REPO, manifest, args.rev)
         notes.extend(file_notes)
         pinned = parse_pins(text, kind)
         resolved, err = resolve_digest(app, tag)
