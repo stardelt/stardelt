@@ -311,7 +311,7 @@ that calls the Iceberg REST catalog has its own confidential service client inst
 
 | Secret | Used by |
 |---|---|
-| `svc-catalog-trino` | the Trino coordinator |
+| `svc-catalog-trino` | the Trino coordinator. The only client that also carries the audience `lakekeeper-trino` — the trusted-engine audience (#486); no other client may get it |
 | `svc-catalog-nova` | Nova |
 | `svc-catalog-spark` | reserved for a future platform-side Spark path; the Spark Connect driver now uses the person's token (#317) |
 | `svc-catalog-airflow` | the Airflow task pods |

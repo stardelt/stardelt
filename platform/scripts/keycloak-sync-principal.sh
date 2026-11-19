@@ -95,8 +95,8 @@ if [ "$mode" = sync ]; then
   IFS=',' read -r -a raw_audiences <<<"$AUDIENCES"
   for aud in "${raw_audiences[@]}"; do
     case "$aud" in
-      trino|lakekeeper) ;;
-      *) fail "refusing AUDIENCES entry '$aud': the allowed audiences are trino and lakekeeper" ;;
+      trino|lakekeeper|lakekeeper-trino) ;;
+      *) fail "refusing AUDIENCES entry '$aud': the allowed audiences are trino, lakekeeper and lakekeeper-trino" ;;
     esac
     case " $seen " in
       *" $aud "*) continue ;;

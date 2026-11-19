@@ -987,7 +987,7 @@ CATALOG_CLIENTS := catalog-trino catalog-nova catalog-spark catalog-airflow cata
 
 .PHONY: sync-catalog-clients
 sync-catalog-clients: _context ## Create/converge the seven svc-catalog-* service clients and their Secrets (idempotent)
-	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-trino AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
+	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-trino AUDIENCES=lakekeeper,lakekeeper-trino ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
 	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-nova AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
 	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-spark AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
 	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-airflow AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
@@ -1369,6 +1369,12 @@ verify-trino-auth: _context ## Prove Trino's authentication end to end, includin
 # dbt can list relations; CALL, the runtime tables and tpch/tpcds stay denied.
 verify-trino-system-catalog: _context ## Prove `system` is read-only for people (dbt can list) and CALL stays denied
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trino-system-catalog.sh
+
+# platform#486 (decision #393, option A): Trino is Lakekeeper's trusted engine through the
+# audience `lakekeeper-trino`, which only svc-catalog-trino carries — so a SECURITY DEFINER
+# view (Trino's and dbt's default) can be created, and no other client can write its owner.
+verify-trusted-engine: _context ## Prove Trino creates a SECURITY DEFINER view and no other client may set its owner
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trusted-engine.sh
 
 # platform#131 A1: a worker drains before it exits. The chart's own connection test cannot
 # run on this install (platform#1536), so its weight-2 graceful-shutdown hook never runs;

@@ -521,6 +521,15 @@ catalog:
           optional: true
     - name: LAKEKEEPER__OPENID_AUDIENCE
       value: lakekeeper
+    # Only Trino's catalog client (svc-catalog-trino) carries the audience lakekeeper-trino
+    # (make sync-catalog-clients). Lakekeeper lets that engine, and no other caller, write
+    # trino.run-as-owner, so SECURITY DEFINER views work (#393).
+    - name: LAKEKEEPER__TRUSTED_ENGINES__TRINO__TYPE
+      value: trino
+    - name: LAKEKEEPER__TRUSTED_ENGINES__TRINO__OWNER_PROPERTY
+      value: trino.run-as-owner
+    - name: LAKEKEEPER__TRUSTED_ENGINES__TRINO__IDENTITIES__OIDC__AUDIENCES
+      value: '["lakekeeper-trino"]'
 
   # The chart adds a `metrics` port (9000) to the `lakekeeper` Service and the
   # scrape annotations to the pod; the metrics server itself is always on (#607).
