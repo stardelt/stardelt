@@ -18,7 +18,7 @@ dependencies = ["pandas", "requests", "trino", "certifi", "pyyaml"]
 # version; this range states what the library is tested against.
 # pyspark-client is the Connect-only package: no Spark jars, same import name.
 spark = ["pyspark-client>=4.1,<4.3"]
-jupyter = ["jupysql", "ipython", "sqlalchemy"]
+jupyter = ["jupysql", "ipython", "sqlalchemy", "ipykernel"]
 test = ["pytest"]
 
 [project.scripts]

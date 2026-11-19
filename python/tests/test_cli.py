@@ -211,3 +211,16 @@ def test_version_prints_the_package_version_and_calls_nothing():
     code, out, err, session = run(["--version"])
     assert (code, out, err) == (0, f"stardelt {stardelt.__version__}\n", "")
     assert session.calls == []
+
+
+def test_setup_vscode_prints_the_kernelspec_path(tmp_path):
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.main(
+        ["setup", "vscode", "--host", "https://alpha.dev.stardelt.io"],
+        environ={"JUPYTER_DATA_DIR": str(tmp_path)},
+        stdout=out,
+        stderr=err,
+    )
+    assert (code, err.getvalue()) == (0, "")
+    assert out.getvalue().endswith("kernels/stardelt-alpha-dev-stardelt-io/kernel.json\n")
+    assert Path(out.getvalue().strip()).exists()
