@@ -12594,6 +12594,13 @@
           "objectVersion"
         ],
         "properties": {
+          "connection": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `Connection` whose secret fields the task pod receives as `CONN_<NAME>_<KEY>`\n(the CRD's `tasks[].connection`). Omitted: the pod gets no connection variable. Nova\nchecks the shape only; whether the connection exists, is Ready, is of this group and is\nin its `usableBy` is the loader's job, and its sentence is the one the task log shows."
+          },
           "name": {
             "type": "string",
             "description": "`<group>/<name>` is the object key; the group is the pipeline's `ownerGroup`, so a\nnotebook of another group can never be named."
@@ -15396,6 +15403,13 @@
           "kind"
         ],
         "properties": {
+          "connection": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `Connection` a `kind: \"notebook\"` task names (`tasks[].connection`), detail route\nonly. Shape-checked by Nova; the loader decides whether the task may use it."
+          },
           "dbtProject": {
             "type": [
               "string",

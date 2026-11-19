@@ -538,6 +538,13 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                         } else {
                             None
                         },
+                        connection: if notebook {
+                            task.get("connection")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
                         dbt_project: if dbt {
                             config
                                 .and_then(|config| config.get("project"))
@@ -937,6 +944,8 @@ const NOTEBOOK_PARAM_NAMES: &str = "parameter names are letters, digits and unde
 const NOTEBOOK_TOO_MANY_PARAMS: &str = "at most 32 parameters";
 const NOTEBOOK_PARAM_VALUE: &str = "a parameter value is at most 256 characters";
 const NOTEBOOK_PARAMS_TOO_LONG: &str = "the parameters are too long";
+const CONNECTION_RULE: &str = "a connection name is 1 to 40 lower-case letters, digits and \
+                               dashes, starting and ending with a letter or digit";
 /// An update cannot change what a pipeline runs (#237): the kind is the resource's.
 const NOTEBOOK_PIPELINE: &str = "this pipeline runs a notebook";
 const STATEMENT_PIPELINE: &str = "this pipeline runs a statement";
@@ -978,7 +987,25 @@ fn validate_notebook(notebook: &NotebookRequest) -> Result<String, String> {
     if params.chars().count() > MAX_NOTEBOOK_PARAMS_JSON_CHARS {
         return Err(NOTEBOOK_PARAMS_TOO_LONG.into());
     }
+    if let Some(connection) = &notebook.connection
+        && !connection_ok(connection)
+    {
+        return Err(CONNECTION_RULE.into());
+    }
     Ok(params)
+}
+
+/// The CRD's rule for `tasks[].connection` (`crd.rs`: `^[a-z]([a-z0-9-]*[a-z0-9])?$`, ≤ 40).
+fn connection_ok(name: &str) -> bool {
+    (1..=40).contains(&name.len())
+        && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && name
+            .bytes()
+            .last()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// The `dbt` task (`#112`): the sentences of `demos/dags/stardelt_pipelines/plan.py`, verbatim,
@@ -1063,6 +1090,8 @@ enum Statement {
         name: String,
         object_version: String,
         params: String,
+        /// The `Connection` the task names (`tasks[].connection`), shape-checked only.
+        connection: Option<String>,
     },
     /// A `dbt` task of a task list (`#112`): exactly the CRD's `config` map.
     Dbt(BTreeMap<String, String>),
@@ -1117,6 +1146,7 @@ async fn checked_statement(
                     name: notebook.name.clone(),
                     object_version: notebook.object_version.clone(),
                     params,
+                    connection: notebook.connection.clone(),
                 }),
                 Ok(false) => Err(refused("version", no_such_version_message(group))),
                 Err(fail) => Err(ActionError::refused("store", fail)),
@@ -1143,11 +1173,18 @@ fn task_json(task: &TaskStatement) -> Value {
             name,
             object_version,
             params,
-        } => json!({
-            "name": task.name,
-            "kind": "notebook",
-            "config": { "notebook": name, "objectVersion": object_version, "params": params },
-        }),
+            connection,
+        } => {
+            let mut value = json!({
+                "name": task.name,
+                "kind": "notebook",
+                "config": { "notebook": name, "objectVersion": object_version, "params": params },
+            });
+            if let Some(connection) = connection {
+                value["connection"] = json!(connection);
+            }
+            value
+        }
         // `checked_statement` never answers a task list.
         Statement::Dbt(config) => json!({ "name": task.name, "kind": "dbt", "config": config }),
         Statement::Tasks(_) => unreachable!("a task carries one statement, not a list"),
@@ -1856,11 +1893,18 @@ fn pipeline_resource(
             name,
             object_version,
             params,
-        } => json!([{
-            "name": "run",
-            "kind": "notebook",
-            "config": { "notebook": name, "objectVersion": object_version, "params": params },
-        }]),
+            connection,
+        } => {
+            let mut task = json!({
+                "name": "run",
+                "kind": "notebook",
+                "config": { "notebook": name, "objectVersion": object_version, "params": params },
+            });
+            if let Some(connection) = connection {
+                task["connection"] = json!(connection);
+            }
+            json!([task])
+        }
         Statement::Tasks(tasks) => Value::Array(tasks.iter().map(task_json).collect()),
         // A top-level body never carries a `dbt` run: only a task list does (#112).
         Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
@@ -1919,12 +1963,21 @@ fn updated_resource(
             name,
             object_version,
             params,
+            connection,
         } => {
             updated["spec"]["tasks"][0]["config"] = json!({
                 "notebook": name,
                 "objectVersion": object_version,
                 "params": params,
             });
+            match connection {
+                Some(c) => updated["spec"]["tasks"][0]["connection"] = json!(c),
+                None => {
+                    if let Some(task) = updated["spec"]["tasks"][0].as_object_mut() {
+                        task.remove("connection");
+                    }
+                }
+            }
         }
         Statement::Tasks(tasks) => {
             updated["spec"]["tasks"] = Value::Array(tasks.iter().map(task_json).collect());
@@ -2169,6 +2222,12 @@ pub struct NotebookRequest {
     /// 256 characters. Written as the task's `config.params` JSON object string.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// The `Connection` whose secret fields the task pod receives as `CONN_<NAME>_<KEY>`
+    /// (the CRD's `tasks[].connection`). Omitted: the pod gets no connection variable. Nova
+    /// checks the shape only; whether the connection exists, is Ready, is of this group and is
+    /// in its `usableBy` is the loader's job, and its sentence is the one the task log shows.
+    #[serde(default)]
+    pub connection: Option<String>,
 }
 
 /// A `dbt` task of a task list (`#112`): a project of the tool image, one selector or a chain
@@ -2503,6 +2562,10 @@ pub struct TaskSpecView {
     /// The parameters a notebook task passes, parsed back from `config.params`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notebook_params: Option<BTreeMap<String, String>>,
+    /// The `Connection` a `kind: "notebook"` task names (`tasks[].connection`), detail route
+    /// only. Shape-checked by Nova; the loader decides whether the task may use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     /// The project of a `kind: "dbt"` task (`config.project`), detail route only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dbt_project: Option<String>,
@@ -3582,6 +3645,9 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
                     name,
                     object_version,
                     params: task.notebook_params.unwrap_or_default(),
+                    // The document describes the whole editable state, so an update sent back
+                    // as it was read keeps the task's connection.
+                    connection: task.connection,
                 });
             (None, notebook)
         }
@@ -10746,6 +10812,7 @@ mod tests {
             name: "report.ipynb".into(),
             object_version: "v1".into(),
             params: BTreeMap::new(),
+            connection: None,
         };
         let mixed = [
             pipeline_task("load", "insert into gold.report select 1", &[]),
@@ -11623,6 +11690,7 @@ mod tests {
                     name: "report.ipynb".into(),
                     object_version: version.clone(),
                     params: BTreeMap::new(),
+                    connection: None,
                 }),
                 dbt: None,
                 depends_on: vec!["load".into()],
@@ -11650,6 +11718,89 @@ mod tests {
                 "config": { "notebook": "report.ipynb", "objectVersion": version, "params": "{}" }
             })
         );
+    }
+
+    /// The connection is a task-level field (`tasks[].connection`), not a `config` one: the CRD
+    /// reads it there, and the loader turns it into `CONN_<NAME>_<KEY>` `secretKeyRef`s.
+    #[tokio::test]
+    async fn a_notebook_task_keeps_its_connection() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{\"nbformat\":4}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("report-with-connection", "analytics", "");
+        body.tasks = Some(vec![PipelineTaskRequest {
+            name: "report".into(),
+            sql: String::new(),
+            notebook: Some(NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: BTreeMap::new(),
+                connection: Some("crm-db".into()),
+            }),
+            dbt: None,
+            depends_on: Vec::new(),
+        }]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("a notebook task naming a connection");
+        let stored = stored_pipeline(&resources, "report-with-connection")
+            .await
+            .expect("written");
+        let task = &stored["spec"]["tasks"][0];
+        assert_eq!(task["connection"], "crm-db", "{stored}");
+        assert!(
+            task["config"].get("connection").is_none(),
+            "the CRD reads the connection at task level, not in config: {stored}"
+        );
+    }
+
+    /// Shape only: whether the connection exists, is Ready, is of the pipeline's group and is in
+    /// its `usableBy` is the loader's rule, and its sentence is the one the task log shows.
+    #[tokio::test]
+    async fn a_connection_name_outside_the_crd_rule_is_refused() {
+        const SENTENCE: &str = "a connection name is 1 to 40 lower-case letters, digits and \
+                                dashes, starting and ending with a letter or digit";
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+        for name in [
+            "CRM_DB".to_string(),
+            "crm_db".to_string(),
+            "-crm".to_string(),
+            "crm-".to_string(),
+            String::new(),
+            "a".repeat(41),
+        ] {
+            create_refused(
+                &resources,
+                &store,
+                &limiter,
+                &ada,
+                NotebookRequest {
+                    name: "report.ipynb".into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::new(),
+                    connection: Some(name.clone()),
+                },
+                SENTENCE,
+            )
+            .await;
+        }
+        // `crm-db` passes the shape rule (its existence is the loader's check).
+        assert!(connection_ok("crm-db"));
+        assert!(!connection_ok(""));
     }
 
     #[tokio::test]
@@ -13920,6 +14071,7 @@ mod tests {
                 name: "report.ipynb".into(),
                 object_version: "v1".into(),
                 params: BTreeMap::from([("days".to_string(), "7".to_string())]),
+                connection: None,
             })
         );
         assert_eq!(
@@ -13977,6 +14129,7 @@ mod tests {
                     name: file.to_string(),
                     object_version: version.to_string(),
                     params: Default::default(),
+                    connection: None,
                 },
                 Some(&("0 3 * * *".to_string(), "UTC".to_string())),
                 &Default::default(),
@@ -14315,6 +14468,7 @@ mod tests {
                 name: notebook.into(),
                 object_version: version.into(),
                 params: BTreeMap::new(),
+                connection: None,
             }),
             tasks: None,
             schedule: Some(ScheduleRequest {
@@ -14335,6 +14489,7 @@ mod tests {
                 name: notebook.into(),
                 object_version: version.into(),
                 params: BTreeMap::new(),
+                connection: None,
             }),
             tasks: None,
             schedule: None,
@@ -14355,6 +14510,7 @@ mod tests {
                 name: notebook.into(),
                 object_version: version.into(),
                 params: "{}".into(),
+                connection: None,
             },
             Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
             &BTreeMap::new(),
@@ -14556,6 +14712,7 @@ mod tests {
                     name: name.into(),
                     object_version: version.clone(),
                     params: BTreeMap::new(),
+                    connection: None,
                 },
                 NOTEBOOK_NAME_RULE,
             )
@@ -14570,6 +14727,7 @@ mod tests {
                 name: format!("{}.ipynb", "a".repeat(129)),
                 object_version: version.clone(),
                 params: BTreeMap::new(),
+                connection: None,
             },
             NOTEBOOK_NAME_RULE,
         )
@@ -14585,6 +14743,7 @@ mod tests {
                     name: "report.ipynb".into(),
                     object_version: version.clone(),
                     params: BTreeMap::from([(name.to_string(), "eu".to_string())]),
+                    connection: None,
                 },
                 NOTEBOOK_PARAM_NAMES,
             )
@@ -14603,6 +14762,7 @@ mod tests {
                 name: "report.ipynb".into(),
                 object_version: version.clone(),
                 params: too_many,
+                connection: None,
             },
             NOTEBOOK_TOO_MANY_PARAMS,
         )
@@ -14620,6 +14780,7 @@ mod tests {
                     "region".to_string(),
                     "x".repeat(MAX_NOTEBOOK_PARAM_VALUE_CHARS + 1),
                 )]),
+                connection: None,
             },
             NOTEBOOK_PARAM_VALUE,
         )
@@ -14633,6 +14794,7 @@ mod tests {
                 name: "report.ipynb".into(),
                 object_version: version.clone(),
                 params: BTreeMap::from([("region".to_string(), "eu\0us".to_string())]),
+                connection: None,
             },
             NOTEBOOK_PARAM_VALUE,
         )
@@ -14655,6 +14817,7 @@ mod tests {
                 name: "report.ipynb".into(),
                 object_version: version.clone(),
                 params: long,
+                connection: None,
             },
             NOTEBOOK_PARAMS_TOO_LONG,
         )
@@ -14937,6 +15100,7 @@ mod tests {
                 notebook: Some("report.ipynb".into()),
                 object_version: Some(version.into()),
                 notebook_params: Some(BTreeMap::new()),
+                connection: None,
                 dbt_project: None,
                 dbt_select: None,
                 depends_on: vec![],
@@ -14957,6 +15121,7 @@ mod tests {
                 notebook: None,
                 object_version: None,
                 notebook_params: None,
+                connection: None,
                 dbt_project: None,
                 dbt_select: None,
                 depends_on: vec![],
@@ -14977,6 +15142,7 @@ mod tests {
                 notebook: None,
                 object_version: None,
                 notebook_params: None,
+                connection: None,
                 dbt_project: None,
                 dbt_select: None,
                 depends_on: vec![],
