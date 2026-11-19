@@ -11,8 +11,9 @@
 #
 # In order:
 #
-#   0.  the prerequisites: kubectl, jq, a stardelt CLI that answers, the ServicePrincipal
-#       pipeline-demo ready, and a CLI that is signed in to Nova;
+#   0.  the prerequisites: kubectl, jq, a stardelt CLI that answers and reads this
+#       repository's bundle, the ServicePrincipal pipeline-demo ready, and a CLI that is
+#       signed in to Nova;
 #   1.  the shop bundle deployed for the target prod: shop-1-bronze, shop-2-silver and
 #       shop-3-gold, scheduled 02:00 / 02:30 / 03:00 Europe/Berlin;
 #   2.  the twelve one-statement legacy pipelines deleted — an explicit list, never a
@@ -50,6 +51,11 @@ if [ -z "$CLI" ]; then
   CLI="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}/bin/stardelt"
 fi
 [ -x "$CLI" ] || fail "the stardelt CLI is not installed — see make public-demo-check 0b"
+
+# The CLI must be able to read this repository's bundle before anything else runs: one from
+# an older release refuses it (`description:` on every file, the `dbt` task) and names a
+# bundle file instead of itself. `bundle validate` is offline and read-only.
+valid="$("$CLI" bundle validate "$BUNDLE" 2>&1)" || fail "the CLI at $CLI cannot read this repository's bundle: $(printf '%s' "$valid" | head -n 1) — install it from this repository (python3 -m venv <venv> && <venv>/bin/pip install -e $PWD/../python) and set STARDELT_CLI_VENV=<venv>"
 
 principal="$(kubectl -n "$NAMESPACE" get serviceprincipals.stardelt.io pipeline-demo \
   -o jsonpath='{.status.ready}' 2>/dev/null || true)"
