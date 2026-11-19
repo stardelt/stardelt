@@ -86,7 +86,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
-.PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
+.PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
 .PHONY: perf-baseline
 
@@ -1353,6 +1353,11 @@ verify-trino-tls: _context ## Prove the in-cluster Trino path is TLS-only and to
 # Superset's own stored connection — the one that went stale in platform#278.
 verify-trino-auth: _context ## Prove Trino's authentication end to end, including Superset's stored connection
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trino-auth.sh
+
+# platform#416 (decision on #366, option A): `system` is read-only for signed-in people so
+# dbt can list relations; CALL, the runtime tables and tpch/tpcds stay denied.
+verify-trino-system-catalog: _context ## Prove `system` is read-only for people (dbt can list) and CALL stays denied
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trino-system-catalog.sh
 
 # platform#131 A1: a worker drains before it exits. The chart's own connection test cannot
 # run on this install (platform#1536), so its weight-2 graceful-shutdown hook never runs;

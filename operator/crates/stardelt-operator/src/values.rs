@@ -1924,10 +1924,31 @@ mod tests {
                 .iter()
                 .any(|r| r["group"] == "stardelt-admins" && r["allow"] == "all")
         );
+        // platform#416: `system` is read-only for people (dbt lists relations), tpch/tpcds stay
+        // closed. First match wins, so nothing an ordinary person hits before the `system`
+        // rule may open that catalog with `"all"`.
+        let system_rule = catalogs
+            .iter()
+            .position(|r| r["catalog"] == "system")
+            .expect("a `system` rule");
+        assert_eq!(catalogs[system_rule]["allow"], "read-only");
+        for rule in &catalogs[..system_rule] {
+            if rule.get("group").is_some() {
+                continue; // administrators only
+            }
+            assert_ne!(
+                rule["allow"], "all",
+                "a rule before the `system` rule lets a non-admin read it with `all`"
+            );
+            assert!(
+                !rule["catalog"].as_str().unwrap_or("").contains("system"),
+                "a rule before the `system` rule names it"
+            );
+        }
         assert!(
             catalogs
                 .iter()
-                .any(|r| r["catalog"] == "(system|tpch|tpcds)" && r["allow"] == "none")
+                .any(|r| r["catalog"] == "(tpch|tpcds)" && r["allow"] == "none")
         );
         assert!(
             rules["impersonation"]
