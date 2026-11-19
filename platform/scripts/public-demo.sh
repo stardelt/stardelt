@@ -42,7 +42,8 @@
 # names of its Secret, both fixed by `make demo-connection YES=1` (#349). Row 22 is the
 # grant the dbt run itself needs — dbt drops the table it replaces, which is Lakekeeper
 # `modify` and not the `write` the pipeline principal holds (#373), fixed by
-# `make demo-dbt-grant YES=1`.
+# `make demo-dbt-grant YES=1`. Row 23 is the public-database pipeline (#79 point 2), fixed by
+# `make demo-public-db YES=1`.
 #
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
@@ -191,6 +192,7 @@ if [ "$mode" = check ]; then
       20) check_20 || rc=1 ;;
       21) check_21 || rc=1 ;;
       22) check_22 || rc=1 ;;
+      23) check_23 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -761,6 +763,27 @@ PY
     return 1
   }
 
+  # 23. The demo's public-database pipeline reads RNAcentral through its Connection (#79 point 2):
+  # the notebook task names `rnacentral`, the group may use it, and visitors may see the pipeline.
+  check_23() {
+    local document connection viewers
+    document="$(kubectl -n "$NAMESPACE" get pipelines.stardelt.io public-db-load -o json 2>/dev/null || true)"
+    if [ -z "$document" ]; then
+      check_msg="the pipeline public-db-load does not exist"
+      check_fix="make demo-public-db YES=1"
+      return 1
+    fi
+    connection="$(jq -r '.spec.tasks[0].connection // ""' <<<"$document")"
+    viewers="$(jq -r --arg g "$GROUP" '(.spec.viewers // []) | index($g) != null' <<<"$document")"
+    if [ "$connection" = rnacentral ] && [ "$viewers" = true ]; then
+      check_msg="public-db-load reads RNAcentral through its Connection and $GROUP may see it"
+    else
+      check_msg="public-db-load names connection '${connection:-none}' and $GROUP may see it: ${viewers:-false} (want rnacentral, true)"
+      check_fix="make demo-public-db YES=1"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -788,6 +811,7 @@ PY
   render 20
   render 21
   render 22
+  render 23
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then

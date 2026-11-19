@@ -380,3 +380,24 @@ def test_source_of_outside_a_repository_is_none(tmp_path):
     directory.mkdir()
     (directory / "a.ipynb").write_text("{}")
     assert bundle.source_of(directory / "a.ipynb") is None
+
+
+def test_a_notebook_pipeline_keeps_its_connection_when_the_version_is_pinned():
+    spec = {"name": "load", "notebook": {"file": "notebooks/explore.ipynb", "connection": "rnacentral", "params": '{"a": "1"}'}}
+    pinned = bundle._pinned(spec, {"objectVersion": "0f1e2d3c"})
+    assert pinned["notebook"] == {"name": "explore.ipynb", "objectVersion": "0f1e2d3c", "params": '{"a": "1"}', "connection": "rnacentral"}
+    assert bundle._pinned({"name": "load", "notebook": {"file": "notebooks/explore.ipynb"}}, {"objectVersion": "0f1e2d3c"})["notebook"] == {
+        "name": "explore.ipynb",
+        "objectVersion": "0f1e2d3c",
+    }
+
+
+def test_a_notebook_connection_must_be_a_connection_name(tmp_path):
+    files = {"sql/load.sql": "select 1", "notebooks/explore.ipynb": "{}"}
+    for connection in ("rnacentral", "crm-db-2"):
+        problems = bundle.validate(make(tmp_path, resources={"load.yaml": f"name: load\nnotebook: {{file: notebooks/explore.ipynb, connection: {connection}}}\n"}, files=dict(files)))[0]
+        assert problems == [], connection
+    for connection in ("RNAcentral", "a_b"):
+        resources = {"load.yaml": f"name: load\nnotebook: {{file: notebooks/explore.ipynb, connection: {connection}}}\n"}
+        problems = bundle.validate(make(tmp_path, resources=resources, files=dict(files)))[0]
+        assert any("notebook.connection is a Connection name" in message for _, message in problems), problems
