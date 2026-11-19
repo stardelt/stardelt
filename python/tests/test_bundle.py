@@ -245,16 +245,50 @@ def test_a_pipeline_may_carry_several_tasks(tmp_path):
     ]
 
 
+def test_a_dbt_task_validates_and_renders(tmp_path):
+    """`dbt` (#112 slice 1b): a task source that names a project already in the tool image."""
+    task_bundle(tmp_path, ["{name: build, dbt: {project: shop, select: 'tag:marts', threads: 4}}"])
+    assert bundle.validate(tmp_path, "prod")[0] == []
+    problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
+    assert (problems, mode) == ([], "production")
+    assert specs[0]["tasks"][0]["dbt"] == {"project": "shop", "select": "tag:marts", "threads": 4}
+    assert specs[0]["tasks"] == [{"name": "build", "dbt": {"project": "shop", "select": "tag:marts", "threads": 4}}]
+    assert specs[0]["ownerGroup"] == "sales"
+
+
+def test_dbt_task_rules_are_reported(tmp_path):
+    needs_select = "a dbt task needs exactly one of select (one dbt selector) and batches (a list of 1 to 8 selectors, run in order)"
+    rows = [
+        (["{name: x, dbt: {project: Dbt, select: tag:marts}}"], "a dbt task needs project (a directory under /opt/dbt/projects in the tool image)"),
+        (["{name: x, dbt: {project: shop, select: tag:marts, batches: [tag:marts]}}"], needs_select),
+        (["{name: x, dbt: {project: shop}}"], needs_select),
+        (["{name: x, dbt: {project: shop, select: tag:marts, vars: {when: 3}}}"], "dbt vars must be a mapping of string values"),
+        (["{name: x, dbt: {project: shop, select: tag:marts, model: x}}"], "dbt tasks accept only project, select, batches, threads and vars (found `model`)"),
+    ]
+    for index, (tasks, expected) in enumerate(rows):
+        directory = tmp_path / f"row{index}"
+        directory.mkdir()
+        task_bundle(directory, tasks)
+        problems = bundle.validate(directory)[0]
+        assert problems[0][0] == "resources/gold.yaml (dev), task 'x'"
+        assert expected in said(problems), problems
+
+
+def test_a_top_level_dbt_is_refused_with_the_task_sentence(tmp_path):
+    task_bundle(tmp_path, ["{name: build, sql: select 1}"], extra="dbt: {project: shop, select: tag:marts}\n")
+    assert "a dbt run is a task: put it under tasks: with a name" in said(bundle.validate(tmp_path)[0])
+
+
 def test_a_task_problem_names_the_file_and_the_task(tmp_path):
     task_bundle(tmp_path, ["{name: customer_ltv, sql: select 1, sqlFile: sql/schema.sql}"])
     problems, _, _ = bundle.validate(tmp_path, "prod")
     assert problems[0][0] == "resources/gold.yaml (prod), task 'customer_ltv'"
-    assert problems[0][1] == "give exactly one of sql, sqlFile or notebook"
+    assert problems[0][1] == "give exactly one of sql, sqlFile, notebook or dbt"
 
 
 def test_task_rules_are_reported(tmp_path):
     rows = [
-        (["{name: x, sql: select 1, sqlFile: sql/schema.sql}"], "task 'x': give exactly one of sql, sqlFile or notebook"),
+        (["{name: x, sql: select 1, sqlFile: sql/schema.sql}"], "task 'x': give exactly one of sql, sqlFile, notebook or dbt"),
         (["{name: x, sql: select 1}", "{name: x, sql: select 2}"], "the name is used twice"),
         (["{name: x, sql: select 1, dependsOn: [nope]}"], "dependsOn names 'nope'"),
         (["{name: a, sql: select 1, dependsOn: [b]}", "{name: b, sql: select 2, dependsOn: [a]}"], "dependsOn is a cycle"),
