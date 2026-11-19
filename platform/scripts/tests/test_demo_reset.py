@@ -231,10 +231,147 @@ class VisitorPipelines(unittest.TestCase):
             JOB, "delete_visitor_pipelines", fake_delete
         ), mock.patch.object(
             JOB, "reset", fake_reset
+        ), mock.patch.object(
+            JOB, "restart_demo_spark", lambda: None
         ):
             self.assertEqual(JOB.main(), 0)
 
         self.assertEqual(order, [("pipelines", "stardelt"), ("drop", 3)])
+
+
+class DemoSpark(unittest.TestCase):
+    """Item 6 of stardelt/stardelt#201: a wedged sandbox session must not outlive the reset.
+
+    `k8s_request` is replaced the way `run` is: nothing here reaches an API server. The
+    merge patch is what `kubectl rollout restart` sends — a pod-template annotation.
+    """
+
+    def test_the_restart_is_a_merge_patch_of_the_pod_template(self):
+        calls = []
+
+        def fake_request(method, path, body=None):
+            calls.append((method, path, body))
+            return None
+
+        with mock.patch.object(JOB, "k8s_request", fake_request):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                JOB.restart_demo_spark()
+
+        self.assertEqual(len(calls), 1)
+        method, path, body = calls[0]
+        self.assertEqual(method, "PATCH")
+        self.assertEqual(
+            path,
+            "/apis/apps/v1/namespaces/stardelt-demo-spark/deployments/spark-demo",
+        )
+        self.assertRegex(
+            body["spec"]["template"]["metadata"]["annotations"]["stardelt.io/reset-at"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        )
+        self.assertEqual(
+            output.getvalue().strip(),
+            "demo-spark: restarted stardelt-demo-spark/spark-demo",
+        )
+
+    def test_a_missing_deployment_is_one_line_and_not_a_failure(self):
+        def fake_request(method, path, body=None):
+            raise urllib.error.HTTPError(
+                "https://kubernetes.default.svc" + path, 404, "Not Found", None, None
+            )
+
+        with mock.patch.object(JOB, "k8s_request", fake_request):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                JOB.restart_demo_spark()  # must not raise
+
+        self.assertEqual(
+            output.getvalue().strip(),
+            "demo-spark: not installed (stardelt-demo-spark/spark-demo not found)",
+        )
+
+    def test_any_other_api_error_reaches_the_caller(self):
+        def fake_request(method, path, body=None):
+            raise urllib.error.HTTPError(
+                "https://kubernetes.default.svc" + path, 403, "Forbidden", None, None
+            )
+
+        with mock.patch.object(JOB, "k8s_request", fake_request):
+            with self.assertRaises(urllib.error.HTTPError):
+                JOB.restart_demo_spark()
+
+    def test_main_restarts_the_sandbox_only_after_the_drops(self):
+        order = []
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        ca = Path(directory.name) / "ca.crt"
+        ca.write_text("a path that exists; the job only checks for it here")
+        env = {
+            "OIDC_ISSUER": "https://id.example.invalid/realms/stardelt",
+            "TRINO_URL": "https://trino.stardelt.svc.cluster.local:8443",
+            "TRINO_CA": str(ca),
+            "CLIENT_ID": "sp-pipeline-demo",
+            "CLIENT_SECRET": "never-read",
+            "NAMESPACE": "stardelt",
+        }
+
+        def fake_delete(namespace):
+            order.append("delete pipelines")
+            return 3
+
+        def fake_reset(pipelines=0):
+            order.append("drop")
+            return 0
+
+        def fake_restart():
+            order.append("patch")
+
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            JOB, "token", lambda: "never-read"
+        ), mock.patch.object(JOB, "trino_context", lambda path: None), mock.patch.object(
+            JOB, "delete_visitor_pipelines", fake_delete
+        ), mock.patch.object(
+            JOB, "reset", fake_reset
+        ), mock.patch.object(
+            JOB, "restart_demo_spark", fake_restart
+        ):
+            self.assertEqual(JOB.main(), 0)
+
+        self.assertEqual(order, ["delete pipelines", "drop", "patch"])
+
+
+class K8sRequest(unittest.TestCase):
+    """`body` turns the request into a merge patch; `GET`/`DELETE` stay unchanged."""
+
+    def test_a_body_is_a_merge_patch_and_never_a_get(self):
+        seen = []
+
+        class Answer(io.StringIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request, timeout=None, context=None):
+            seen.append(request)
+            return Answer('{"ok": true}')
+
+        with mock.patch.object(urllib.request, "urlopen", fake_urlopen), mock.patch(
+            "builtins.open", mock.mock_open(read_data="a-token")
+        ), mock.patch.object(ssl, "create_default_context", return_value=None):
+            JOB.k8s_request("PATCH", "/apis/apps/v1/namespaces/x/deployments/y", {"a": 1})
+            JOB.k8s_request("GET", "/apis/apps/v1/namespaces/x/deployments/y")
+
+        patch, get = seen
+        self.assertEqual(patch.get_method(), "PATCH")
+        self.assertEqual(patch.data, b'{"a": 1}')
+        self.assertEqual(
+            patch.get_header("Content-type"), "application/merge-patch+json"
+        )
+        self.assertEqual(get.get_method(), "GET")
+        self.assertIsNone(get.data)
+        self.assertIsNone(get.get_header("Content-type"))
 
 
 class Environment(unittest.TestCase):

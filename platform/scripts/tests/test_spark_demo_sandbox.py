@@ -29,15 +29,35 @@ class SparkDemoSandboxTest(unittest.TestCase):
         # kubectl applies the documents in file order; the namespaced objects need it to exist.
         self.assertEqual(self.docs[0].get("kind"), "Namespace")
 
-    def test_it_declares_exactly_the_six_objects(self):
+    def test_it_declares_exactly_the_eight_objects(self):
         for kind in ("Namespace", "ServiceAccount", "ConfigMap", "Deployment", "Service",
-                     "NetworkPolicy"):
+                     "NetworkPolicy", "Role", "RoleBinding"):
             self.one(kind)
-        self.assertEqual(len(self.docs), 6)
+        self.assertEqual(len(self.docs), 8)
 
     def test_it_grants_no_cluster_rights(self):
-        for kind in ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"):
+        for kind in ("ClusterRole", "ClusterRoleBinding"):
             self.assertEqual(self.by_kind(kind), [], f"the sandbox must declare no {kind}")
+
+    def test_the_one_role_is_the_nightly_reset_patching_one_deployment(self):
+        # stardelt/stardelt#201 item 6: the reset's ServiceAccount, in another namespace,
+        # may do nothing but bump this Deployment's pod template.
+        role = self.one("Role", "demo-reset-spark")
+        self.assertEqual(role["metadata"]["namespace"], "stardelt-demo-spark")
+        self.assertEqual(
+            role["rules"],
+            [{"apiGroups": ["apps"], "resources": ["deployments"],
+              "resourceNames": ["spark-demo"], "verbs": ["get", "patch"]}],
+        )
+        binding = self.one("RoleBinding", "demo-reset-spark")
+        self.assertEqual(binding["metadata"]["namespace"], "stardelt-demo-spark")
+        self.assertEqual(binding["roleRef"],
+                         {"kind": "Role", "name": "demo-reset-spark",
+                          "apiGroup": "rbac.authorization.k8s.io"})
+        self.assertEqual(
+            binding["subjects"],
+            [{"kind": "ServiceAccount", "name": "demo-reset", "namespace": "stardelt"}],
+        )
 
     def test_the_service_account_mounts_no_token(self):
         sa = self.one("ServiceAccount", "spark-demo")
