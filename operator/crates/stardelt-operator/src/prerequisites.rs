@@ -73,6 +73,13 @@ impl S3Keys {
     }
 }
 
+/// `sts-signing-key`: the key the gateway signs STS session tokens with (`sts.signingKey`).
+/// SeaweedFS reads it as base64 text; 64 hex characters are valid base64, so `random_hex`
+/// is the generator and no dependency is added. Never printed, never rotated.
+pub fn generate_sts_signing_key() -> Result<String, getrandom::Error> {
+    random_hex(32)
+}
+
 /// The namespace the platform is installed into. Same floor as the platform repo's
 /// `manifests/namespace.yaml` (platform#1096 question 5): `baseline` is enforced, so no
 /// privileged, hostNetwork or hostPath pod; `restricted` is only warned and audited while
@@ -159,13 +166,20 @@ fn string_data(pairs: &[(&str, String)]) -> Option<BTreeMap<String, String>> {
 }
 
 /// `stardelt-s3-creds`: what Trino, Airflow, CNPG backups and the bootstrap Job read.
-pub fn s3_creds_secret(lakehouse: &str, namespace: &str, bucket: &str, keys: &S3Keys) -> Secret {
+pub fn s3_creds_secret(
+    lakehouse: &str,
+    namespace: &str,
+    bucket: &str,
+    keys: &S3Keys,
+    sts_signing_key: &str,
+) -> Secret {
     Secret {
         metadata: meta(S3_SECRET, namespace, lakehouse, "seaweedfs"),
         type_: Some("Opaque".into()),
         string_data: string_data(&[
             ("access-key", keys.access_key.clone()),
             ("secret-key", keys.secret_key.clone()),
+            ("sts-signing-key", sts_signing_key.to_string()),
             ("endpoint", s3_endpoint(namespace)),
             ("bucket", bucket.to_string()),
             ("region", "us-east-1".to_string()),
@@ -175,18 +189,72 @@ pub fn s3_creds_secret(lakehouse: &str, namespace: &str, bucket: &str, keys: &S3
 }
 
 /// `seaweedfs-s3-config`: the same key pair as the gateway's S3 identity.
-pub fn seaweedfs_config_secret(lakehouse: &str, namespace: &str, keys: &S3Keys) -> Secret {
-    let identities = json!({"identities": [{
-        "name": "stardelt",
-        "credentials": [{"accessKey": keys.access_key, "secretKey": keys.secret_key}],
-        "actions": ["Admin", "Read", "Write"],
-    }]});
+/// The same document is read twice by the gateway: `-config` for `identities`,
+/// `-iam.config` for the IAM half (stardelt/stardelt#256).
+pub fn seaweedfs_config_secret(
+    lakehouse: &str,
+    namespace: &str,
+    keys: &S3Keys,
+    sts_signing_key: &str,
+) -> Secret {
+    let document = json!({
+        "identities": [{
+            "name": "stardelt",
+            "credentials": [{"accessKey": keys.access_key, "secretKey": keys.secret_key}],
+            "actions": ["Admin", "Read", "Write"],
+        }],
+        "sts": {"signingKey": sts_signing_key},
+        "policy": {"storeType": "memory", "defaultEffect": "Deny"},
+        "policies": [{
+            "name": "stardelt-all",
+            "document": {
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": ["s3:*"],
+                    "Resource": ["arn:aws:s3:::*"],
+                }],
+            },
+        }],
+        "roles": [{
+            "roleName": "stardelt",
+            "roleArn": "arn:aws:iam::000000000000:role/stardelt",
+            "trustPolicy": {
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"AWS": "*"},
+                    "Action": ["sts:AssumeRole"],
+                }],
+            },
+            "attachedPolicies": ["stardelt-all"],
+        }],
+    });
     Secret {
         metadata: meta(S3_CONFIG_SECRET, namespace, lakehouse, "seaweedfs"),
         type_: Some("Opaque".into()),
-        string_data: string_data(&[("seaweedfs_s3_config", identities.to_string())]),
+        string_data: string_data(&[("seaweedfs_s3_config", document.to_string())]),
         ..Default::default()
     }
+}
+
+/// True when a `seaweedfs_s3_config` document already carries the IAM half.
+pub fn config_document_has_sts(document: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(document)
+        .map(|v| v.get("sts").is_some())
+        .unwrap_or(false)
+}
+
+/// True when the document's first identity uses `access_key` — i.e. this operator wrote it.
+pub fn config_document_names_identity(document: &str, access_key: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(document)
+        .ok()
+        .and_then(|v| {
+            v["identities"][0]["credentials"][0]["accessKey"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .is_some_and(|key| key == access_key)
 }
 
 /// The CloudNative-PG `Cluster` for the catalog (single instance, like the platform manifest).
@@ -930,11 +998,19 @@ mod tests {
 
     #[test]
     fn creds_secret_carries_the_five_consumer_keys() {
-        let s = s3_creds_secret("main", "data", "lakehouse", &keys());
+        let s = s3_creds_secret("main", "data", "lakehouse", &keys(), "STS");
         let d = s.string_data.unwrap();
-        for k in ["access-key", "secret-key", "endpoint", "bucket", "region"] {
+        for k in [
+            "access-key",
+            "secret-key",
+            "sts-signing-key",
+            "endpoint",
+            "bucket",
+            "region",
+        ] {
             assert!(d.contains_key(k), "missing {k}");
         }
+        assert_eq!(d["sts-signing-key"], "STS");
         assert_eq!(
             d["endpoint"],
             "http://seaweedfs-s3.data.svc.cluster.local:8333"
@@ -944,7 +1020,7 @@ mod tests {
 
     #[test]
     fn gateway_config_has_the_same_key_pair() {
-        let s = seaweedfs_config_secret("main", "data", &keys());
+        let s = seaweedfs_config_secret("main", "data", &keys(), "STS");
         let json: serde_json::Value =
             serde_json::from_str(&s.string_data.unwrap()["seaweedfs_s3_config"]).unwrap();
         let cred = &json["identities"][0]["credentials"][0];
@@ -952,6 +1028,36 @@ mod tests {
             (cred["accessKey"].as_str(), cred["secretKey"].as_str()),
             (Some("AK"), Some("SK"))
         );
+        assert_eq!(json["sts"]["signingKey"], "STS");
+        assert_eq!(json["policy"]["defaultEffect"], "Deny");
+        assert_eq!(
+            json["roles"][0]["roleArn"],
+            "arn:aws:iam::000000000000:role/stardelt"
+        );
+        assert_eq!(json["policies"][0]["name"], "stardelt-all");
+    }
+
+    #[test]
+    fn an_old_document_is_recognised() {
+        let old = r#"{"identities":[{"name":"stardelt","credentials":[{"accessKey":"AK","secretKey":"SK"}],"actions":["Admin","Read","Write"]}]}"#;
+        assert!(!config_document_has_sts(old));
+        assert!(config_document_names_identity(old, "AK"));
+        assert!(!config_document_names_identity(old, "OTHER"));
+        let new = seaweedfs_config_secret("main", "data", &keys(), "STS");
+        let document = new.string_data.unwrap()["seaweedfs_s3_config"].clone();
+        assert!(config_document_has_sts(&document));
+        assert!(config_document_names_identity(&document, "AK"));
+        assert!(!config_document_has_sts("not json"));
+        assert!(!config_document_names_identity("not json", "AK"));
+    }
+
+    #[test]
+    fn the_sts_signing_key_is_hex_and_differs() {
+        let a = generate_sts_signing_key().unwrap();
+        let b = generate_sts_signing_key().unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 
     #[test]
