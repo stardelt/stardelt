@@ -288,6 +288,10 @@ verify-crds: _context ## The live CRD schemas match the operator checkout (needs
 verify-pins: _context ## The live Deployment images match the checked-in pins
 	@bash scripts/verify-pins.sh
 
+.PHONY: verify-s3-sts
+verify-s3-sts: _context ## The gateway speaks STS: identity put, an AssumeRole session at one table prefix, a sibling prefix refused
+	@NS=$(NAMESPACE) bash scripts/verify-s3-sts.sh
+
 .PHONY: verify-restarts
 verify-restarts: _context ## Restart counts of the restart-prone Deployments (read-only; a not-Ready pod fails)
 	@NS=$(NAMESPACE) bash scripts/verify-restarts.sh
