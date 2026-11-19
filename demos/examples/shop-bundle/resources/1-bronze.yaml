@@ -1,4 +1,5 @@
 name: shop-1-bronze
+description: "Generates the shop's 200 000 order lines and loads customers and products into bronze."
 schedule: {cron: "0 2 * * *", timezone: Europe/Berlin}
 params:
   schema: "${var.schema}"

@@ -537,6 +537,9 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
                 name: "daily_revenue".into(),
                 namespace: "stardelt".into(),
                 owner_group: Some("analytics".into()),
+                description: Some(
+                    "Aggregates the day's orders into the revenue mart the dashboard reads.".into(),
+                ),
                 can_run: true,
                 can_edit: true,
                 schedule: Some("0 6 * * * (UTC)".into()),
@@ -571,6 +574,9 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
                 name: "ingest_orders".into(),
                 namespace: "stardelt".into(),
                 owner_group: Some("mobility".into()),
+                description: Some(
+                    "Loads new orders from the shop's source tables every fifteen minutes.".into(),
+                ),
                 can_run: true,
                 can_edit: true,
                 schedule: Some("*/15 * * * * (UTC)".into()),

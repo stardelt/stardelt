@@ -1178,6 +1178,15 @@ pub struct PipelineSpec {
         regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     )]
     pub owner_group: Option<String>,
+    /// One sentence a person reads on the Pipelines page: what this pipeline does. Optional;
+    /// absent keeps every existing pipeline valid and renders as no line.
+    #[serde(
+        default,
+        rename = "description",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(max = 200))]
+    pub description: Option<String>,
     /// Service principal the tasks run as. Absent means the platform's default pipeline principal.
     /// By convention the principal of the owner group, named `pipeline-<ownerGroup>`; Nova's Schedule
     /// writes that name.
@@ -4153,6 +4162,7 @@ mod tests {
             schedule: None,
             run_as: None,
             owner_group: None,
+            description: None,
             viewers: Vec::new(),
             params: BTreeMap::new(),
             retries: None,
@@ -4201,6 +4211,7 @@ mod tests {
                 { "name": "build", "kind": "dbt", "dependsOn": ["load"], "config": { "selector": "tag:nightly" } }
             ],
             "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" },
+            "description": "Loads the shop's bronze layer",
             "runAs": "pipeline-analytics",
             "params": { "days": "1" },
             "retries": { "attempts": 2, "backoff": "5m" },
@@ -4214,8 +4225,49 @@ mod tests {
         assert_eq!(parsed.engine, PipelineEngine::Spark);
         assert_eq!(parsed.concurrency, PipelineConcurrency::Replace);
         assert_eq!(parsed.run_as.as_deref(), Some("pipeline-analytics"));
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("Loads the shop's bronze layer")
+        );
         assert_eq!(parsed.tasks[1].kind, TaskKind::Dbt);
         assert_eq!(serde_json::to_value(&parsed).expect("serialize"), spec);
+    }
+
+    /// `spec.description` is a sentence a person reads on the Pipelines page (#327): optional, at
+    /// most 200 characters, and absent from a spec that does not set it.
+    #[test]
+    fn pipeline_description_is_optional_and_bounded() {
+        let schema = pipeline_spec_schema();
+        let description = &schema["properties"]["description"];
+        assert_eq!(
+            description["type"], "string",
+            "description schema: {description}"
+        );
+        assert_eq!(
+            description["maxLength"], 200,
+            "a 201-character description is refused"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["tasks"]),
+            "a description is optional"
+        );
+
+        let without = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        assert!(
+            !serde_json::to_value(&without)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("description"),
+            "a pipeline without a description leaves the key out"
+        );
+        let mut with = without;
+        with.description = Some("Loads the shop's bronze layer".into());
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["description"],
+            serde_json::json!("Loads the shop's bronze layer")
+        );
     }
 
     #[test]

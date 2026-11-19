@@ -28,6 +28,13 @@ spec:
                 - Forbid
                 - Replace
                 type: string
+              description:
+                description: |-
+                  One sentence a person reads on the Pipelines page: what this pipeline does. Optional;
+                  absent keeps every existing pipeline valid and renders as no line.
+                maxLength: 200
+                nullable: true
+                type: string
               engine:
                 default: airflow
                 description: Engine that orchestrates (and for `spark`, executes) the pipeline.

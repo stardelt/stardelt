@@ -299,6 +299,7 @@ mod tests {
             schedule: None,
             run_as: None,
             owner_group: None,
+            description: None,
             viewers: Vec::new(),
             params: BTreeMap::new(),
             retries: None,

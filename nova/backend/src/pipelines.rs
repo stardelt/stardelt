@@ -2383,6 +2383,9 @@ pub struct PipelineView {
     pub namespace: String,
     /// `spec.ownerGroup`; `None` means administrators only.
     pub owner_group: Option<String>,
+    /// `spec.description`: one line about what the pipeline does; absent for most.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Whether the caller may run it and stop its runs.
     pub can_run: bool,
     /// Whether the caller may also pause, resume, change or delete it — the owner group and
@@ -2628,6 +2631,10 @@ fn view_of(
         namespace: namespace.to_string(),
         owner_group: spec
             .get("ownerGroup")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        description: spec
+            .get("description")
             .and_then(Value::as_str)
             .map(str::to_string),
         can_run: visible(who, spec),
@@ -8921,6 +8928,41 @@ mod tests {
         assert!(
             (duration - 8.268047).abs() < 1e-9,
             "the run duration is the difference of its timestamps: {duration}"
+        );
+    }
+
+    /// `spec.description` is a sentence a person reads on the Pipelines page (#327): it reaches the
+    /// view unchanged, and a pipeline without one carries no key at all.
+    #[test]
+    fn a_pipeline_description_reaches_the_view() {
+        let mut described = resource("shop", Some("analytics"));
+        described["spec"]["description"] = json!("Generates the shop's bronze layer");
+        let view = view_of("stardelt", "shop", &described, None, None, &admin());
+        assert_eq!(
+            view.description.as_deref(),
+            Some("Generates the shop's bronze layer")
+        );
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["description"],
+            json!("Generates the shop's bronze layer")
+        );
+
+        let plain = view_of(
+            "stardelt",
+            "shop",
+            &resource("shop", Some("analytics")),
+            None,
+            None,
+            &admin(),
+        );
+        assert_eq!(plain.description, None);
+        assert!(
+            !serde_json::to_value(&plain)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("description"),
+            "a pipeline without a description leaves the key out, rather than sending null"
         );
     }
 

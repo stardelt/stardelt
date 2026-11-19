@@ -601,12 +601,20 @@ function Row({
   return (
     <tr className="border-t border-border/70 hover:bg-bg-soft/30">
       <td className="td px-5">
-        <Link
-          to={`/pipelines/${encodeURIComponent(pipeline.namespace)}/${encodeURIComponent(pipeline.name)}`}
-          className="underline break-words"
-        >
-          {pipeline.name}
-        </Link>
+        <div className="min-w-0">
+          <Link
+            to={`/pipelines/${encodeURIComponent(pipeline.namespace)}/${encodeURIComponent(pipeline.name)}`}
+            className="underline break-words"
+          >
+            {pipeline.name}
+          </Link>
+          {/* One line about what the pipeline does (spec.description): absent for most, then no line. */}
+          {pipeline.description && (
+            <p className="mt-0.5 max-w-[22rem] truncate text-xs text-text-dim" title={pipeline.description}>
+              {pipeline.description}
+            </p>
+          )}
+        </div>
       </td>
       <td className="td px-3 text-text-dim">
         <span className="whitespace-nowrap">{pipeline.ownerGroup ?? '—'}</span>
