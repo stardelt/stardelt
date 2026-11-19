@@ -45,7 +45,9 @@ kind: Deployment
 metadata:
   name: spark-demo
   namespace: stardelt-demo-spark
-  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt }
+  # `stardelt.io/compute: demo` makes Nova's Compute page show this server (nova#271).
+  # Label only: the pod template's labels stay as they are (the NetworkPolicy selects them).
+  labels: { app.kubernetes.io/name: spark-demo, app.kubernetes.io/part-of: stardelt, stardelt.io/compute: demo }
 spec:
   replicas: 1
   strategy: { type: Recreate }
@@ -195,3 +197,41 @@ roleRef:
   kind: Role
   name: demo-reset-spark
   apiGroup: rbac.authorization.k8s.io
+---
+# Nova's read of this namespace (nova#271): the Compute page lists the Deployments labelled
+# `stardelt.io/compute` and reads the ConfigMap `<deployment>-config` for their specs. Without
+# this the sandbox card is simply missing from the page (the list answers 403, Nova logs it and
+# returns what it has), never an error.
+#
+# It lives here, not in manifests/nova-deployment.yaml, because this file creates the namespace:
+# a Role in `stardelt-demo-spark` inside Nova's manifest fails `kubectl apply` (exit 1,
+# `namespaces "stardelt-demo-spark" not found`) on every install that does not also run
+# `make install-spark-demo` — the sandbox is opt-in, Nova is not.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nova-compute-reader
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/part-of: stardelt }
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nova-compute-reader
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/part-of: stardelt }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nova-compute-reader
+subjects:
+  - kind: ServiceAccount
+    name: nova
+    namespace: stardelt

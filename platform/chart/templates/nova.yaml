@@ -20,6 +20,12 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list"]
+  # The Spark servers are plain Deployments labelled `stardelt.io/compute`, and the
+  # `<deployment>-config` ConfigMap next to each carries the `spark-defaults.conf` the Compute
+  # page shows (nova#271, manifests/nova-deployment.yaml). Same grant on both install paths.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
