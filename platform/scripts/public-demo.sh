@@ -35,6 +35,10 @@
 #   11. the nightly reset's script matches this checkout (it is a ConfigMap copy).
 #   12. the nightly reset last succeeded within 26 hours (its CronJob status, not its script).
 #
+# --check only, after the on-mode steps: row 18 is the shop's three scheduled bundle
+# pipelines and row 19 the dbt run (shop-dbt, a dbt task on project shop, viewers=[visitors]),
+# both fixed by `make demo-shop YES=1` (#335).
+#
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
 #
@@ -177,6 +181,8 @@ if [ "$mode" = check ]; then
       15) check_15 || rc=1 ;;
       16) check_16 || rc=1 ;;
       17) check_17 || rc=1 ;;
+      18) check_18 || rc=1 ;;
+      19) check_19 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -636,6 +642,53 @@ PY
     fi
   }
 
+  # 18. The shop pipelines are the bundle's three, scheduled (#335, #79 slice 2b): twelve
+  # one-statement On demand pipelines also carry the label, so the count alone proves nothing.
+  check_18() {
+    local document names unscheduled
+    document="$(kubectl -n "$NAMESPACE" get pipelines.stardelt.io -l stardelt.io/bundle=shop -o json 2>/dev/null || true)"
+    names=""
+    unscheduled=""
+    if [ -n "$document" ]; then
+      names="$(jq -r '[.items[]? | .metadata.name] | sort | join(" ")' <<<"$document")"
+      unscheduled="$(jq -r '[.items[]? | select((.spec.schedule.cron // "") == "") | .metadata.name] | join(" ")' <<<"$document")"
+    fi
+    if [ "$names" != "shop-1-bronze shop-2-silver shop-3-gold" ]; then
+      check_msg="the shop pipelines are '${names:-none}', not the bundle's 3 scheduled ones (shop-1-bronze, shop-2-silver, shop-3-gold)"
+      check_fix="make demo-shop YES=1"
+      return 1
+    fi
+    if [ -n "$unscheduled" ]; then
+      check_msg="the shop pipelines $unscheduled carry no .spec.schedule.cron"
+      check_fix="make demo-shop YES=1"
+      return 1
+    fi
+    check_msg="the shop pipelines are the bundle's 3 scheduled ones (shop-1-bronze, shop-2-silver, shop-3-gold)"
+  }
+
+  # 19. The dbt run exists, is a dbt task on the demo's project, and names the visitors (#335, #112).
+  check_19() {
+    local document
+    document="$(kubectl -n "$NAMESPACE" get pipelines.stardelt.io shop-dbt -o json 2>/dev/null || true)"
+    if [ -z "$document" ]; then
+      check_msg="the pipeline shop-dbt does not exist"
+      check_fix="make demo-shop YES=1"
+      return 1
+    fi
+    if ! jq -e '(.spec.tasks[0].kind // "") == "dbt" and (.spec.tasks[0].config.project // "") == "shop"' \
+      <<<"$document" >/dev/null 2>&1; then
+      check_msg="shop-dbt's first task is '$(jq -r '.spec.tasks[0].kind // "missing"' <<<"$document")' on project '$(jq -r '.spec.tasks[0].config.project // "missing"' <<<"$document")'"
+      check_fix="make demo-shop YES=1"
+      return 1
+    fi
+    if ! jq -e --arg g "$GROUP" '((.spec.viewers // []) | index($g)) != null' <<<"$document" >/dev/null 2>&1; then
+      check_msg="shop-dbt is a dbt task on project shop but does not name $GROUP as a viewer"
+      check_fix="make demo-shop YES=1"
+      return 1
+    fi
+    check_msg="shop-dbt is a dbt task on project shop and $GROUP may see it"
+  }
+
   render 0a
   render 0b
   render 0
@@ -658,6 +711,8 @@ PY
   render 15
   render 16
   render 17
+  render 18
+  render 19
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then

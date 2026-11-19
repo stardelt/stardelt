@@ -906,6 +906,10 @@ public-demo-check: _context ## Read-only: every public-demo rollout prerequisite
 public-demo-off: _context ## Kill switch: disable the public demo person and sign it out (needs YES=1)
 	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/public-demo.sh --off
 
+.PHONY: demo-shop
+demo-shop: _context ## The demo's shop pipelines: the shop bundle, the dbt run, viewers, and the twelve legacy ones gone (lab only; needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' STARDELT_NOVA_URL='$(STARDELT_NOVA_URL)' bash scripts/demo-shop.sh
+
 .PHONY: demo-sts demo-sts-check demo-sts-off
 demo-sts: _context ## Flip a warehouse to vend table-scoped storage credentials (lab only; needs YES=1, WAREHOUSE=gold)
 	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=true on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi
