@@ -40,7 +40,7 @@ The platform's notebook image installs a **pinned** release of this library; a p
 notebook can install the same pin:
 
 ```bash
-pip install "stardelt @ git+https://github.com/stardelt/stardelt@python/v0.4.2#subdirectory=python"
+pip install "stardelt @ git+https://github.com/stardelt/stardelt@python/v0.4.3#subdirectory=python"
 ```
 
 ## Container image
@@ -72,7 +72,7 @@ workspace (Nova → Profile → VS Code).
 
 ## Releases
 
-Semantic versions, tagged `python/v<version>` (`python/v0.4.2`). The package is not on PyPI:
+Semantic versions, tagged `python/v<version>` (`python/v0.4.3`). The package is not on PyPI:
 install a tag from Git, as above. `python/v0.2.0` is the first release that contains the
 `stardelt` command line (`stardelt login`, `stardelt bundle ...`). The platform pins a
 **release**, never a branch: a moving tag is not an upgrade path. A release also publishes the
