@@ -48,7 +48,8 @@
 # Exit 1 on any mismatch, so `make verify-catalog-permissions` is a gate.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
@@ -85,7 +86,7 @@ trap cleanup EXIT
 # shellcheck disable=SC2034
 KC_LOG_PREFIX=verify-catalog-permissions
 # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+. "$SCRIPT_DIR/lib/keycloak-admin.sh"
 
 kc() { "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$@"; }
 

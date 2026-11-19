@@ -14,12 +14,13 @@
 # file names `opa.policy.batched-uri` or `opa.policy.uri`, both must match.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 VALUES="helm-values/trino-identity.yaml"
 
 # shellcheck source=lib/bridge.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/bridge.sh"
+. "$SCRIPT_DIR/lib/bridge.sh"
 
 batched="${BRIDGE_BATCH_PATH#/v1/data/}"
 allow="${BRIDGE_ALLOW_PATH#/v1/data/}"

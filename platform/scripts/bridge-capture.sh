@@ -40,7 +40,8 @@
 #     …]}
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 POD="bridge-capture"
@@ -53,7 +54,7 @@ MIN_PAIRS=20
 # The two policy paths Trino is configured with — one source for the scripts
 # that ask the bridge and the capture that records what Trino asks (#359).
 # shellcheck source=lib/bridge.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/bridge.sh"
+. "$SCRIPT_DIR/lib/bridge.sh"
 
 fail() { echo "bridge-capture: $*" >&2; exit 1; }
 
