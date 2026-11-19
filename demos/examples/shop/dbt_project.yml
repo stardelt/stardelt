@@ -26,6 +26,10 @@ seeds:
       unit_price: "decimal(10,2)"
 
 models:
+  # dbt builds its incremental temp relation as a view, and Lakekeeper refuses a
+  # SECURITY DEFINER view's `trino.run-as-owner` without a trusted engine (stardelt#393).
+  # A temp table needs no view: the marts merge into their own target instead.
+  +views_enabled: false
   shop:
     bronze:
       +database: bronze

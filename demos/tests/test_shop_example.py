@@ -88,6 +88,20 @@ def test_the_staging_views_run_as_the_querying_identity():
     )
 
 
+def test_the_incremental_temp_relation_is_a_table_and_the_units_test_is_a_marts_test():
+    project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
+    assert project["models"]["+views_enabled"] is False, (
+        "dbt builds the incremental temp relation as a view by default, and Lakekeeper refuses "
+        "a SECURITY DEFINER view's trino.run-as-owner without a trusted engine (stardelt#393)"
+    )
+    test = (SHOP / "tests" / "units_reconcile.sql").read_text()
+    assert "ref('order_lines_enriched')" in test, (
+        "the units test must ref only marts models, or eager indirect selection runs it in "
+        "the tag:load batch, where a fresh catalog has no gold.shop_dbt yet"
+    )
+    assert "ref('stg_order_lines')" not in test
+
+
 def test_every_dbt_batch_tag_selects_a_resource_and_the_seeds_come_first():
     project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
     tags = set()
