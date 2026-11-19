@@ -920,6 +920,12 @@ demo-sts-off: _context ## The rollback of demo-sts: sts-enabled=false on the war
 	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=false on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi
 	@NAMESPACE=$(NAMESPACE) YES=1 WAREHOUSE=$(or $(WAREHOUSE),gold) bash scripts/demo-sts.sh --off
 
+.PHONY: demo-connection demo-connection-off
+demo-connection: _context ## The demo's first Connection: RNAcentral's public PostgreSQL, its secret in OpenBao and the managed store (lab only; needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-connection.sh
+demo-connection-off: _context ## Remove the demo Connection and its secret path (lab only; needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-connection.sh --off
+
 .PHONY: public-demo-catalogs
 public-demo-catalogs: _context ## The public demo's bronze/silver/gold Catalogs, before the shop deploy (lab only; needs YES=1)
 	@if [ '$(YES)' != 1 ]; then \
