@@ -20,8 +20,11 @@
 #     client reads through, and the ticket flips only `gold`.
 #   * so Q20 as written (on `playground`, before the flip) can only report `vended=no`. The
 #     writable-or-read-only question is therefore also measured on `gold` — the one warehouse
-#     this run flips, where `demo` holds `write` on the warehouse — and printed as
+#     this run flips, where the **group** `demo` holds `write` on it — and printed as
 #     `Q20-gold:`. That line does not match the `Q2[0-4]:` count of the ticket's verify.
+#     (The **person** `demo` is in the group `visitors` only and reads `gold`; `Q20-gold`
+#     therefore measured a *reader's* credential. The writer's case is #424, measured on
+#     `playground` by `scripts/spike-lakekeeper-sts-writer.sh`.)
 #   * the service account `superset` sees catalog `shared` only, so the Q21 read it names is
 #     refused ("Cannot access catalog gold"); the read is repeated as `demo` and the refusal is
 #     printed, rather than silently substituting a principal.
@@ -373,7 +376,9 @@ echo "Q21: trino-gold-rows=$gold_rows demo-trino-write=$demo_write_code"
 
 # --- Q20-gold: the same writer question, on the warehouse this run flips ------------------
 # Not part of the ticket's verify: `playground` is never flipped here, so only `$WAREHOUSE`
-# can vend. `demo` holds write+create on it (Catalog `$WAREHOUSE`, .spec.grants).
+# can vend. The **group** `demo` holds `write` on it (Catalog `$WAREHOUSE`, .spec.grants); the
+# **person** `demo` is in the group `visitors`, which reads `$WAREHOUSE`, so this load is a
+# reader's load and `Q20-gold` answers a reader's credential — the writer's case is #424.
 # The table is one that already exists: `demo` may not create a schema or table in
 # `$WAREHOUSE` through Trino even though Lakekeeper's warehouse assignments carry `create`
 # (measured 2026-11-19: `CREATE SCHEMA gold.scratch` => Access Denied, while the same call on
