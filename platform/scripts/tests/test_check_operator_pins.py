@@ -29,6 +29,7 @@ PLATFORM_SIDE = {
     "crates/stardelt-operator/src/provision.rs": "manifests/nova-deployment.yaml",
     "crates/stardelt-operator/values/airflow.yaml": "helm-values/airflow.yaml",
     "crates/stardelt-operator/values/spark.yaml": "manifests/spark.yaml",
+    "crates/stardelt-operator/values/spark-connect-auth.yaml": "manifests/spark-connect-auth.yaml",
     "crates/stardelt-operator/values/superset.yaml": "helm-values/superset.yaml",
 }
 
