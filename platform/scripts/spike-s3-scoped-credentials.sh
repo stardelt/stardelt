@@ -271,8 +271,8 @@ echo "  - trailing slash (Read:<bucket>/<prefix>/): put-in/get-in/put-out/get-ou
 echo "  - no trailing slash (Read:<bucket>/<prefix>): put-in/get-in/put-out/get-out/list-bucket/list-prefix = $q4_noslash"
 echo "Q4: scoped identities at a prefix $q4"
 echo "  - put-in/get-in/put-out/get-out/list-bucket/list-prefix = $q4_codes"
-set -- $q4_codes
-if [ "$5" = "200" ]; then
+read -r _put_in _get_in _put_out _get_out list_bucket _list_prefix <<<"$q4_codes"
+if [ "$list_bucket" = "200" ]; then
   echo "  - finding: list-bucket answers 200 — the identity can enumerate object names in the bucket"
 fi
 
