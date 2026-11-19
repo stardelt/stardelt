@@ -138,6 +138,24 @@ else
   fail deployment "spark-demo ${ready:-0/0} ready"
 fi
 
+# ---------------------------------------------------------------------------
+# 7. The Deployment runs the image manifests/spark.yaml pins. `make install-spark-demo` renders
+#    the manifest from that line, and nothing compares the live pod with it afterwards: a
+#    roll that does not re-apply the manifest leaves the sandbox on an older digest (the
+#    stardelt/stardelt#224 class, one level down). Compared by digest, not by tag.
+# ---------------------------------------------------------------------------
+pin="$(sed -nE 's/^[[:space:]]*spark\.kubernetes\.container\.image[[:space:]]+(ghcr\.io\/stardelt\/spark[^[:space:]]+)[[:space:]]*$/\1/p' manifests/spark.yaml)"
+live="$(kubectl -n "$DEMO_NS" get pod -l app.kubernetes.io/name=spark-demo -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null || true)"
+pin_digest="${pin##*@}"
+live_digest="${live##*@}"
+if [ -z "$pin_digest" ] || [ -z "$live_digest" ]; then
+  fail image "pin '${pin:-none}', live '${live:-none}' — make install-spark-demo"
+elif [ "$live_digest" = "$pin_digest" ]; then
+  pass image "spark-demo runs ${live_digest:0:19}… (the pin)"
+else
+  fail image "spark-demo runs ${live_digest:0:19}…, the pin is ${pin_digest:0:19}… — make install-spark-demo"
+fi
+
 if [ "$bad" -eq 0 ]; then
   echo "verify-spark-demo-sandbox: PASS (${ok} of ${probes})"
   exit 0

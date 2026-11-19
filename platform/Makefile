@@ -256,6 +256,10 @@ verify-spark-janitor: _context ## The janitor's dry run keeps the map a live Spa
 verify-spark-demo-sandbox: _context ## The demo Spark sandbox: restricted PSS, no token, no internet, data plane reachable
 	@NS=$(NAMESPACE) bash scripts/verify-spark-demo-sandbox.sh
 
+.PHONY: verify-spark-demo-query
+verify-spark-demo-query: _context ## One session through the demo Spark sandbox: range(10) = 10 from a visitor-labelled client pod
+	@NS=$(NAMESPACE) DEMO_NS=stardelt-demo-spark bash scripts/verify-spark-demo-query.sh
+
 .PHONY: verify-spark-auth
 verify-spark-auth: _context ## The shared Connect front: a signed query runs, an unsigned call and a token without the audience are refused (manual; starts one pod)
 	@NS=$(NAMESPACE) BASE_DOMAIN=$(BASE_DOMAIN) bash scripts/verify-spark-auth.sh
