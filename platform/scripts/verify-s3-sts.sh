@@ -11,8 +11,9 @@
 #   session-out   the same session is REFUSED under the sibling prefix of the same table
 #
 # The session policy is the one Lakekeeper will send: one table's bare prefix and `prefix/*`
-# (a table-shaped policy needs both, spike stardelt#245). The role trusts any principal, which
-# grants nothing the platform key does not already have — the restriction is the session policy.
+# (a table-shaped policy needs both, spike stardelt#245). The role trusts exactly the platform
+# identity (arn:aws:iam::000000000000:user/stardelt, #407), so the session policy is the second
+# restriction, not the only one.
 #
 # Exit 0 = PASS, 1 = FAIL (the pod reached Succeeded or Failed and its lines were judged),
 # 3 = UNVERIFIED (no gateway, no Secret, or a pod that reached no terminal phase).
