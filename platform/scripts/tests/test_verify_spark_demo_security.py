@@ -8,7 +8,7 @@ Standard library only, like the other tests here: `python3 -m unittest discover 
 scripts/tests -v` runs them in CI. `kubectl` and `python3` are bash shims first on PATH, so no
 cluster and no network are touched: the sandbox exists in every case, the pod's phase and its
 log come from FAKE_PHASE and FAKE_LOG, and the judged lines are the ones the test writes. That
-is the point of the three cases — the verdict must follow the log's four lines, not the pod
+is the point of the four cases — the verdict must follow the log's five lines, not the pod
 phase alone (the stardelt/stardelt#282 lesson).
 """
 import os
@@ -55,6 +55,7 @@ exec "${REAL_PYTHON3:?}" "$@"
 REFUSED_LOG = """\
 catalog=granted:loaded
 catalog=refused: (org.apache.iceberg.exceptions.RESTException) Error occurred while processing GET request
+vended=ok 1 row(s)
 files=refused: (java.nio.file.AccessDeniedException) s3a://lakehouse/gold: No AWS Credentials provided
 token=absent
 api=refused: ConnectionRefusedError(111, 'Connection refused')
@@ -91,10 +92,10 @@ class SparkDemoSecurity(unittest.TestCase):
             ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60
         )
 
-    def test_the_four_refusals_are_a_pass(self):
+    def test_the_five_probes_are_a_pass(self):
         result = self.run_script(REFUSED_LOG)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("PASS (4 of 4)", result.stdout)
+        self.assertIn("PASS (5 of 5)", result.stdout)
         self.assertIn("retail is refused", result.stdout)
 
     def test_a_failed_probe_is_a_fail(self):
@@ -105,6 +106,17 @@ class SparkDemoSecurity(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL", result.stdout)
         self.assertIn("files=ADMITTED 3", result.stdout)
+
+    def test_a_missing_vended_credential_is_a_fail(self):
+        log = REFUSED_LOG.replace(
+            "vended=ok 1 row(s)",
+            "vended=refused: (org.apache.iceberg.exceptions.ForbiddenException) "
+            "Forbidden: s3.access-key-id is not set",
+        )
+        result = self.run_script(log)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL", result.stdout)
+        self.assertIn("(make demo-sts YES=1)", result.stdout)
 
     def test_a_pending_pod_is_unverified(self):
         result = self.run_script(REFUSED_LOG, phase="Pending")

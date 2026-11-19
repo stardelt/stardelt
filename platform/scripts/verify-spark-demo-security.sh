@@ -9,13 +9,17 @@
 # `make verify-spark-demo-sandbox` judges what the sandbox *contains* — Pod Security, the
 # ServiceAccount, the token mount, its egress. Neither is a visitor's session: a sandbox that
 # loaded every catalog, read the bucket directly, carried a token or reached the internet would
-# pass both. These four probes are #201's security-test list, run as the `demo` person from a pod
+# pass both. These five probes are #201's security-test list, run as the `demo` person from a pod
 # that carries a visitor's labels:
 #
 #   catalog   a catalog `visitors` holds no grant on is refused *and* `gold`, which they may
 #             read, answers — without that positive half a dead catalog server and a missing
 #             grant look identical. The session's token is `demo`'s, minted the way a real
 #             visitor's browser session would be.
+#   vended    a real data file is read through the vended credential alone: no S3 key is set,
+#             so only Lakekeeper's table-scoped credential can open it. This is the one probe
+#             that needs the warehouse flag (`make demo-sts YES=1`); without it the driver is
+#             refused and the probe fails with that hint.
 #   files     the driver's Hadoop S3A against the gateway with NO credentials must refuse the
 #             warehouse prefix: code that goes around the catalog cannot read the bucket.
 #   token     the client pod carries no ServiceAccount token and cannot open
@@ -23,10 +27,11 @@
 #   udf       a Python UDF cannot reach example.com:443. The driver is `local[2]`, so the UDF
 #             runs in the driver pod and the egress policy is what is measured.
 #
-# All four are measurable now, before vended credentials land: the sandbox has no storage
-# credential. The gate stays valid after slices b/c — the refusals must keep refusing.
+# `vended` is the one probe that needs the warehouse flag to stay on; the other four must keep
+# refusing after it lands — a vended credential is table-scoped and read-only, so the bucket and
+# the other catalogs stay closed.
 #
-# Exit 0 = PASS (all four), 1 = FAIL (a probe was admitted, or `gold` did not answer), 3 =
+# Exit 0 = PASS (all five), 1 = FAIL (a probe was admitted, or `gold` did not answer), 3 =
 # UNVERIFIED (no kubectl, the sandbox is not installed, the pod never started, or the client
 # never reached the Connect server — nothing about containment was measured then).
 #
@@ -90,7 +95,7 @@ fail() {  # <logs> <reason>: the pod's tail, then the judged FAIL line
   # probe's own judged lines are excluded: `api=refused: ConnectionRefusedError` is a PASS half.
   local unreachable
   unreachable="$(printf '%s\n' "$logs" \
-    | grep -vE '^(catalog|files|token|api|udf)=' \
+    | grep -vE '^(catalog|vended|files|token|api|udf)=' \
     | grep -m1 -E 'UNAVAILABLE|Connection refused|timed out|Name or service not known|Temporary failure in name resolution' || true)"
   if [ -n "$unreachable" ]; then
     echo "verify-spark-demo-security: UNVERIFIED (the client did not reach ${HOST}:${PORT}: ${unreachable})"
@@ -218,7 +223,15 @@ spec:
           except Exception as exc:
               print("catalog=refused: " + first_line(exc), flush=True)
 
-          # 2. files: S3A in the driver, with no credential configured.
+          # 2. vended: one data file through the vended credential only. No S3 key is set, so a
+          #    success means Lakekeeper's table-scoped credential opened the object.
+          try:
+              rows = session.sql("SELECT * FROM gold.shop.daily_revenue LIMIT 1").collect()
+              print("vended=ok %d row(s)" % len(rows), flush=True)
+          except Exception as exc:
+              print("vended=refused: " + first_line(exc), flush=True)
+
+          # 3. files: S3A in the driver, with no credential configured.
           session.conf.set("spark.hadoop.fs.s3a.endpoint", S3_ENDPOINT)
           session.conf.set("spark.hadoop.fs.s3a.path.style.access", "true")
           try:
@@ -227,7 +240,7 @@ spec:
           except Exception as exc:
               print("files=refused: " + first_line(exc), flush=True)
 
-          # 3. token and api: no ServiceAccount token, and the API server is not reachable.
+          # 4. token and api: no ServiceAccount token, and the API server is not reachable.
           print("token=" + ("MOUNTED" if os.path.exists(SA_TOKEN) else "absent"), flush=True)
           try:
               socket.create_connection(("kubernetes.default.svc", 443), 3).close()
@@ -235,7 +248,7 @@ spec:
           except Exception as exc:
               print("api=refused: " + repr(exc), flush=True)
 
-          # 4. udf: the driver is local[2], so this runs in the driver pod's network namespace.
+          # 5. udf: the driver is local[2], so this runs in the driver pod's network namespace.
           def reach():
               try:
                   socket.create_connection(("example.com", 443), 5).close()
@@ -294,7 +307,15 @@ else
   pass catalog "retail is refused: ${catalog#catalog=refused: } (gold answers)"
 fi
 
-# 2. files: S3A with no credential must not list the warehouse prefix.
+# 2. vended: a real data file must come back through the vended credential alone.
+vended="$(judged vended)"
+if [ "${vended#vended=ok}" = "$vended" ]; then
+  fail_probe vended "${vended:-no answer} (make demo-sts YES=1)"
+else
+  pass vended "${vended#vended=ok } from gold.shop.daily_revenue through the vended credential"
+fi
+
+# 3. files: S3A with no credential must not list the warehouse prefix.
 files="$(judged files)"
 if [ "${files#files=refused:}" = "$files" ]; then
   fail_probe files "${files:-no answer}"
@@ -302,7 +323,7 @@ else
   pass files "s3a://${S3_BUCKET}/gold/ is refused without credentials: ${files#files=refused: }"
 fi
 
-# 3. token and api: one probe, because a token without a reachable API server still reads
+# 4. token and api: one probe, because a token without a reachable API server still reads
 #    nothing and a reachable API server without a token authenticates nobody. Both halves.
 token="$(judged token)"
 api="$(judged api)"
@@ -314,7 +335,7 @@ else
   pass token "no ServiceAccount token; kubernetes.default.svc is refused"
 fi
 
-# 4. udf: anything but `udf=ok` is the UDF having reached the internet (or never run).
+# 5. udf: anything but `udf=ok` is the UDF having reached the internet (or never run).
 udf="$(judged udf)"
 if [ "${udf#udf=ok}" = "$udf" ]; then
   fail_probe udf "${udf:-no answer}"
