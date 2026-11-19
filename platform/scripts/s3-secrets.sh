@@ -36,13 +36,17 @@ rand() { openssl rand -hex "$1"; }
 # document. It carries the identity (unchanged) and the IAM half the gateway reads with
 # `-iam.config` (stardelt#201 slice 2). Keep it byte-identical to the chart's version
 # (chart/templates/s3-credentials.yaml); test_s3_sts_config.py compares the two as JSON.
+# The role trusts exactly one principal — the identity named in `identities`, which the gateway
+# turns into `arn:aws:iam::000000000000:user/<name>` (weed/s3api/auth_credentials.go's
+# generatePrincipalArn). A future S3 identity therefore cannot assume the all-buckets role;
+# naming "*" here would let every identity the platform adds assume it.
 s3_config_json() {
   printf '%s\n' \
     "{\"identities\":[{\"name\":\"stardelt\",\"credentials\":[{\"accessKey\":\"$1\",\"secretKey\":\"$2\"}],\"actions\":[\"Admin\",\"Read\",\"Write\"]}]," \
     " \"sts\":{\"signingKey\":\"$3\"}," \
     " \"policy\":{\"storeType\":\"memory\",\"defaultEffect\":\"Deny\"}," \
     " \"policies\":[{\"name\":\"stardelt-all\",\"document\":{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],\"Resource\":[\"arn:aws:s3:::*\"]}]}}]," \
-    " \"roles\":[{\"roleName\":\"stardelt\",\"roleArn\":\"arn:aws:iam::000000000000:role/stardelt\",\"trustPolicy\":{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"sts:AssumeRole\"]}]},\"attachedPolicies\":[\"stardelt-all\"]}]}"
+    " \"roles\":[{\"roleName\":\"stardelt\",\"roleArn\":\"arn:aws:iam::000000000000:role/stardelt\",\"trustPolicy\":{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::000000000000:user/stardelt\"},\"Action\":[\"sts:AssumeRole\"]}]},\"attachedPolicies\":[\"stardelt-all\"]}]}"
 }
 
 # Print-only mode for the unit test (scripts/tests/test_s3_sts_config.py): the same function

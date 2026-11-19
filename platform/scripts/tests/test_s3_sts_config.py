@@ -71,6 +71,24 @@ class DocumentShapeTest(unittest.TestCase):
                          "the platform identity half is unchanged")
         self.assertEqual(doc["roles"][0]["roleArn"], ROLE_ARN)
 
+    def test_the_role_trusts_only_the_platform_identity(self):
+        """A future S3 identity must not be able to assume the all-buckets role (#407)."""
+        doc = script_document()
+        self.assertEqual(doc["identities"][0]["name"], "stardelt")
+        statement = doc["roles"][0]["trustPolicy"]["Statement"]
+        self.assertEqual(len(statement), 1)
+        self.assertEqual(
+            statement[0]["Principal"],
+            {"AWS": "arn:aws:iam::000000000000:user/stardelt"},
+            "the trust policy names the identity the gateway builds as "
+            "arn:aws:iam::<account>:user/<name>",
+        )
+        self.assertNotIn(
+            "*",
+            json.dumps(statement[0]["Principal"]),
+            "a wildcard principal lets every S3 identity assume the all-buckets role",
+        )
+
 
 class ChartAgreementTest(unittest.TestCase):
     @classmethod
