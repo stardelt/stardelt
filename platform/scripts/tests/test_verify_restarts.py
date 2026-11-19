@@ -284,6 +284,45 @@ class VerifyRestarts(unittest.TestCase):
         done = self.run_script(pods, ROWS="nova", RESTART_NODE_STALL_WINDOW="2")
         self.assertEqual(done.returncode, 1)
 
+    def test_error_exits_of_several_controllers_in_one_window_are_the_cluster_stall(self):
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(60)}),
+            pod("spark-operator-controller-7d-x", "spark-operator-controller-5c6d7f8b9",
+                restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(54)}),
+            pod("cnpg-cloudnative-pg-7d-x", "cnpg-cloudnative-pg-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(48)}),
+        ]
+        rows = "user-scheduler,spark-operator-controller,cnpg-cloudnative-pg"
+        done = self.run_script(pods, ROWS=rows)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        lines = [ln for ln in done.stdout.splitlines() if "pod(s) ready" in ln]
+        self.assertEqual(len(lines), 3, done.stdout)
+        for line in lines:
+            self.assertTrue(line.startswith("!"), line)
+            self.assertIn("cluster-wide exit(s)", line)
+            self.assertIn("controllers lost their leases", line)
+        self.assertIn("verify-restarts: PASS", done.stdout)
+        self.assertNotIn("✗", done.stdout)
+
+    def test_one_controller_still_fails_on_its_own_error_exit(self):
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(60)}),
+        ]
+        done = self.run_script(pods, ROWS="user-scheduler")
+        self.assertEqual(done.returncode, 1)
+        line = [ln for ln in done.stdout.splitlines() if "user-scheduler" in ln][0]
+        self.assertTrue(line.startswith("✗"), line)
+        self.assertIn("1 crash(es) within 3600s: Error exit=1", line)
+        self.assertIn("verify-restarts: FAIL (1 Deployment(s) had a container crash within 3600s)",
+                      done.stdout)
+
     def test_the_statefulset_pod_is_not_matched_by_the_name_prefix(self):
         pods = deployment_pods("nova", replicas=1) + [
             pod("nova-pg-1", "nova-pg", owner_kind="StatefulSet"),
