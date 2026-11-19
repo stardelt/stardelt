@@ -1,0 +1,230 @@
+# Spark Connect's token-checking front (stardelt#84 Q4, spike stardelt#208).
+#
+# Spark Connect authenticates nobody (platform#1096). This Deployment is the gate: Envoy's
+# jwt_authn verifies a Keycloak-signed access token with audience `spark-connect` before a
+# single gRPC frame reaches the driver. Measured in #208/#214: streamed ExecutePlan +
+# ReattachExecute pass unchanged, an unsigned call is refused with UNAUTHENTICATED "Jwt is
+# missing", and the stream needs `timeout: 0s` on the route and `stream_idle_timeout: 0s`
+# on the HCM (a query is silent while an executor works).
+#
+# The listener is plaintext h2c: the client's `;token=` forces TLS, so TLS terminates at
+# ingress-nginx with the platform's Let's Encrypt certificate, which speaks h2c
+# (`backend-protocol: GRPC`) to this Service. Nothing points here yet — this file only
+# makes the front exist and prove that it refuses an unsigned call.
+#
+# `__BASE_DOMAIN__` is rendered by `make install-spark` (the issuer and the host).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-connect-auth
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: spark-connect-auth, app.kubernetes.io/part-of: stardelt }
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address: { address: 127.0.0.1, port_value: 9901 }
+    static_resources:
+      listeners:
+        - name: spark-connect
+          address:
+            socket_address: { address: 0.0.0.0, port_value: 15002 }
+          # The network filter lives in a filter chain: Envoy's Listener has no `filters`
+          # of its own (v1.35 refuses that config, "no such field: 'filters'").
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: spark_connect
+                    codec_type: AUTO
+                    # A query stream is silent while an executor works (#208).
+                    stream_idle_timeout: 0s
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                    route_config:
+                      name: spark
+                      virtual_hosts:
+                        - name: spark
+                          domains: ["*"]
+                          routes:
+                            - match: { prefix: "/" }
+                              route:
+                                cluster: spark_connect
+                                timeout: 0s
+                    http_filters:
+                      - name: envoy.filters.http.jwt_authn
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                          providers:
+                            keycloak:
+                              issuer: https://id.__BASE_DOMAIN__/realms/stardelt
+                              audiences: ["spark-connect"]
+                              # Hand the verified JWT on: the upstream is where an identity would
+                              # have to be read from (the Connect server reads none today, #208).
+                              forward: true
+                              remote_jwks:
+                                http_uri:
+                                  uri: http://keycloak.stardelt.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs
+                                  cluster: keycloak
+                                  timeout: 5s
+                                cache_duration: 300s
+                          rules:
+                            - match: { prefix: "/" }
+                              requires: { provider_name: keycloak }
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: spark_connect
+          connect_timeout: 5s
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config:
+                # gRPC upstream: Envoy must not downgrade to HTTP/1 (#208).
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: spark_connect
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: spark-connect.stardelt.svc.cluster.local, port_value: 15002 }
+        - name: keycloak
+          connect_timeout: 5s
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: keycloak
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: keycloak.stardelt.svc.cluster.local, port_value: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-connect-auth
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: spark-connect-auth, app.kubernetes.io/part-of: stardelt }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: spark-connect-auth }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: spark-connect-auth, app.kubernetes.io/part-of: stardelt }
+    spec:
+      # Pod Security `restricted`: the image's own user is 101.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.35.0@sha256:cfe1c570e72aa4207853a37bd1c32c808a0036a351b16f73732dcfd0e5775175
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+          ports:
+            - { name: connect, containerPort: 15002, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: connect }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: connect }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - { name: config, mountPath: /etc/envoy, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: spark-connect-auth }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-connect-auth
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: spark-connect-auth, app.kubernetes.io/part-of: stardelt }
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: spark-connect-auth
+  ports:
+    - { name: connect, port: 15002, targetPort: connect, protocol: TCP }
+---
+# Who may reach the front: the ingress controller (the public name) and notebook pods (the
+# in-cluster path a later slice points the library at). Nothing else — the driver's own
+# policy still admits only notebooks and executors, and this front is the gate in front of it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spark-connect-auth-ingress
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: spark-connect-auth, app.kubernetes.io/part-of: stardelt }
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spark-connect-auth
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              component: singleuser-server
+      ports:
+        - { protocol: TCP, port: 15002 }
+---
+# The public name. The client's `;token=` forces TLS (measured, #208), so this is the only
+# route a token-carrying client can use; the certificate is the platform's Let's Encrypt
+# one. `letsencrypt-prod` is this cluster's Ready ClusterIssuer (the `nova` Ingress uses it);
+# an install with another issuer replaces the annotation. The read/send timeouts are the
+# ones a long-silent query needs — nginx's 60 s default would cut the stream.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: spark-connect
+  namespace: stardelt
+  labels: { app.kubernetes.io/name: spark-connect-auth, app.kubernetes.io/part-of: stardelt }
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["spark.__BASE_DOMAIN__"]
+      secretName: spark-connect-tls
+  rules:
+    - host: spark.__BASE_DOMAIN__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: spark-connect-auth
+                port:
+                  number: 15002

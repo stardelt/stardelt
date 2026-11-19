@@ -97,8 +97,17 @@ class SparkConnectMetricsTest(unittest.TestCase):
     def test_the_notebook_rule_is_unchanged(self):
         rules = [rule for rule in ingress_rules(self.documents)
                  if CONNECT_PORT in rule_ports(rule)]
-        self.assertEqual(1, len(rules), "exactly one ingress rule may mention 15002")
-        rule = rules[0]
+        # Two rules name 15002 since stardelt#231: the notebook rule below and the Envoy
+        # front (`spark-connect-auth`, manifests/spark-connect-auth.yaml) that verifies a
+        # token before a frame reaches the driver. The notebook rule is selected by its
+        # peer, and the other rule must be the front's — so the count still says something.
+        self.assertEqual(2, len(rules),
+                         "15002 is admitted to notebooks and to the token-checking front")
+        notebook = [rule for rule in rules
+                    if {"component": "singleuser-server"}
+                    == (((rule.get("from") or [{}])[0]).get("podSelector") or {}).get("matchLabels")]
+        self.assertEqual(1, len(notebook), "exactly one ingress rule is the notebook rule")
+        rule = notebook[0]
         self.assertEqual([{"protocol": "TCP", "port": CONNECT_PORT}], rule.get("ports"))
         peers = rule.get("from") or []
         self.assertEqual(1, len(peers), "the 15002 rule has exactly one peer")
@@ -113,6 +122,12 @@ class SparkConnectMetricsTest(unittest.TestCase):
                          "the notebook rule must not widen to other namespaces")
         self.assertNotEqual(SCRAPER, selector.get("matchLabels"),
                            "the notebook rule must not admit the scraper")
+        front = [other for other in rules if other is not rule]
+        self.assertEqual(
+            [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "spark-connect-auth"}}}],
+            front[0].get("from"),
+            "the second 15002 rule admits the token-checking front and nothing else",
+        )
 
     def test_the_per_user_catalogue_keeps_the_ui_dark(self):
         with open(CATALOGUE, encoding="utf-8") as handle:
