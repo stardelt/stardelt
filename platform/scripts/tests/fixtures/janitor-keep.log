@@ -1,0 +1,2 @@
+keep   spark-exec-0f1e2d3c4b5a6978-conf-map (created by a live spark driver)
+spark-confmap-janitor: would delete 0 ConfigMap(s); kept everything younger than 1s

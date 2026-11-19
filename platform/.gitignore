@@ -6,6 +6,8 @@
 *.pem
 *.key
 *.log
+# …except the janitor logs the check judges (scripts/tests/test_verify_spark_janitor.py).
+!scripts/tests/fixtures/*.log
 dev/hetzner-k3s/cluster.yaml
 
 # Umbrella chart dependencies — fetched by `make chart-deps`

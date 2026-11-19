@@ -248,6 +248,10 @@ verify-spark-query: _context ## One query through the shared Spark Connect serve
 verify-spark-config: _context ## The ConfigMap that pins the Spark executor image carries manifests/spark.yaml's digest
 	@NS=$(NAMESPACE) bash scripts/verify-spark-config.sh
 
+.PHONY: verify-spark-janitor
+verify-spark-janitor: _context ## The janitor's dry run keeps the map a live Spark driver created (JANITOR_DRY_RUN=1, max age 1s)
+	@NS=$(NAMESPACE) bash scripts/verify-spark-janitor.sh
+
 .PHONY: verify-spark-demo-sandbox
 verify-spark-demo-sandbox: _context ## The demo Spark sandbox: restricted PSS, no token, no internet, data plane reachable
 	@NS=$(NAMESPACE) bash scripts/verify-spark-demo-sandbox.sh
