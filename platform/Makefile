@@ -935,14 +935,6 @@ demo-sts-off: _context ## The rollback of demo-sts: sts-enabled=false on the war
 	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=false on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi
 	@NAMESPACE=$(NAMESPACE) YES=1 WAREHOUSE=$(or $(WAREHOUSE),gold) bash scripts/demo-sts.sh --off
 
-.PHONY: demo-sts-visitors demo-sts-visitors-check demo-sts-visitors-off
-demo-sts-visitors: _context ## Flip the three visitor catalogs to vended credentials (lab only; needs YES=1)
-	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-sts.sh --visitors-on
-demo-sts-visitors-check: _context ## Read-only: do bronze, silver and gold vend table-scoped credentials
-	@NAMESPACE=$(NAMESPACE) bash scripts/demo-sts.sh --visitors
-demo-sts-visitors-off: _context ## The rollback: sts-enabled=false on bronze, silver and gold (needs YES=1)
-	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-sts.sh --visitors-off
-
 .PHONY: demo-connection demo-connection-off
 demo-connection: _context ## The demo's first Connection: RNAcentral's public PostgreSQL, its secret in OpenBao and the managed store (lab only; needs YES=1)
 	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-connection.sh
@@ -995,7 +987,7 @@ CATALOG_CLIENTS := catalog-trino catalog-nova catalog-spark catalog-airflow cata
 
 .PHONY: sync-catalog-clients
 sync-catalog-clients: _context ## Create/converge the seven svc-catalog-* service clients and their Secrets (idempotent)
-	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-trino AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
+	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-trino AUDIENCES=lakekeeper,lakekeeper-trino ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
 	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-nova AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
 	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-spark AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
 	@NAMESPACE=$(NAMESPACE) KIND=service NAME=catalog-airflow AUDIENCES=lakekeeper ROTATE=$(ROTATE) bash scripts/keycloak-sync-principal.sh
@@ -1377,6 +1369,12 @@ verify-trino-auth: _context ## Prove Trino's authentication end to end, includin
 # dbt can list relations; CALL, the runtime tables and tpch/tpcds stay denied.
 verify-trino-system-catalog: _context ## Prove `system` is read-only for people (dbt can list) and CALL stays denied
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trino-system-catalog.sh
+
+# platform#486 (decision #393, option A): Trino is Lakekeeper's trusted engine through the
+# audience `lakekeeper-trino`, which only svc-catalog-trino carries — so a SECURITY DEFINER
+# view (Trino's and dbt's default) can be created, and no other client can write its owner.
+verify-trusted-engine: _context ## Prove Trino creates a SECURITY DEFINER view and no other client may set its owner
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trusted-engine.sh
 
 # platform#131 A1: a worker drains before it exits. The chart's own connection test cannot
 # run on this install (platform#1536), so its weight-2 graceful-shutdown hook never runs;
