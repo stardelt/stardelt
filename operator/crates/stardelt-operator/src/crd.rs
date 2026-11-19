@@ -2214,6 +2214,17 @@ pub struct StreamAppSpec {
         regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     )]
     pub owner_group: Option<String>,
+    /// Groups that may READ the stream in Nova — list it and open it — and nothing else.
+    /// Stopping it and changing it stay with `ownerGroup`. Absent means the owner group only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        length(max = 16),
+        inner(
+            length(min = 1, max = 64),
+            regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+        )
+    )]
+    pub viewers: Vec<String>,
     /// The `ServicePrincipal` the job runs as (convention: `pipeline-<ownerGroup>`).
     #[serde(default, rename = "runAs", skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 40), regex(pattern = r"^[a-z0-9][a-z0-9-]*$"))]
@@ -2407,6 +2418,12 @@ impl StreamAppSpec {
             if !data_identifier_ok(key) {
                 return Err(format!("merge key `{key}` must be a column name"));
             }
+        }
+        if self.viewers.len() > 16 {
+            return Err("viewers holds at most 16 groups".to_string());
+        }
+        if let Some(bad) = self.viewers.iter().find(|group| !group_name_ok(group)) {
+            return Err(format!("viewers holds `{bad}`, which is not a group name"));
         }
         Ok(())
     }
@@ -6135,6 +6152,12 @@ mod tests {
         assert!(matches!(spec.restart_policy, StreamRestartPolicy::Always));
     }
 
+    fn stream_app_spec_schema() -> serde_json::Value {
+        let yaml = serde_yaml::to_string(&StreamApp::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"].clone()
+    }
+
     fn minimal_stream_spec(
         topic: &str,
         table: &str,
@@ -6151,6 +6174,60 @@ mod tests {
             }
         }))
         .expect("stream spec parses")
+    }
+
+    #[test]
+    fn stream_app_viewers_are_optional_group_names() {
+        let schema = stream_app_spec_schema();
+        let viewers = &schema["properties"]["viewers"];
+        assert_eq!(viewers["type"], "array");
+        assert_eq!(viewers["maxItems"], 16);
+        assert_eq!(viewers["items"]["type"], "string");
+        assert_eq!(viewers["items"]["maxLength"], 64);
+        assert_eq!(
+            viewers["items"]["pattern"], schema["properties"]["ownerGroup"]["pattern"],
+            "a viewer is a group name, exactly as the owner group is"
+        );
+        let required = schema["required"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !required.iter().any(|name| name == "viewers"),
+            "viewers is not required"
+        );
+
+        let empty = minimal_stream_spec(
+            "pegelonline.measurements",
+            "gold.pegelonline_hourly",
+            SinkMode::Merge,
+            vec!["station_uuid"],
+        );
+        assert!(
+            !serde_json::to_value(&empty)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("viewers"),
+            "an empty viewers list is left out of the spec"
+        );
+    }
+
+    #[test]
+    fn stream_app_validation_rejects_a_bad_viewer() {
+        let mut spec = minimal_stream_spec(
+            "pegelonline.measurements",
+            "gold.pegelonline_hourly",
+            SinkMode::Merge,
+            vec!["station_uuid"],
+        );
+        spec.viewers = vec!["visitors".into(), "not a group".into()];
+        assert!(spec.validate("pegelonline").is_err());
+
+        spec.viewers = (0..17).map(|i| format!("group{i}")).collect();
+        assert!(spec.validate("pegelonline").is_err());
+
+        spec.viewers = vec!["visitors".into()];
+        assert!(spec.validate("pegelonline").is_ok());
+        spec.viewers = vec![];
+        assert!(spec.validate("pegelonline").is_ok());
     }
 
     #[test]
@@ -6199,16 +6276,18 @@ mod tests {
 
     #[test]
     fn stream_app_round_trips_camel_case() {
-        let spec = minimal_stream_spec(
+        let mut spec = minimal_stream_spec(
             "pegelonline.measurements",
             "gold.pegelonline_hourly",
             SinkMode::Merge,
             vec!["station_uuid"],
         );
+        spec.viewers = vec!["visitors".into()];
         let json = serde_json::to_value(&spec).expect("serialises");
         assert!(json.get("source").unwrap().get("connectionRef").is_some());
         assert!(json.get("sink").unwrap().get("mergeKeys").is_some());
         assert!(json.get("restartPolicy").is_some());
+        assert_eq!(json["viewers"], serde_json::json!(["visitors"]));
         // checkpointPrefix and ownerGroup/runAs are absent (skipped when None/empty)
         assert!(json.get("sink").unwrap().get("checkpointPrefix").is_none());
         assert!(json.get("ownerGroup").is_none());
