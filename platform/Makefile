@@ -230,6 +230,10 @@ verify-spark-guard: _context ## The Spark Connect driver may create executor pod
 verify-spark-query: _context ## One query through the shared Spark Connect server: session, range(10).count(), repartition(4).count()
 	@NS=$(NAMESPACE) bash scripts/verify-spark-query.sh
 
+.PHONY: verify-spark-no-platform-key
+verify-spark-no-platform-key: _context ## The platform storage key is absent from the shared Spark server's driver, executors, user code and executor admission (#75; FAIL until the removal slice)
+	@NS=$(NAMESPACE) bash scripts/verify-spark-no-platform-key.sh
+
 .PHONY: verify-spark-config
 verify-spark-config: _context ## The ConfigMap that pins the Spark executor image carries manifests/spark.yaml's digest
 	@NS=$(NAMESPACE) bash scripts/verify-spark-config.sh
