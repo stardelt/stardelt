@@ -89,6 +89,11 @@ up() { # url -> 0 when anything but a transport failure answered
 ready=no
 for _ in $(seq 1 30); do
   if up "$LK/management/v1/info"; then ready=yes; break; fi
+  # A port-forward that has already exited (no cluster, no such Service) is not worth 30 seconds.
+  if ! kill -0 "$LK_PID" 2>/dev/null; then
+    echo "the port-forward to svc/lakekeeper in $NS exited" >&2
+    exit 1
+  fi
   sleep 1
 done
 [ "$ready" = "yes" ] || { echo "lakekeeper did not answer within 30s" >&2; exit 1; }

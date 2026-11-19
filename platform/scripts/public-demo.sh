@@ -818,7 +818,8 @@ PY
     if out="$(NAMESPACE="$NAMESPACE" bash scripts/demo-sts.sh --visitors 2>&1)"; then
       check_msg="bronze, silver and gold vend table-scoped storage credentials"
     else
-      check_msg="$(printf '%s\n' "$out" | grep -m1 'sts-enabled=false')"
+      check_msg="$(printf '%s\n' "$out" | grep -m1 'sts-enabled=false' || true)"
+      [ -n "$check_msg" ] || check_msg="demo-sts.sh did not answer: $(printf '%s\n' "$out" | head -n1)"
       check_fix="make demo-sts-visitors YES=1"
       return 1
     fi
