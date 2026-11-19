@@ -161,6 +161,10 @@ def _notebook_problems(where, notebook, files):
             )
         if {"name", "objectVersion"} & set(notebook):
             problems.append((where, "a notebook that names a file cannot also name a version: remove name and objectVersion"))
+        if "connection" in notebook:
+            connection = notebook["connection"]
+            if not isinstance(connection, str) or not CONNECTION.match(connection):
+                problems.append((where, "notebook.connection is a Connection name (1 to 40 lower-case letters, digits and dashes)"))
     return problems
 
 
@@ -726,6 +730,8 @@ def _pinned(spec, answer):
     pinned = {"name": PurePosixPath(notebook["file"]).name, "objectVersion": answer["objectVersion"]}
     if notebook.get("params"):
         pinned["params"] = notebook["params"]
+    if notebook.get("connection"):
+        pinned["connection"] = notebook["connection"]
     return {**spec, "notebook": pinned}
 
 

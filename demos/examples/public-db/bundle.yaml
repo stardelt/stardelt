@@ -1,0 +1,11 @@
+bundle:
+  name: public-db
+  ownerGroup: demo
+include: [pipelines/*.yaml]
+files: [notebooks/load_rnacentral.ipynb]
+requires:
+  connections: [rnacentral]
+targets:
+  prod:
+    mode: production
+    runAs: pipeline-demo

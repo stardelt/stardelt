@@ -14,7 +14,7 @@
 #
 #   1. the External Secrets store `openbao-managed` (scripts/eso-openbao-store.sh managed);
 #   2. the secret `secret/connections/managed/rnacentral` (keys `user`, `password`);
-#   3. the `Connection` rnacentral, scope `managed`, `usableBy: [visitors]`.
+#   3. the `Connection` rnacentral, scope `managed`, `usableBy: [visitors, demo]`.
 #
 # `managed` means the platform's own work uses it, never a person's notebook: a pipeline of
 # the group `visitors` may use it, while `stardelt.connection()` in a notebook refuses a
@@ -91,7 +91,8 @@ metadata:
   labels: { stardelt.io/managed-by: public-demo }
 spec:
   scope: managed
-  usableBy: [$GROUP]
+  # "visitors" see it, "demo" runs the pipeline that uses it (the loader refuses any other group).
+  usableBy: [visitors, demo]
   type: postgresql
   config:
     host: $HOST
