@@ -59,7 +59,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: sync
-              image: ghcr.io/stardelt/airflow:demo@sha256:1ded9dcf6b19c8b94357de395f86d8d37367ada043807096548342ef581a72d6
+              image: ghcr.io/stardelt/airflow:demo@sha256:1bc543d9f48c0f70f399ce43c9efa8f5776955697c53c929cebb3470100654b8
               command: ["python", "/opt/scripts/sync.py"]
               env:
                 - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
