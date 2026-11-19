@@ -354,6 +354,15 @@ def sql(query, params=None):
             FutureWarning,
             stacklevel=2,
         )
+    return _sql(query, params)
+
+
+def _sql(query, params=None):
+    """Run ``query`` as the signed-in user, return the rows as a DataFrame.
+
+    The body of :func:`sql` without its deprecation warning: the library's own
+    callers use this one, so a notebook never warns about a call it did not make.
+    """
     if not _on_platform():
         from stardelt import api, statements
 
@@ -589,7 +598,7 @@ def _catalog_names():
     catalog every install has. The message never carries the token.
     """
     try:
-        frame = sql("SHOW CATALOGS")
+        frame = _sql("SHOW CATALOGS")
     except Exception:  # noqa: BLE001 - Spark-only work must survive a Trino outage
         print(
             "stardelt.spark: Trino is not reachable — configuring only the warehouse catalog.",
