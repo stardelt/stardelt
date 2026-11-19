@@ -122,7 +122,8 @@ class DbtPodOperator(KubernetesPodOperator):
 
     The image and the CA Secret come from the loader's environment (`PIPELINE_DBT_*`), read at
     execution time, so a DAG still parses on an install that has no dbt image and the task fails
-    with a sentence instead of a missing image.
+    with a sentence instead of a missing image. The image is pulled on every run, because its
+    tag is mutable and a rebuilt image has to reach the next pod.
     """
 
     def __init__(
@@ -148,6 +149,10 @@ class DbtPodOperator(KubernetesPodOperator):
         super().__init__(
             namespace=namespace,
             image=None,  # set in execute from PIPELINE_DBT_IMAGE
+            # `:demo` is a mutable tag, and the API server would default it to IfNotPresent: a
+            # rebuilt image must reach the next pod, or a fix under demos/images/dbt or the shop
+            # project stays invisible on a node that ran the old one (#338).
+            image_pull_policy="Always",
             cmds=["/usr/local/bin/stardelt-dbt"],
             arguments=dbt_arguments(
                 project=project, select=select, threads=threads, vars_text=vars_text
