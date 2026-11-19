@@ -433,8 +433,13 @@ catalog:
   # distinct (camelCase) from the top-level ones: they reach the catalog Deployment, its
   # `check-db` init container and the `lakekeeper-db-migration-<revision>` Job. The chart keeps
   # `runAsUser: 65532` / `runAsGroup: 65534` from `catalog.image.uid/gid`; `restricted` needs
-  # runAsNonRoot and seccomp on top. The `opa` sidecar has no value key (hardcoded in the chart),
-  # so this pod stays a documented limit — see the ticket.
+  # runAsNonRoot and seccomp on top. The `opa` sidecar carries no value key: the chart has only
+  # `OPABridge.uid`/`gid`/`resources` (checked in 0.14.0 and in the chart's `main`), so it runs
+  # without `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]` and `restricted`
+  # refuses this pod by name. That is the accepted, reported limit of stardelt/stardelt#218:
+  # `make verify-pod-security` lists it as a known exception and `platform/Makefile:164-166`
+  # passes `--allow '^lakekeeper-'` for it. The fix belongs upstream (an `OPABridge.securityContext`
+  # value, then a chart bump in stardelt/stardelt#67); do not add a post-renderer for it.
   podSecurityContext:
     runAsNonRoot: true
     seccompProfile: {type: RuntimeDefault}
