@@ -4206,8 +4206,9 @@ test.describe('schedule notebook', () => {
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('pinned-run')
     await dialog.getByRole('button', { name: 'Create schedule' }).click()
     await expect.poll(() => posted).not.toBeNull()
+    // A create sends `connection: null`: the dialog has no control for it (#382).
     expect((posted as Record<string, unknown>).notebook).toEqual({
-      name: 'smoke.ipynb', objectVersion: V2, params: { days: '7' },
+      name: 'smoke.ipynb', objectVersion: V2, params: { days: '7' }, connection: null,
     })
     expect(bodies(requests, '/api/pipelines')).toHaveLength(1)
     await context.close()
@@ -4240,7 +4241,10 @@ test.describe('schedule notebook', () => {
     await expect.poll(() => posted).toEqual({
       name: 'notebook-run',
       ownerGroup: 'analytics',
-      notebook: { name: 'smoke.ipynb', objectVersion: V3, params: { days: '2026-10-20', region: 'us' } },
+      notebook: {
+        name: 'smoke.ipynb', objectVersion: V3, params: { days: '2026-10-20', region: 'us' },
+        connection: null,
+      },
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
@@ -4280,7 +4284,7 @@ test.describe('schedule notebook', () => {
     await dialog.getByRole('button', { name: 'Save schedule' }).click()
     const first = bodies(requests, `/api/pipelines/${NS}/nightly`, 'PUT')
     expect(first).toEqual([{
-      notebook: { name: 'smoke.ipynb', objectVersion: V2, params: { days: '9' } },
+      notebook: { name: 'smoke.ipynb', objectVersion: V2, params: { days: '9' }, connection: null },
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
@@ -4296,7 +4300,7 @@ test.describe('schedule notebook', () => {
     await expect.poll(() => bodies(requests, `/api/pipelines/${NS}/nightly`, 'PUT').length).toBe(2)
     const second = bodies(requests, `/api/pipelines/${NS}/nightly`, 'PUT')[1]
     expect(second.notebook).toEqual({
-      name: 'smoke.ipynb', objectVersion: V3, params: { days: '1', region: 'eu' },
+      name: 'smoke.ipynb', objectVersion: V3, params: { days: '1', region: 'eu' }, connection: null,
     })
     expect(second).not.toHaveProperty('sql')
     await context.close()

@@ -873,6 +873,12 @@ export type NotebookRequest = {
   objectVersion: string
   /** The values papermill binds; names are the tagged cell's, values at most 256 characters. */
   params: Record<string, string>
+  /**
+   * The `Connection` whose secret fields the task pod receives as `CONN_<NAME>_<KEY>`
+   * (the CRD's `tasks[].connection`, #369). The dialog does not edit it yet; it sends back
+   * the stored value so a save cannot drop it.
+   */
+  connection?: string | null
 }
 
 /** `POST /api/pipelines/check`: what the engine says about a statement, without running it. */
