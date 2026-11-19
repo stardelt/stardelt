@@ -272,6 +272,11 @@ hub:
           names = {group.name for group in spawner.user.groups}
           if "visitors" in names and not names & {"stardelt-users", "stardelt-admins"}:
               spawner.environment["DEMO_MODE"] = "1"
+              # stardelt/stardelt#201: a visitor's `spark` is the demo sandbox, never the shared server.
+              # `spark-connect-ingress` refuses these pods on the shared server; the sandbox is the one
+              # with the visitor ingress and the 2-core local limit. The Service and namespace come from
+              # `manifests/spark-demo-sandbox.yaml`; `scripts/check-hub-config.py` keeps the two in step.
+              spawner.environment["SPARK_REMOTE"] = "sc://spark-demo.stardelt-demo-spark.svc.cluster.local:15002"
 
       c.KubeSpawner.pre_spawn_hook = _demo_mode
 
