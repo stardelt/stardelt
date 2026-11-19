@@ -21,6 +21,12 @@
 #
 # Check 4 is skipped (and said so) when TRINO_VERIFY_USER_PASSWORD is unset, so
 # the anonymous and certificate checks still run without a credential.
+#
+# Environment:
+#   NAMESPACE          default stardelt
+#   PROBE_IMAGE        image for the probe pods (default curlimages/curl:8.10.1); must be
+#                      repo@sha256:<digest> or this default — a floating tag is refused.
+#
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -58,7 +64,7 @@ kubectl -n "$NAMESPACE" get secret trino-ca >/dev/null 2>&1 \
 # The pod's shell prints the check's variables; the caller parses them. A failing
 # curl must still leave the pod's output readable, so the script never sets -e.
 run_probe() {
-  local name="$1" script="$2" volumes="$3" mounts="$4" overrides
+  local name="$1" script="$2" volumes="$3" mounts="$4" overrides merged
   overrides="$(PROBE="$name" IMAGE="$PROBE_IMAGE" SCRIPT="$script" VOLUMES="$volumes" MOUNTS="$mounts" \
     python3 - <<'PY'
 import json, os
@@ -79,9 +85,14 @@ print(json.dumps({
 PY
 )"
   # The merge adds the restricted Pod Security floor (platform#1656); the probe's command,
-  # volumes and mounts pass through unchanged.
+  # volumes and mounts pass through unchanged. A refused merge (a floating PROBE_IMAGE)
+  # would leave the override empty and start a pod without its own command, whose empty
+  # log then blames Trino's TLS (stardelt/stardelt#212).
+  if ! merged="$(printf '%s' "$overrides" | python3 scripts/probe-pod-spec.py --merge)"; then
+    fail "cannot build the $name probe pod spec (probe-pod-spec failed)"
+  fi
   kubectl -n "$NAMESPACE" run "$name" --restart=Never --image="$PROBE_IMAGE" \
-    --overrides="$(printf '%s' "$overrides" | python3 scripts/probe-pod-spec.py --merge)" >/dev/null
+    --overrides="$merged" >/dev/null
   kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$name" --timeout=180s >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" logs "$name" 2>/dev/null || true
   kubectl -n "$NAMESPACE" delete pod "$name" --wait=false >/dev/null 2>&1 || true
