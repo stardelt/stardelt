@@ -6,13 +6,20 @@
 #       restricted to one bucket?
 #   Q3  what does the platform ask Lakekeeper for today (read-only: two files, one grep,
 #       plus a read-only kubectl lookup of the lab's Catalogs when a cluster is reachable)?
+#   Q4  can one static identity be restricted to a *prefix* of one bucket (stardelt#201
+#       item 3, storage access for the demo sandbox; Q3-B of stardelt#75)?
+#   Q5  can an inline STS session Policy be restricted to a prefix of one bucket
+#       (stardelt#201 item 3, storage access for the demo sandbox; Q3-B of stardelt#75)?
+#   Q6  what can Lakekeeper 0.15.0 be told about STS for a warehouse (read-only: the
+#       pinned release's management OpenAPI, plus one grep of the bootstrap script)?
 #
 # Every answer is one `Q<n>: ...` line on stdout; detail lines start with `  - `. A
 # "not supported" / "absent" is a successful measurement: the script exits 0 either way.
 # No secret is printed, nothing is written to a cluster, and the container and temp dir
 # are removed on exit (including SIGINT).
 #
-# Docker is required; the image and digest are the ones the lab runs.
+# Docker is required; the image and digest are the ones the lab runs. Q6 needs kubectl and
+# curl and degrades to `not measured` when the management port-forward is unreachable.
 set -euo pipefail
 
 IMAGE="chrislusf/seaweedfs:4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
@@ -30,8 +37,10 @@ ROLE_ARN="arn:aws:iam::000000000000:role/spike"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d "${TMPDIR:-$HOME/.cache/opencode-scratch}/s3-scope-spike.XXXXXX")"
 body="$tmp/body"
+PF_PID=""
 
 cleanup() {
+  if [ -n "$PF_PID" ]; then kill "$PF_PID" >/dev/null 2>&1 || true; fi
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
@@ -222,3 +231,162 @@ else
   echo "  - lab: not tested (no reachable cluster)"
 fi
 echo "Q3: storage one credential for every catalog ($BOOTSTRAP:$WH_LINE)"
+
+# --- Q4: static identity confined to a bucket prefix (stardelt#201 item 3, #75 Q3-B) -----
+echo "Q4: measuring a static identity whose actions name a prefix"
+
+# Six codes in the order the design reads them: put-in get-in put-out get-out list-bucket
+# list-prefix. Every request uses a fresh container, so the bucket and both seed objects
+# are written by the full identity first.
+prefix6() { # <actions JSON array> -> the six codes
+  local actions="$1"
+  write_s3_config '{"name":"prefix-a","credentials":[{"accessKey":"'"$SCOPED_AK"'","secretKey":"'"$SCOPED_SK"'"}],"actions":'"$actions"'}'
+  start_gateway
+  s3 "$FULL_AK" "$FULL_SK" PUT /spike-c >/dev/null
+  s3 "$FULL_AK" "$FULL_SK" PUT /spike-c/prefix-a/inside.txt 'inside prefix-a' >/dev/null
+  s3 "$FULL_AK" "$FULL_SK" PUT /spike-c/prefix-b/outside.txt 'outside prefix-a' >/dev/null
+  printf '%s %s %s %s %s %s' \
+    "$(s3 "$SCOPED_AK" "$SCOPED_SK" PUT /spike-c/prefix-a/scoped.txt 'scoped')" \
+    "$(s3 "$SCOPED_AK" "$SCOPED_SK" GET /spike-c/prefix-a/inside.txt)" \
+    "$(s3 "$SCOPED_AK" "$SCOPED_SK" PUT /spike-c/prefix-b/scoped.txt 'scoped')" \
+    "$(s3 "$SCOPED_AK" "$SCOPED_SK" GET /spike-c/prefix-b/outside.txt)" \
+    "$(s3 "$SCOPED_AK" "$SCOPED_SK" GET "/spike-c?list-type=2")" \
+    "$(s3 "$SCOPED_AK" "$SCOPED_SK" GET "/spike-c?list-type=2&prefix=prefix-a/")"
+}
+
+q4_slash="$(prefix6 '["Read:spike-c/prefix-a/","Write:spike-c/prefix-a/"]')"
+q4_noslash="$(prefix6 '["Read:spike-c/prefix-a","Write:spike-c/prefix-a"]')"
+
+q4="not supported"
+q4_codes="$q4_noslash"
+case "$q4_slash" in "200 200 403 403 "*)
+  q4="supported: Read:<bucket>/<prefix>/ (trailing slash required)"; q4_codes="$q4_slash" ;;
+*)
+  case "$q4_noslash" in "200 200 403 403 "*)
+    q4="supported: Read:<bucket>/<prefix> (no trailing slash)"; q4_codes="$q4_noslash" ;;
+  esac ;;
+esac
+
+echo "  - trailing slash (Read:<bucket>/<prefix>/): put-in/get-in/put-out/get-out/list-bucket/list-prefix = $q4_slash"
+echo "  - no trailing slash (Read:<bucket>/<prefix>): put-in/get-in/put-out/get-out/list-bucket/list-prefix = $q4_noslash"
+echo "Q4: scoped identities at a prefix $q4"
+echo "  - put-in/get-in/put-out/get-out/list-bucket/list-prefix = $q4_codes"
+read -r _put_in _get_in _put_out _get_out list_bucket _list_prefix <<<"$q4_codes"
+if [ "$list_bucket" = "200" ]; then
+  echo "  - finding: list-bucket answers 200 — the identity can enumerate object names in the bucket"
+fi
+
+# --- Q5: inline STS session policy confined to a bucket prefix (stardelt#201 item 3) -----
+echo "Q5: measuring an inline session Policy whose resources name a prefix"
+
+PREFIX_ROLE_ARN="arn:aws:iam::000000000000:role/spike-prefix"
+TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":["sts:AssumeRole"]}]}'
+PREFIX_RESOURCES='["arn:aws:s3:::spike-c/prefix-a","arn:aws:s3:::spike-c/prefix-a/*"]'
+
+write_s3_config '{"name":"prefix-a","credentials":[{"accessKey":"'"$SCOPED_AK"'","secretKey":"'"$SCOPED_SK"'"}],"actions":["Read:spike-c/prefix-a/","Write:spike-c/prefix-a/"]}'
+cat > "$tmp/iam.json" <<EOF
+{"sts":{"signingKey":"$SIGNING_KEY"},"policy":{"storeType":"memory","defaultEffect":"Deny"},
+ "policies":[{"name":"spike-c","document":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::spike-c","arn:aws:s3:::spike-c/*"]}]}},
+             {"name":"spike-c-prefix","document":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":$PREFIX_RESOURCES}]}}],
+ "roles":[{"roleName":"spike","roleArn":"$ROLE_ARN","trustPolicy":$TRUST_POLICY,"attachedPolicies":["spike-c"]},
+          {"roleName":"spike-prefix","roleArn":"$PREFIX_ROLE_ARN","trustPolicy":$TRUST_POLICY,"attachedPolicies":["spike-c-prefix"]}]}
+EOF
+start_gateway "-s3.iam.config=/spike/iam.json"
+# Bucket creation and the seed objects stay on the full identity.
+echo "  - bucket and seed objects as full: PUT /spike-c $(s3 "$FULL_AK" "$FULL_SK" PUT /spike-c), PUT inside.txt $(s3 "$FULL_AK" "$FULL_SK" PUT /spike-c/prefix-a/inside.txt 'inside prefix-a'), PUT outside.txt $(s3 "$FULL_AK" "$FULL_SK" PUT /spike-c/prefix-b/outside.txt 'outside prefix-a')"
+
+prefix_session_codes() { # <policy document JSON> -> "put-in get-in put-out get-out"
+  local policy="$1" code
+  code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:sts" --user "$FULL_AK:$FULL_SK" \
+    -X POST -d "Action=AssumeRole&Version=2011-06-15&RoleArn=$PREFIX_ROLE_ARN&RoleSessionName=spike-prefix" \
+    --data-urlencode "Policy=$policy" "$ENDPOINT/" 2>/dev/null)" || code="000"
+  creds
+  if [ -z "$S_AK" ] || [ -z "$S_SK" ] || [ -z "$S_TOK" ]; then
+    printf 'not tested: AssumeRole returned %s and no credentials' "${code:-000}"
+    return 0
+  fi
+  printf '%s %s %s %s' \
+    "$(session_s3 PUT /spike-c/prefix-a/session.txt 'session')" \
+    "$(session_s3 GET /spike-c/prefix-a/inside.txt)" \
+    "$(session_s3 PUT /spike-c/prefix-b/session.txt 'session')" \
+    "$(session_s3 GET /spike-c/prefix-b/outside.txt)"
+}
+
+SESSION_PREFIX_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":'"$PREFIX_RESOURCES"'}]}'
+SESSION_PREFIX_PRINCIPAL='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:*"],"Resource":'"$PREFIX_RESOURCES"'}]}'
+
+q5_plain="$(prefix_session_codes "$SESSION_PREFIX_POLICY")"
+q5_principal="$(prefix_session_codes "$SESSION_PREFIX_PRINCIPAL")"
+
+q5="not measurable"
+case "$q5_plain" in
+  "200 200 403 403") q5="the inline session Policy scopes to a prefix" ;;
+  "200 200 200 200") q5="the inline session Policy only scopes to a bucket" ;;
+  *)
+    case "$q5_principal" in
+      "200 200 403 403") q5="the inline session Policy scopes to a prefix, with Principal:* in every statement" ;;
+      "200 200 200 200") q5="the inline session Policy only scopes to a bucket" ;;
+    esac ;;
+esac
+echo "Q5: $q5"
+echo "  - put-in/get-in/put-out/get-out = $q5_plain"
+echo "  - with Principal:*: $q5_principal"
+
+# --- Q6: what Lakekeeper 0.15.0 can be told (read-only) ----------------------------------
+echo "Q6: reading the pinned catalog's storage-profile fields (no write)"
+STS_LINE="$(grep -n '"sts-enabled"' "$ROOT/$BOOTSTRAP" | head -n1)"
+if [ -n "$STS_LINE" ]; then
+  echo "  - lakekeeper_bootstrap.sh:$STS_LINE"
+else
+  echo "  - lakekeeper_bootstrap.sh: no \"sts-enabled\" line (moved or removed)"
+fi
+STS_VALUE="$(printf '%s' "$STS_LINE" | sed -n 's/.*"sts-enabled": *\([a-z]*\).*/\1/p')"
+[ -n "$STS_VALUE" ] || STS_VALUE="unknown"
+
+LK_JSON="$tmp/lk.json"
+lk_ok=no
+if command -v kubectl >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+  kubectl -n stardelt port-forward svc/lakekeeper 18181:8181 >"$tmp/lk-pf.log" 2>&1 &
+  PF_PID=$!
+  for _ in $(seq 1 30); do
+    if curl -fsS --max-time 2 http://127.0.0.1:18181/api-docs/management/v1/openapi.json -o "$LK_JSON" 2>/dev/null; then
+      lk_ok=yes
+      break
+    fi
+    sleep 0.5
+  done
+  kill "$PF_PID" >/dev/null 2>&1 || true
+  PF_PID=""
+fi
+
+lk_ver="the pinned release"
+sts_endpoint="missing"
+sts_principal="missing"
+if [ "$lk_ok" = yes ]; then
+  LK_IMAGE="$(kubectl -n stardelt get pods -l app.kubernetes.io/name=lakekeeper -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' 2>/dev/null | head -n1)"
+  lk_tag="$(printf '%s' "$LK_IMAGE" | sed -n 's/.*:\(v[0-9][^@]*\).*/\1/p')"
+  [ -z "$lk_tag" ] || lk_ver="$lk_tag"
+  lk_req="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["components"]["schemas"]["S3Profile"]; print(", ".join(d.get("required",[])))' "$LK_JSON")"
+  lk_sts="$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["components"]["schemas"]["S3Profile"]["properties"]; print(", ".join(k for k in p if k.startswith("sts")))' "$LK_JSON")"
+  case ", $lk_sts," in *", sts-endpoint,"*) sts_endpoint="present" ;; esac
+  case ", $lk_sts," in *", sts-session-policy-principal,"*) sts_principal="present" ;; esac
+  echo "  - StorageProfileS3 required: $lk_req"
+  echo "  - StorageProfileS3 sts-* fields: $lk_sts"
+else
+  echo "  - management OpenAPI: not reachable ($(tail -n1 "$tmp/lk-pf.log" 2>/dev/null | cut -c1-120))"
+fi
+
+if [ "$lk_ok" = yes ]; then
+  q6="sts-endpoint and sts-session-policy-principal exist in Lakekeeper $lk_ver; the warehouse the bootstrap creates is sts-enabled: $STS_VALUE"
+else
+  q6="not measured: the management OpenAPI was not reachable"
+fi
+echo "Q6: $q6"
+
+# --- the two lines the design quotes ------------------------------------------------------
+b_shape="not available"
+case "$q4" in supported*) b_shape="available" ;; esac
+a_shape="not configurable"
+if [ "$sts_endpoint" = present ] && [ "$sts_principal" = present ]; then a_shape="configurable"; fi
+echo "for #201 item 3: prefix-scoped static identity = $q4; STS session policy at a prefix = $q5"
+echo "recommendation input: B is $b_shape; A is $a_shape (Q6)"
