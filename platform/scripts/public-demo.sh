@@ -37,7 +37,9 @@
 #
 # --check only, after the on-mode steps: row 18 is the shop's three scheduled bundle
 # pipelines and row 19 the dbt run (shop-dbt, a dbt task on project shop, viewers=[visitors]),
-# both fixed by `make demo-shop YES=1` (#335).
+# both fixed by `make demo-shop YES=1` (#335). Row 20 is the demo's Connection to
+# RNAcentral's public PostgreSQL (scope managed, usableBy visitors) and row 21 the key
+# names of its Secret, both fixed by `make demo-connection YES=1` (#349).
 #
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
@@ -183,6 +185,8 @@ if [ "$mode" = check ]; then
       17) check_17 || rc=1 ;;
       18) check_18 || rc=1 ;;
       19) check_19 || rc=1 ;;
+      20) check_20 || rc=1 ;;
+      21) check_21 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -689,6 +693,43 @@ PY
     check_msg="shop-dbt is a dbt task on project shop and $GROUP may see it"
   }
 
+  # 20. The demo's Connection reaches RNAcentral's public PostgreSQL (#349, #79 point 3): the
+  # platform's own work uses it (scope managed), never a person's notebook.
+  check_20() {
+    local document ready scope users has_group
+    document="$(kubectl -n "$NAMESPACE" get connection rnacentral -o json 2>/dev/null || true)"
+    if [ -z "$document" ]; then
+      check_msg="the Connection rnacentral does not exist"
+      check_fix="make demo-connection YES=1"
+      return 1
+    fi
+    ready="$(jq -r '.status.ready // false' <<<"$document")"
+    scope="$(jq -r '.spec.scope // ""' <<<"$document")"
+    users="$(jq -r '(.spec.usableBy // []) | join(",")' <<<"$document")"
+    has_group="$(jq -r --arg g "$GROUP" 'if ((.spec.usableBy // []) | index($g)) then "yes" else "" end' <<<"$document")"
+    if [ "$ready" = true ] && [ "$scope" = managed ] && [ "$has_group" = yes ]; then
+      check_msg="Connection rnacentral is Ready (managed, usableBy: $users)"
+    else
+      check_msg="Connection rnacentral is ready=${ready:-?}, scope=${scope:-?}, usableBy=${users:-none} (want ready, managed, $GROUP)"
+      check_fix="make demo-connection YES=1"
+      return 1
+    fi
+  }
+
+  # 21. Its Secret holds exactly the keys the CRD names (#349) — the names only, never a value.
+  check_21() {
+    local keys
+    keys="$(kubectl -n "$NAMESPACE" get secret conn-rnacentral -o json 2>/dev/null \
+      | jq -r '.data | keys | join(",")')" || true
+    if [ "$keys" = "password,user" ]; then
+      check_msg="Secret conn-rnacentral holds the keys password,user"
+    else
+      check_msg="Secret conn-rnacentral holds the keys '${keys:-nothing}' (want password,user)"
+      check_fix="make demo-connection YES=1"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -713,6 +754,8 @@ PY
   render 17
   render 18
   render 19
+  render 20
+  render 21
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then
