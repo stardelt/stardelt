@@ -43,7 +43,8 @@
 # grant the dbt run itself needs — dbt drops the table it replaces, which is Lakekeeper
 # `modify` and not the `write` the pipeline principal holds (#373), fixed by
 # `make demo-dbt-grant YES=1`. Row 23 is the public-database pipeline (#79 point 2), fixed by
-# `make demo-public-db YES=1`.
+# `make demo-public-db YES=1`. Row 24 is the demo's stream (#79 point 3), fixed by
+# `make demo-stream YES=1`.
 #
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
@@ -193,6 +194,7 @@ if [ "$mode" = check ]; then
       21) check_21 || rc=1 ;;
       22) check_22 || rc=1 ;;
       23) check_23 || rc=1 ;;
+      24) check_24 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -784,6 +786,29 @@ PY
     fi
   }
 
+  # 24. The demo's stream (#79 point 3): a StreamApp group `demo` owns and `visitors` may read. The
+  # operator only marks it Running once the sink's driver is up, which needs the setup pipeline's
+  # table: a StreamApp reads its sink's schema and never creates it (stream_job.py:89).
+  check_24() {
+    local document owner viewers phase
+    document="$(kubectl -n "$NAMESPACE" get streamapps.stardelt.io demo-pegelonline -o json 2>/dev/null || true)"
+    if [ -z "$document" ]; then
+      check_msg="the StreamApp demo-pegelonline does not exist"
+      check_fix="make demo-stream YES=1"
+      return 1
+    fi
+    owner="$(jq -r '.spec.ownerGroup // ""' <<<"$document")"
+    viewers="$(jq -r --arg g "$GROUP" '(.spec.viewers // []) | index($g) != null' <<<"$document")"
+    phase="$(jq -r '.status.phase // "unknown"' <<<"$document")"
+    if [ "$owner" = demo ] && [ "$viewers" = true ] && [ "$phase" = Running ]; then
+      check_msg="demo-pegelonline is owned by demo, $GROUP may see it, and it is Running"
+    else
+      check_msg="demo-pegelonline owner='${owner:-none}' $GROUP may see it: ${viewers:-false} phase=${phase} (want demo, true, Running)"
+      check_fix="make demo-stream YES=1"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -812,6 +837,7 @@ PY
   render 21
   render 22
   render 23
+  render 24
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then

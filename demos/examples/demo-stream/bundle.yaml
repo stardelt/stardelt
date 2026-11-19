@@ -1,0 +1,10 @@
+bundle:
+  name: demo-stream
+  ownerGroup: demo
+include: [pipelines/*.yaml]
+files: [sql/*.sql]
+requires: { connections: [] }
+targets:
+  prod:
+    mode: production
+    runAs: pipeline-demo

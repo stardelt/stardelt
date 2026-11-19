@@ -1,0 +1,24 @@
+# The demo's stream (#79 point 3): the public Streams page shows a running app.
+#
+# Reads the topic the hourly `pegelonline_hourly` DAG fills and keeps one row per station,
+# timeseries and measurement time in the demo's gold layer. Group `demo` owns it; `visitors` may
+# read it and nothing else. Applied by `make demo-stream YES=1` after `demo-stream-setup` has
+# created the sink: a StreamApp reads its sink's schema (`stream_job.py:89`), it never creates one.
+apiVersion: stardelt.io/v1alpha1
+kind: StreamApp
+metadata:
+  name: demo-pegelonline
+  namespace: stardelt
+  labels: { app.kubernetes.io/part-of: stardelt, stardelt.io/managed-by: public-demo }
+spec:
+  source:
+    topic: pegelonline.measurements
+    format: json
+  sink:
+    catalog: gold
+    table: shop_dbt.pegelonline
+    mode: merge
+    mergeKeys: [station_uuid, timeseries, measured_at]
+  ownerGroup: demo
+  viewers: [visitors]
+  restartPolicy: always
