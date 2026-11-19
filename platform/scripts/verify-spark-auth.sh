@@ -42,9 +42,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
 BASE_DOMAIN="${BASE_DOMAIN:-alpha.dev.stardelt.io}"
 SPARK_USER="${SPARK_USER:-analyst}"
-# The visitor leg: the public demo's person is `demo`, in `visitors` only. It has no key in
-# `dev-seed-users` on the lab (its password is public and fixed), so the leg is skipped there
-# unless a visitors-only person was seeded into the Secret.
+# The visitor leg: the public demo's person is `demo`, in `visitors` only. `dev-seed-users` has
+# no key for it (it is created by `scripts/public-demo.sh`, not `make seed-dev-access`), so its
+# published password `demo` is the fallback; `VISITOR_PASSWORD` overrides every source.
 VISITOR_USER="${VISITOR_USER:-demo}"
 TIMEOUT="${TIMEOUT:-300}"
 POD=verify-spark-auth
@@ -120,11 +120,16 @@ case "$out" in
 esac
 
 # 3. The visitor leg (stardelt/stardelt#404): a real token for a person who is in `visitors`
-#    only. Its password can only come from `dev-seed-users`; when that key is missing the leg is
-#    skipped, not failed — the lab's `demo` has a fixed public password in the realm instead.
+#    only, refused with PERMISSION_DENIED. The password comes from `dev-seed-users` when the
+#    demo seed created that user; the public demo's `demo` has a fixed, published password
+#    (`demo`, the "Try the demo" sign-in) and no key there, so the leg falls back to it.
+#    `VISITOR_PASSWORD` overrides both.
 visitor=skipped
 kubectl -n "$NS" get secret dev-seed-users -o jsonpath="{.data.$VISITOR_USER}" 2>&1 \
   | base64 -d > "$tmp/visitor-pw" || true
+if [ ! -s "$tmp/visitor-pw" ] && [ "$VISITOR_USER" = demo ]; then
+  printf '%s' "${VISITOR_PASSWORD:-demo}" > "$tmp/visitor-pw"
+fi
 if [ -s "$tmp/visitor-pw" ]; then
   chmod 600 "$tmp/visitor-pw"
   if ! out="$(ISSUER="$ISSUER" USER="$VISITOR_USER" PASSWORD_FILE="$tmp/visitor-pw" \
