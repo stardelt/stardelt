@@ -1179,7 +1179,7 @@ def generate(nova, directory, namespace, name):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", name):
         raise GenerateError(f"{name!r} is not a plain pipeline name")
     answer = nova.call("pipelines_spec", path={"namespace": namespace, "name": name})
-    if answer["managedBy"] != "nova" or not answer["editable"]:
+    if answer["managedBy"] != "nova" or not (answer["editable"] or answer["document"].get("tasks")):
         raise GenerateError(f"{name} cannot be changed from a file (it is managed outside Nova, or has a shape the form cannot edit)")
     document = dict(answer["document"])
     group = document.pop("ownerGroup", None)
@@ -1191,6 +1191,8 @@ def generate(nova, directory, namespace, name):
     files = {}
     tasks = document.pop("tasks", None) or []
     for task in tasks:
+        if "notebook" in task:
+            raise GenerateError(f"{name} has a notebook task ({task['name']}): a notebook travels as a file in the bundle, which generate cannot write yet")
         text = task.pop("sql", None)
         if text is None:
             continue
