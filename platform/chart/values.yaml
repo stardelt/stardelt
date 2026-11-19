@@ -227,7 +227,8 @@ s3Credentials:
   # `create: false`: you provide BOTH Secrets yourself (see
   # manifests/s3-credentials.example.yaml for the first; the second is
   # `seaweedfs_s3_config` = {"identities":[{"name":"stardelt","credentials":
-  # [{"accessKey":"…","secretKey":"…"}],"actions":["Admin","Read","Write"]}]}).
+  # [{"accessKey":"…","secretKey":"…"}],"actions":["Admin","Read","Write"]}]}
+  # plus the STS half the gateway reads with `-iam.config` — see the example file).
   create: true
   # Renaming requires updating the secretKeyRef entries under `trino.env` and
   # `airflow.extraEnv` too.
@@ -235,6 +236,9 @@ s3Credentials:
   # Leave empty to generate. Set both to choose your own.
   accessKey: ""
   secretKey: ""
+  # Base64 text, used as the gateway's STS signing key (`sts.signingKey` in
+  # seaweedfs_s3_config). Leave empty to generate once and keep — like the key pair.
+  stsSigningKey: ""
   # Rendered with `tpl`, so `{{ .Release.Namespace }}` expands.
   endpoint: "http://seaweedfs-s3.{{ .Release.Namespace }}.svc.cluster.local:8333"
   bucket: lakehouse

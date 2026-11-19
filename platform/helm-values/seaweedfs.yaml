@@ -112,6 +112,12 @@ s3:
   # The S3 identities come from Secret `seaweedfs-s3-config`, written by
   # scripts/s3-secrets.sh from the same key pair as `stardelt-s3-creds`.
   existingConfigSecret: seaweedfs-s3-config
+  # The same document carries the STS/IAM half (identities, sts.signingKey, policy, policies,
+  # roles); the gateway reads it a second time for STS (stardelt#201 slice 2, spike stardelt#248).
+  # One JSON document is served to both flags: the identities pass logs `invalid policy` for the
+  # IAM keys it ignores, and `-iam.config` loads them. Deliberate, not an error.
+  extraArgs:
+    - -iam.config=/etc/sw/seaweedfs_s3_config
   createBuckets:
     - name: lakehouse
       anonymousRead: false
