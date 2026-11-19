@@ -11,9 +11,12 @@
 #
 # In order:
 #
-#   0.  the prerequisites: kubectl, jq, a stardelt CLI that answers and reads this
+#   0.  the prerequisites: kubectl, jq, openssl, a stardelt CLI that answers and reads this
 #       repository's bundle, the ServicePrincipal pipeline-demo ready, and a CLI that is
 #       signed in to Nova;
+#   0b. the destination demo/run-feed (an ntfy webhook on a random topic,
+#       viewers=[visitors]), created once — before the bundle, because Nova refuses a
+#       pipeline whose notify names a destination its group does not have;
 #   1.  the shop bundle deployed for the target prod: shop-1-bronze, shop-2-silver and
 #       shop-3-gold, scheduled 02:00 / 02:30 / 03:00 Europe/Berlin;
 #   2.  the twelve one-statement legacy pipelines deleted — an explicit list, never a
@@ -43,7 +46,7 @@ fail() { echo "demo-shop: $*" >&2; exit 1; }
 
 # 0. The prerequisites. The CLI is the one on PATH, or the venv `make public-demo-check` row
 # 0b accepts, so a shell that never activated a venv can still run the redeploy.
-for tool in kubectl jq; do
+for tool in kubectl jq openssl; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
 done
 CLI="$(command -v stardelt 2>/dev/null || true)"
@@ -67,6 +70,22 @@ echo "› ServicePrincipal pipeline-demo: ready"
 plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
   || fail "the stardelt CLI is not signed in to $NOVA ($(printf '%s' "$plan" | tail -1)) — run: stardelt login --host $NOVA"
 echo "› stardelt CLI: signed in to $NOVA"
+
+# 0b. The run feed (#79): an ntfy webhook on a random topic, made once and then kept.
+feed="$("$CLI" --host "$NOVA" api destinations_list 2>/dev/null \
+  | jq -r '.[]? | select(.owner_group == "demo" and .name == "run-feed") | .config.url' || true)"
+if [ -n "$feed" ]; then
+  echo "› run-feed: exists (${feed%%/stardelt-demo-*}/stardelt-demo-…)"
+elif [ "$YES" = 1 ]; then
+  topic="stardelt-demo-$(openssl rand -hex 8)"
+  body="$(jq -n --arg url "https://ntfy.sh/$topic" \
+    '{owner_group: "demo", name: "run-feed", kind: "webhook", config: {url: $url}, viewers: ["visitors"]}')"
+  "$CLI" --host "$NOVA" api destinations_create --body "$body" >/dev/null \
+    || fail "cannot create the destination demo/run-feed"
+  echo "› run-feed: created — subscribe at https://ntfy.sh/$topic"
+else
+  echo "would: create the destination demo/run-feed (webhook https://ntfy.sh/stardelt-demo-<random>, viewers=[visitors])"
+fi
 
 # 1. The bundle: three scheduled pipelines instead of twelve On demand ones.
 planned=()
