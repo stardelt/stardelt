@@ -51,7 +51,7 @@ pub const KEYCLOAK_PATHS: [&str; 6] = [
 /// The Ingress of Nova, on the base domain. `None` unless `spec.ingress.enabled` and a base
 /// domain is set.
 pub fn nova(spec: &PlatformInstanceSpec) -> Option<Ingress> {
-    build(spec, nova::NAME, nova::NAME, 8080, "", &["/"], false)
+    build(spec, nova::NAME, nova::NAME, 8080, "", &["/"], false, &[])
 }
 
 /// The Ingress of the identity provider, on `id.<base domain>`, with `identity.mode: platform`
@@ -68,6 +68,7 @@ pub fn keycloak(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         "id",
         &KEYCLOAK_PATHS,
         true,
+        &[],
     )
 }
 
@@ -85,6 +86,7 @@ pub fn airflow(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         "airflow",
         &["/"],
         false,
+        &[],
     )
 }
 
@@ -102,6 +104,7 @@ pub fn jupyterhub(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         "jupyter",
         &["/"],
         false,
+        &[],
     )
 }
 
@@ -125,6 +128,7 @@ pub fn superset(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         "superset",
         &["/"],
         false,
+        &[],
     )
 }
 
@@ -150,9 +154,36 @@ pub fn trino(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         "trino",
         &["/v1/statement", "/oauth2"],
         false,
+        &[],
     )
 }
 
+/// The token-checking front's public name, `spark.<base domain>` (stardelt/stardelt#231, #84 Q4):
+/// gRPC, so nginx must speak HTTP/2 to the back end, and a query can be silent for as long as an
+/// executor works — the platform manifest's 3600 s read/send timeouts.
+pub fn spark(spec: &PlatformInstanceSpec) -> Option<Ingress> {
+    if spec.identity.mode == IdentityMode::None {
+        return None;
+    }
+    build(
+        spec,
+        "spark-connect",
+        "spark-connect-auth",
+        15002,
+        "spark",
+        &["/"],
+        false,
+        &[
+            ("nginx.ingress.kubernetes.io/backend-protocol", "GRPC"),
+            ("nginx.ingress.kubernetes.io/proxy-read-timeout", "3600"),
+            ("nginx.ingress.kubernetes.io/proxy-send-timeout", "3600"),
+        ],
+    )
+}
+
+/// The one builder every application Ingress goes through: class, TLS, extra annotations and the
+/// path list come from the instance's ingress settings. Eight arguments, one per field it copies.
+#[allow(clippy::too_many_arguments)]
 fn build(
     spec: &PlatformInstanceSpec,
     name: &str,
@@ -161,6 +192,7 @@ fn build(
     subdomain: &str,
     paths: &[&str],
     regex: bool,
+    extra: &[(&str, &str)],
 ) -> Option<Ingress> {
     let settings = &spec.ingress;
     if !settings.enabled {
@@ -175,6 +207,9 @@ fn build(
             "cert-manager.io/cluster-issuer".to_string(),
             issuer.to_string(),
         );
+    }
+    for (key, value) in extra {
+        annotations.insert((*key).to_string(), (*value).to_string());
     }
     if regex {
         annotations.insert(
@@ -537,5 +572,55 @@ mod tests {
             tls[0].secret_name.as_deref(),
             Some("trino-data-example-com-tls")
         );
+    }
+
+    #[test]
+    fn spark_is_published_only_with_sign_in_and_speaks_grpc() {
+        assert!(
+            spark(&spec(serde_json::json!({}))).is_none(),
+            "no identity, no front"
+        );
+        assert!(
+            spark(&spec(serde_json::json!({"identity": {"mode": "none"}}))).is_none(),
+            "identity.mode: none"
+        );
+
+        let signed_in = spec(serde_json::json!({
+            "identity": {"mode": "platform"},
+            "ingress": { "enabled": true, "tls": { "enabled": true, "issuer": "letsencrypt" } }
+        }));
+        let ingress = spark(&signed_in).expect("an Ingress");
+        assert_eq!(ingress.metadata.name.as_deref(), Some("spark-connect"));
+        let (host, paths) = rule_of(&ingress);
+        assert_eq!(host, "spark.data.example.com");
+        assert_eq!(paths, [("/".to_string(), "Prefix".to_string())]);
+        let rule = &ingress.spec.as_ref().unwrap().rules.as_ref().unwrap()[0];
+        let backend = rule.http.as_ref().unwrap().paths[0]
+            .backend
+            .service
+            .as_ref()
+            .unwrap();
+        assert_eq!(backend.name, "spark-connect-auth");
+        assert_eq!(backend.port.as_ref().unwrap().number, Some(15002));
+        let annotations = ingress.metadata.annotations.as_ref().expect("annotations");
+        assert_eq!(annotations["cert-manager.io/cluster-issuer"], "letsencrypt");
+        assert_eq!(
+            annotations["nginx.ingress.kubernetes.io/backend-protocol"],
+            "GRPC"
+        );
+        assert_eq!(
+            annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"],
+            "3600"
+        );
+        assert_eq!(
+            annotations["nginx.ingress.kubernetes.io/proxy-send-timeout"],
+            "3600"
+        );
+
+        let no_domain = spec(serde_json::json!({
+            "baseDomain": null,
+            "identity": {"mode": "platform"}
+        }));
+        assert!(spark(&no_domain).is_none(), "no base domain, no host");
     }
 }

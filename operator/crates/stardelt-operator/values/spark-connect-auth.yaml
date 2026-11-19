@@ -1,0 +1,4 @@
+# The token-checking front's Envoy image (stardelt/stardelt#231, D44 twin). One file, like
+# values/spark.yaml, so scripts/check-operator-pins.sh and scripts/sync-operator-goldens.sh can
+# compare and roll it against manifests/spark-connect-auth.yaml (`spark_auth.rs` parses it).
+envoyImage: envoyproxy/envoy:v1.35.0@sha256:cfe1c570e72aa4207853a37bd1c32c808a0036a351b16f73732dcfd0e5775175
