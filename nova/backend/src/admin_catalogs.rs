@@ -1076,7 +1076,7 @@ fn demo_row() -> AdminCatalog {
         grants: ["browse", "select", "write", "create"]
             .into_iter()
             .map(|verb| CatalogGrant {
-                group: "stardelt-users".to_string(),
+                group: "stardelt-admins".to_string(),
                 verb: verb.to_string(),
             })
             .collect(),
@@ -1325,19 +1325,19 @@ mod tests {
             row.grants,
             vec![
                 CatalogGrant {
-                    group: "stardelt-users".into(),
+                    group: "stardelt-admins".into(),
                     verb: "browse".into()
                 },
                 CatalogGrant {
-                    group: "stardelt-users".into(),
+                    group: "stardelt-admins".into(),
                     verb: "select".into()
                 },
                 CatalogGrant {
-                    group: "stardelt-users".into(),
+                    group: "stardelt-admins".into(),
                     verb: "write".into()
                 },
                 CatalogGrant {
-                    group: "stardelt-users".into(),
+                    group: "stardelt-admins".into(),
                     verb: "create".into()
                 },
             ]
@@ -2115,7 +2115,7 @@ mod tests {
             record.removed,
             ["browse", "create", "select", "write"]
                 .into_iter()
-                .map(|verb| ("stardelt-users".to_string(), verb.to_string()))
+                .map(|verb| ("stardelt-admins".to_string(), verb.to_string()))
                 .collect::<Vec<_>>()
         );
         assert_eq!(record.unchanged, 0);

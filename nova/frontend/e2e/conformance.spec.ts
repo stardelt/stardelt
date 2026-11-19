@@ -5096,6 +5096,31 @@ test.describe('admin catalogs', () => {
     await context.close()
   })
 
+  test('confirm_step_for_removing_stardelt_users_on_any_catalog', async ({ browser }) => {
+    const shared = row({
+      name: 'shared', displayName: 'Shared', owner: 'stardelt-admins',
+      grants: [
+        { group: 'stardelt-users', verb: 'select' },
+        { group: 'stardelt-analytics', verb: 'browse' },
+      ],
+      conditions: READY,
+    })
+    const { context, page, writes } = await openEditable(browser, {
+      catalogs: [...CATALOGS, shared],
+      onPut: (route) => json(route, { ...shared, grants: [{ group: 'stardelt-analytics', verb: 'browse' }], generation: 2, observedGeneration: 1 }),
+    })
+    const dialog = await openEdit(page, 'shared')
+    await dialog.getByRole('button', { name: 'Remove stardelt-users' }).click()
+    await dialog.getByRole('button', { name: 'Save' }).click()
+    expect(writes).toHaveLength(0)
+    await expect(
+      dialog.getByText('This removes access for everybody who is not in another granted group.'),
+    ).toBeVisible()
+    await dialog.getByRole('button', { name: 'Confirm' }).click()
+    await expect.poll(() => writes.length).toBe(1)
+    await context.close()
+  })
+
   test('applying_then_applied_poll', async ({ browser }) => {
     let saved = false
     const applied = () =>
