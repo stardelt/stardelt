@@ -47,7 +47,7 @@ use crate::{
         nova_pg_backup, nova_pg_cluster, openfga_pg_backup, openfga_pg_cluster, platform_namespace,
         s3_creds_secret, s3_endpoint, seaweedfs_config_secret,
     },
-    secrets, spark, superset,
+    secrets, spark, spark_auth, superset,
 };
 use k8s_openapi::api::batch::v1::CronJob;
 
@@ -862,6 +862,61 @@ pub async fn ensure_spark(
     .await
     {
         return Some(status(NAME, false, e.to_string()));
+    }
+    // The token-checking front (stardelt/stardelt#231, D44 twin): the platform path applies it
+    // whenever the platform IdP exists (`platform/Makefile:703-712`); the operator does the same
+    // when it runs the IdP itself. `identity.mode: external` is out of scope (a customer's
+    // provider, and its JWKS URL is not the operator's to know).
+    let instance = crate::principal_keycloak::platform_instance_for_namespace(ctx, namespace)
+        .await
+        .ok()
+        .flatten();
+    if let Some(instance) = instance
+        && instance.spec.identity.mode == IdentityMode::Platform
+    {
+        let base_domain = instance.spec.base_domain.clone().unwrap_or_default();
+        if let Err(e) = apply::<ConfigMap>(
+            client,
+            namespace,
+            &spark_auth::config_map(namespace, &base_domain),
+            dry_run,
+        )
+        .await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+        if let Err(e) = apply::<Deployment>(
+            client,
+            namespace,
+            &spark_auth::deployment(namespace),
+            dry_run,
+        )
+        .await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+        if let Err(e) =
+            apply::<Service>(client, namespace, &spark_auth::service(namespace), dry_run).await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+        if let Err(e) = apply::<NetworkPolicy>(
+            client,
+            namespace,
+            &spark_auth::network_policy(namespace),
+            dry_run,
+        )
+        .await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+        // The public name comes from the instance's ingress settings; `ingress::spark`
+        // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`.
+        if let Some(route) = ingress::spark(&instance.spec)
+            && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
     }
     if let Err(e) = apply_cluster(client, &spark::pod_guard_policy(), dry_run).await {
         return Some(status(NAME, false, e.to_string()));

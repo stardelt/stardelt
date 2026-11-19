@@ -259,6 +259,15 @@ pub fn shared_spark_connect_ingress(namespace: &str) -> NetworkPolicy {
                     )])]),
                     ports: Some(vec![port(SPARK_CONNECT_METRICS_PORT)]),
                 },
+                // The token-checking front (stardelt/stardelt#231, D44 twin): the only peer a
+                // member's gRPC call may arrive from once the front exists.
+                NetworkPolicyIngressRule {
+                    from: Some(vec![peer(&[(
+                        "app.kubernetes.io/name",
+                        "spark-connect-auth",
+                    )])]),
+                    ports: Some(vec![port(SPARK_CONNECT_PORT)]),
+                },
             ]),
             egress: None,
         }),
@@ -1101,7 +1110,7 @@ mod tests {
             &vec!["Ingress".to_string()]
         );
         let ingress = spec.ingress.as_ref().expect("rules");
-        assert_eq!(ingress.len(), 3);
+        assert_eq!(ingress.len(), 4);
         // Rule 1: members' notebook pods only, on the Connect port.
         let members = ingress[0].from.as_ref().unwrap();
         assert_eq!(members.len(), 1);
@@ -1159,6 +1168,27 @@ mod tests {
             Some(IntOrString::Int(4040))
         );
         assert_eq!(ingress[2].ports.as_ref().unwrap().len(), 1);
+        // Rule 4: the token-checking front, on the Connect port.
+        let front = ingress[3].from.as_ref().unwrap();
+        assert_eq!(front.len(), 1);
+        assert_eq!(
+            front[0]
+                .pod_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap(),
+            &BTreeMap::from([(
+                "app.kubernetes.io/name".to_string(),
+                "spark-connect-auth".to_string()
+            )])
+        );
+        assert!(front[0].namespace_selector.is_none(), "same namespace");
+        assert_eq!(
+            ingress[3].ports.as_ref().unwrap(),
+            &vec![port(SPARK_CONNECT_PORT)]
+        );
     }
 
     #[test]
