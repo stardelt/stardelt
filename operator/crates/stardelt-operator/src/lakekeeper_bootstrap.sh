@@ -119,7 +119,10 @@ cat > /tmp/wh.json <<EOF
     "region": "$S3_REGION",
     "path-style-access": true,
     "flavor": "minio",
-    "sts-enabled": false,
+    "sts-enabled": true,
+    "sts-role-arn": "arn:aws:iam::000000000000:role/stardelt",
+    "sts-endpoint": "$S3_ENDPOINT",
+    "sts-session-policy-principal": false,
     "remote-signing-enabled": false
   },
   "storage-credential": {

@@ -183,6 +183,9 @@ S3_SECRET_NAME = os.environ.get("S3_SECRET_NAME", "stardelt-s3-creds")
 
 # The one project the catalog bootstraps (manifests/lakekeeper-bootstrap.yaml).
 PROJECT_ID = "00000000-0000-0000-0000-000000000000"
+# The gateway's STS role (scripts/s3-secrets.sh, chart/templates/s3-credentials.yaml,
+# operator prerequisites.rs).
+STS_ROLE_ARN = "arn:aws:iam::000000000000:role/stardelt"
 CATALOG_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/catalogs" % NAMESPACE
 SQLWAREHOUSE_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/sqlwarehouses" % NAMESPACE
 CONFIGMAP_PATH = "/api/v1/namespaces/%s/configmaps" % NAMESPACE
@@ -1030,6 +1033,10 @@ def warehouse_body(name, spec, s3):
 
     The storage credential comes from the `s3` argument only — the platform Secret's
     key pair, read once per run; nothing here re-reads the environment or a Secret.
+
+    A new warehouse vends table-scoped temporary credentials (`sts-enabled`): the
+    gateway hands each table load a short-lived credential scoped to that table's
+    prefix, read-only for readers and read-write for writers (#75).
     """
     prefix = ((spec or {}).get("storage") or {}).get("keyPrefix") or name
     return {
@@ -1043,7 +1050,10 @@ def warehouse_body(name, spec, s3):
             "region": s3["region"],
             "path-style-access": True,
             "flavor": "minio",
-            "sts-enabled": False,
+            "sts-enabled": True,
+            "sts-role-arn": STS_ROLE_ARN,
+            "sts-endpoint": s3["endpoint"],
+            "sts-session-policy-principal": False,
             "remote-signing-enabled": False,
         },
         "storage-credential": {
