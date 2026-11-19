@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Entrypoint of the dbt tool image: mint a fresh engine token from the pipeline's service
+# principal, hand it to dbt through the environment, and exec dbt with the caller's arguments.
+#
+# A token lives five minutes, so it is minted per invocation, never taken from the image.
+# A missing variable prints its NAME to stderr and exits 2; no value is ever printed.
+set -euo pipefail
+
+require() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "stardelt-dbt: ${name} is not set" >&2
+    exit 2
+  fi
+}
+
+require PIPELINE_TOKEN_URL
+require PIPELINE_CLIENT_ID
+require PIPELINE_CLIENT_SECRET
+require PIPELINE_TRINO_URL
+
+# Client-credentials grant, the same contract as demos/dags/stardelt_pipelines/trino.py
+# `client_credentials_token`. The identity endpoint is a public HTTPS URL, so the engine's
+# own CA (REQUESTS_CA_BUNDLE / SSL_CERT_FILE in a task pod) must not be used for this POST.
+token="$(python3 -c '
+import json, os, ssl, urllib.parse, urllib.request
+
+for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+    os.environ.pop(name, None)
+body = urllib.parse.urlencode(
+    {
+        "grant_type": "client_credentials",
+        "client_id": os.environ["PIPELINE_CLIENT_ID"],
+        "client_secret": os.environ["PIPELINE_CLIENT_SECRET"],
+    }
+).encode()
+request = urllib.request.Request(
+    os.environ["PIPELINE_TOKEN_URL"],
+    data=body,
+    headers={"Content-Type": "application/x-www-form-urlencoded"},
+)
+with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context()) as response:
+    print(json.load(response)["access_token"])
+')" || {
+  echo "stardelt-dbt: could not mint a token from PIPELINE_TOKEN_URL" >&2
+  exit 1
+}
+
+# dbt's Trino profile wants the host without scheme or port (profiles.yml keeps the port).
+host="${PIPELINE_TRINO_URL#*://}"
+host="${host%%/*}"
+host="${host%%:*}"
+
+export DBT_TRINO_JWT="$token"
+export DBT_TRINO_HOST="$host"
+if [ -n "${PIPELINE_TRINO_CA_FILE:-}" ]; then
+  export DBT_TRINO_CA="$PIPELINE_TRINO_CA_FILE"
+fi
+
+exec /opt/dbt/bin/dbt "$@"
