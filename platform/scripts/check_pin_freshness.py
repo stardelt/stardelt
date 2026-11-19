@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -126,6 +128,17 @@ def compare_lib_tag(tag: str, ref: str, tag_commit: str) -> str:
     )
 
 
+def lib_ahead_line(count: int, newest: str, tag: str, ref: str) -> str:
+    """One advisory line: main's python/ carries commits the pinned release does not."""
+    if count <= 0:
+        return ""
+    return (
+        f"! notebook library: main's python/ is {count} commit(s) ahead of the pinned "
+        f"python/{tag}@{_short(ref)} (newest {newest}) — cut the next python/v* release "
+        f"and move STARDELT_LIB_REF/STARDELT_LIB_TAG in platform/Makefile"
+    )
+
+
 def resolve_tag_commit(tag: str) -> tuple[str | None, str]:
     proc = subprocess.run(
         ["git", "ls-remote", "--tags", "https://github.com/stardelt/stardelt",
@@ -138,6 +151,46 @@ def resolve_tag_commit(tag: str) -> tuple[str | None, str]:
     if not line:
         return None, f"tag {tag} not found"
     return line.split()[0], ""
+
+
+def lib_commits_ahead(ref: str, tag: str = "") -> tuple[int, str]:
+    """(commits on main's python/ after `ref`, newest short hash), or (0, "") when unknown.
+
+    History only: `--filter=blob:none` clones no file contents. Never fails the run — an
+    unreachable main is a note, not a stale pin.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="pin-freshness-"))
+    try:
+        inner = tmp / "repo"
+        subprocess.run(
+            ["git", "clone", "--bare", "--filter=blob:none", "--quiet", "--branch", "main",
+             "https://github.com/stardelt/stardelt", str(inner)],
+            check=True, capture_output=True, text=True,
+        )
+        if tag:
+            # The pinned commit is in main's history; fetch the tag so a pin that is not
+            # can still be counted instead of failing the rev-list.
+            subprocess.run(
+                ["git", "-C", str(inner), "fetch", "--quiet", "origin",
+                 f"refs/tags/python/{tag}:refs/tags/python/{tag}"],
+                check=True, capture_output=True, text=True,
+            )
+        # A bare clone keeps the branch as refs/heads/main: there is no origin/main here.
+        count = int(subprocess.run(
+            ["git", "-C", str(inner), "rev-list", "--count", f"{ref}..main", "--", "python/"],
+            capture_output=True, text=True, check=True,
+        ).stdout)
+        newest = subprocess.run(
+            ["git", "-C", str(inner), "log", "-1", "--format=%h", "--abbrev=8",
+             f"{ref}..main", "--", "python/"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return count, newest
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        print("! notebook library: main not reachable, freshness not judged")
+        return 0, ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def resolve_digest(app: str, tag: str = "dev") -> tuple[str | None, str]:
@@ -214,6 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="treat an unreachable registry as a note, not a failure",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail when an advisory '!' line was printed, not only on a '✗'",
+    )
     args = parser.parse_args(argv)
 
     lines: list[str] = []
@@ -252,12 +310,18 @@ def main(argv: list[str] | None = None) -> int:
                 offline_failed = True
         else:
             lines.append(compare_lib_tag(lib_tag, lib_ref, tag_commit))
+            ahead, newest = lib_commits_ahead(lib_ref, lib_tag)
+            line = lib_ahead_line(ahead, newest, lib_tag, lib_ref)
+            if line:
+                lines.append(line)
 
     for note in dict.fromkeys(notes):
         print(note)
     for line in lines:
         print(line)
     if offline_failed:
+        return 1
+    if args.strict and any(line.startswith("!") for line in [*notes, *lines]):
         return 1
     return exit_code(lines)
 
