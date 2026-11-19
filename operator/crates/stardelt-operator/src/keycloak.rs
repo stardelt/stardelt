@@ -679,6 +679,55 @@ mod tests {
         );
     }
 
+    /// The front (`spark-connect-auth`, stardelt/stardelt#231) refuses a token whose `aud` has no
+    /// `spark-connect`, so the realm must issue it: a bearer-only client to name as the audience,
+    /// and the mapper on the two clients a person's token comes from (#84 Q4).
+    #[test]
+    fn the_realm_issues_the_spark_connect_audience() {
+        let realm = realm_config_map(&spec(Some("data.example.com")))
+            .expect("a ConfigMap")
+            .data
+            .expect("data")
+            .remove("stardelt-realm.json")
+            .expect("the realm");
+        let parsed: serde_json::Value = serde_json::from_str(&realm).expect("the realm is JSON");
+        let clients = parsed["clients"].as_array().expect("clients");
+        let find = |id: &str| {
+            clients
+                .iter()
+                .find(|c| c["clientId"] == id)
+                .unwrap_or_else(|| panic!("the realm has no {id} client"))
+        };
+        let spark = find("spark-connect");
+        assert_eq!(spark["bearerOnly"].as_bool(), Some(true));
+        assert_eq!(spark["publicClient"].as_bool(), Some(false));
+        assert_eq!(spark["standardFlowEnabled"].as_bool(), Some(false));
+        for id in ["jupyterhub", "stardelt-dev"] {
+            let mappers = find(id)["protocolMappers"].as_array().expect("mappers");
+            let mapper = mappers
+                .iter()
+                .find(|m| m["name"] == "aud-spark-connect")
+                .unwrap_or_else(|| panic!("{id} has no aud-spark-connect mapper"));
+            assert_eq!(
+                mapper["config"]["included.client.audience"], "spark-connect",
+                "{id}'s aud-spark-connect names the wrong audience"
+            );
+            assert_eq!(mapper["config"]["access.token.claim"], "true");
+        }
+        let carriers = clients
+            .iter()
+            .filter(|c| {
+                c["protocolMappers"]
+                    .as_array()
+                    .is_some_and(|ms| ms.iter().any(|m| m["name"] == "aud-spark-connect"))
+            })
+            .count();
+        assert_eq!(
+            carriers, 2,
+            "only jupyterhub and stardelt-dev carry aud-spark-connect"
+        );
+    }
+
     #[test]
     fn the_realm_follows_the_base_domain_and_needs_one() {
         let realm = realm_config_map(&spec(Some("lab.example.org")))
