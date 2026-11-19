@@ -4,6 +4,9 @@
 # Upstream `scipy-notebook` plus the client libraries a warehouse notebook needs,
 # so a new user can query the platform without a `pip install` in the first cell:
 #   - trino            Python client for the warehouse (Trino → Lakekeeper)
+#   - psycopg[binary]  PostgreSQL driver; the library's `stardelt.connection(...)` documents
+#                      `sqlalchemy_url(driver="psycopg")`, and a pipeline notebook that names a
+#                      `Connection` of type postgresql needs it (D23)
 #   - pyspark-client  the Spark Connect client only (no Spark jars; notebooks
 #                      never run Spark locally)
 #   - pandas, pyarrow  DataFrames and Arrow; scipy-notebook ships pandas but not
@@ -74,9 +77,11 @@ RUN python3 -m pip uninstall -y jupyterlab-git \
         nbgitpuller==1.3.0 \
         papermill==2.7.0 \
         trino==0.340.0 \
+        psycopg[binary]==3.3.9 \
         ipywidgets==8.1.5 \
         sidecar==0.8.1 \
     && python3 -c "import pandas, pyarrow, pyspark, trino; print('pandas', pandas.__version__, '| pyarrow', pyarrow.__version__, '| pyspark', pyspark.__version__, '| trino', trino.__version__)" \
+    && python3 -c "import psycopg; print('psycopg', psycopg.__version__)" \
     && python3 -c "import jupyterlab_git, nbgitpuller; print('jupyterlab-git', jupyterlab_git.__version__, '| nbgitpuller', nbgitpuller.__version__)" \
     && python3 -c "import papermill; print('papermill', papermill.__version__)" \
     && python3 -c "import ipywidgets, sidecar; print('ipywidgets', ipywidgets.__version__, '| sidecar', sidecar.__version__)" \
