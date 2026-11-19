@@ -76,3 +76,19 @@ def test_the_shop_overrides_the_relation_listing_without_the_system_catalog():
     assert "materialized_view" not in macro, "the shop has no materialized views to detect"
     project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
     assert "macros" in project["macro-paths"]
+
+
+def test_every_dbt_batch_tag_selects_a_resource_and_the_seeds_come_first():
+    project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
+    tags = set()
+    for layer in project["models"]["shop"].values():
+        tags.update(layer.get("+tags") or [])
+    tags.update(project["seeds"]["shop"].get("+tags") or [])
+    for snapshot in project.get("snapshots", {}).values():
+        tags.update(snapshot.get("+tags") or [])
+    pipeline = yaml.safe_load((SHOP / "pipeline-dbt.yaml").read_text())
+    batches = yaml.safe_load(pipeline["spec"]["tasks"][0]["config"]["batches"])
+    assert batches[0] == "tag:seed", "the seeds must be built before anything reads bronze"
+    unknown = [b for b in batches if b.removeprefix("tag:") not in tags]
+    assert not unknown, f"batches select tags no resource carries: {unknown}"
+    assert set(tags) <= {b.removeprefix("tag:") for b in batches}

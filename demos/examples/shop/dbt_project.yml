@@ -20,6 +20,7 @@ seeds:
   shop:
     +database: bronze
     +schema: shop_dbt
+    +tags: [seed]
     +column_types:
       id: integer
       unit_price: "decimal(10,2)"

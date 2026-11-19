@@ -33,7 +33,7 @@ make inventory DBT=.venv/bin/dbt  # every resource by name: 35 in all
 - **Macro** `money` — one place that rounds money to cents and gives it the contract's `decimal(18, 2)`.
 - **Persisted docs** — descriptions of the marts and their columns are written into the Trino catalog (the platform's catalog shows them).
 - **Exposure** `shop_dashboard` — names the dashboard that reads the three marts.
-- **Tags** `load` (bronze and staging) and `marts` (gold and the snapshot) — `dbt build --select tag:marts` runs one layer.
+- **Tags** `seed` (the two CSV seeds), `load` (bronze and staging) and `marts` (gold and the snapshot) — `dbt build --select tag:marts` runs one layer; `pipeline-dbt.yaml` runs all three in that order.
 
 ## Run it on the platform
 
