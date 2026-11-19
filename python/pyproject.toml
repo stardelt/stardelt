@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stardelt"
-version = "0.4.1"
+version = "0.4.2"
 description = "Small helper between a stardelt notebook and the warehouse (sql, write_df, spark)"
 readme = "stardelt/README.md"
 license = { file = "stardelt/LICENSE" }
