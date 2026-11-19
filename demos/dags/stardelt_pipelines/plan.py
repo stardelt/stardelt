@@ -2,8 +2,8 @@
 
 Pure: no Airflow, no network, no clock. The rules mirror `PipelineSpec::validate` in the
 operator (unique task names, known dependencies, no cycles, a `sql` task has a statement, a
-`notebook` task names its file and its published object version), because the API server's
-schema rules cannot see a dependency cycle.
+`notebook` task names its file and its published object version, a `dbt` task names a project of
+the tool image), because the API server's schema rules cannot see a dependency cycle.
 
 The same holds for the principal: a pipeline that names one is checked against the
 `ServicePrincipal` resources of its namespace (the caller passes them in), so no pipeline can
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 _DURATION = re.compile(r"^(\d+)([smhd])$")
 _SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -56,6 +56,29 @@ NOTEBOOK_ONLY_KEYS = (
 NOTEBOOK_BAD_PARAMS = (
     "notebook params must be a JSON object string of string values, at most 32 keys"
 )
+# The `dbt` task's config: a project of the tool image, one selector or a chain of batches, the
+# threads and the dbt `--vars`. The plan mints one task per batch, so `build` with two batches is
+# `build-1` and `build-2` in the DAG.
+DBT_CONFIG_KEYS = ("project", "select", "batches", "threads", "vars")
+DBT_ONLY_KEYS = (
+    "dbt tasks accept only project, select, batches, threads and vars (found `{key}`)"
+)
+DBT_NEEDS_PROJECT = (
+    "a dbt task needs config.project (a directory under /opt/dbt/projects in the tool image)"
+)
+DBT_NEEDS_SELECT = (
+    "a dbt task needs exactly one of config.select (one dbt selector) and config.batches "
+    "(a JSON array of 1 to 8 selectors, run in order)"
+)
+DBT_BAD_THREADS = "dbt threads must be a digit string from 1 to 16 (default `4`)"
+DBT_BAD_VARS = "dbt vars must be a JSON object string of string values"
+DBT_NEEDS_PRINCIPAL = (
+    "a dbt task runs as the group principal of its pipeline: set ownerGroup and runAs"
+)
+MAX_DBT_BATCHES = 8
+MAX_DBT_THREADS = 16
+# A project is one directory name under the tool image's /opt/dbt/projects.
+_DBT_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
 
 
 class PlanError(ValueError):
@@ -85,6 +108,12 @@ class TaskPlan:
     # The `Connection` a task names and the secret keys its pod gets as `CONN_<NAME>_<KEY>`.
     connection: str | None = None
     connection_keys: tuple[str, ...] = ()
+    # `dbt` tasks only: the project under the tool image's /opt/dbt/projects, its selectors, the
+    # threads and the `--vars` text. Defaults keep every other kind unchanged.
+    dbt_project: str | None = None
+    dbt_select: tuple[str, ...] = ()
+    dbt_threads: str = "4"
+    dbt_vars: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +169,9 @@ def plan(
         raise PlanError("the pipeline has no tasks")
     tasks: list[TaskPlan] = []
     seen: set[str] = set()
+    # A dbt task's batches become `<name>-1` … `<name>-N`; a later task that depends on the
+    # batched name waits for the last batch instead.
+    last_batch: dict[str, str] = {}
     for raw in raw_tasks:
         task_name = raw.get("name")
         if not task_name:
@@ -148,10 +180,10 @@ def plan(
             raise PlanError(f"task name `{task_name}` is used twice")
         seen.add(task_name)
         kind = raw.get("kind")
-        if kind not in ("sql", "notebook"):
+        if kind not in ("sql", "notebook", "dbt"):
             raise PlanError(
                 f"task `{task_name}` has kind `{kind}`, which has no runtime yet "
-                "(only sql and notebook run today)"
+                "(only sql, notebook and dbt run today)"
             )
         if kind == "sql" and not raw.get("sql"):
             raise PlanError(f"sql task `{task_name}` needs a sql statement")
@@ -161,6 +193,14 @@ def plan(
             if not (spec.get("ownerGroup") and spec.get("runAs")):
                 raise PlanError(NOTEBOOK_NEEDS_PRINCIPAL)
             notebook, object_version, notebook_params = _notebook_config(raw.get("config"))
+        dbt_project = None
+        dbt_select: tuple[str, ...] = ()
+        dbt_threads = "4"
+        dbt_vars = None
+        if kind == "dbt":
+            if not (spec.get("ownerGroup") and spec.get("runAs")):
+                raise PlanError(DBT_NEEDS_PRINCIPAL)
+            dbt_project, dbt_select, dbt_threads, dbt_vars = _dbt_config(raw.get("config"))
         connection = raw.get("connection")
         connection_keys: tuple[str, ...] = ()
         if connection is not None:
@@ -181,11 +221,37 @@ def plan(
                     f"namespace `{namespace}`"
                 )
             connection_keys = _connection_for_pipeline(connection, found, spec.get("ownerGroup"))
+        depends_on = tuple(raw.get("dependsOn") or ())
+        if kind == "dbt" and len(dbt_select) > 1:
+            # One task per batch, chained in order. The first batch carries what the task
+            # declared; every later batch waits for the one before it.
+            names = [f"{task_name}-{index + 1}" for index in range(len(dbt_select))]
+            for index, batch_name in enumerate(names):
+                tasks.append(
+                    TaskPlan(
+                        name=batch_name,
+                        kind=kind,
+                        depends_on=((names[index - 1],) if index else depends_on),
+                        sql=None,
+                        warehouse=raw.get("warehouse"),
+                        notebook=None,
+                        object_version=None,
+                        notebook_params=(),
+                        connection=connection,
+                        connection_keys=connection_keys,
+                        dbt_project=dbt_project,
+                        dbt_select=(dbt_select[index],),
+                        dbt_threads=dbt_threads,
+                        dbt_vars=dbt_vars,
+                    )
+                )
+            last_batch[task_name] = names[-1]
+            continue
         tasks.append(
             TaskPlan(
                 name=task_name,
                 kind=kind,
-                depends_on=tuple(raw.get("dependsOn") or ()),
+                depends_on=depends_on,
                 sql=raw.get("sql"),
                 warehouse=raw.get("warehouse"),
                 notebook=notebook,
@@ -193,11 +259,23 @@ def plan(
                 notebook_params=notebook_params,
                 connection=connection,
                 connection_keys=connection_keys,
+                dbt_project=dbt_project,
+                dbt_select=dbt_select,
+                dbt_threads=dbt_threads,
+                dbt_vars=dbt_vars,
             )
         )
+    for index, task in enumerate(tasks):
+        rewritten = tuple(last_batch.get(dep, dep) for dep in task.depends_on)
+        if rewritten != task.depends_on:
+            tasks[index] = replace(task, depends_on=rewritten)
+    names = [task.name for task in tasks]
+    duplicate = next((name for name in names if names.count(name) > 1), None)
+    if duplicate is not None:
+        raise PlanError(f"task name `{duplicate}` is used twice")
     for task in tasks:
         for dep in task.depends_on:
-            if dep == task.name or dep not in seen:
+            if dep == task.name or dep not in names:
                 raise PlanError(
                     f"task `{task.name}` depends on `{dep}`, which is not another task of this pipeline"
                 )
@@ -241,6 +319,74 @@ def _notebook_config(config: dict | None) -> tuple[str, str, tuple[tuple[str, st
     if not isinstance(version, str) or not _OBJECT_VERSION.match(version):
         raise PlanError(NOTEBOOK_NEEDS_FILE)
     return notebook, version, _notebook_params(config.get("params"))
+
+
+def _dbt_config(config: dict | None) -> tuple[str, tuple[str, ...], str, str | None]:
+    """The project, selectors, threads and `--vars` of a `dbt` task, or a `PlanError`.
+
+    One selector (`select`) or a chain of batches (`batches`, 1 to 8 selectors in a JSON array),
+    never both and never neither. The project is one directory name under the tool image's
+    `/opt/dbt/projects`, so it can never name a directory outside it.
+    """
+    if not isinstance(config, dict):
+        raise PlanError(DBT_NEEDS_PROJECT)
+    for key in config:
+        if key not in DBT_CONFIG_KEYS:
+            raise PlanError(DBT_ONLY_KEYS.format(key=key))
+    project = config.get("project")
+    if not isinstance(project, str) or not _DBT_PROJECT.match(project):
+        raise PlanError(DBT_NEEDS_PROJECT)
+    select = config.get("select")
+    batches = config.get("batches")
+    if (select is None) == (batches is None):
+        raise PlanError(DBT_NEEDS_SELECT)
+    if select is not None:
+        if not isinstance(select, str) or not select.strip():
+            raise PlanError(DBT_NEEDS_SELECT)
+        selectors = (select.strip(),)
+    else:
+        selectors = _dbt_batches(batches)
+    threads = config.get("threads", "4")
+    if (
+        not isinstance(threads, str)
+        or not threads.isascii()
+        or not threads.isdigit()
+        or not 1 <= int(threads) <= MAX_DBT_THREADS
+    ):
+        raise PlanError(DBT_BAD_THREADS)
+    vars_text = config.get("vars")
+    if vars_text is not None:
+        _dbt_vars(vars_text)
+    return project, selectors, threads, vars_text
+
+
+def _dbt_batches(raw) -> tuple[str, ...]:
+    """`batches` as the selectors it names: a JSON array of 1 to 8 non-empty strings."""
+    if not isinstance(raw, str):
+        raise PlanError(DBT_NEEDS_SELECT)
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise PlanError(DBT_NEEDS_SELECT) from None
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= MAX_DBT_BATCHES
+        or not all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        raise PlanError(DBT_NEEDS_SELECT)
+    return tuple(item.strip() for item in value)
+
+
+def _dbt_vars(raw) -> None:
+    """`--vars` must be a JSON object of string values; the text is handed to dbt unchanged."""
+    if not isinstance(raw, str):
+        raise PlanError(DBT_BAD_VARS)
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise PlanError(DBT_BAD_VARS) from None
+    if not isinstance(value, dict) or not all(isinstance(item, str) for item in value.values()):
+        raise PlanError(DBT_BAD_VARS)
 
 
 def _connection_for_pipeline(

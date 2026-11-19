@@ -5,8 +5,8 @@
 # Base: pinned by digest. Re-check with `docker buildx imagetools inspect python:3.12-slim`;
 # replace the digest only when it stops resolving, and say so in the PR.
 FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS licences
-COPY check-licenses.py /opt/check-licenses.py
-COPY license-exceptions.txt /opt/license-exceptions.txt
+COPY images/dbt/check-licenses.py /opt/check-licenses.py
+COPY images/dbt/license-exceptions.txt /opt/license-exceptions.txt
 # The exceptions file starts with a header line of prose (`# …`), so the file cannot live
 # inside the runtime image as a pip requirement; the gate reads it directly.
 # hadolint ignore=DL3013
@@ -22,8 +22,11 @@ RUN python -m venv /opt/dbt \
     && /opt/dbt/bin/pip install --no-cache-dir --only-binary=:all: "dbt-core==1.11.17" "dbt-trino==1.10.6" \
     && /opt/dbt/bin/python -m pip check \
     && /opt/dbt/bin/dbt --version
+# The sample project the demo's `dbt` task names (`project: shop` in its config). Customer
+# projects arrive as pinned files later (#104). Read-only for the pod: dbt writes /tmp only.
+COPY examples/shop /opt/dbt/projects/shop
 COPY --from=licences /opt/LICENSES.txt /opt/licenses.json /opt/check-licenses.py /opt/license-exceptions.txt /opt/dbt/
-COPY stardelt-dbt /usr/local/bin/stardelt-dbt
+COPY images/dbt/stardelt-dbt /usr/local/bin/stardelt-dbt
 RUN chmod 0755 /usr/local/bin/stardelt-dbt
 # A pipeline mounts the project read-only (or root-owned), so dbt's default `logs/` and
 # `target/` inside the project would fail to write: both live in /tmp, which uid 1000 owns.

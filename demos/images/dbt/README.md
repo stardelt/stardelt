@@ -2,18 +2,25 @@
 
 `ghcr.io/stardelt/dbt:demo` — dbt-core with the Trino adapter, for running a dbt project
 against the platform's engine. Nothing is linked into stardelt code: a pipeline mounts its
-dbt project and runs this image.
+dbt project and runs this image, and the sample project ships inside it (below).
 
 - `dbt-core==1.11.17`, `dbt-trino==1.10.6`, in their own virtualenv at `/opt/dbt`
   (`1.12.x` needs an sdist-only parser, so `--only-binary=:all:` refuses it; revisit when dbt
   ships wheels for `dbt-core-experimental-parser`).
-- Base `python:3.12-slim`, pinned by digest. Measured image size **385,843,774 bytes**
-  (368 MiB); the budget is **450 MiB** (471,859,200 bytes) and the CI build is not size-gated,
-  so keep the number here in step with reality after a bump.
+- Base `python:3.12-slim`, pinned by digest. Measured image size **386,043,978 bytes**
+  (368 MiB, with the sample project; 2026-11-19); the budget is **450 MiB** (471,859,200 bytes)
+  and the CI build is not size-gated, so keep the number here in step with reality after a bump.
 - `dbt`'s `logs/` and `target/` are redirected to `/tmp` (`DBT_LOG_PATH`, `DBT_TARGET_PATH`):
   a pipeline mounts its project read-only, or root-owned.
 - Anonymous usage stats are off, colours off, the container runs as uid 1000 with `/work` as
   its working directory.
+
+## The sample project in the image
+
+`/opt/dbt/projects/shop` is a copy of `demos/examples/shop`, so a `dbt` task of a `Pipeline`
+names it with `config.project: shop` and the demo needs no checkout. It is root-owned and
+read-only for the pod (dbt writes only `/tmp`). Customer projects from Git or a pinned archive
+are not part of this image; the image digest is the pin for the sample.
 
 ## The wrapper, and the four variables
 
@@ -68,7 +75,7 @@ gate is tested.
 ## Build and check
 
 ```console
-$ cd demos && docker build -t stardelt-dbt:test images/dbt
+$ cd demos && docker build -t stardelt-dbt:test -f images/dbt/Dockerfile .
 $ docker run --rm --entrypoint /opt/dbt/bin/dbt stardelt-dbt:test --version
 $ docker run --rm --entrypoint python stardelt-dbt:test \
     /opt/dbt/check-licenses.py /opt/dbt/licenses.json /opt/dbt/license-exceptions.txt

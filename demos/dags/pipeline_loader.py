@@ -25,6 +25,8 @@ Environment of the dag-processor and the task pods:
   PIPELINE_NOTEBOOK_S3_CONN the Airflow connection that pre-signs the notebook's GET and PUT
   PIPELINE_NOTEBOOK_TRINO_CA_SECRET  the Secret mounted into the notebook pod for the CA
   PIPELINE_NOTEBOOK_KERNEL_TIMEOUT  seconds a notebook pod waits for its kernel (optional, 30 to 900, default 180)
+  PIPELINE_DBT_IMAGE        the dbt tool image a `dbt` task's own pod runs (default `ghcr.io/stardelt/dbt:demo`)
+  PIPELINE_DBT_TRINO_CA_SECRET  the Secret mounted into the dbt pod for the CA (default `trino-ca`)
   PIPELINE_API_GROUP / PIPELINE_API_PLURAL   defaults `stardelt.io` / `pipelines` (tests override)
 """
 from __future__ import annotations
@@ -44,6 +46,7 @@ from airflow.timetables.trigger import CronTriggerTimetable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stardelt_pipelines import trino  # noqa: E402
 from stardelt_pipelines.access import dag_access  # noqa: E402
+from stardelt_pipelines.dbt import DbtPodOperator  # noqa: E402
 from stardelt_pipelines.expand import expand, run_values  # noqa: E402
 from stardelt_pipelines.notebook import NotebookPodOperator  # noqa: E402
 from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan  # noqa: E402
@@ -199,6 +202,25 @@ def _build_dag(p) -> DAG:
                 principal_secret=p.principal.secret_name,
                 connection_name=t.connection,
                 connection_keys=t.connection_keys,
+                namespace=namespace,
+                dag=dag,
+            )
+            continue
+        if t.kind == "dbt":
+            # A dbt run is a pod of its own too: the tool image has no Airflow, and the pod
+            # mints its own token from the principal's Secret, so the worker's pod override is
+            # not this task's business.
+            if p.principal is None:  # the plan refuses this; a silent default would run as nobody
+                raise PlanError(f"dbt task `{t.name}` has no principal")
+            operators[t.name] = DbtPodOperator(
+                task_id=t.name,
+                pipeline=p.name,
+                owner_group=p.owner_group,
+                project=t.dbt_project,
+                select=t.dbt_select[0],
+                threads=t.dbt_threads,
+                vars_text=t.dbt_vars,
+                principal_secret=p.principal.secret_name,
                 namespace=namespace,
                 dag=dag,
             )

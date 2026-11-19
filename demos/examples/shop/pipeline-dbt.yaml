@@ -1,0 +1,25 @@
+# The dbt demo: `shop_dbt` schemas in bronze, silver and gold, next to the `shop` schemas the
+# notebook example writes. The schedule is the demo's nightly slot (04:00 Berlin); trigger it by
+# hand with `kubectl -n stardelt exec deploy/airflow-scheduler -- airflow dags trigger
+# stardelt__shop-dbt`.
+#
+# The dbt image ships the project at /opt/dbt/projects/shop, and the pod mints a fresh engine
+# token from the ServicePrincipal `pipeline-demo` (group `demo`) on every invocation.
+apiVersion: stardelt.io/v1alpha1
+kind: Pipeline
+metadata:
+  name: shop-dbt
+  namespace: stardelt
+spec:
+  ownerGroup: demo
+  runAs: pipeline-demo
+  schedule:
+    cron: "0 4 * * *"
+    timezone: Europe/Berlin
+  tasks:
+    - name: build
+      kind: dbt
+      config:
+        project: shop
+        batches: '["tag:load","tag:marts"]'
+        threads: "4"
