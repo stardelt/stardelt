@@ -75,5 +75,18 @@ check(
     "found setdefault()" if "setdefault(" in hook else "",
 )
 
+sandbox = next(
+    d for d in yaml.safe_load_all((ROOT / "manifests/spark-demo-sandbox.yaml").read_text())
+    if d and d.get("kind") == "Service" and (d.get("metadata") or {}).get("name") == "spark-demo"
+)
+demo_hook = str((helm_hub.get("extraConfig") or {}).get("27-demo-mode") or "")
+sandbox_ns = sandbox["metadata"]["namespace"]
+check(
+    "demo hub: a visitor's SPARK_REMOTE is the sandbox Service (27-demo-mode ↔ manifests/spark-demo-sandbox.yaml)",
+    "spawner.environment[\"SPARK_REMOTE\"]" in demo_hook
+    and f"sc://spark-demo.{sandbox_ns}.svc.cluster.local:15002" in demo_hook,
+    f"namespace={sandbox_ns}",
+)
+
 print("\nPASS" if not failures else f"\nFAIL ({len(failures)} check(s))")
 sys.exit(0 if not failures else 1)
