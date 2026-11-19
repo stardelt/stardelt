@@ -28,7 +28,8 @@
 # anything. Passwords and secrets never appear in output.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
@@ -107,7 +108,7 @@ trap cleanup EXIT
 # shellcheck disable=SC2034
 KC_LOG_PREFIX=demo-access
 # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+. "$SCRIPT_DIR/lib/keycloak-admin.sh"
 
 kc() { "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$@"; }
 

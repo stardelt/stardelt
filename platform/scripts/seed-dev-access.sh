@@ -56,7 +56,8 @@
 # step. Every mutating mode needs YES=1.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
@@ -173,7 +174,7 @@ fi
 # shellcheck disable=SC2034
 KC_LOG_PREFIX=seed-dev-access
 # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+. "$SCRIPT_DIR/lib/keycloak-admin.sh"
 
 kc() { "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$@"; }
 

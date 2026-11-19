@@ -37,7 +37,8 @@
 # including on failure.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
@@ -55,7 +56,7 @@ SINGLE_RUNS=3
 # The paths Trino is configured with, not copies of them (platform#359), plus
 # the chart's own rules as the oracle.
 # shellcheck source=lib/bridge.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/bridge.sh"
+. "$SCRIPT_DIR/lib/bridge.sh"
 
 fail() { echo "bridge-latency: $*" >&2; exit 1; }
 
@@ -88,7 +89,7 @@ trap cleanup EXIT
 # shellcheck disable=SC2034
 KC_LOG_PREFIX=bridge-latency
 # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+. "$SCRIPT_DIR/lib/keycloak-admin.sh"
 
 kc() { curl --silent --show-error --max-time 30 "${HEAD[@]}" "${AUTH[@]}" "$@"; }
 
@@ -118,7 +119,7 @@ PRINCIPALS=(
 # `SelectFromColumns` question: the front rule answers it from the table, and
 # Lakekeeper would deny a table that is not there.
 # shellcheck source=lib/bridge-tables.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/bridge-tables.sh"
+. "$SCRIPT_DIR/lib/bridge-tables.sh"
 # shellcheck disable=SC2034  # read by scripts/lib/bridge-tables.sh
 BRIDGE_TABLES_LOG="$tmp/port-forward.log"
 object_catalogs=()

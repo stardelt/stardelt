@@ -39,7 +39,8 @@
 # group (stardelt-operator#494, stardelt-nova#679).
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
@@ -150,7 +151,7 @@ trap cleanup EXIT
 # shellcheck disable=SC2034
 KC_LOG_PREFIX=keycloak-sync-principal
 # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+. "$SCRIPT_DIR/lib/keycloak-admin.sh"
 
 # 3. Delete mode: only a client this script created (attribute stardelt-managed equal to
 #    KIND) may be deleted, and only with YES=1. Anything else is reported and left alone.

@@ -55,7 +55,8 @@
 # and nothing else is deleted.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 DEMO_SPARK_NS="${DEMO_SPARK_NS:-stardelt-demo-spark}"
@@ -135,7 +136,7 @@ start_keycloak() {
   # shellcheck disable=SC2034
   KC_LOG_PREFIX=public-demo
   # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-  . "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+  . "$SCRIPT_DIR/lib/keycloak-admin.sh"
 }
 
 kc() { "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$@"; }

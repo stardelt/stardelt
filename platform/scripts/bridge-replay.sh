@@ -67,7 +67,8 @@
 # for each other, and a single difference exits 1.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 REALM="${REALM:-stardelt}"
@@ -86,7 +87,7 @@ DATA_ONLY=0
 
 # The paths the engine is configured with, not copies of them (platform#359).
 # shellcheck source=lib/bridge.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/bridge.sh"
+. "$SCRIPT_DIR/lib/bridge.sh"
 
 fail() { echo "bridge-replay: $*" >&2; exit 1; }
 
@@ -112,7 +113,7 @@ trap cleanup EXIT
 # shellcheck disable=SC2034
 KC_LOG_PREFIX=bridge-replay
 # shellcheck source=lib/keycloak-admin.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib/keycloak-admin.sh"
+. "$SCRIPT_DIR/lib/keycloak-admin.sh"
 
 kc() { curl --silent --show-error --max-time 30 "${HEAD[@]}" "${AUTH[@]}" "$@"; }
 
@@ -214,7 +215,7 @@ if [ "$MODE" = "differential" ]; then
   # denies a table that does not exist and Trino never asks about one, so a
   # synthetic name would compare a real answer with an impossible question.
   # shellcheck source=lib/bridge-tables.sh disable=SC1091
-  . "$(dirname "${BASH_SOURCE[0]}")/lib/bridge-tables.sh"
+  . "$SCRIPT_DIR/lib/bridge-tables.sh"
   # shellcheck disable=SC2034  # read by scripts/lib/bridge-tables.sh
   BRIDGE_TABLES_LOG="$tmp/port-forward.log"
   bridge_tables_init || fail "cannot reach the catalog to list its tables"
