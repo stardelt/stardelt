@@ -27,6 +27,7 @@ RUN python -m venv /opt/dbt \
 COPY examples/shop /opt/dbt/projects/shop
 COPY --from=licences /opt/LICENSES.txt /opt/licenses.json /opt/check-licenses.py /opt/license-exceptions.txt /opt/dbt/
 COPY images/dbt/stardelt-dbt /usr/local/bin/stardelt-dbt
+COPY images/dbt/run_summary.py /opt/dbt-run-summary.py
 RUN chmod 0755 /usr/local/bin/stardelt-dbt
 # A pipeline mounts the project read-only (or root-owned), so dbt's default `logs/` and
 # `target/` inside the project would fail to write: both live in /tmp, which uid 1000 owns.
