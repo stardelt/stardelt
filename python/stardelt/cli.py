@@ -55,6 +55,11 @@ def _parser():
     )
     signin.add_argument("--client-id", help=f"the public client to sign in with (default: {login.DEFAULT_CLIENT_ID})")
     commands.add_parser("logout", help="forget the stored sign-in")
+    setup = commands.add_parser("setup", help="install local integration files (the VS Code kernel)")
+    setup_commands = setup.add_subparsers(dest="setup_command", required=True)
+    editor = setup_commands.add_parser("vscode", help="write the stardelt kernelspec for VS Code")
+    editor.add_argument("--host", help="Nova's address (default: STARDELT_NOVA_URL or the stored sign-in)")
+    editor.add_argument("--spark-host", help="the Spark Connect host (default spark.<Nova's domain>)")
     sql = commands.add_parser("sql", help="run one statement as you")
     sql.add_argument("statement", nargs="?", help="the SQL text; or use -f")
     sql.add_argument("-f", "--file", help="read the SQL text from this file, or from standard input when it is -")
@@ -371,6 +376,17 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
         return _login(args, environ, stderr, session)
     if args.command == "logout":
         stderr.write("stardelt: signed out\n" if login.forget(environ) else "stardelt: there was no stored sign-in\n")
+        return OK
+
+    if args.command == "setup":
+        from stardelt import vscode_setup
+
+        try:
+            path = vscode_setup.install(environ, host=args.host, spark_host=args.spark_host)
+        except (ValueError, OSError) as err:
+            stderr.write(f"stardelt: {err}\n")
+            return USAGE
+        stdout.write(f"{path}\n")
         return OK
 
     body = None
