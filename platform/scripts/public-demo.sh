@@ -46,6 +46,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
+DEMO_SPARK_NS="${DEMO_SPARK_NS:-stardelt-demo-spark}"
 REALM="${REALM:-stardelt}"
 YES="${YES:-0}"
 
@@ -173,6 +174,9 @@ if [ "$mode" = check ]; then
       12) check_12 || rc=1 ;;
       13) check_13 || rc=1 ;;
       14) check_14 || rc=1 ;;
+      15) check_15 || rc=1 ;;
+      16) check_16 || rc=1 ;;
+      17) check_17 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -583,6 +587,55 @@ PY
     check_msg="the demo sign-in is not locked out ($failures failed attempt(s))"
   }
 
+  # 15. The demo's Spark sandbox is installed (stardelt#201 slice 1, stardelt#246).
+  check_15() {
+    local ready
+    ready="$(kubectl -n "$DEMO_SPARK_NS" get deploy spark-demo \
+      -o jsonpath='{.status.readyReplicas}/{.status.replicas}' 2>/dev/null || true)"
+    if [ "$ready" = "1/1" ]; then
+      check_msg="spark-demo 1/1 ready in $DEMO_SPARK_NS"
+    else
+      check_msg="the demo Spark sandbox is not installed or not ready (${ready:-absent})"
+      check_fix="make install-spark-demo"
+      return 1
+    fi
+  }
+
+  # 16. The nightly reset may restart the sandbox (stardelt#201 item 6, stardelt#251): the reset is
+  # best-effort, so a missing Role is one printed line in a Job log nobody reads.
+  check_16() {
+    local verbs subject
+    verbs="$(kubectl -n "$DEMO_SPARK_NS" get role demo-reset-spark \
+      -o jsonpath='{.rules[0].verbs[*]}' 2>/dev/null || true)"
+    subject="$(kubectl -n "$DEMO_SPARK_NS" get rolebinding demo-reset-spark \
+      -o jsonpath='{.subjects[0].name}/{.subjects[0].namespace}' 2>/dev/null || true)"
+    if [ -n "$verbs" ] && [ "$subject" = "demo-reset/$NAMESPACE" ]; then
+      check_msg="the nightly reset may restart spark-demo (verbs: $verbs)"
+    else
+      check_msg="the reset has no right to restart spark-demo (role: ${verbs:-missing}, subject: ${subject:-missing})"
+      check_fix="make install-spark-demo"
+      return 1
+    fi
+  }
+
+  # 17. Only a visitor pod reaches the sandbox (stardelt#201 item 2): the policy's one peer.
+  check_17() {
+    local peers
+    peers="$(kubectl -n "$DEMO_SPARK_NS" get networkpolicy spark-demo -o json 2>/dev/null \
+      | jq -r '[.spec.ingress[]?.from[]?
+                | ((.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] // "?")
+                   + ":" + (.podSelector.matchLabels["component"] // "-")
+                   + ":" + (.podSelector.matchLabels["stardelt.io/group.visitors"] // "-"))]
+               | join(",")')" || true
+    if [ "$peers" = "stardelt:singleuser-server:true" ]; then
+      check_msg="only a visitor pod in $NAMESPACE reaches 15002"
+    else
+      check_msg="the sandbox ingress admits '${peers:-nothing}' (want stardelt:singleuser-server:true)"
+      check_fix="make install-spark-demo"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -602,6 +655,9 @@ PY
   render 12
   render 13
   render 14
+  render 15
+  render 16
+  render 17
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then
