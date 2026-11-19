@@ -9,6 +9,11 @@ overwrite an existing one. To bring your own, create **both** Secrets before ins
 `manifests/s3-credentials.example.yaml` shows the first, and `seaweedfs_s3_config` is
 `{"identities":[{"name":"stardelt","credentials":[{"accessKey":"…","secretKey":"…"}],"actions":["Admin","Read","Write"]}]}`.
 
+That second document carries **both** halves: the identities above and the STS half the gateway
+reads with `-iam.config` (`sts.signingKey`, `policy`, `policies`, `roles`), which is what lets the
+gateway vend table-scoped credentials (stardelt#201). `stardelt-s3-creds` carries the matching
+`sts-signing-key`, so `scripts/s3-secrets.sh` and the chart write both Secrets from one key pair.
+
 The object store also ships its own web UI (buckets, users and policies, a file browser). It is
 **for cluster administrators only**, reached with `make seaweedfs-admin` (a port-forward to
 `http://127.0.0.1:23646`; the login is the generated Secret `seaweedfs-admin-ui`, never printed). It
