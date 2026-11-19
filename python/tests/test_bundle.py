@@ -6,6 +6,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 from stardelt import bundle, cli
 
@@ -275,6 +276,40 @@ def test_task_rules_are_reported(tmp_path):
 def test_a_pipeline_cannot_give_both_tasks_and_one_source(tmp_path):
     task_bundle(tmp_path, ["{name: x, sql: select 1}"], extra="sql: select 1\n")
     assert "give tasks, or one of sql, sqlFile or notebook — not both" in said(bundle.validate(tmp_path)[0])
+
+
+def test_a_pipeline_description_validates_and_round_trips(tmp_path):
+    """`spec.description` (#327): the validator leaves the key alone, and `generate` keeps it.
+
+    The bundle has no allowlist for pipeline keys, so a description needs no code here; a test
+    proves it instead.
+    """
+    described = "name: load\ndescription: Loads the shop's bronze layer\nsqlFile: sql/load.sql\n"
+    (tmp_path / "validated").mkdir()
+    assert bundle.validate(make(tmp_path / "validated", resources={"load.yaml": described}))[0] == []
+
+    class Nova:
+        """The one call `generate` makes: the pipeline as Nova returns it."""
+
+        def call(self, method, path=None):
+            assert (method, path) == ("pipelines_spec", {"namespace": "stardelt", "name": "daily"})
+            return {
+                "managedBy": "nova",
+                "editable": True,
+                "document": {
+                    "name": "daily",
+                    "ownerGroup": "sales",
+                    "description": "Loads the shop's bronze layer",
+                    "sql": "select 1",
+                },
+            }
+
+    directory = tmp_path / "round-trip"
+    directory.mkdir()
+    bundle.generate(Nova(), make(directory), "stardelt", "daily")
+    text = (directory / "resources" / "daily.yaml").read_text()
+    assert yaml.safe_load(text)["description"] == "Loads the shop's bronze layer"
+    assert "description" in text
 
 
 def _git(directory, *args):

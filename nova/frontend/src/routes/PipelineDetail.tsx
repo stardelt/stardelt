@@ -140,6 +140,10 @@ export default function PipelineDetail() {
               </a>
             )}
           </div>
+          {/* What the pipeline does (`spec.description`): absent for most, then no line. */}
+          {pipeline.description && (
+            <p className="text-sm text-text-dim mt-1 break-words">{pipeline.description}</p>
+          )}
           <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
         </div>
         {!demo && (

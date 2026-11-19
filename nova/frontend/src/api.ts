@@ -986,6 +986,8 @@ export type PipelineView = {
   namespace: string
   /** The owning group; null means administrators only. */
   ownerGroup: string | null
+  /** `spec.description`: one line about what the pipeline does; absent for most. */
+  description?: string | null
   /** Whether the caller may run it and stop its runs; a viewer of a shared pipeline may run. */
   canRun: boolean
   /** Whether the caller may also pause, resume, change or delete it — owner group and admins. */

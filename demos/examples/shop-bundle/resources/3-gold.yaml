@@ -1,4 +1,5 @@
 name: shop-3-gold
+description: "Builds the marts the demo reads: daily revenue, customer lifetime value and the product mix."
 schedule: {cron: "0 3 * * *", timezone: Europe/Berlin}
 params:
   schema: "${var.schema}"
