@@ -30,6 +30,12 @@
 #    An `Error` exit within RESTART_NODE_STALL_WINDOW (default 120) seconds of an `Unknown`/exit=255
 #    exit in the same namespace is the node's, not the component's: the row keeps `!` and says so
 #    (stardelt/stardelt#60, measured 2026-11-19T02:39:54Z).
+#  - a kube-apiserver stall that only costs leader leases has no `Unknown` exit at all: it makes
+#    several Deployments exit 1 within the same window ("failed to renew lease", "Leaderelection
+#    lost"). An `Error` exit within RESTART_NODE_STALL_WINDOW seconds of another listed
+#    Deployment's `Error` exit is that cluster stall too: the row keeps `!` and names it
+#    (measured 2026-11-19T07:01:09-14Z). A single Deployment's `Error` exit with no second row in
+#    the window still fails; `OOMKilled` and `ContainerCannotRun` never count as lease losses.
 #
 # Pods are matched by owner, not by name prefix: `nova-` also matches the StatefulSet pod
 # `nova-pg-1`, so a pod counts only when `ownerReferences[0].kind == "ReplicaSet"` and the
@@ -162,6 +168,37 @@ def node_stall_stamps(pods):
     return stamps
 
 
+def cluster_stall_stamps(pods):
+    """`Error` exits of two or more different rows inside one window: the API server, not the components.
+
+    Measured 2026-11-19T07:01:09-14Z on the lab: user-scheduler, spark-operator-controller and
+    -webhook, CloudNativePG and the barman plugin each exited 1 after "failed to renew lease
+    … context deadline exceeded" / "Leaderelection lost", and no pod in the namespace carried an
+    Unknown/exit=255 exit, so `node_stall_stamps` was empty.
+    """
+    exits = {}
+    for name in rows:
+        for pod in pods_of(name):
+            for status in (pod.get("status") or {}).get("containerStatuses") or []:
+                term = ((status.get("lastState") or {}).get("terminated") or {})
+                if term.get("reason") != "Error" or not term.get("finishedAt"):
+                    continue
+                stamp = _epoch(term["finishedAt"])
+                if stamp is not None:
+                    exits.setdefault(name, []).append(stamp)
+    stamps = []
+    for name, own in exits.items():
+        for stamp in own:
+            if any(
+                abs(stamp - other) <= NODE_STALL_WINDOW
+                for other_name, others in exits.items()
+                if other_name != name
+                for other in others
+            ):
+                stamps.append(stamp)
+    return stamps
+
+
 def node_caused(term, stalls):
     """`Error` inside a node stall's window is the node, not the component (stardelt/stardelt#60)."""
     if term[0] != "Error":
@@ -202,6 +239,7 @@ crashed = 0
 found = 0
 now = int(time.time())
 stalls = node_stall_stamps(pods)
+cluster = cluster_stall_stamps(pods)
 for name in rows:
     pods = pods_of(name)
     if not pods:
@@ -240,7 +278,7 @@ for name in rows:
         finished_epoch = _epoch(term[2])
         if finished_epoch is None or finished_epoch < now - MAX_AGE:
             continue  # unparseable or older than the window: printed with the row, never fatal
-        if node_caused(term, stalls):
+        if node_caused(term, stalls + cluster):
             node_rows.append((pod, term))
             continue
         crashes.append((pod, term))
@@ -254,10 +292,14 @@ for name in rows:
     if node_rows:
         pod, (reason, code, finished) = node_rows[0]
         stamp = _epoch(finished)
-        nearest = min(abs(stamp - s) for s in stalls)
         mark = "!"
-        text += "; %d node-caused exit(s) within %ds: %s exit=%s at %s (%ds of an unknown exit=255) — see stardelt/stardelt#60" % (
-            len(node_rows), MAX_AGE, reason, "?" if code is None else code, finished, nearest)
+        if stalls:
+            nearest = min(abs(stamp - s) for s in stalls)
+            text += "; %d node-caused exit(s) within %ds: %s exit=%s at %s (%ds of an unknown exit=255) — see stardelt/stardelt#60" % (
+                len(node_rows), MAX_AGE, reason, "?" if code is None else code, finished, nearest)
+        else:
+            text += "; %d cluster-wide exit(s) within %ds: %s exit=%s at %s (controllers lost their leases in one window; kube-apiserver) — see stardelt/stardelt#60" % (
+                len(node_rows), MAX_AGE, reason, "?" if code is None else code, finished)
     lines.append(row(mark, name, text))
 
 for line in lines:
