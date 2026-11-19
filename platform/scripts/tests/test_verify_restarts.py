@@ -309,6 +309,37 @@ class VerifyRestarts(unittest.TestCase):
         self.assertIn("verify-restarts: PASS", done.stdout)
         self.assertNotIn("✗", done.stdout)
 
+    def test_an_old_node_stall_does_not_relabel_a_cluster_stall(self):
+        """The lab keeps old exit=255 exits, so `stalls` is never empty (#267).
+
+        A row whose own exit is far outside the 120 s node window is a cluster stall even when an
+        Unknown/255 exit exists somewhere in the namespace — the sentence must not quote 600 s as
+        a distance to a 120 s window.
+        """
+        pods = [
+            pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(60)}),
+            pod("spark-operator-controller-7d-x", "spark-operator-controller-5c6d7f8b9",
+                restarts=1,
+                terminated={"reason": "Error", "exitCode": 1,
+                            "finishedAt": seconds_ago(54)}),
+            pod("stardelt-operator-7d-x", "stardelt-operator-5c6d7f8b9", restarts=1,
+                terminated={"reason": "Unknown", "exitCode": 255,
+                            "finishedAt": seconds_ago(600)}),
+        ]
+        rows = "user-scheduler,spark-operator-controller,stardelt-operator"
+        done = self.run_script(pods, ROWS=rows)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        lines = [ln for ln in done.stdout.splitlines() if "pod(s) ready" in ln]
+        self.assertEqual(len(lines), 3, done.stdout)
+        for name in ("user-scheduler", "spark-operator-controller"):
+            line = [ln for ln in lines if name in ln][0]
+            self.assertTrue(line.startswith("!"), line)
+            self.assertIn("cluster-wide exit(s)", line)
+            self.assertNotIn("of an unknown exit=255", line)
+        self.assertIn("verify-restarts: PASS", done.stdout)
+
     def test_one_controller_still_fails_on_its_own_error_exit(self):
         pods = [
             pod("user-scheduler-7d-x", "user-scheduler-5c6d7f8b9", restarts=1,
