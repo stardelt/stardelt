@@ -906,6 +906,16 @@ public-demo-check: _context ## Read-only: every public-demo rollout prerequisite
 public-demo-off: _context ## Kill switch: disable the public demo person and sign it out (needs YES=1)
 	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/public-demo.sh --off
 
+.PHONY: demo-sts demo-sts-check demo-sts-off
+demo-sts: _context ## Flip a warehouse to vend table-scoped storage credentials (lab only; needs YES=1, WAREHOUSE=gold)
+	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=true on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi
+	@NAMESPACE=$(NAMESPACE) YES=1 WAREHOUSE=$(or $(WAREHOUSE),gold) bash scripts/demo-sts.sh --on
+demo-sts-check: _context ## Read-only: does the warehouse vend table-scoped storage credentials
+	@NAMESPACE=$(NAMESPACE) WAREHOUSE=$(or $(WAREHOUSE),gold) bash scripts/demo-sts.sh --check
+demo-sts-off: _context ## The rollback of demo-sts: sts-enabled=false on the warehouse (needs YES=1, WAREHOUSE=gold)
+	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=false on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi
+	@NAMESPACE=$(NAMESPACE) YES=1 WAREHOUSE=$(or $(WAREHOUSE),gold) bash scripts/demo-sts.sh --off
+
 .PHONY: public-demo-catalogs
 public-demo-catalogs: _context ## The public demo's bronze/silver/gold Catalogs, before the shop deploy (lab only; needs YES=1)
 	@if [ '$(YES)' != 1 ]; then \
