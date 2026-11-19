@@ -14,7 +14,8 @@
 # (a table-shaped policy needs both, spike stardelt#245). The role trusts any principal, which
 # grants nothing the platform key does not already have — the restriction is the session policy.
 #
-# Exit 0 = PASS, 1 = FAIL, 3 = UNVERIFIED (no gateway, no pod, or a cluster we cannot read).
+# Exit 0 = PASS, 1 = FAIL (the pod reached Succeeded or Failed and its lines were judged),
+# 3 = UNVERIFIED (no gateway, no Secret, or a pod that reached no terminal phase).
 # No credential is printed: the CLI reads them from env vars and `--query` output is never echoed.
 set -euo pipefail
 
@@ -114,9 +115,20 @@ YAML
 
 kubectl -n "$NAMESPACE" apply -f "$tmp/pod.yaml" >/dev/null
 
-if ! kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=240s "pod/$pod" >/dev/null 2>&1; then
+# A terminal phase is a judged run: `Succeeded` prints pass lines, `Failed` prints at least one
+# `fail` line. Only a pod that reached neither phase is UNVERIFIED (image pull, unschedulable).
+deadline=$((SECONDS + ${S3_STS_WAIT_SECONDS:-240}))
+phase=""
+while [ "$SECONDS" -lt "$deadline" ]; do
+  phase="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  case "$phase" in
+    Succeeded|Failed) break ;;
+  esac
+  sleep "${S3_STS_POLL_SECONDS:-2}"
+done
+if [ "$phase" != "Succeeded" ] && [ "$phase" != "Failed" ]; then
   kubectl -n "$NAMESPACE" logs "$pod" 2>&1 || true
-  echo "verify-s3-sts: UNVERIFIED (the probe pod did not run to completion)"
+  echo "verify-s3-sts: UNVERIFIED (the probe pod reached no terminal phase — the gateway or its Secret is missing)"
   exit 3
 fi
 
