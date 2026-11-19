@@ -3199,6 +3199,18 @@ pub struct SparkClusterSpec {
     #[schemars(length(max = 100))]
     pub display_name: Option<String>,
     pub owner: SparkClusterOwner,
+    /// Groups that may USE the cluster in Nova — see it, connect to it and run work with it —
+    /// and nothing else. Starting, stopping and changing it stay with `owner`. Absent means
+    /// the owner's group only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        length(max = 16),
+        inner(
+            length(min = 1, max = 64),
+            regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+        )
+    )]
+    pub viewers: Vec<String>,
     #[serde(default)]
     pub size: SparkClusterSize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3263,6 +3275,12 @@ impl SparkClusterSpec {
         }
         if self.owner.group.is_some() == self.owner.user.is_some() {
             return Err("set exactly one of owner.group and owner.user".to_string());
+        }
+        if self.viewers.len() > 16 {
+            return Err("viewers holds at most 16 groups".to_string());
+        }
+        if let Some(bad) = self.viewers.iter().find(|group| !group_name_ok(group)) {
+            return Err(format!("viewers holds `{bad}`, which is not a group name"));
         }
         if let Some(display_name) = &self.display_name
             && display_name.len() > 100
@@ -5961,6 +5979,64 @@ mod tests {
     }
 
     #[test]
+    fn spark_cluster_viewers_are_optional_group_names() {
+        let schema = spark_spec_schema();
+        let viewers = &schema["properties"]["viewers"];
+        assert_eq!(viewers["type"], "array");
+        assert_eq!(viewers["maxItems"], 16);
+        assert_eq!(viewers["items"]["type"], "string");
+        assert_eq!(viewers["items"]["maxLength"], 64);
+        assert_eq!(
+            viewers["items"]["pattern"],
+            schema["properties"]["owner"]["properties"]["group"]["pattern"],
+            "a viewer is a group name, exactly as the owner group is"
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|key| key == "viewers")),
+            "viewers is optional"
+        );
+
+        let empty = spark_cluster(minimal_spark_spec());
+        assert!(
+            !serde_json::to_value(&empty.spec)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("viewers"),
+            "an empty viewers list is left out of the spec"
+        );
+        let mut two = empty;
+        two.spec.viewers = vec!["analytics".into(), "visitors".into()];
+        assert_eq!(
+            serde_json::to_value(&two.spec).unwrap()["viewers"],
+            serde_json::json!(["analytics", "visitors"])
+        );
+    }
+
+    #[test]
+    fn spark_cluster_validation_rejects_a_bad_viewer() {
+        let mut bad = spark_cluster(minimal_spark_spec());
+        bad.spec.viewers = vec!["visitors".into(), "bad group!".into()];
+        assert_eq!(
+            bad.spec.validate("shared").unwrap_err(),
+            "viewers holds `bad group!`, which is not a group name"
+        );
+
+        let mut many = spark_cluster(minimal_spark_spec());
+        many.spec.viewers = vec!["visitors".into(); 17];
+        assert_eq!(
+            many.spec.validate("shared").unwrap_err(),
+            "viewers holds at most 16 groups"
+        );
+
+        let mut good = spark_cluster(minimal_spark_spec());
+        good.spec.viewers = vec!["visitors".into()];
+        assert_eq!(good.spec.validate("shared"), Ok(()));
+    }
+
+    #[test]
     fn a_spark_image_must_be_pinned_by_digest() {
         let unpinned = spark_cluster(serde_json::json!({
             "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
@@ -6099,7 +6175,8 @@ mod tests {
         let c = spark_cluster(serde_json::json!({
             "owner": { "group": "analytics" }, "runtime": "spark-4.0-py3.12",
             "displayName": "Analytics Spark", "maxExecutors": 4,
-            "idleStopMinutes": 30, "state": "Running"
+            "idleStopMinutes": 30, "state": "Running",
+            "viewers": ["visitors"]
         }));
         let json = serde_json::to_value(&c.spec).expect("serialises");
         for key in ["displayName", "maxExecutors", "idleStopMinutes"] {
@@ -6108,6 +6185,7 @@ mod tests {
         assert_eq!(c.spec.state, SparkClusterState::Running);
         assert_eq!(c.spec.max_executors, Some(4));
         assert_eq!(c.spec.idle_stop_minutes, 30);
+        assert_eq!(c.spec.viewers, vec!["visitors".to_string()]);
     }
 
     #[test]

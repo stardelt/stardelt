@@ -877,6 +877,7 @@ mod tests {
                 group: Some("mobility-analytics".into()),
                 user: None,
             },
+            viewers: vec![],
             size: SparkClusterSize::Small,
             driver: None,
             executor: None,

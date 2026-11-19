@@ -145,9 +145,25 @@ fn owner_of(spec: &Value) -> ComputeOwner {
     }
 }
 
+/// `spec.viewers`: the groups that may use a cluster whose `owner` names another group or a
+/// person. Used only by `may_use`; starting and stopping stay with `may_act`.
+fn viewers_of(spec: &Value) -> Vec<String> {
+    spec.get("viewers")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Whether the caller may see the cluster: an administrator, everyone for `shared`, the
-/// owner's group, or the owner themselves (`owner.user` is the sign-in name).
-fn may_use(who: &Identity, name: &str, owner: &ComputeOwner) -> bool {
+/// owner's group, or the owner themselves (`owner.user` is the sign-in name) — or one of the
+/// groups in `spec.viewers` (who may use it, not start or stop it).
+fn may_use(who: &Identity, name: &str, owner: &ComputeOwner, viewers: &[String]) -> bool {
     who.is_admin
         || name == "shared"
         || owner
@@ -155,6 +171,9 @@ fn may_use(who: &Identity, name: &str, owner: &ComputeOwner) -> bool {
             .as_ref()
             .is_some_and(|group| who.groups.iter().any(|g| g == group))
         || owner.user.as_deref() == Some(who.display_name.as_str())
+        || viewers
+            .iter()
+            .any(|group| who.groups.iter().any(|mine| mine == group))
 }
 
 /// Whether the caller may start or stop the cluster. The shared cluster is always on
@@ -222,7 +241,8 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
         .to_string();
     let spec = object.get("spec").unwrap_or(object);
     let owner = owner_of(spec);
-    if !may_use(who, &name, &owner) {
+    let viewers = viewers_of(spec);
+    if !may_use(who, &name, &owner, &viewers) {
         return None;
     }
     let status = object.get("status").unwrap_or(&Value::Null);
@@ -1009,6 +1029,12 @@ pub(crate) async fn upsert(
         .unwrap_or("Stopped")
         .to_string();
     spec["state"] = json!(state_word);
+    if let Some(viewers) = existing
+        .as_ref()
+        .and_then(|object| object.data.pointer("/spec/viewers").cloned())
+    {
+        spec["viewers"] = viewers;
+    }
     let object = kube::api::DynamicObject {
         types: Some(kube::core::TypeMeta {
             api_version: "stardelt.io/v1alpha1".into(),
@@ -1103,7 +1129,7 @@ mod tests {
 
     use super::{
         may_act, may_use, message_of, owner_of, phase_of, platform_view, spark_defaults,
-        validate_spec, visible_clusters, visible_to,
+        validate_spec, viewers_of, visible_clusters, visible_to,
     };
     use crate::auth::Identity;
 
@@ -1149,16 +1175,57 @@ mod tests {
         let person = owner_of(&json!({"owner": {"user": "alice"}}));
         let shared = owner_of(&json!({"owner": {"group": "stardelt-users"}}));
 
-        assert!(may_use(&who("root", &[], true), "trial", &group));
-        assert!(may_use(&who("bob", &["sales"], false), "trial", &group));
-        assert!(may_use(&who("alice", &[], false), "trial", &person));
+        assert!(may_use(&who("root", &[], true), "trial", &group, &[]));
+        assert!(may_use(
+            &who("bob", &["sales"], false),
+            "trial",
+            &group,
+            &[]
+        ));
+        assert!(may_use(&who("alice", &[], false), "trial", &person, &[]));
         assert!(!may_use(
             &who("bob", &["marketing"], false),
             "trial",
-            &group
+            &group,
+            &[]
         ));
-        assert!(!may_use(&who("bob", &[], false), "trial", &person));
-        assert!(may_use(&who("bob", &[], false), "shared", &shared));
+        assert!(!may_use(&who("bob", &[], false), "trial", &person, &[]));
+        assert!(may_use(&who("bob", &[], false), "shared", &shared, &[]));
+    }
+
+    #[test]
+    fn a_viewer_may_use_a_cluster_but_not_act() {
+        let spec = json!({"owner": {"group": "analytics"}, "viewers": ["visitors"]});
+        let owner = owner_of(&spec);
+        let viewers = viewers_of(&spec);
+
+        assert!(may_use(
+            &who("demo", &["visitors"], false),
+            "team",
+            &owner,
+            &viewers
+        ));
+        assert!(!may_act(&who("demo", &["visitors"], false), "team", &owner));
+        assert!(!may_use(
+            &who("other", &["other"], false),
+            "team",
+            &owner,
+            &viewers
+        ));
+    }
+
+    #[test]
+    fn a_viewer_sees_the_cluster() {
+        let spec = json!({"owner": {"group": "analytics"}, "viewers": ["visitors"]});
+        let objects = [cluster("team", spec)];
+        let listed = |user: &str, groups: &[&str]| {
+            visible_clusters(&objects, &who(user, groups, false))
+                .iter()
+                .map(|view| view.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed("demo", &["visitors"]), ["team"]);
+        assert!(listed("other", &["other"]).is_empty());
     }
 
     #[test]
