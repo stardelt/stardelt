@@ -3,7 +3,7 @@
     import stardelt
     stardelt.browse()
 
-Permission-aware listing uses stardelt.sql() under the person's token
+Permission-aware listing uses stardelt._sql() under the person's token
 (SHOW CATALOGS, SHOW SCHEMAS FROM c, SHOW TABLES FROM c.s, DESCRIBE c.s.t).
 Everything is text (no HTML from table or column names).
 """
@@ -143,7 +143,7 @@ class CatalogBrowser:
     def _load_catalogs(self):
         try:
             import stardelt
-            frame = stardelt.sql("SHOW CATALOGS")
+            frame = stardelt._sql("SHOW CATALOGS")
             if frame is not None and len(frame) > 0:
                 # Get first column
                 col = frame.columns[0]
@@ -197,7 +197,7 @@ class CatalogBrowser:
             import stardelt
             # Use SHOW SCHEMAS FROM catalog
             query = f'SHOW SCHEMAS FROM {_quote_ident_if_needed(self.current_catalog)}'
-            frame = stardelt.sql(query)
+            frame = stardelt._sql(query)
             if frame is not None and len(frame) > 0:
                 col = frame.columns[0]
                 schemas = []
@@ -232,7 +232,7 @@ class CatalogBrowser:
             catalog = _quote_ident_if_needed(self.current_catalog)
             schema = _quote_ident_if_needed(self.current_schema)
             query = f'SHOW TABLES FROM {catalog}.{schema}'
-            frame = stardelt.sql(query)
+            frame = stardelt._sql(query)
             if frame is not None and len(frame) > 0:
                 col = frame.columns[0]
                 tables = []
@@ -278,7 +278,7 @@ class CatalogBrowser:
                 full_name = f'{catalog}.{schema}.{table}'
                 # Try DESCRIBE first
                 try:
-                    frame = stardelt.sql(f'DESCRIBE {full_name}')
+                    frame = stardelt._sql(f'DESCRIBE {full_name}')
                     if frame is not None and len(frame) > 0:
                         # Print as text table
                         print(_safe_text(frame.to_string()))
@@ -287,7 +287,7 @@ class CatalogBrowser:
                     pass
                 # Try information_schema
                 try:
-                    frame = stardelt.sql(
+                    frame = stardelt._sql(
                         "SELECT column_name, data_type, comment FROM information_schema.columns "
                         f"WHERE table_catalog = '{self.current_catalog}' AND table_schema = '{self.current_schema}' AND table_name = '{self.current_table}'"
                     )
@@ -315,7 +315,7 @@ class CatalogBrowser:
                 table = _quote_ident_if_needed(self.current_table)
                 full_name = f'{catalog}.{schema}.{table}'
                 try:
-                    frame = stardelt.sql(f'SELECT * FROM {full_name} LIMIT 20')
+                    frame = stardelt._sql(f'SELECT * FROM {full_name} LIMIT 20')
                     if frame is not None:
                         print(_safe_text(frame.to_string()))
                         return

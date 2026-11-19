@@ -13,6 +13,7 @@ import socket
 import sys
 import time
 import types
+import warnings
 
 import certifi
 import pandas as pd
@@ -338,7 +339,7 @@ def test_unsupported_dtypes(trino):
 
 
 def test_spark_reads_remote_from_env(fake_spark, monkeypatch):
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse"))
     monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
 
     monkeypatch.setenv("SPARK_REMOTE", "sc://other:15002")
@@ -687,9 +688,36 @@ def _catalogs(*names):
 
 @pytest.fixture
 def visible_catalogs(monkeypatch):
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse", "bronze"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse", "bronze"))
     monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
     return ["warehouse", "bronze"]
+
+
+def test_the_library_does_not_warn_about_itself(fake_spark, visible_catalogs):
+    """``spark()`` lists catalogs through the private path: no FutureWarning about ``sql()``."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stardelt.spark("app")
+    self_warnings = [
+        warning
+        for warning in caught
+        if issubclass(warning.category, FutureWarning)
+        and "stardelt.sql()" in str(warning.message)
+    ]
+    assert self_warnings == []
+
+
+def test_a_persons_own_sql_call_still_warns_on_the_platform(trino):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stardelt.sql("SELECT 1")
+    deprecations = [
+        warning
+        for warning in caught
+        if issubclass(warning.category, FutureWarning)
+        and "stardelt.sql()" in str(warning.message)
+    ]
+    assert len(deprecations) == 1
 
 
 def test_unreachable_endpoint_fails_in_seconds():
@@ -747,7 +775,7 @@ def test_sets_catalog_conf_for_visible_names_only(fake_spark, visible_catalogs):
 def test_hidden_and_invalid_names_skipped(fake_spark, monkeypatch):
     monkeypatch.setattr(
         stardelt,
-        "sql",
+        "_sql",
         lambda _query: _catalogs(
             "warehouse", "system", "information_schema", "memory", "tpch", "tpcds", "jmx",
             "Upper", "a" * 41, "ok9",
@@ -768,7 +796,7 @@ def test_hidden_and_invalid_names_skipped(fake_spark, monkeypatch):
 def test_refused_catalog_is_not_loaded_but_others_are(fake_spark, monkeypatch):
     fake_spark.refused = {"bronze"}
     monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse", "bronze"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse", "bronze"))
     session = stardelt.spark()
     assert "warehouse" in session.catalog.loaded
     assert "bronze" not in session.catalog.loaded
@@ -792,7 +820,7 @@ def test_token_in_conf_never_printed_or_in_errors(
 def test_second_call_refreshes_token(fake_spark, monkeypatch):
     tokens = iter(["token-one-317", "token-two-317"])
     monkeypatch.setattr(stardelt, "_token", lambda: next(tokens))
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse"))
     first = stardelt.spark()
     assert first.configs["spark.sql.catalog.warehouse.token"] == "token-one-317"
     second = stardelt.spark()
@@ -867,7 +895,7 @@ def test_dead_session_is_stopped_best_effort_even_if_stop_raises(
 def test_token_change_builds_a_new_session_without_the_notice(fake_spark, monkeypatch, capsys):
     tokens = iter(["token-one-377", "token-two-377"])
     monkeypatch.setattr(stardelt, "_token", lambda: next(tokens))
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse"))
     first = stardelt.spark()
     second = stardelt.spark()
     assert second is not first
@@ -889,7 +917,7 @@ def test_trino_down_falls_back_to_warehouse(fake_spark, monkeypatch, capsys):
     def boom(_query):
         raise RuntimeError("Trino is down")
 
-    monkeypatch.setattr(stardelt, "sql", boom)
+    monkeypatch.setattr(stardelt, "_sql", boom)
     monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
     session = stardelt.spark()
     configured = {
@@ -904,10 +932,10 @@ def test_trino_down_falls_back_to_warehouse(fake_spark, monkeypatch, capsys):
 
 def test_default_catalog_warehouse_when_present(fake_spark, monkeypatch):
     monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("bronze"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("bronze"))
     assert "spark.sql.defaultCatalog" not in stardelt.spark().configs
     stardelt._SPARK_SESSION = None
-    monkeypatch.setattr(stardelt, "sql", lambda _query: _catalogs("warehouse", "bronze"))
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse", "bronze"))
     assert stardelt.spark().configs["spark.sql.defaultCatalog"] == "warehouse"
 
 
