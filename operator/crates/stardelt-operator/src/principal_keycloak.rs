@@ -389,6 +389,111 @@ pub async fn platform_instance_for_namespace(
         .find(|pi| pi.spec.namespace == namespace))
 }
 
+/// Make an existing realm issue the audience the Spark front checks (#263 slice A).
+///
+/// `--import-realm` imports a realm once, so a realm created by an earlier operator never gains
+/// the `spark-connect` client or its two `aud-spark-connect` mappers; the front that
+/// `ensure_spark` applies would then refuse every token. Idempotent: every object is read first,
+/// so a second call writes nothing.
+pub async fn ensure_spark_audience(ctx: &Context, namespace: &str) -> Result<(), String> {
+    let token = admin_token(ctx, namespace).await?;
+
+    // 1. The bearer-only client the front names as its audience (keycloak_realm.json).
+    let clients = proxy_auth(
+        ctx,
+        namespace,
+        &token,
+        "GET",
+        "/admin/realms/stardelt/clients?clientId=spark-connect",
+        None,
+        None,
+    )
+    .await?;
+    let clients: serde_json::Value = serde_json::from_str(&clients)
+        .map_err(|_| "Keycloak returned a client list that is not JSON".to_string())?;
+    if clients.as_array().is_none_or(|list| list.is_empty()) {
+        let client = serde_json::json!({
+            "clientId": "spark-connect",
+            "name": "Spark Connect",
+            "enabled": true,
+            "protocol": "openid-connect",
+            "bearerOnly": true,
+            "publicClient": false,
+            "standardFlowEnabled": false,
+            "implicitFlowEnabled": false,
+            "directAccessGrantsEnabled": false,
+            "serviceAccountsEnabled": false
+        });
+        proxy_auth(
+            ctx,
+            namespace,
+            &token,
+            "POST",
+            "/admin/realms/stardelt/clients",
+            Some("application/json"),
+            Some(client),
+        )
+        .await?;
+    }
+
+    // 2. The audience mapper on the two clients a person signs in with.
+    for client_id in ["jupyterhub", "stardelt-dev"] {
+        let listed = proxy_auth(
+            ctx,
+            namespace,
+            &token,
+            "GET",
+            &format!("/admin/realms/stardelt/clients?clientId={client_id}"),
+            None,
+            None,
+        )
+        .await?;
+        let listed: serde_json::Value = serde_json::from_str(&listed)
+            .map_err(|_| format!("Keycloak returned the {client_id} list that is not JSON"))?;
+        let Some(uuid) = listed
+            .as_array()
+            .and_then(|list| list.first())
+            .and_then(|c| c.get("id"))
+            .and_then(|id| id.as_str())
+        else {
+            return Err(format!("Keycloak has no client {client_id}"));
+        };
+        let mappers_path = format!("/admin/realms/stardelt/clients/{uuid}/protocol-mappers/models");
+        let mappers = proxy_auth(ctx, namespace, &token, "GET", &mappers_path, None, None).await?;
+        let mappers: serde_json::Value = serde_json::from_str(&mappers)
+            .map_err(|_| format!("Keycloak returned the {client_id} mappers that are not JSON"))?;
+        let present = mappers.as_array().is_some_and(|list| {
+            list.iter()
+                .any(|m| m.get("name").and_then(|v| v.as_str()) == Some("aud-spark-connect"))
+        });
+        if !present {
+            let mapper = serde_json::json!({
+                "name": "aud-spark-connect",
+                "protocol": "openid-connect",
+                "protocolMapper": "oidc-audience-mapper",
+                "consentRequired": false,
+                "config": {
+                    "included.client.audience": "spark-connect",
+                    "id.token.claim": "false",
+                    "access.token.claim": "true",
+                    "introspection.token.claim": "true"
+                }
+            });
+            proxy_auth(
+                ctx,
+                namespace,
+                &token,
+                "POST",
+                &mappers_path,
+                Some("application/json"),
+                Some(mapper),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Delete the Keycloak client and the credentials Secret of one principal.
 /// Mirrors `keycloak-sync-principal.sh --delete`: only a client carrying
 /// `stardelt-managed: principal` may be removed; anything else is an error, not a guess.
@@ -949,6 +1054,142 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_existing_realm_gains_the_spark_audience() {
+        let (ctx, requests) = mock_ctx(|method, uri, _body| {
+            if method == "GET" && uri.contains("/configmaps/keycloak-env") {
+                return (200, cm_env());
+            }
+            if method == "GET" && uri.contains("/secrets/keycloak-admin") {
+                return (200, admin_secret());
+            }
+            if uri.contains("/proxy/realms/master/protocol/openid-connect/token") {
+                return (200, serde_json::json!({"access_token": "tok"}));
+            }
+            if method == "GET"
+                && uri.contains("/proxy/admin/realms/stardelt/clients?clientId=spark-connect")
+            {
+                return (200, serde_json::json!([]));
+            }
+            if method == "GET"
+                && uri.contains("/proxy/admin/realms/stardelt/clients?clientId=jupyterhub")
+            {
+                return (200, serde_json::json!([{"id": "uuid-jh"}]));
+            }
+            if method == "GET"
+                && uri.contains("/proxy/admin/realms/stardelt/clients?clientId=stardelt-dev")
+            {
+                return (200, serde_json::json!([{"id": "uuid-sd"}]));
+            }
+            if method == "GET" && uri.contains("/protocol-mappers/models") {
+                return (200, serde_json::json!([]));
+            }
+            if method == "POST" {
+                return (201, serde_json::json!({}));
+            }
+            (
+                404,
+                serde_json::json!({"kind":"Status","code":404,"message":"not found"}),
+            )
+        });
+
+        ensure_spark_audience(&ctx, "stardelt").await.expect("sync");
+
+        let requests = requests.lock().expect("poisoned");
+        let posts: Vec<_> = requests
+            .iter()
+            .filter(|(m, u, _)| m == "POST" && !u.contains("/protocol/openid-connect/token"))
+            .collect();
+        let client_posts: Vec<_> = posts
+            .iter()
+            .filter(|(_, u, _)| u.ends_with("/proxy/admin/realms/stardelt/clients"))
+            .collect();
+        assert_eq!(
+            client_posts.len(),
+            1,
+            "expected one client POST: {requests:?}"
+        );
+        let body: serde_json::Value = serde_json::from_str(&client_posts[0].2).expect("json");
+        assert_eq!(body["clientId"], "spark-connect");
+        for uuid in ["uuid-jh", "uuid-sd"] {
+            let mapper_posts: Vec<_> = posts
+                .iter()
+                .filter(|(_, u, _)| {
+                    u.ends_with(&format!("/clients/{uuid}/protocol-mappers/models"))
+                })
+                .collect();
+            assert_eq!(
+                mapper_posts.len(),
+                1,
+                "expected one mapper POST for {uuid}: {requests:?}"
+            );
+            assert!(
+                mapper_posts[0].2.contains("\"aud-spark-connect\""),
+                "mapper body: {}",
+                mapper_posts[0].2
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_realm_that_already_carries_the_audience_gets_no_post() {
+        let (ctx, requests) = mock_ctx(|method, uri, _body| {
+            if method == "GET" && uri.contains("/configmaps/keycloak-env") {
+                return (200, cm_env());
+            }
+            if method == "GET" && uri.contains("/secrets/keycloak-admin") {
+                return (200, admin_secret());
+            }
+            if uri.contains("/proxy/realms/master/protocol/openid-connect/token") {
+                return (200, serde_json::json!({"access_token": "tok"}));
+            }
+            if method == "GET"
+                && uri.contains("/proxy/admin/realms/stardelt/clients?clientId=spark-connect")
+            {
+                return (
+                    200,
+                    serde_json::json!([{"id": "uuid-sc", "clientId": "spark-connect"}]),
+                );
+            }
+            if method == "GET"
+                && uri.contains("/proxy/admin/realms/stardelt/clients?clientId=jupyterhub")
+            {
+                return (200, serde_json::json!([{"id": "uuid-jh"}]));
+            }
+            if method == "GET"
+                && uri.contains("/proxy/admin/realms/stardelt/clients?clientId=stardelt-dev")
+            {
+                return (200, serde_json::json!([{"id": "uuid-sd"}]));
+            }
+            if method == "GET" && uri.contains("/protocol-mappers/models") {
+                return (
+                    200,
+                    serde_json::json!([{"id": "m1", "name": "aud-spark-connect"}]),
+                );
+            }
+            if method == "POST" {
+                return (201, serde_json::json!({}));
+            }
+            (
+                404,
+                serde_json::json!({"kind":"Status","code":404,"message":"not found"}),
+            )
+        });
+
+        ensure_spark_audience(&ctx, "stardelt").await.expect("sync");
+
+        let requests = requests.lock().expect("poisoned");
+        // The admin token is itself a POST; everything else must be a read.
+        let writes: Vec<_> = requests
+            .iter()
+            .filter(|(m, u, _)| {
+                (*m == "POST" || *m == "PUT" || *m == "DELETE" || *m == "PATCH")
+                    && !u.contains("/protocol/openid-connect/token")
+            })
+            .collect();
+        assert!(writes.is_empty(), "no write expected: {writes:?}");
     }
 
     #[tokio::test]

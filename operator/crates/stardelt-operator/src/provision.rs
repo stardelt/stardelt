@@ -917,6 +917,9 @@ pub async fn ensure_spark(
         {
             return Some(status(NAME, false, e.to_string()));
         }
+        if let Err(e) = crate::principal_keycloak::ensure_spark_audience(ctx, namespace).await {
+            return Some(status(NAME, false, e.to_string()));
+        }
     }
     if let Err(e) = apply_cluster(client, &spark::pod_guard_policy(), dry_run).await {
         return Some(status(NAME, false, e.to_string()));
