@@ -1,0 +1,103 @@
+name: "release / Publish"
+
+# Phase D of the release (stardelt/stardelt#2): the release PR added releases/v<version>/ to
+# main. Retag every image by digest, tag the tested commit, create the GitHub release.
+on:
+  push:
+    branches: [main]
+    paths: ["releases/**"]
+  workflow_dispatch: {}   # re-run after a failed publish; it skips what already exists
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Retag the images, tag the commit, create the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Which release
+        id: rel
+        run: |
+          set -euo pipefail
+          todo=""
+          for dir in releases/v*/; do
+            v="$(basename "$dir")"
+            git ls-remote --exit-code --tags origin "refs/tags/$v" >/dev/null || todo="$todo $v"
+          done
+          set -- $todo
+          [ "$#" -eq 1 ] || { echo "✗ expected one untagged release folder, found: ${todo:-none}"; exit 1; }
+          v="$1"
+          commit="$(sed -n 's/^commit: \([0-9a-f]\{40\}\)$/\1/p' "releases/$v/versions.yaml")"
+          [ -n "$commit" ] || { echo "✗ releases/$v/versions.yaml names no commit"; exit 1; }
+          git merge-base --is-ancestor "$commit" origin/main || { echo "✗ $commit is not on main"; exit 1; }
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag every image v0.0.N on its digest (no rebuild)
+        env:
+          V: ${{ steps.rel.outputs.v }}
+        run: |
+          set -euo pipefail
+          sed -n 's/^  \([a-z-]*\): {digest: "\(sha256:[0-9a-f]\{64\}\)".*$/\1 \2/p' "releases/$V/versions.yaml" > "$RUNNER_TEMP/images.txt"
+          [ "$(wc -l < "$RUNNER_TEMP/images.txt")" -eq 7 ] || { cat "$RUNNER_TEMP/images.txt"; echo "✗ expected 7 images"; exit 1; }
+          while read -r image digest; do
+            docker buildx imagetools create --tag "ghcr.io/stardelt/$image:$V" "ghcr.io/stardelt/$image@$digest"
+            got="$(docker buildx imagetools inspect "ghcr.io/stardelt/$image:$V" | sed -n 's/^Digest: *//p' | head -n 1)"
+            [ "$got" = "$digest" ] || { echo "✗ $image:$V is $got, want $digest"; exit 1; }
+            echo "✓ ghcr.io/stardelt/$image:$V = $digest"
+          done < "$RUNNER_TEMP/images.txt"
+
+      - name: Build the wheels at the tested commit
+        env:
+          COMMIT: ${{ steps.rel.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git worktree add "$RUNNER_TEMP/src" "$COMMIT"
+          python3 -m pip install -U build "jupyterlab>=4.0.0,<5"
+          python3 -m build "$RUNNER_TEMP/src/python" --outdir "$RUNNER_TEMP/dist"
+          (cd "$RUNNER_TEMP/src/python/jupyterlab" && jlpm install)
+          python3 -m build --wheel "$RUNNER_TEMP/src/python/jupyterlab" --outdir "$RUNNER_TEMP/dist"
+          ls -l "$RUNNER_TEMP/dist"
+
+      - name: Tag the commit and create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.rel.outputs.v }}
+          COMMIT: ${{ steps.rel.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$V" "$COMMIT" -m "stardelt $V"
+          git push origin "refs/tags/$V"
+          python3 scripts/release/release_notes.py "${V#v}" <(git show "$COMMIT:CHANGELOG.md" 2>/dev/null || true) > "$RUNNER_TEMP/notes.md"
+          gh release create "$V" --verify-tag --title "stardelt $V" --notes-file "$RUNNER_TEMP/notes.md" \
+            "releases/$V/install.yaml" "releases/$V/versions.yaml" "releases/$V/platform-minimal.yaml" \
+            "$RUNNER_TEMP"/dist/*
