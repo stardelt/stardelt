@@ -13,7 +13,9 @@
 # `namespaceSelector: {}` rule is the metrics scrape source below — a pod
 # labelled `app.kubernetes.io/name: prometheus` (stardelt-operator#607) reads
 # port 9000 from any namespace, read-only; every caller rule stays
-# same-namespace. Kubelet probes come from the node and are unaffected.
+# same-namespace except the one named caller — the public demo's Spark sandbox
+# driver in `stardelt-demo-spark` (stardelt/stardelt#314). Kubelet probes come
+# from the node and are unaffected.
 #
 # The callers below are the pods that actually use the catalog, checked against
 # the live configuration in stardelt-platform#274:
@@ -35,6 +37,8 @@
 #     change to the Job is needed.
 #   - Access sync CronJob: one Lakekeeper warehouse per `Catalog`
 #     (manifests/access-sync.yaml, platform#305). Management API on 8181.
+#   - The demo Spark sandbox's driver (namespace stardelt-demo-spark, manifests/spark-demo-sandbox.yaml);
+#     local mode, so there are no executors to admit.
 #
 # Not callers, and therefore not allowed: Trino workers (they read Parquet from
 # S3; the coordinator does the catalog work), Spark executors (they read data
@@ -112,6 +116,16 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: access-sync
+        # The public demo's Spark sandbox (manifests/spark-demo-sandbox.yaml, the fixed
+        # namespace `stardelt-demo-spark`): its driver is the catalog client of a visitor's
+        # session — local mode has no executors — so it is the sandbox's only catalog caller.
+        # `kubernetes.io/metadata.name` is the apiserver's own label on every namespace.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: stardelt-demo-spark
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spark-demo
       ports:
         - protocol: TCP
           port: 8181

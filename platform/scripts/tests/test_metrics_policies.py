@@ -20,6 +20,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 SCRAPER = {"app.kubernetes.io/name": "prometheus"}
 
+# The one named cross-namespace caller besides the scraper (stardelt/stardelt#314): the
+# public demo's Spark sandbox driver, in the fixed namespace `stardelt-demo-spark`
+# (manifests/spark-demo-sandbox.yaml). Local mode, so there are no executors to admit.
+DEMO_SANDBOX = {
+    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "stardelt-demo-spark"}},
+    "podSelector": {"matchLabels": {"app.kubernetes.io/name": "spark-demo"}},
+}
+
 
 def load_values(name):
     with open(ROOT / "helm-values" / name, encoding="utf-8") as handle:
@@ -63,8 +71,21 @@ class PolicyTest(unittest.TestCase):
             if rule is scrape[0]:
                 continue
             for peer in rule.get("from") or []:
+                if peer == DEMO_SANDBOX:
+                    continue
                 self.assertNotIn("namespaceSelector", peer,
-                                 "%s: a caller rule must stay same-namespace" % name)
+                                 "%s: a caller rule must stay same-namespace, or be the one "
+                                 "named demo-sandbox peer" % name)
+
+    def test_the_catalog_policy_admits_the_demo_sandbox_driver_on_8181(self):
+        policy = load_policy("lakekeeper-network-policy.yaml")
+        catalog = [rule for rule in policy["spec"]["ingress"]
+                   if rule.get("ports") == [{"protocol": "TCP", "port": 8181}]]
+        self.assertEqual(len(catalog), 1,
+                         "expected exactly one rule on port 8181, found %d" % len(catalog))
+        self.assertIn(DEMO_SANDBOX, catalog[0]["from"],
+                      "the demo sandbox's driver is the catalog client of a visitor's session; "
+                      "without this peer every catalog load is refused")
 
     def test_the_policies_admit_only_a_prometheus_scraper(self):
         self.assert_only_a_scraper("lakekeeper-network-policy.yaml", 9000)
