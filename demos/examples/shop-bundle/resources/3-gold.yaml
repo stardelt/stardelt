@@ -3,6 +3,7 @@ description: "Builds the marts the demo reads: daily revenue, customer lifetime 
 schedule: {cron: "0 3 * * *", timezone: Europe/Berlin}
 params:
   schema: "${var.schema}"
+notify: {onSuccess: [run-feed], onFailure: [run-feed]}
 tasks:
   - {name: schema, sqlFile: sql/03_schema_gold.sql}
   - {name: daily_revenue, sqlFile: sql/10_daily_revenue.sql, dependsOn: [schema]}
