@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# The demo's shop pipelines in one repeatable command (#335, #79 slice 2b).
+#
+#   make demo-shop            # print the plan and exit 1
+#   make demo-shop YES=1      # converge the shop: the bundle, the dbt run, viewers
+#
+# The demo's Pipelines page used to be twelve one-statement pipelines, all On demand: no
+# schedule, no next run, a stale history. The bundle in demos/examples/shop-bundle is the
+# demo, and this script is the redeploy of it — the sequence a person ran by hand, written
+# once and checkable (`make public-demo-check`, rows 18 and 19).
+#
+# In order:
+#
+#   0.  the prerequisites: kubectl, jq, a stardelt CLI that answers, the ServicePrincipal
+#       pipeline-demo ready, and a CLI that is signed in to Nova;
+#   1.  the shop bundle deployed for the target prod: shop-1-bronze, shop-2-silver and
+#       shop-3-gold, scheduled 02:00 / 02:30 / 03:00 Europe/Berlin;
+#   2.  the twelve one-statement legacy pipelines deleted — an explicit list, never a
+#       pattern, and never one that carries .spec.schedule;
+#   3.  the dbt run applied: shop-dbt, 04:00 Europe/Berlin;
+#   4.  viewers=[visitors] on every shop pipeline and on shop-dbt (`stardelt bundle deploy`
+#       rewrites the whole spec, so it drops viewers — rerun this script after a deploy);
+#   5.  one line for the maintainer: how to trigger shop-dbt's first run.
+#
+# A run with YES != 1 changes nothing: it prints every step as `would:` and exits 1.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+NAMESPACE="${NAMESPACE:-stardelt}"
+YES="${YES:-0}"
+NOVA="${STARDELT_NOVA_URL:-https://alpha.dev.stardelt.io}"
+GROUP=visitors
+BUNDLE=../demos/examples/shop-bundle
+DBT=../demos/examples/shop/pipeline-dbt.yaml
+LEGACY=(
+  shop-01-bronze shop-02-silver shop-03-gold shop-04-customers shop-05-products shop-06-lines
+  shop-07-stg-cust shop-08-stg-prod shop-09-stg-lines shop-10-revenue shop-11-ltv shop-12-mix
+)
+
+fail() { echo "demo-shop: $*" >&2; exit 1; }
+
+# 0. The prerequisites. The CLI is the one on PATH, or the venv `make public-demo-check` row
+# 0b accepts, so a shell that never activated a venv can still run the redeploy.
+for tool in kubectl jq; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
+done
+CLI="$(command -v stardelt 2>/dev/null || true)"
+if [ -z "$CLI" ]; then
+  CLI="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}/bin/stardelt"
+fi
+[ -x "$CLI" ] || fail "the stardelt CLI is not installed — see make public-demo-check 0b"
+
+principal="$(kubectl -n "$NAMESPACE" get serviceprincipals.stardelt.io pipeline-demo \
+  -o jsonpath='{.status.ready}' 2>/dev/null || true)"
+[ "$principal" = true ] \
+  || fail "ServicePrincipal pipeline-demo is not ready (${principal:-absent}) — run make demo-access YES=1 first"
+echo "› ServicePrincipal pipeline-demo: ready"
+
+# `--host` is a global option of the CLI: it comes before the subcommand.
+plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
+  || fail "the stardelt CLI is not signed in to $NOVA ($(printf '%s' "$plan" | tail -1)) — run: stardelt login --host $NOVA"
+echo "› stardelt CLI: signed in to $NOVA"
+
+# 1. The bundle: three scheduled pipelines instead of twelve On demand ones.
+planned=()
+if [ "$YES" = 1 ]; then
+  "$CLI" --host "$NOVA" bundle deploy "$BUNDLE" -t prod \
+    || fail "stardelt bundle deploy $BUNDLE -t prod failed"
+  echo "› shop bundle: deployed (shop-1-bronze 02:00, shop-2-silver 02:30, shop-3-gold 03:00 Europe/Berlin)"
+else
+  echo "would: stardelt bundle deploy $BUNDLE -t prod --host $NOVA"
+  mapfile -t planned < <(printf '%s\n' "$plan" | jq -Rr 'fromjson? | select(.name != null) | .name')
+  [ "${#planned[@]}" -gt 0 ] || fail "cannot read the plan of $BUNDLE: $(printf '%s' "$plan" | tail -1)"
+  printf '%s\n' "$plan" | jq -Rr 'fromjson? | select(.name != null) | "› plan: \(.name) \(.action)"'
+fi
+
+# 2. The twelve legacy pipelines. An explicit list, so a name this script does not know is
+# never deleted; a scheduled pipeline is never deleted, by anyone's script.
+for name in "${LEGACY[@]}"; do
+  document="$(kubectl -n "$NAMESPACE" get pipelines.stardelt.io "$name" -o json 2>/dev/null || true)"
+  if [ -z "$document" ]; then
+    echo "› $name: absent"
+    continue
+  fi
+  if [ "$(jq -r '.metadata.labels["stardelt.io/bundle"] // ""' <<<"$document")" != shop ]; then
+    echo "› $name: not the demo's (no stardelt.io/bundle=shop)"
+    continue
+  fi
+  if jq -e '.spec.schedule != null' <<<"$document" >/dev/null 2>&1; then
+    fail "$name carries .spec.schedule ($(jq -r '.spec.schedule.cron // "?"' <<<"$document")) — this script never deletes a scheduled pipeline"
+  fi
+  if [ "$YES" = 1 ]; then
+    kubectl -n "$NAMESPACE" delete pipelines.stardelt.io "$name" >/dev/null \
+      || fail "cannot delete pipeline $name"
+    echo "› $name: deleted (the bundle's shop-1-bronze replaces it)"
+  else
+    echo "would: delete $name"
+  fi
+done
+
+# 3. The dbt run: one task on the demo's dbt project, in the bundle's own image.
+if [ "$YES" = 1 ]; then
+  kubectl -n "$NAMESPACE" apply -f "$DBT" >/dev/null || fail "cannot apply $DBT"
+  echo "› shop-dbt: applied (04:00 Europe/Berlin)"
+else
+  echo "would: apply $DBT (shop-dbt, 04:00 Europe/Berlin)"
+fi
+
+# 4. The viewers. `stardelt bundle deploy` rewrites the whole spec and drops `viewers`
+# (public-demo.sh step 9), so this runs after the deploy. `kubectl patch` takes one object
+# name — there is no `-l` on it — so patch each pipeline by name; shop-dbt carries no bundle
+# label and is patched by name here.
+if [ "$YES" = 1 ]; then
+  mapfile -t names < <(kubectl -n "$NAMESPACE" get pipelines.stardelt.io -l stardelt.io/bundle=shop \
+    -o json 2>/dev/null | jq -r '.items[]?.metadata.name' 2>/dev/null || true)
+  if kubectl -n "$NAMESPACE" get pipelines.stardelt.io shop-dbt >/dev/null 2>&1; then
+    names+=("shop-dbt")
+  fi
+  if [ "${#names[@]}" -eq 0 ]; then
+    echo "› viewers: no shop pipelines yet"
+  else
+    for name in "${names[@]}"; do
+      kubectl -n "$NAMESPACE" patch pipelines.stardelt.io "$name" --type merge \
+        -p "{\"spec\":{\"viewers\":[\"$GROUP\"]}}" >/dev/null \
+        || fail "cannot add viewers=[$GROUP] to pipeline $name"
+    done
+    echo "› viewers=[$GROUP] on ${#names[@]} pipeline(s)"
+  fi
+else
+  # The cluster still holds the twelve legacy pipelines here: count what the run above
+  # would leave, not what is there now.
+  echo "would: let $GROUP see the bundle's ${#planned[@]} pipeline(s) and shop-dbt (viewers=[$GROUP])"
+fi
+
+# 5. What is left for the maintainer: the dbt run's first history entry.
+echo "shop-dbt's first run: kubectl -n $NAMESPACE exec deploy/airflow-scheduler -- airflow dags trigger stardelt__shop-dbt"
+
+if [ "$YES" != 1 ]; then
+  echo "demo-shop: nothing was changed — re-run with YES=1"
+  exit 1
+fi
+
+echo ""
+echo "demo-shop: OK — the shop is the bundle's three, the dbt run and no legacy pipelines"
