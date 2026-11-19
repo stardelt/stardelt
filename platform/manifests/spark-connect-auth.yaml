@@ -12,6 +12,13 @@
 # (`backend-protocol: GRPC`) to this Service. Nothing points here yet — this file only
 # makes the front exist and prove that it refuses an unsigned call.
 #
+# Authenticating is not authorizing (security finding, 2026-11-19). The front accepts any
+# signed realm token with audience `spark-connect`, so the RBAC filter below reads the realm's
+# `groups` claim and admits only `stardelt-users` and `stardelt-admins`; `visitors` (the public
+# demo's group) is in neither list and is refused. The claim carries the short group name: every
+# group-membership mapper in `chart/files/keycloak-realm.json` sets `full.path: false`. Enforcing
+# on it needs `payload_in_metadata`, which is why the provider hands the verified payload on.
+#
 # `__BASE_DOMAIN__` is rendered by `make install-spark` (the issuer and the host).
 apiVersion: v1
 kind: ConfigMap
@@ -65,6 +72,8 @@ data:
                               # Hand the verified JWT on: the upstream is where an identity would
                               # have to be read from (the Connect server reads none today, #208).
                               forward: true
+                              # The RBAC filter below matches on the verified payload's `groups`.
+                              payload_in_metadata: jwt_payload
                               remote_jwks:
                                 http_uri:
                                   uri: http://keycloak.stardelt.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs
@@ -74,6 +83,34 @@ data:
                           rules:
                             - match: { prefix: "/" }
                               requires: { provider_name: keycloak }
+                      # A verified token is not yet a member: the RBAC filter is the gate. The
+                      # realm's `groups` claim carries short names (`full.path: false`), so the
+                      # two entries are exactly the groups `stardelt-users` and `stardelt-admins`.
+                      # `visitors` — the public demo's group — is in neither and gets
+                      # PERMISSION_DENIED (Envoy answers 403, gRPC maps it).
+                      - name: envoy.filters.http.rbac
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                          rules:
+                            action: ALLOW
+                            policies:
+                              members:
+                                permissions: [{ any: true }]
+                                principals:
+                                  - metadata:
+                                      filter: envoy.filters.http.jwt_authn
+                                      path: [{ key: jwt_payload }, { key: groups }]
+                                      value:
+                                        list_match:
+                                          one_of:
+                                            string_match: { exact: "stardelt-users" }
+                                  - metadata:
+                                      filter: envoy.filters.http.jwt_authn
+                                      path: [{ key: jwt_payload }, { key: groups }]
+                                      value:
+                                        list_match:
+                                          one_of:
+                                            string_match: { exact: "stardelt-admins" }
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

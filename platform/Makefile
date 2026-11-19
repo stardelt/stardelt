@@ -265,7 +265,7 @@ verify-spark-demo-security: _context ## The demo sandbox's containment: no non-g
 	@NS=$(NAMESPACE) DEMO_NS=stardelt-demo-spark bash scripts/verify-spark-demo-security.sh
 
 .PHONY: verify-spark-auth
-verify-spark-auth: _context ## The shared Connect front: a signed query runs, an unsigned call and a token without the audience are refused (manual; starts one pod)
+verify-spark-auth: _context ## The shared Connect front: a signed query runs; an unsigned call, a token without the audience and a visitor's token are refused (manual; starts one pod)
 	@NS=$(NAMESPACE) BASE_DOMAIN=$(BASE_DOMAIN) bash scripts/verify-spark-auth.sh
 
 verify-maintenance: _context ## Every Catalog's maint-<catalog> CronJob, its staggered schedule and its principal (manual)

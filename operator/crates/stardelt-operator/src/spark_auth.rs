@@ -1,7 +1,9 @@
 //! The token-checking front of Spark Connect (`stardelt/stardelt#231`, D44 twin of
 //! `platform/manifests/spark-connect-auth.yaml`): an Envoy whose `jwt_authn` verifies a
 //! Keycloak-signed access token with audience `spark-connect` before a gRPC frame reaches the
-//! driver (stardelt#84 Q4, spike stardelt#208).
+//! driver (stardelt#84 Q4, spike stardelt#208), and whose `rbac` filter next to it admits only
+//! the realm groups `stardelt-users` and `stardelt-admins` — a valid token of a `visitors`-only
+//! person is refused with PERMISSION_DENIED (stardelt#404).
 //!
 //! Pure builders, object for object with the platform manifest. The Ingress lives in
 //! [`crate::ingress::spark`]; this module builds the ConfigMap, the Deployment, the Service and
