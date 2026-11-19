@@ -13,7 +13,9 @@
 # `namespaceSelector: {}` rule is the metrics scrape source below — a pod
 # labelled `app.kubernetes.io/name: prometheus` (stardelt-operator#607) reads
 # port 9000 from any namespace, read-only; every caller rule stays
-# same-namespace. Kubelet probes come from the node and are unaffected.
+# same-namespace except the one named caller — the public demo's Spark sandbox
+# driver in `stardelt-demo-spark` (stardelt/stardelt#314). Kubelet probes come
+# from the node and are unaffected.
 #
 # The callers below are the pods that actually use the catalog, checked against
 # the live configuration in stardelt-platform#274:
