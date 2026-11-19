@@ -245,6 +245,7 @@ branch="chore/pin-rollup"
 git switch -C "$branch"
 git add "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" "$AIRFLOW_FILE" "$AIRFLOW_GROUP_FILE" "$SUPERSET_FILE" "$SUPERSET_GROUP_FILE" \
   "$JUPYTER_FILE" chart/values.yaml chart/files/spark-runtimes.json \
+  scripts/fixtures/spark-executor-pod.yaml \
   "$OPERATOR_DIR/crates/stardelt-operator/src/provision.rs" \
   "$OPERATOR_DIR/crates/stardelt-operator/values/airflow.yaml" \
   "$OPERATOR_DIR/crates/stardelt-operator/values/spark.yaml" \
