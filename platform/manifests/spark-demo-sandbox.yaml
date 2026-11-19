@@ -128,7 +128,9 @@ spec:
 ---
 # Who may reach it, and where it may go. Ingress: the visitor's notebook pod (the hub's demo hook
 # sets both labels, helm-values/jupyterhub.yaml:532) and nothing else — no other namespace, no
-# other pod. Egress: DNS, the S3 gateway and Lakekeeper for slice 2, and no internet.
+# other pod. Egress: DNS, the S3 gateway and Lakekeeper for slice 2, and no internet. The two
+# data-plane peers are named by label (`seaweedfs` `s3`, `lakekeeper` `catalog`), so a later pod
+# in `stardelt` that listens on 8333 or 8181 is not reachable from a visitor's code (#405).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -159,12 +161,28 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # The object store's S3 gateway, named by the labels the platform's own notebook egress
+    # policy selects (manifests/pipeline-notebook-egress.yaml).
     - to:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: stardelt }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: seaweedfs
+              app.kubernetes.io/component: s3
       ports:
         - protocol: TCP
           port: 8333
+    # The catalog, named by the labels its own ingress policy selects
+    # (manifests/lakekeeper-network-policy.yaml).
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: stardelt }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lakekeeper
+              app.kubernetes.io/component: catalog
+      ports:
         - protocol: TCP
           port: 8181
 ---
