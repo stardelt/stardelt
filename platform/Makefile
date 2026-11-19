@@ -82,7 +82,7 @@ CHART_EXTRA ?=
 # client redirect URIs on the app subdomains. Same default as `dev-dns`.
 BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
-.PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-query dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
+.PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-auth verify-spark-query dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
@@ -247,6 +247,10 @@ verify-spark-query: _context ## One query through the shared Spark Connect serve
 .PHONY: verify-spark-config
 verify-spark-config: _context ## The ConfigMap that pins the Spark executor image carries manifests/spark.yaml's digest
 	@NS=$(NAMESPACE) bash scripts/verify-spark-config.sh
+
+.PHONY: verify-spark-auth
+verify-spark-auth: _context ## The shared Connect front: a signed query runs, an unsigned call and a token without the audience are refused (manual; starts one pod)
+	@NS=$(NAMESPACE) BASE_DOMAIN=$(BASE_DOMAIN) bash scripts/verify-spark-auth.sh
 
 verify-maintenance: _context ## Every Catalog's maint-<catalog> CronJob, its staggered schedule and its principal (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-maintenance.sh
