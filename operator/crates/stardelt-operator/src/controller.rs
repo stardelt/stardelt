@@ -111,31 +111,52 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         Api::<Lakehouse>::all(client.clone()),
         watcher::Config::default(),
     )
-    .run(reconcile_lakehouse, error_policy, ctx.clone());
+    .run(
+        |obj, ctx| crate::metrics::timed("lakehouse", reconcile_lakehouse(obj, ctx)),
+        error_policy,
+        ctx.clone(),
+    );
     let platforms = Controller::new(
         Api::<PlatformInstance>::all(client.clone()),
         watcher::Config::default(),
     )
-    .run(reconcile_platform, error_policy, ctx.clone());
+    .run(
+        |obj, ctx| crate::metrics::timed("platform", reconcile_platform(obj, ctx)),
+        error_policy,
+        ctx.clone(),
+    );
 
     let connections = Controller::new(
         Api::<Connection>::all(client.clone()),
         watcher::Config::default(),
     )
-    .run(reconcile_connection, error_policy, ctx.clone());
+    .run(
+        |obj, ctx| crate::metrics::timed("connection", reconcile_connection(obj, ctx)),
+        error_policy,
+        ctx.clone(),
+    );
 
     let principals = Controller::new(
         Api::<ServicePrincipal>::all(client.clone()),
         watcher::Config::default(),
     )
-    .run(reconcile_principal, error_policy, ctx.clone());
+    .run(
+        |obj, ctx| crate::metrics::timed("principal", reconcile_principal(obj, ctx)),
+        error_policy,
+        ctx.clone(),
+    );
 
     let streams = Controller::new(
         Api::<StreamApp>::all(client.clone()),
         watcher::Config::default(),
     )
     .run(
-        crate::stream_app::reconcile_stream_app,
+        |obj, ctx| {
+            crate::metrics::timed(
+                "stream_app",
+                crate::stream_app::reconcile_stream_app(obj, ctx),
+            )
+        },
         crate::stream_app::error_policy,
         ctx.clone(),
     );
@@ -145,7 +166,12 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         watcher::Config::default(),
     )
     .run(
-        crate::spark_cluster::reconcile_spark_cluster,
+        |obj, ctx| {
+            crate::metrics::timed(
+                "spark_cluster",
+                crate::spark_cluster::reconcile_spark_cluster(obj, ctx),
+            )
+        },
         crate::spark_cluster::error_policy,
         ctx.clone(),
     );
@@ -155,7 +181,9 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         watcher::Config::default(),
     )
     .run(
-        crate::maintenance::reconcile_catalog,
+        |obj, ctx| {
+            crate::metrics::timed("catalog", crate::maintenance::reconcile_catalog(obj, ctx))
+        },
         crate::maintenance::error_policy,
         ctx.clone(),
     );
