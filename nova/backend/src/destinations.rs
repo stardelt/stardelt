@@ -53,6 +53,8 @@ pub struct Destination {
     /// The kind's address: `{"recipients": [...]}` or `{"url": "https://…"}`.
     #[schema(value_type = Value)]
     pub config: serde_json::Value,
+    /// Groups that may see this destination, read-only. Empty: its owner group only.
+    pub viewers: Vec<String>,
     /// Epoch milliseconds, like `Job.started_at`.
     pub created_at: i64,
     /// Epoch milliseconds, like `Job.started_at`.
@@ -69,6 +71,8 @@ pub struct NewDestination {
     /// The kind's address: `{"recipients": [...]}` or `{"url": "https://…"}`.
     #[schema(value_type = Value)]
     pub config: serde_json::Value,
+    #[serde(default)]
+    pub viewers: Vec<String>,
 }
 
 /// `{"recipients": [1 to 20 non-empty addresses]}` and nothing else needed.
@@ -112,11 +116,26 @@ fn validate(req: NewDestination) -> Result<NewDestination, String> {
         return Err(format!("name must be 1 to {MAX_NAME_CHARS} characters"));
     }
     let owner_group = validate_group(&req.owner_group)?;
+    if req.viewers.len() > 16 {
+        return Err("viewers holds at most 16 groups".into());
+    }
+    let mut viewers = Vec::with_capacity(req.viewers.len());
+    for group in &req.viewers {
+        match validate_group(group) {
+            Ok(g) => viewers.push(g),
+            Err(_) => {
+                return Err(format!(
+                    "viewers holds `{group}`, which is not a group name"
+                ));
+            }
+        }
+    }
     Ok(NewDestination {
         owner_group,
         name,
         kind: req.kind,
         config: req.config,
+        viewers,
     })
 }
 
@@ -135,6 +154,12 @@ fn member_of(group: &str, principal: Option<&Principal>) -> bool {
 #[allow(dead_code)]
 pub fn may_see(destination: &Destination, principal: Option<&Principal>, _dev_user: &str) -> bool {
     member_of(&destination.owner_group, principal)
+        || principal.is_some_and(|p| {
+            p.identity
+                .groups
+                .iter()
+                .any(|g| destination.viewers.iter().any(|v| v == g))
+        })
 }
 
 /// `GET /api/destinations` — the caller's groups' destinations, newest first.
@@ -182,9 +207,9 @@ pub async fn list(
         .unwrap_or_default();
     // `$1` carries the dev-mode and administrator case: every group is theirs.
     let see_all = principal.is_none_or(|p| p.identity.is_admin);
-    let sql = "SELECT id, owner_group, name, kind, config, created_at, updated_at \
+    let sql = "SELECT id, owner_group, name, kind, config, viewers, created_at, updated_at \
                FROM destination \
-               WHERE ($1::boolean OR owner_group = ANY($2)) \
+               WHERE ($1::boolean OR owner_group = ANY($2) OR viewers && $2) \
                  AND ($3::text IS NULL OR owner_group = $3) \
                ORDER BY created_at DESC, id DESC";
     match sqlx::query_as::<_, Destination>(sql)
@@ -241,14 +266,15 @@ pub async fn create(
         "a destination named {} already exists in {}",
         new.name, new.owner_group
     );
-    let sql = "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
-               VALUES ($1, $2, $3, $4, $5, $5) \
-               RETURNING id, owner_group, name, kind, config, created_at, updated_at";
+    let sql = "INSERT INTO destination (owner_group, name, kind, config, viewers, created_at, updated_at) \
+               VALUES ($1, $2, $3, $4, $5, $6, $6) \
+               RETURNING id, owner_group, name, kind, config, viewers, created_at, updated_at";
     match sqlx::query_as::<_, Destination>(sql)
         .bind(&new.owner_group)
         .bind(&new.name)
         .bind(&new.kind)
         .bind(&new.config)
+        .bind(&new.viewers)
         .bind(now)
         .fetch_one(pool)
         .await
@@ -432,7 +458,7 @@ pub async fn test(
         return unavailable();
     };
     let found = sqlx::query_as::<_, Destination>(
-        "SELECT id, owner_group, name, kind, config, created_at, updated_at \
+        "SELECT id, owner_group, name, kind, config, viewers, created_at, updated_at \
          FROM destination WHERE id = $1",
     )
     .bind(id)
@@ -443,7 +469,7 @@ pub async fn test(
         Ok(None) => return not_found(),
         Err(e) => return store_failed(e),
     };
-    if !may_see(&row, caller.as_ref().map(|c| &c.0), &s.dev_user) {
+    if !member_of(&row.owner_group, caller.as_ref().map(|c| &c.0)) {
         return not_found();
     }
     if row.kind == "email" {
@@ -515,6 +541,7 @@ mod tests {
             name: name.into(),
             kind: "email".into(),
             config: serde_json::json!({ "recipients": recipients }),
+            viewers: Vec::new(),
         }
     }
 
@@ -524,6 +551,7 @@ mod tests {
             name: name.into(),
             kind: "webhook".into(),
             config: serde_json::json!({ "url": url }),
+            viewers: Vec::new(),
         }
     }
 
@@ -534,6 +562,7 @@ mod tests {
             name: "on call".into(),
             kind: "webhook".into(),
             config: serde_json::json!({ "url": "https://example.com/hook" }),
+            viewers: Vec::new(),
             created_at: 0,
             updated_at: 0,
         }
@@ -648,6 +677,40 @@ mod tests {
         assert!(!may_see(&owner, Some(&outsider), "stardelt-dev"));
         assert!(may_see(&owner, Some(&admin), "stardelt-dev"));
         assert!(may_see(&owner, None, "stardelt-dev"));
+    }
+
+    #[test]
+    fn a_viewer_sees_a_destination_and_cannot_send_it() {
+        let mut row = destination("demo");
+        row.viewers = vec!["visitors".into()];
+        let visitor = principal("demo-person", &["visitors"], false);
+        let member = principal("alice", &["demo"], false);
+        assert!(may_see(&row, Some(&visitor), "stardelt-dev"));
+        assert!(may_see(&row, Some(&member), "stardelt-dev"));
+        assert!(
+            !member_of("demo", Some(&visitor)),
+            "a viewer is not a member: no test message, no delete"
+        );
+        assert!(member_of("demo", Some(&member)));
+    }
+
+    #[test]
+    fn validate_accepts_viewers_and_refuses_a_bad_group() {
+        let mut req = webhook("demo", "demo-feed", "https://ntfy.sh/demo-4711");
+        req.viewers = vec!["visitors".into(), "analytics".into()];
+        assert_eq!(validate(req).unwrap().viewers, ["visitors", "analytics"]);
+        let mut bad = webhook("demo", "demo-feed", "https://ntfy.sh/demo-4711");
+        bad.viewers = vec!["visitors".into(), "bad group!".into()];
+        assert_eq!(
+            validate(bad).unwrap_err(),
+            "viewers holds `bad group!`, which is not a group name"
+        );
+        let mut many = webhook("demo", "demo-feed", "https://ntfy.sh/demo-4711");
+        many.viewers = vec!["visitors".into(); 17];
+        assert_eq!(
+            validate(many).unwrap_err(),
+            "viewers holds at most 16 groups"
+        );
     }
 
     // --- the test message (slice b) -------------------------------------------------
