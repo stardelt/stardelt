@@ -3709,7 +3709,7 @@
     "/api/destinations": {
       "get": {
         "tags": [
-          "internal"
+          "public"
         ],
         "summary": "`GET /api/destinations` — the caller's groups' destinations, newest first.",
         "description": "The notification destinations of the caller's groups, newest first. `?group=<group>` narrows to one group the caller belongs to. Times are epoch milliseconds.",
@@ -3763,7 +3763,7 @@
       },
       "post": {
         "tags": [
-          "internal"
+          "public"
         ],
         "summary": "`POST /api/destinations` — `201` with the stored row.",
         "description": "Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything.",
@@ -3835,7 +3835,7 @@
     "/api/destinations/{id}": {
       "delete": {
         "tags": [
-          "internal"
+          "public"
         ],
         "summary": "`DELETE /api/destinations/{id}` — `204`; `404` for another group's id or none.",
         "description": "Delete one of the caller's groups' notification destinations.",
@@ -3892,7 +3892,7 @@
     "/api/destinations/{id}/test": {
       "post": {
         "tags": [
-          "internal"
+          "public"
         ],
         "summary": "`POST /api/destinations/{id}/test` — send one test message to a webhook destination\nand record the attempt.",
         "description": "Send one test message to a webhook destination and record the attempt. An email destination answers 400 until the platform's SMTP relay exists. The answer never contains the webhook's URL.",

@@ -12,6 +12,10 @@
 //! group's id answers `404`, exactly like an id that does not exist. In `dev` mode
 //! there is no principal and one person, so every destination is theirs.
 //!
+//! The four routes are `public` (stardelt/stardelt#464): a destination is an address a pipeline
+//! or an operator tool points at, so the CLI and the MCP server must be able to create one —
+//! `stardelt api destinations_create` is generated from the contract.
+//!
 //! No secret is stored here. A webhook's header secrets wait for the service-identity
 //! decision (slice c).
 //!
@@ -170,7 +174,7 @@ pub fn may_see(destination: &Destination, principal: Option<&Principal>, _dev_us
     get,
     operation_id = "destinations_list",
     path = "/api/destinations",
-    tag = "internal",
+    tag = "public",
     description = "The notification destinations of the caller's groups, newest first. `?group=<group>` narrows to one group the caller belongs to. Times are epoch milliseconds.",
     params(
         ("group" = Option<String>, Query, description = "Only this group's destinations"),
@@ -229,7 +233,7 @@ pub async fn list(
     post,
     operation_id = "destinations_create",
     path = "/api/destinations",
-    tag = "internal",
+    tag = "public",
     description = "Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything.",
     request_body = NewDestination,
     responses(
@@ -294,7 +298,7 @@ pub async fn create(
     delete,
     operation_id = "destinations_remove",
     path = "/api/destinations/{id}",
-    tag = "internal",
+    tag = "public",
     description = "Delete one of the caller's groups' notification destinations.",
     params(("id" = i64, Path, description = "The destination's id")),
     responses(
@@ -439,7 +443,7 @@ const INSERT_DELIVERY: &str = "INSERT INTO destination_delivery \
     post,
     operation_id = "destinations_test",
     path = "/api/destinations/{id}/test",
-    tag = "internal",
+    tag = "public",
     description = "Send one test message to a webhook destination and record the attempt. An email destination answers 400 until the platform's SMTP relay exists. The answer never contains the webhook's URL.",
     params(("id" = i64, Path, description = "The destination's id")),
     responses(
