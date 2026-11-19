@@ -3,6 +3,11 @@
 //! The operator translates a `SparkCluster` into the Spark Operator's `SparkConnect`; Nova
 //! only exposes it — lists the clusters a caller may use and sets `spec.state` (Start and
 //! Stop). Nothing in Nova is state of its own.
+//!
+//! Next to the `SparkCluster`s the page shows the Spark servers the platform's own manifests
+//! install (`stardelt/spark-connect` and the demo sandbox, `kind: "platform"`, nova#271): they
+//! are plain Deployments, so Nova reads the Deployment for the shape and the `<name>-config`
+//! ConfigMap for the sizes, through a whitelist of keys.
 
 use std::sync::Arc;
 
@@ -12,7 +17,9 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use kube::api::{Api, ApiResource, DeleteParams, Patch, PatchParams, PostParams};
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::ConfigMap;
+use kube::api::{Api, ApiResource, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,8 +31,30 @@ use crate::auth::{Identity, Principal};
 use crate::connection_routes::Fail;
 use crate::pipelines::{ResourceError, answer, no_cluster, resource_fail};
 
+/// The Deployment label that marks a Spark server the manifests install: `shared` for the
+/// members' server, `demo` for the visitors' sandbox (`platform/manifests/spark.yaml`,
+/// `spark-demo-sandbox.yaml`).
+const PLATFORM_LABEL: &str = "stardelt.io/compute";
+/// The public demo's Spark namespace (`platform/manifests/spark-demo-sandbox.yaml`).
+const DEMO_NAMESPACE: &str = "stardelt-demo-spark";
+/// When the demo sandbox is restarted (`platform/manifests/demo-reset.yaml`).
+const DEMO_RESET: &str = "daily 03:00 UTC";
+
+/// The only `spark-defaults.conf` keys the API answers. The rest of that file is the platform's:
+/// ServiceAccount names, the executor pod template, Secret references and paths.
+const SPARK_CONF_KEYS: &[&str] = &[
+    "spark.master",
+    "spark.driver.memory",
+    "spark.driver.maxResultSize",
+    "spark.executor.cores",
+    "spark.executor.memory",
+    "spark.dynamicAllocation.minExecutors",
+    "spark.dynamicAllocation.maxExecutors",
+    "spark.dynamicAllocation.executorIdleTimeout",
+];
+
 /// The `SparkCluster`'s owner: a group or a person, exactly one of the two.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ComputeOwner {
     pub group: Option<String>,
     pub user: Option<String>,
@@ -49,7 +78,7 @@ pub struct ComputeEnvVar {
 }
 
 /// One `SparkCluster`, as the Compute page needs it.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeCluster {
     pub name: String,
@@ -79,6 +108,23 @@ pub struct ComputeCluster {
     pub idle_stop_minutes: i64,
     pub can_use: bool,
     pub shared: bool,
+    /// `cluster` for a `SparkCluster`, `platform` for a Spark server the manifests install.
+    pub kind: String,
+    /// `kubernetes` (executors are pods) or `local` (the demo sandbox: two threads, none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The container's resource limits, on a platform server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ComputeResources>,
+    /// `members` or `visitors`: who shares a platform server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// When a platform server is restarted on a schedule (`daily 03:00 UTC` on the sandbox).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    /// Whether this is the Spark the caller's own notebook uses.
+    #[serde(default)]
+    pub yours: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -222,6 +268,12 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             .and_then(Value::as_i64)
             .unwrap_or(60),
         can_use: true,
+        kind: "cluster".to_string(),
+        mode: None,
+        limits: None,
+        audience: None,
+        resets_at: None,
+        yours: false,
     })
 }
 
@@ -233,6 +285,218 @@ pub fn visible_clusters(objects: &[Value], who: &Identity) -> Vec<ComputeCluster
         .collect();
     views.sort_by(|a, b| a.name.cmp(&b.name));
     views
+}
+
+/// A visitor of the public demo: `27-demo-mode` gives their notebook the sandbox as `spark`.
+fn is_visitor(who: &Identity) -> bool {
+    who.groups.iter().any(|group| group == "visitors")
+}
+
+/// The `spark-defaults.conf` a platform server runs with, whitelisted to `SPARK_CONF_KEYS`.
+/// Spark accepts `key value` (the platform's own files, aligned with spaces) and `key = value`;
+/// comments and blanks are dropped and a key outside the whitelist never leaves this function.
+/// Pure, so the parse is testable without a cluster.
+fn spark_defaults(text: &str) -> std::collections::BTreeMap<String, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| match line.split_once('=') {
+            Some((key, value)) => Some((key.trim(), value.trim())),
+            None => {
+                let mut parts = line.splitn(2, char::is_whitespace);
+                let key = parts.next()?.trim();
+                let value = parts.next().unwrap_or_default().trim();
+                (!value.is_empty()).then_some((key, value))
+            }
+        })
+        .filter(|(key, _)| SPARK_CONF_KEYS.contains(key))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+/// The tag of an image reference: `ghcr.io/stardelt/spark:dev@sha256:…` → `dev`.
+fn image_tag(image: &str) -> String {
+    let without_digest = image.split('@').next().unwrap_or(image);
+    match without_digest.rsplit_once(':') {
+        Some((_, tag)) if !tag.is_empty() && !tag.contains('/') => tag.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A limit's CPU as whole cores: `1` → 1, `2000m` → 2. A fractional quota (`500m`, `250m`) is
+/// not a core count and answers `None`.
+fn cores_of(text: &str) -> Option<i32> {
+    if let Some(milli) = text.trim().strip_suffix('m') {
+        let milli: i64 = milli.trim().parse().ok()?;
+        return (milli > 0 && milli % 1000 == 0).then_some((milli / 1000) as i32);
+    }
+    text.trim().parse().ok()
+}
+
+/// One Spark server the manifests install, as the Compute page needs it. `defaults` is the
+/// Deployment's `<name>-config` ConfigMap: without it the card renders without specs.
+fn platform_view(
+    deployment: &Value,
+    defaults: Option<&Value>,
+    who: &Identity,
+) -> Option<ComputeCluster> {
+    let name = deployment
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)?
+        .to_string();
+    // The value of the `stardelt.io/compute` label; `/` is escaped as `~1` in a JSON pointer.
+    let audience = match deployment
+        .pointer("/metadata/labels/stardelt.io~1compute")
+        .and_then(Value::as_str)
+    {
+        Some("demo") => Some("visitors".to_string()),
+        Some("shared") => Some("members".to_string()),
+        _ => None,
+    };
+    let container = deployment.pointer("/spec/template/spec/containers/0");
+    let image = container
+        .and_then(|container| container.get("image"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let limits = container
+        .and_then(|container| container.pointer("/resources/limits"))
+        .map(|limits| ComputeResources {
+            cores: limits.get("cpu").and_then(Value::as_str).and_then(cores_of),
+            memory: limits
+                .get("memory")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    let spark_conf = defaults
+        .and_then(|defaults| defaults.pointer("/data/spark-defaults.conf"))
+        .and_then(Value::as_str)
+        .map(spark_defaults)
+        .unwrap_or_default();
+    let mode = match spark_conf.get("spark.master").map(String::as_str) {
+        Some(master) if master.starts_with("local") => "local",
+        _ => "kubernetes",
+    };
+    let driver = spark_conf
+        .get("spark.driver.memory")
+        .map(|memory| ComputeResources {
+            cores: None,
+            memory: Some(memory.clone()),
+        });
+    let executor_cores = spark_conf
+        .get("spark.executor.cores")
+        .and_then(|cores| cores.parse::<i32>().ok());
+    let executor_memory = spark_conf.get("spark.executor.memory").cloned();
+    let executor =
+        (executor_cores.is_some() || executor_memory.is_some()).then_some(ComputeResources {
+            cores: executor_cores,
+            memory: executor_memory,
+        });
+    let ready = deployment
+        .pointer("/status/readyReplicas")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let visitors = audience.as_deref() == Some("visitors");
+    Some(ComputeCluster {
+        name,
+        display_name: None,
+        owner: ComputeOwner {
+            // The group that shares it: the members' server belongs to `stardelt-users`, the
+            // sandbox to `visitors`. `audience` carries the same fact in the words the page shows.
+            group: audience.as_ref().map(|_| {
+                if visitors {
+                    "visitors".to_string()
+                } else {
+                    "stardelt-users".to_string()
+                }
+            }),
+            user: None,
+        },
+        // Not a `SparkCluster` class: the card shows the limit block instead.
+        size: "platform".to_string(),
+        runtime: image.as_deref().map(image_tag).unwrap_or_default(),
+        driver,
+        executor,
+        max_executors: spark_conf
+            .get("spark.dynamicAllocation.maxExecutors")
+            .and_then(|max| max.parse::<i32>().ok()),
+        image,
+        env: Vec::new(),
+        spark_conf,
+        phase: if ready >= 1 { "Running" } else { "Stopped" }.to_string(),
+        message: None,
+        endpoint: None,
+        started_at: None,
+        last_activity_at: None,
+        idle_stop_minutes: 0,
+        can_use: true,
+        shared: audience.as_deref() == Some("members"),
+        kind: "platform".to_string(),
+        mode: Some(mode.to_string()),
+        limits,
+        audience: audience.clone(),
+        resets_at: visitors.then(|| DEMO_RESET.to_string()),
+        yours: if is_visitor(who) {
+            visitors
+        } else {
+            audience.as_deref() == Some("members")
+        },
+    })
+}
+
+/// What the page shows: every cluster the caller may use, then the visitor rule. A visitor's
+/// `spark` is the demo sandbox (`27-demo-mode`), and `spark-connect-ingress` refuses them on the
+/// shared server — so their page carries the sandbox only. Everyone else sees all.
+fn visible_to(mut clusters: Vec<ComputeCluster>, who: &Identity) -> Vec<ComputeCluster> {
+    if is_visitor(who) {
+        clusters.retain(|cluster| {
+            cluster.kind == "platform" && cluster.audience.as_deref() == Some("visitors")
+        });
+    }
+    clusters
+}
+
+/// The Spark servers the manifests install: Deployments labelled `stardelt.io/compute` in Nova's
+/// namespace and in the demo sandbox's, each with the `<name>-config` ConfigMap next to it.
+///
+/// A namespace Nova may not read (no Role) and an API that does not answer are not errors: the
+/// list is logged and the page keeps what it has — a missing card, never a `502`. A missing
+/// ConfigMap only costs the specs.
+async fn platform_servers(state: &AppState, who: &Identity) -> Vec<ComputeCluster> {
+    let Some(client) = state.kube.clone() else {
+        return Vec::new();
+    };
+    let mut servers = Vec::new();
+    for namespace in [crate::cluster::namespace(), DEMO_NAMESPACE.to_string()] {
+        let deployments: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
+        let configmaps: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace);
+        let list = match deployments
+            .list(&ListParams::default().labels(PLATFORM_LABEL))
+            .await
+        {
+            Ok(list) => list,
+            Err(error) => {
+                tracing::warn!(namespace = %namespace, error = %error, "platform Spark servers could not be listed");
+                continue;
+            }
+        };
+        for deployment in list.items {
+            let Ok(value) = serde_json::to_value(&deployment) else {
+                continue;
+            };
+            let Some(name) = value.pointer("/metadata/name").and_then(Value::as_str) else {
+                continue;
+            };
+            let defaults = configmaps
+                .get(&format!("{name}-config"))
+                .await
+                .ok()
+                .and_then(|configmap| serde_json::to_value(&configmap).ok());
+            if let Some(server) = platform_view(&value, defaults.as_ref(), who) {
+                servers.push(server);
+            }
+        }
+    }
+    servers
 }
 
 /// The one row without a cluster (demo mode, a local run): the shared cluster is always on.
@@ -260,6 +524,12 @@ fn demo_clusters() -> Vec<ComputeCluster> {
         idle_stop_minutes: 0,
         can_use: true,
         shared: true,
+        kind: "cluster".to_string(),
+        mode: None,
+        limits: None,
+        audience: None,
+        resets_at: None,
+        yours: false,
     }]
 }
 
@@ -317,7 +587,9 @@ async fn list_clusters(state: &AppState, who: &Identity) -> Result<Vec<ComputeCl
                 .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?,
         );
     }
-    Ok(visible_clusters(&values, who))
+    let mut clusters = visible_clusters(&values, who);
+    clusters.extend(platform_servers(state, who).await);
+    Ok(visible_to(clusters, who))
 }
 
 /// Set `spec.state` and answer the updated cluster. Start and Stop are the same verb with a
@@ -385,7 +657,7 @@ async fn set_state(
     operation_id = "compute_list",
     path = "/api/compute",
     tag = "public",
-    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs, `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
+    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs, `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's clusters, sorted by name", body = ComputeResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -830,7 +1102,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        may_act, may_use, message_of, owner_of, phase_of, validate_spec, visible_clusters,
+        may_act, may_use, message_of, owner_of, phase_of, platform_view, spark_defaults,
+        validate_spec, visible_clusters, visible_to,
     };
     use crate::auth::Identity;
 
@@ -1138,6 +1411,248 @@ mod tests {
         assert_eq!(
             validate_spec("trial", &duplicate),
             Err("each env var name may appear once in env: `A` appears twice".to_string())
+        );
+    }
+
+    /// The demo sandbox's Deployment and `spark-demo-config` ConfigMap, as
+    /// `platform/manifests/spark-demo-sandbox.yaml` writes them (values measured 2026-11-19).
+    fn demo_server() -> (Value, Value) {
+        let deployment = json!({
+            "metadata": {
+                "name": "spark-demo",
+                "namespace": "stardelt-demo-spark",
+                "labels": {"app.kubernetes.io/name": "spark-demo", "stardelt.io/compute": "demo"}
+            },
+            "spec": {"template": {"spec": {"containers": [{
+                "name": "spark-demo",
+                "image": "ghcr.io/stardelt/spark:dev@sha256:70f9c9f2b40b1e32b4877c31c9af6905989d0944581cd950dd056c07008448d0",
+                "resources": {
+                    "requests": {"cpu": "250m", "memory": "1Gi"},
+                    "limits": {"cpu": "2", "memory": "4Gi"}
+                }
+            }]}}},
+            "status": {"readyReplicas": 1}
+        });
+        let configmap = json!({
+            "metadata": {"name": "spark-demo-config", "namespace": "stardelt-demo-spark"},
+            "data": {"spark-defaults.conf": concat!(
+                "# Local mode: no executors, no pod creates, no Kubernetes client.\n",
+                "spark.master                        local[2]\n",
+                "spark.driver.memory                 2g\n",
+                "spark.driver.maxResultSize          256m\n",
+                "spark.sql.shuffle.partitions        8\n",
+                "spark.ui.enabled                    false\n",
+                "spark.connect.grpc.binding.port     15002\n",
+            )}
+        });
+        (deployment, configmap)
+    }
+
+    /// The shared `spark-connect` Deployment and `spark-connect-config` ConfigMap, as
+    /// `platform/manifests/spark.yaml` writes them.
+    fn shared_server() -> (Value, Value) {
+        let deployment = json!({
+            "metadata": {
+                "name": "spark-connect",
+                "namespace": crate::cluster::namespace(),
+                "labels": {"app.kubernetes.io/name": "spark-connect", "stardelt.io/compute": "shared"}
+            },
+            "spec": {"template": {"spec": {"containers": [{
+                "name": "spark-connect",
+                "image": "ghcr.io/stardelt/spark:dev@sha256:70f9c9f2b40b1e32b4877c31c9af6905989d0944581cd950dd056c07008448d0",
+                "resources": {"limits": {"cpu": "1", "memory": "3Gi"}}
+            }]}}},
+            "status": {"readyReplicas": 2}
+        });
+        let configmap = json!({
+            "metadata": {"name": "spark-connect-config", "namespace": crate::cluster::namespace()},
+            "data": {"spark-defaults.conf": concat!(
+                "# --- Sizing on the shared 16 GB node ---\n",
+                "spark.master                                            k8s://https://kubernetes.default.svc\n",
+                "spark.driver.memory                                     1g\n",
+                "spark.driver.maxResultSize                              512m\n",
+                "spark.executor.memory                                   1g\n",
+                "spark.executor.memoryOverhead                           384m\n",
+                "spark.executor.cores                                    1\n",
+                "spark.dynamicAllocation.minExecutors                    0\n",
+                "spark.dynamicAllocation.maxExecutors                    2\n",
+                "spark.dynamicAllocation.executorIdleTimeout             60s\n",
+                "spark.kubernetes.executor.secretKeyRef.AWS_SECRET_ACCESS_KEY stardelt-s3-creds:secret-key\n",
+            )}
+        });
+        (deployment, configmap)
+    }
+
+    #[test]
+    fn platform_server_specs_are_read_from_the_deployment_and_configmap() {
+        let (deployment, configmap) = demo_server();
+        // Production reads a `Deployment` the API server answered, not raw JSON: the round trip
+        // through the k8s types must keep `Quantity` a string (`"2"`, `"4Gi"`).
+        let typed: k8s_openapi::api::apps::v1::Deployment =
+            serde_json::from_value(deployment).expect("a Deployment");
+        let deployment = serde_json::to_value(&typed).expect("JSON");
+        let view = platform_view(
+            &deployment,
+            Some(&configmap),
+            &who("demo", &["visitors"], false),
+        )
+        .expect("a platform view");
+
+        assert_eq!(view.name, "spark-demo");
+        assert_eq!(view.kind, "platform");
+        assert_eq!(view.mode.as_deref(), Some("local"));
+        assert_eq!(view.audience.as_deref(), Some("visitors"));
+        assert_eq!(view.phase, "Running");
+        assert_eq!(view.runtime, "dev");
+        // The measured values of the sandbox, from `spark-defaults.conf` ...
+        assert_eq!(
+            view.spark_conf.get("spark.master").map(String::as_str),
+            Some("local[2]")
+        );
+        assert_eq!(
+            view.driver
+                .as_ref()
+                .and_then(|driver| driver.memory.as_deref()),
+            Some("2g")
+        );
+        assert_eq!(
+            view.spark_conf
+                .get("spark.driver.maxResultSize")
+                .map(String::as_str),
+            Some("256m")
+        );
+        // ... and from the container's limits.
+        let limits = view.limits.as_ref().expect("limits");
+        assert_eq!(limits.cores, Some(2));
+        assert_eq!(limits.memory.as_deref(), Some("4Gi"));
+        // Local mode has no executors: the page says "local mode, no executors".
+        assert!(view.executor.is_none());
+        assert_eq!(view.resets_at.as_deref(), Some("daily 03:00 UTC"));
+        assert!(!view.shared);
+    }
+
+    #[test]
+    fn a_platform_response_carries_no_secret() {
+        let (mut deployment, configmap) = shared_server();
+        deployment["spec"]["template"]["spec"]["containers"][0]["env"] = json!([
+            {"name": "AWS_SECRET_ACCESS_KEY",
+             "valueFrom": {"secretKeyRef": {"name": "stardelt-s3-creds", "key": "secret-key"}}}
+        ]);
+        let view = platform_view(&deployment, Some(&configmap), &who("bob", &[], false))
+            .expect("a platform view");
+
+        // The Deployment's `env` is never read: the page shows no environment.
+        assert!(view.env.is_empty());
+        // The ConfigMap's Secret reference and its pod-template path are outside the whitelist.
+        let mut keys: Vec<&str> = view.spark_conf.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "spark.driver.maxResultSize",
+                "spark.driver.memory",
+                "spark.dynamicAllocation.executorIdleTimeout",
+                "spark.dynamicAllocation.maxExecutors",
+                "spark.dynamicAllocation.minExecutors",
+                "spark.executor.cores",
+                "spark.executor.memory",
+                "spark.master",
+            ]
+        );
+        let text: String = view.spark_conf.values().cloned().collect();
+        assert!(!text.contains("secret-key"));
+        assert!(!text.contains("stardelt-s3-creds"));
+    }
+
+    #[test]
+    fn a_visitor_sees_only_the_sandbox() {
+        let visitor = who("demo", &["visitors"], false);
+        let (demo, demo_config) = demo_server();
+        let (shared, shared_config) = shared_server();
+        let clusters = vec![
+            platform_view(&shared, Some(&shared_config), &visitor).expect("shared"),
+            platform_view(&demo, Some(&demo_config), &visitor).expect("demo"),
+            // A `SparkCluster` a visitor's group owns is not theirs either: their `spark` is the
+            // sandbox.
+            visible_clusters(
+                &[cluster(
+                    "visit-trial",
+                    json!({"owner": {"group": "visitors"}}),
+                )],
+                &visitor,
+            )[0]
+            .clone(),
+        ];
+        let views = visible_to(clusters, &visitor);
+        let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+        assert_eq!(names, ["spark-demo"]);
+        assert!(views[0].yours);
+        assert!(views.iter().all(|view| !view.shared));
+    }
+
+    #[test]
+    fn a_member_sees_the_shared_server() {
+        let member = who("bob", &["stardelt-users"], false);
+        let (demo, demo_config) = demo_server();
+        let (shared, shared_config) = shared_server();
+        let clusters = vec![
+            platform_view(&demo, Some(&demo_config), &member).expect("demo"),
+            platform_view(&shared, Some(&shared_config), &member).expect("shared"),
+        ];
+        let views = visible_to(clusters, &member);
+        let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+        assert_eq!(names, ["spark-demo", "spark-connect"]);
+        let shared = views
+            .iter()
+            .find(|view| view.name == "spark-connect")
+            .expect("the shared server");
+        assert!(shared.yours);
+        assert!(shared.shared);
+        assert_eq!(shared.audience.as_deref(), Some("members"));
+        assert_eq!(shared.mode.as_deref(), Some("kubernetes"));
+        assert!(shared.resets_at.is_none());
+        let demo = views
+            .iter()
+            .find(|view| view.name == "spark-demo")
+            .expect("the sandbox");
+        // A member's `spark` is the shared server; the sandbox is the visitors'.
+        assert!(!demo.yours);
+    }
+
+    #[test]
+    fn spark_defaults_keeps_only_the_whitelist() {
+        let conf = concat!(
+            "# a comment is not a setting\n",
+            "\n",
+            "spark.master          local[2]\n",
+            "spark.ui.enabled      false\n",
+            "spark.executor.cores = 1\n",
+            "spark.kubernetes.executor.secretKeyRef.AWS_SECRET_ACCESS_KEY stardelt-s3-creds:secret-key\n",
+            "spark.driver.memory   2g\n",
+        );
+        let defaults = spark_defaults(conf);
+        let keys: Vec<&str> = defaults.keys().map(String::as_str).collect();
+        // BTreeMap order; `spark.ui.enabled` and the Secret reference are gone.
+        assert_eq!(
+            keys,
+            [
+                "spark.driver.memory",
+                "spark.executor.cores",
+                "spark.master"
+            ]
+        );
+        assert_eq!(
+            defaults.get("spark.driver.memory").map(String::as_str),
+            Some("2g")
+        );
+        // Both separators are read: the manifests align with spaces, `=` works too.
+        assert_eq!(
+            defaults.get("spark.executor.cores").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            defaults.get("spark.master").map(String::as_str),
+            Some("local[2]")
         );
     }
 

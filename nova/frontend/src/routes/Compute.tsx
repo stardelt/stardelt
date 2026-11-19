@@ -28,6 +28,38 @@ function audience(owner: ComputeCluster['owner']): string {
   return owner.group ? owner.group : owner.user ?? '—'
 }
 
+/** The demo sandbox's line: it is the visitors' server, local mode, restarted every night. */
+const SANDBOX_COPY =
+  'Demo sandbox · shared by all visitors · local mode · 2 cores · 4 GiB · resets nightly 03:00 UTC'
+
+/** The shared server's line: always on, its executors scale to zero when idle. */
+const SHARED_COPY = 'Shared · always on · scales executors to zero after 60 s idle'
+
+/** A pod shape as the API reports it (`2 cores · 4Gi`), or `not reported`. */
+function shape(spec?: { cores?: number | null; memory?: string | null } | null): string {
+  const cores = spec?.cores != null ? `${spec.cores} core${spec.cores === 1 ? '' : 's'}` : null
+  return [cores, spec?.memory ?? null].filter(Boolean).join(' · ') || 'not reported'
+}
+
+/** The executor line: `0–2 × 1 core / 1g`, or `local mode, no executors` on the sandbox. */
+function executorLine(c: ComputeCluster): string {
+  if (c.mode === 'local') return 'local mode, no executors'
+  const min = c.sparkConf?.['spark.dynamicAllocation.minExecutors']
+  const max = c.maxExecutors
+  const count = min != null && max != null ? `${min}–${max}` : max != null ? `max ${max}` : null
+  const size =
+    [c.executor?.cores != null ? `${c.executor.cores} core${c.executor.cores === 1 ? '' : 's'}` : null, c.executor?.memory ?? null]
+      .filter(Boolean)
+      .join(' / ')
+  if (count && size) return `${count} × ${size}`
+  return [count, size].filter(Boolean).join(' · ') || 'not reported'
+}
+
+/** The card order: the caller's own Spark first, then the demo sandbox, then by name. */
+function rank(c: ComputeCluster): number {
+  return c.yours ? 0 : c.audience === 'visitors' ? 1 : 2
+}
+
 export default function Compute() {
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
@@ -43,6 +75,9 @@ export default function Compute() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['compute'] }),
   })
   const pending = start.isPending || stop.isPending
+  const sorted = clusters.data
+    ? [...clusters.data.clusters].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+    : []
 
   return (
     <div className="flex flex-col gap-4">
@@ -77,22 +112,46 @@ export default function Compute() {
             </p>
           )}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {clusters.data.clusters.map((c) => {
+            {sorted.map((c) => {
               const look = PHASES[c.phase] ?? { word: c.phase || 'Unknown', cls: NEUTRAL }
               const since = c.startedAt && c.phase === 'Running' ? formatWhen(c.startedAt).text : null
+              // A `platform` server is installed by the platform's manifests: it has no Start,
+              // Stop or Edit, because nothing here is a `SparkCluster`.
+              const platform = c.kind === 'platform'
               return (
                 <article key={c.name} className="flex flex-col gap-2 rounded-[10px] border border-border bg-bg-soft/40 p-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium break-words">{c.displayName ?? c.name}</span>
                     <span className={`badge ${look.cls}`}>{look.word}</span>
+                    {c.yours && (
+                      <span className={`badge ${GOOD}`}>
+                        Your notebook&apos;s <span className="font-mono">spark</span>
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-xs text-text-dim">
                     <span>{audience(c.owner)}</span>
                     <span className={`badge ${NEUTRAL}`}>{c.size}</span>
                     <span className="font-mono text-xs">{c.runtime}</span>
                   </div>
+                  <dl className="grid grid-cols-[5rem_1fr] gap-x-2 gap-y-1 text-xs">
+                    <dt className="text-text-dim">driver</dt>
+                    <dd className="font-mono break-words">{shape(c.driver)}</dd>
+                    <dt className="text-text-dim">executors</dt>
+                    <dd className="font-mono break-words">{executorLine(c)}</dd>
+                    {c.limits && (
+                      <>
+                        <dt className="text-text-dim">limit</dt>
+                        <dd className="font-mono break-words">{shape(c.limits)}</dd>
+                      </>
+                    )}
+                    <dt className="text-text-dim">image</dt>
+                    <dd className="font-mono break-words">{c.runtime || '—'}</dd>
+                  </dl>
                   {c.shared ? (
-                    <p className="text-sm text-text-dim">Shared · always on · for everyone</p>
+                    <p className="text-sm text-text-dim">{SHARED_COPY}</p>
+                  ) : platform ? (
+                    c.audience === 'visitors' && <p className="text-sm text-text-dim">{SANDBOX_COPY}</p>
                   ) : (
                     <>
                       <p className="text-sm text-text-dim">
@@ -134,7 +193,7 @@ export default function Compute() {
                       </div>
                     </>
                   )}
-                  {c.shared && admin && (
+                  {!platform && c.shared && admin && (
                     <div className="flex gap-2">
                       <button
                         type="button"

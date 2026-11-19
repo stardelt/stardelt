@@ -223,7 +223,9 @@ kind: Deployment
 metadata:
   name: spark-connect
   namespace: stardelt
-  labels: { app.kubernetes.io/name: spark-connect, app.kubernetes.io/part-of: stardelt }
+  # `stardelt.io/compute: shared` makes Nova's Compute page show this server (nova#271).
+  # Label only: the pod template's labels stay as they are (the NetworkPolicies select them).
+  labels: { app.kubernetes.io/name: spark-connect, app.kubernetes.io/part-of: stardelt, stardelt.io/compute: shared }
 spec:
   replicas: 1
   # Sessions live in this driver; two of them would also share the executor

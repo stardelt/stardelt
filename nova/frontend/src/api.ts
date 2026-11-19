@@ -1053,6 +1053,18 @@ export type ComputeCluster = {
   idleStopMinutes: number
   canUse: boolean
   shared: boolean
+  /** `cluster` for a `SparkCluster`; `platform` for a Spark server the platform's manifests install. */
+  kind?: 'cluster' | 'platform'
+  /** `kubernetes` (executors are pods) or `local` (the demo sandbox: two threads, none). */
+  mode?: string | null
+  /** The container's resource limits, on a platform server. */
+  limits?: { cores?: number | null; memory?: string | null } | null
+  /** Who shares a platform server. */
+  audience?: 'members' | 'visitors' | null
+  /** When a platform server is restarted on a schedule (`daily 03:00 UTC` on the sandbox). */
+  resetsAt?: string | null
+  /** Whether this is the Spark the caller's own notebook uses. */
+  yours?: boolean
 }
 
 /**

@@ -20,6 +20,13 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list"]
+  # The Spark servers are plain Deployments labelled `stardelt.io/compute` (nova#271); the
+  # ConfigMap named `<deployment>-config` next to each carries the `spark-defaults.conf` the
+  # Compute page shows. `compute.rs::spark_defaults` copies a whitelist of keys only, so no
+  # Secret reference or credential ever reaches the page.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

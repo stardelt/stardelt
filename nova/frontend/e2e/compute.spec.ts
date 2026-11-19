@@ -9,7 +9,7 @@ test('the Compute page lists the shared cluster and offers no buttons for it', a
   await expect(main.getByRole('heading', { name: 'Compute' })).toBeVisible()
   await expect(main.getByText('Shared', { exact: true })).toBeVisible()
   // The page's own sentence also says "always on", so the card's line is the assertion.
-  await expect(main.getByText('Shared · always on · for everyone')).toBeVisible()
+  await expect(main.getByText('Shared · always on · scales executors to zero after 60 s idle')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Start' })).toHaveCount(0)
 })
 
