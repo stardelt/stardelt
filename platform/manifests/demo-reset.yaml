@@ -17,6 +17,13 @@
 # minutes, so a pipeline that outlived the drop would re-create the table the reset just
 # removed; deleting it first is what makes "gone by morning" true.
 #
+# A third action is best effort: the demo's Spark sandbox (`stardelt-demo-spark/spark-demo`,
+# manifests/spark-demo-sandbox.yaml) is one server shared by every visitor with two worker
+# threads, so the reset restarts its driver and a wedged session cannot outlive 03:00 UTC. The
+# right to patch that one Deployment is the Role/RoleBinding `demo-reset-spark` in the sandbox's
+# namespace; a platform without the demo has no Deployment, which is one printed line, not a
+# failed reset.
+#
 # Two trust stores, as every in-cluster Trino client has:
 #   * OIDC discovery and the token request go to the public issuer (`issuerUrl` in
 #     ConfigMap `stardelt-identity`), so they use the image's public WebPKI roots

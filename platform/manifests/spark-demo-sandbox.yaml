@@ -1,6 +1,7 @@
 # The public demo's Spark: a second Connect server that shares nothing with the platform's
 # (stardelt/stardelt#201 slice 1). Local mode, so the driver creates no executor pods and this
-# namespace needs no Role; no ServiceAccount token; `restricted` Pod Security; egress to the data
+# namespace needs no Role for its own pods — the one Role below belongs to the nightly reset; no
+# ServiceAccount token; `restricted` Pod Security; egress to the data
 # plane only. Storage access (vended credentials) is slice 2 — until then a session can compute but
 # cannot read a table.
 apiVersion: v1
@@ -164,3 +165,33 @@ spec:
           port: 8333
         - protocol: TCP
           port: 8181
+---
+# The nightly reset restarts this Deployment so a wedged session cannot outlive 03:00 UTC
+# (stardelt/stardelt#201 item 6). The reset's ServiceAccount lives in `stardelt`; a RoleBinding may
+# name it across namespaces, and the Role grants one verb pair on one name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo-reset-spark
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/part-of: stardelt }
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["spark-demo"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-reset-spark
+  namespace: stardelt-demo-spark
+  labels: { app.kubernetes.io/part-of: stardelt }
+subjects:
+  - kind: ServiceAccount
+    name: demo-reset
+    namespace: stardelt
+roleRef:
+  kind: Role
+  name: demo-reset-spark
+  apiGroup: rbac.authorization.k8s.io

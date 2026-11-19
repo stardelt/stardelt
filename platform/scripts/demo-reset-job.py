@@ -40,6 +40,7 @@ visitor-chosen name is ever printed: the log carries counts and HTTP status code
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
 import ssl
@@ -50,6 +51,8 @@ import urllib.request
 
 CATALOG = os.environ.get("CATALOG") or "playground"
 NAMESPACE = os.environ.get("NAMESPACE") or "stardelt"
+DEMO_SPARK_NAMESPACE = os.environ.get("DEMO_SPARK_NAMESPACE") or "stardelt-demo-spark"
+DEMO_SPARK_DEPLOYMENT = "spark-demo"
 TIMEOUT = 60
 
 K8S_API = "https://kubernetes.default.svc"
@@ -139,14 +142,24 @@ def ident(name):
     return '"' + name.replace('"', '""') + '"'
 
 
-def k8s_request(method, path):
-    """One request to the API server as this pod's ServiceAccount."""
+def k8s_request(method, path, body=None):
+    """One request to the API server as this pod's ServiceAccount.
+
+    With `body`, the request is a JSON merge patch (`Content-Type` above); without it the
+    `GET`/`DELETE` calls are unchanged.
+    """
     token = open(f"{SA_DIR}/token", encoding="utf-8").read().strip()
     context = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/merge-patch+json"
     request = urllib.request.Request(
         K8S_API + path,
+        data=data,
         method=method,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=TIMEOUT, context=context) as answer:
         return json.load(answer) if method == "GET" else None
@@ -167,6 +180,28 @@ def delete_visitor_pipelines(namespace):
             f"/apis/stardelt.io/v1alpha1/namespaces/{namespace}/pipelines/{urllib.parse.quote(name)}",
         )
     return len(names)
+
+
+def restart_demo_spark():
+    """Give the demo's Spark driver a fresh pod (stardelt/stardelt#201 item 6).
+
+    Best effort by design: the sandbox is optional, so a missing Deployment is one line, not a
+    failed reset. Any other API error raises — a reset that silently leaves a wedged server is
+    what this exists to prevent.
+    """
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        k8s_request(
+            "PATCH",
+            f"/apis/apps/v1/namespaces/{DEMO_SPARK_NAMESPACE}/deployments/{DEMO_SPARK_DEPLOYMENT}",
+            {"spec": {"template": {"metadata": {"annotations": {"stardelt.io/reset-at": stamp}}}}},
+        )
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            print(f"demo-spark: not installed ({DEMO_SPARK_NAMESPACE}/{DEMO_SPARK_DEPLOYMENT} not found)")
+            return
+        raise
+    print(f"demo-spark: restarted {DEMO_SPARK_NAMESPACE}/{DEMO_SPARK_DEPLOYMENT}")
 
 
 def reset(pipelines=0):
@@ -259,7 +294,11 @@ def main():
     # A refused or failed API call raises, so the job exits 1 and the CronJob shows red:
     # a reset that silently keeps the pipelines is the bug this step exists to prevent.
     pipelines = delete_visitor_pipelines(NAMESPACE)
-    return 1 if reset(pipelines) else 0
+    failed = reset(pipelines)
+    # After the drops: a session that is still running could re-create what the reset removed,
+    # and the fresh driver is the point of the restart.
+    restart_demo_spark()
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
