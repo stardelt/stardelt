@@ -2769,7 +2769,8 @@ pub fn catalog_principals(namespace: &str) -> Vec<ServicePrincipal> {
 }
 
 /// The ServicePrincipal of the catalog's own client. The owner group is the platform admins, so
-/// the platform — not one team — owns the credential. Audiences: the catalog only.
+/// the platform — not one team — owns the credential. Audiences: the catalog, and for
+/// `catalog-trino` alone the trusted-engine audience `lakekeeper-trino`.
 pub fn catalog_principal(name: &str, namespace: &str) -> ServicePrincipal {
     ServicePrincipal {
         metadata: ObjectMeta {
@@ -2784,7 +2785,17 @@ pub fn catalog_principal(name: &str, namespace: &str) -> ServicePrincipal {
         spec: crate::crd::ServicePrincipalSpec {
             owner_group: "stardelt-admins".into(),
             purpose: PrincipalPurpose::Catalog,
-            audiences: vec![PrincipalAudience::Lakekeeper],
+            // Only the Trino catalog client carries the trusted-engine audience (#486, twin of
+            // `platform/Makefile:987-995`): Lakekeeper lets exactly that audience write
+            // `trino.run-as-owner`, so no other catalog client and no person may hold it.
+            audiences: if name == "catalog-trino" {
+                vec![
+                    PrincipalAudience::Lakekeeper,
+                    PrincipalAudience::LakekeeperTrino,
+                ]
+            } else {
+                vec![PrincipalAudience::Lakekeeper]
+            },
             existing_secret_ref: None,
         },
         status: None,
@@ -3171,8 +3182,35 @@ mod tests {
         for sp in catalog_principals("data") {
             assert_eq!(sp.spec.purpose, PrincipalPurpose::Catalog);
             assert_eq!(sp.spec.owner_group, "stardelt-admins");
-            assert_eq!(sp.spec.audiences, vec![PrincipalAudience::Lakekeeper]);
+            let trino = sp.metadata.name.as_deref() == Some("catalog-trino");
+            assert_eq!(
+                sp.spec.audiences,
+                if trino {
+                    vec![
+                        PrincipalAudience::Lakekeeper,
+                        PrincipalAudience::LakekeeperTrino,
+                    ]
+                } else {
+                    vec![PrincipalAudience::Lakekeeper]
+                },
+                "{:?}",
+                sp.metadata.name
+            );
         }
+    }
+
+    #[test]
+    fn only_the_trino_catalog_client_carries_the_trusted_engine_audience() {
+        let carriers: Vec<String> = catalog_principals("data")
+            .into_iter()
+            .filter(|sp| {
+                sp.spec
+                    .audiences
+                    .contains(&PrincipalAudience::LakekeeperTrino)
+            })
+            .map(|sp| sp.metadata.name.expect("name"))
+            .collect();
+        assert_eq!(carriers, vec!["catalog-trino"]);
     }
 
     #[tokio::test]

@@ -1,0 +1,21 @@
+# The catalog authenticates (twin of platform/helm-values/lakekeeper.yaml:501-529). Merged last
+# when ConfigMap stardelt-identity exists, so a Lakehouse CR cannot put the catalog back on the
+# anonymous development default. The issuer is a literal, not a ConfigMap reference: the operator
+# installs no Reloader (D-op-3), so a value that never changes would never roll the pod, while a
+# changed literal changes the pod template and Helm rolls it.
+catalog:
+  extraEnv:
+    - name: LAKEKEEPER__OPENID_PROVIDER_URI
+      value: __ISSUER_URL__
+    - name: LAKEKEEPER__OPENID_AUDIENCE
+      value: lakekeeper
+    # Only Trino's catalog client (ServicePrincipal catalog-trino) carries the audience
+    # lakekeeper-trino, so Lakekeeper lets that engine, and no other caller, write
+    # trino.run-as-owner. Without it every SECURITY DEFINER view — Trino's and dbt's default —
+    # is refused (403 ProtectedPropertyModification, #393/#486).
+    - name: LAKEKEEPER__TRUSTED_ENGINES__TRINO__TYPE
+      value: trino
+    - name: LAKEKEEPER__TRUSTED_ENGINES__TRINO__OWNER_PROPERTY
+      value: trino.run-as-owner
+    - name: LAKEKEEPER__TRUSTED_ENGINES__TRINO__IDENTITIES__OIDC__AUDIENCES
+      value: '["lakekeeper-trino"]'

@@ -168,6 +168,11 @@ consent; for any other `oidc` provider the group claim. Only clients listed in
 `spec.identity.clients` appear, so the output is the complete list for that instance. An
 invalid file, or one that is not `external`, exits 1 and prints the reason on stderr.
 
+The catalog's trusted-engine audience cannot be created by the operator in an external
+provider: the administrator must give the **Trino catalog client** (`svc-catalog-trino`) the
+extra audience `lakekeeper-trino`, on that client only. It is what lets Trino write the reserved
+view property `trino.run-as-owner`, and Lakekeeper refuses the write without it.
+
 ### Plug selection
 
 The plug matrix is expressed directly in the resource. Defaults are Lakekeeper + SeaweedFS +
