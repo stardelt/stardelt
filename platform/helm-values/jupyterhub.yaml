@@ -585,6 +585,21 @@ singleuser:
         ports:
           - port: 8080
             protocol: TCP
+      # The public demo's Spark sandbox (manifests/spark-demo-sandbox.yaml, stardelt#201). The
+      # sandbox's own policy admits only a visitor pod on 15002; without this rule the visitor's
+      # egress policy — whose four rules are same-namespace podSelectors — never lets the connect
+      # out. A member's pod gains nothing: the sandbox's ingress refuses every pod without
+      # `stardelt.io/group.visitors`.
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: stardelt-demo-spark
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: spark-demo
+        ports:
+          - port: 15002
+            protocol: TCP
       # Example — uncomment and set the customer's ranges:
       # - to:
       #     - ipBlock:
