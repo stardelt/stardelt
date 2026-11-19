@@ -706,11 +706,21 @@ install-spark: deps _context ## Install the Spark Connect endpoint (Iceberg on t
 	fi
 	@kubectl -n $(NAMESPACE) apply -f manifests/spark-confmap-janitor.yaml
 	@# The token-checking front (stardelt#84 Q4, spike #208). Additive: nothing points at it
-	@# yet. The apply and the rollout are one logical line and the sub-make another, because a
-	@# logical line carrying $(MAKE) is executed whole under `make -n` (test_make_dry_run).
+	@# yet. Envoy reads its config at start; the apply alone restarts nothing, so the block
+	@# restarts the front when the rendered `envoy.yaml` changes. The apply and the rollout are
+	@# one logical line and the sub-make another, because a logical line carrying $(MAKE) is
+	@# executed whole under `make -n` (test_make_dry_run).
 	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
 	  echo "› Spark Connect front: Envoy jwt_authn at spark.$(BASE_DOMAIN) (audience spark-connect)"; \
+	  old=$$(kubectl -n $(NAMESPACE) get configmap spark-connect-auth \
+	    -o jsonpath='{.data.envoy\.yaml}' 2>/dev/null | sha256sum | cut -d' ' -f1 || true); \
 	  sed -e "s|__BASE_DOMAIN__|$(BASE_DOMAIN)|g" manifests/spark-connect-auth.yaml | kubectl apply -f -; \
+	  new=$$(kubectl -n $(NAMESPACE) get configmap spark-connect-auth \
+	    -o jsonpath='{.data.envoy\.yaml}' | sha256sum | cut -d' ' -f1); \
+	  if [ "$$old" != "$$new" ]; then \
+	    echo "› envoy.yaml changed — restarting the token-checking front"; \
+	    kubectl -n $(NAMESPACE) rollout restart deploy/spark-connect-auth; \
+	  fi; \
 	  kubectl -n $(NAMESPACE) rollout status deploy/spark-connect-auth --timeout=5m; \
 	else \
 	  echo "› Spark Connect front: skipped — no platform IdP (stardelt-identity ConfigMap)"; \
