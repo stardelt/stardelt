@@ -479,6 +479,19 @@ fn schedule_of(spec: &Value) -> Option<String> {
     }
 }
 
+/// The selectors of a `kind: "dbt"` task's `config` as one line: `config.select`, or the
+/// `config.batches` array parsed back and joined with `, `. A `batches` text that is not a JSON
+/// array of strings leaves `None` — the view never fails on a hand-written resource (`#112`).
+fn dbt_select_of(config: Option<&Value>) -> Option<String> {
+    let config = config?;
+    if let Some(select) = config.get("select").and_then(Value::as_str) {
+        return Some(select.to_string());
+    }
+    let batches = config.get("batches").and_then(Value::as_str)?;
+    let batches: Vec<String> = serde_json::from_str(batches).ok()?;
+    Some(batches.join(", "))
+}
+
 /// The task names and kinds the resource declares, in declaration order. `detailed` adds what
 /// only the edit dialog needs — a `sql` task's statement, a notebook task's file name, version
 /// and parameters — so the list stays small.
@@ -492,6 +505,7 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                     let kind = task.get("kind").and_then(Value::as_str).unwrap_or_default();
                     let config = task.get("config");
                     let notebook = detailed && kind == "notebook";
+                    let dbt = detailed && kind == "dbt";
                     Some(TaskSpecView {
                         name: task.get("name")?.as_str()?.to_string(),
                         kind: kind.to_string(),
@@ -524,6 +538,15 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                         } else {
                             None
                         },
+                        dbt_project: if dbt {
+                            config
+                                .and_then(|config| config.get("project"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        dbt_select: if dbt { dbt_select_of(config) } else { None },
                         depends_on: task
                             .get("dependsOn")
                             .and_then(Value::as_array)
@@ -907,7 +930,7 @@ const MAX_NOTEBOOK_PARAM_VALUE_CHARS: usize = 256;
 /// The longest the `params` JSON object string may be — the CRD's CEL limit.
 const MAX_NOTEBOOK_PARAMS_JSON_CHARS: usize = 4096;
 
-const ONE_OF_STATEMENT_OR_NOTEBOOK: &str = "give a statement or a notebook";
+const ONE_OF_STATEMENT_NOTEBOOK_OR_DBT: &str = "give a statement, a notebook or a dbt run";
 const NOTEBOOK_NAME_RULE: &str = "the notebook name is a .ipynb file name (letters, digits, \
                                   dots, dashes, underscores and spaces)";
 const NOTEBOOK_PARAM_NAMES: &str = "parameter names are letters, digits and underscores";
@@ -958,6 +981,76 @@ fn validate_notebook(notebook: &NotebookRequest) -> Result<String, String> {
     Ok(params)
 }
 
+/// The `dbt` task (`#112`): the sentences of `demos/dags/stardelt_pipelines/plan.py`, verbatim,
+/// so Nova refuses exactly what the loader refuses.
+const DBT_NEEDS_PROJECT: &str =
+    "a dbt task needs config.project (a directory under /opt/dbt/projects in the tool image)";
+const DBT_NEEDS_SELECT: &str = "a dbt task needs exactly one of config.select (one dbt selector) \
+                                and config.batches (a JSON array of 1 to 8 selectors, run in order)";
+const DBT_BAD_THREADS: &str = "dbt threads must be a digit string from 1 to 16 (default `4`)";
+const DBT_BAD_VARS: &str = "dbt vars must be a JSON object string of string values";
+/// At most this many selectors in one `batches` chain (the loader's `MAX_DBT_BATCHES`).
+const MAX_DBT_BATCHES: usize = 8;
+/// At most this many dbt threads (the loader's `MAX_DBT_THREADS`).
+const MAX_DBT_THREADS: u8 = 16;
+/// The longest the `vars` JSON object string may be — the CRD's CEL limit for a `config` value.
+const MAX_DBT_VARS_JSON_CHARS: usize = 4096;
+/// A project is one directory name under the tool image's `/opt/dbt/projects`: the loader's
+/// `^[a-z][a-z0-9-]{0,38}$`.
+fn valid_dbt_project(project: &str) -> bool {
+    let bytes = project.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 39
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// The `dbt` task's `config` map as the resource stores it, checked the way `plan.py` checks it:
+/// the project, exactly one of `select` and `batches`, the threads as a digit string, and the
+/// `--vars` text. `Err` is the sentence the caller sees.
+fn dbt_config(request: &DbtRequest) -> Result<BTreeMap<String, String>, String> {
+    if !valid_dbt_project(&request.project) {
+        return Err(DBT_NEEDS_PROJECT.into());
+    }
+    let mut config = BTreeMap::new();
+    config.insert("project".to_string(), request.project.clone());
+    match (request.select.as_deref(), request.batches.as_deref()) {
+        (Some(select), None) => {
+            if select.trim().is_empty() {
+                return Err(DBT_NEEDS_SELECT.into());
+            }
+            config.insert("select".to_string(), select.to_string());
+        }
+        (None, Some(batches)) => {
+            if batches.is_empty()
+                || batches.len() > MAX_DBT_BATCHES
+                || batches.iter().any(|select| select.trim().is_empty())
+            {
+                return Err(DBT_NEEDS_SELECT.into());
+            }
+            let batches =
+                serde_json::to_string(batches).map_err(|_| DBT_NEEDS_SELECT.to_string())?;
+            config.insert("batches".to_string(), batches);
+        }
+        _ => return Err(DBT_NEEDS_SELECT.into()),
+    }
+    let threads = request.threads.unwrap_or(4);
+    if threads == 0 || threads > MAX_DBT_THREADS {
+        return Err(DBT_BAD_THREADS.into());
+    }
+    config.insert("threads".to_string(), threads.to_string());
+    if let Some(vars) = &request.vars {
+        let vars = serde_json::to_string(vars).map_err(|_| DBT_BAD_VARS.to_string())?;
+        if vars.chars().count() > MAX_DBT_VARS_JSON_CHARS {
+            return Err(DBT_BAD_VARS.into());
+        }
+        config.insert("vars".to_string(), vars);
+    }
+    Ok(config)
+}
+
 /// The `run` task of a Nova-written pipeline as a write stores it (#210, #237): exactly one of a
 /// statement and a pinned notebook version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -971,17 +1064,21 @@ enum Statement {
         object_version: String,
         params: String,
     },
+    /// A `dbt` task of a task list (`#112`): exactly the CRD's `config` map.
+    Dbt(BTreeMap<String, String>),
     /// A whole task list, each task checked (`#905`).
     Tasks(Vec<TaskStatement>),
 }
 
 /// The body's statement with the rules of its kind applied: the SQL ones (statement, template
-/// parameters, placeholders), or the notebook ones (name, parameters, and a pinned version that
-/// exists in the group). `Err` is the sentence and the audit's reason. A body gives exactly one
-/// of a non-empty `sql` and a `notebook`; both or neither is the same sentence (#237).
+/// parameters, placeholders), the notebook ones (name, parameters, and a pinned version that
+/// exists in the group), or the dbt ones (`plan.py`'s config rules). `Err` is the sentence and
+/// the audit's reason. A body gives exactly one of a non-empty `sql`, a `notebook` and a `dbt`
+/// run; two of them or none is the same sentence (#237, #112).
 async fn checked_statement(
     sql: &str,
     notebook: Option<&NotebookRequest>,
+    dbt: Option<&DbtRequest>,
     template_params: &BTreeMap<String, String>,
     notebooks: Option<&NotebookStore>,
     group: &str,
@@ -989,15 +1086,18 @@ async fn checked_statement(
     let refused = |reason: &'static str, message: String| {
         ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
     };
-    match (sql.trim().is_empty(), notebook) {
-        (false, None) => {
+    match (sql.trim().is_empty(), notebook, dbt) {
+        (true, None, Some(dbt)) => dbt_config(dbt)
+            .map(Statement::Dbt)
+            .map_err(|message| refused("dbt", message)),
+        (false, None, None) => {
             let sql = validate_sql(sql).map_err(|message| refused("sql", message))?;
             validate_params(template_params).map_err(|message| refused("params", message))?;
             check_placeholders(&sql, template_params)
                 .map_err(|message| refused("params", message))?;
             Ok(Statement::Sql(sql))
         }
-        (true, Some(notebook)) => {
+        (true, Some(notebook), None) => {
             let params =
                 validate_notebook(notebook).map_err(|message| refused("notebook", message))?;
             if !notebooks::object_version_ok(&notebook.object_version) {
@@ -1022,7 +1122,7 @@ async fn checked_statement(
                 Err(fail) => Err(ActionError::refused("store", fail)),
             }
         }
-        _ => Err(refused("body", ONE_OF_STATEMENT_OR_NOTEBOOK.into())),
+        _ => Err(refused("body", ONE_OF_STATEMENT_NOTEBOOK_OR_DBT.into())),
     }
 }
 
@@ -1049,6 +1149,7 @@ fn task_json(task: &TaskStatement) -> Value {
             "config": { "notebook": name, "objectVersion": object_version, "params": params },
         }),
         // `checked_statement` never answers a task list.
+        Statement::Dbt(config) => json!({ "name": task.name, "kind": "dbt", "config": config }),
         Statement::Tasks(_) => unreachable!("a task carries one statement, not a list"),
     };
     if !task.depends_on.is_empty() {
@@ -1168,6 +1269,7 @@ async fn checked_tasks(
         let statement = checked_statement(
             &task.sql,
             task.notebook.as_ref(),
+            task.dbt.as_ref(),
             template_params,
             notebooks,
             group,
@@ -1208,8 +1310,11 @@ async fn checked_run(
     group: &str,
 ) -> Result<Statement, ActionError> {
     match (sql.trim().is_empty(), notebook.is_some(), tasks) {
-        // A body without `tasks` behaves exactly as today, sentence included.
-        (_, _, None) => checked_statement(sql, notebook, template_params, notebooks, group).await,
+        // A body without `tasks` behaves exactly as today, sentence included. A body's own
+        // `dbt` is not a shape this route takes (#112): only a task list carries one.
+        (_, _, None) => {
+            checked_statement(sql, notebook, None, template_params, notebooks, group).await
+        }
         (true, false, Some(tasks)) => {
             // Once for the whole list: the parameters are the pipeline's, shared by every task.
             validate_params(template_params).map_err(|message| {
@@ -1231,7 +1336,8 @@ async fn checked_run(
 enum StoredShape {
     /// The form's single `run` task, of this kind (`sql` or `notebook`).
     Run(&'static str),
-    /// A task list: every task is `sql` or `notebook`, and it is not the single `run` task.
+    /// A task list: every task is `sql`, `notebook` or `dbt`, and it is not the single `run`
+    /// task.
     Tasks,
     /// A shape Nova does not write (another kind, or no tasks at all).
     Other,
@@ -1251,7 +1357,7 @@ fn is_task_list(resource: &Value) -> bool {
                 && tasks.iter().all(|task| {
                     matches!(
                         task.get("kind").and_then(Value::as_str),
-                        Some("sql" | "notebook")
+                        Some("sql" | "notebook" | "dbt")
                     )
                 })
         })
@@ -1756,6 +1862,8 @@ fn pipeline_resource(
             "config": { "notebook": name, "objectVersion": object_version, "params": params },
         }]),
         Statement::Tasks(tasks) => Value::Array(tasks.iter().map(task_json).collect()),
+        // A top-level body never carries a `dbt` run: only a task list does (#112).
+        Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
     };
     let mut spec = json!({
         "ownerGroup": group,
@@ -1821,6 +1929,8 @@ fn updated_resource(
         Statement::Tasks(tasks) => {
             updated["spec"]["tasks"] = Value::Array(tasks.iter().map(task_json).collect());
         }
+        // An update body never carries a `dbt` run: it names no `dbt` field (#112).
+        Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
     }
     updated["spec"]["concurrency"] = json!(options.concurrency);
     updated["spec"]["retries"] = json!({
@@ -2061,19 +2171,42 @@ pub struct NotebookRequest {
     pub params: BTreeMap<String, String>,
 }
 
-/// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement and
-/// a notebook, and the tasks that must succeed first.
+/// A `dbt` task of a task list (`#112`): a project of the tool image, one selector or a chain
+/// of batches, the threads and the `--vars` text. The rules are `demos/dags/stardelt_pipelines/
+/// plan.py`'s, so Nova refuses what the loader would refuse.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DbtRequest {
+    /// A directory name under `/opt/dbt/projects` in the tool image.
+    pub project: String,
+    #[serde(default)]
+    pub select: Option<String>,
+    /// 1 to 8 selectors, run in order (`config.batches` as the JSON array text).
+    #[serde(default)]
+    pub batches: Option<Vec<String>>,
+    /// 1 to 16; omitted is 4.
+    #[serde(default)]
+    pub threads: Option<u8>,
+    #[serde(default)]
+    pub vars: Option<BTreeMap<String, String>>,
+}
+
+/// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a
+/// notebook and a dbt run, and the tasks that must succeed first.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineTaskRequest {
     /// Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}` (the CRD also accepts capitals).
     pub name: String,
-    /// The statement to run; exactly one of this and `notebook` is given.
+    /// The statement to run; exactly one of this, `notebook` and `dbt` is given.
     #[serde(default)]
     pub sql: String,
     /// A published notebook version to run instead (#237).
     #[serde(default)]
     pub notebook: Option<NotebookRequest>,
+    /// A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the three.
+    #[serde(default)]
+    pub dbt: Option<DbtRequest>,
     /// Names of the tasks that must succeed first; at most 8, each a task of this list.
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -2370,6 +2503,12 @@ pub struct TaskSpecView {
     /// The parameters a notebook task passes, parsed back from `config.params`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notebook_params: Option<BTreeMap<String, String>>,
+    /// The project of a `kind: "dbt"` task (`config.project`), detail route only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dbt_project: Option<String>,
+    /// The selector or the batched selectors, joined with `, `, detail route only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dbt_select: Option<String>,
     /// The task names this task waits for (`tasks[].dependsOn`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -5037,7 +5176,9 @@ async fn update_pipeline_inner(
 
     // A body names exactly one of a statement, a notebook and a task list (#237, #905), and an
     // update never changes the shape the pipeline has: a task list stays a task list and a `run`
-    // pipeline stays one.
+    // pipeline stays one. `UpdatePipelineRequest` carries no `dbt` on purpose (#112): a dbt task
+    // lives only in a task list, which is edited in its file, and `run_task_kind` answers `None`
+    // for one — so the form sends no update for it.
     let requested = checked_run(
         &body.sql,
         body.notebook.as_ref(),
@@ -5817,7 +5958,7 @@ pub(crate) async fn preview(
     operation_id = "pipelines_create",
     path = "/api/pipelines",
     tag = "public",
-    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement, a notebook or a dbt run`. A body may instead give `tasks` (`[{ name, sql | notebook | dbt, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 201, description = "The resource as written", body = PipelineView),
@@ -10475,6 +10616,18 @@ mod tests {
             name: name.into(),
             sql: sql.into(),
             notebook: None,
+            dbt: None,
+            depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    /// A `dbt` task entry for the tests (`task` is taken by the Airflow run double above).
+    fn dbt_task(name: &str, dbt: DbtRequest, depends_on: &[&str]) -> PipelineTaskRequest {
+        PipelineTaskRequest {
+            name: name.into(),
+            sql: String::new(),
+            notebook: None,
+            dbt: Some(dbt),
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -10558,6 +10711,7 @@ mod tests {
                 name: "report".into(),
                 sql: String::new(),
                 notebook: Some(report.clone()),
+                dbt: None,
                 depends_on: vec!["load".into()],
             },
         ];
@@ -11000,7 +11154,7 @@ mod tests {
         .await
         .expect_err("no statement");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(error.message(), ONE_OF_STATEMENT_OR_NOTEBOOK);
+        assert_eq!(error.message(), ONE_OF_STATEMENT_NOTEBOOK_OR_DBT);
 
         for sql in [
             "x".repeat(MAX_STATEMENT_CHARS + 1),
@@ -11428,6 +11582,7 @@ mod tests {
                     object_version: version.clone(),
                     params: BTreeMap::new(),
                 }),
+                dbt: None,
                 depends_on: vec!["load".into()],
             },
         ]);
@@ -11453,6 +11608,177 @@ mod tests {
                 "config": { "notebook": "report.ipynb", "objectVersion": version, "params": "{}" }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_dbt_task_list_is_checked_and_stored() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-marts", "analytics", "");
+        body.tasks = Some(vec![dbt_task(
+            "build",
+            DbtRequest {
+                project: "shop".into(),
+                select: None,
+                batches: Some(vec!["tag:load".into(), "tag:marts".into()]),
+                threads: None,
+                vars: None,
+            },
+            &[],
+        )]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a dbt task list");
+        let stored = stored_pipeline(&resources, "shop-marts")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][0],
+            json!({
+                "name": "build",
+                "kind": "dbt",
+                "config": {
+                    "project": "shop",
+                    "batches": "[\"tag:load\",\"tag:marts\"]",
+                    "threads": "4"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dbt_task_refuses_the_loader_s_sentences() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let refused = |dbt: DbtRequest| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                let mut body = create_body("shop-marts", "analytics", "");
+                body.tasks = Some(vec![dbt_task("build", dbt, &[])]);
+                let error =
+                    create_pipeline(Some(resources), None, None, &create_limiter(), ada, body)
+                        .await
+                        .expect_err("refused");
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+                error.message().to_string()
+            }
+        };
+        let dbt = |project: &str, select: Option<&str>, batches: Option<&[&str]>| DbtRequest {
+            project: project.into(),
+            select: select.map(str::to_string),
+            batches: batches.map(|batches| batches.iter().map(|s| (*s).to_string()).collect()),
+            threads: None,
+            vars: None,
+        };
+
+        // A project is one directory name under /opt/dbt/projects.
+        assert_eq!(
+            refused(dbt("Shop", Some("tag:load"), None)).await,
+            format!("task `build`: {DBT_NEEDS_PROJECT}")
+        );
+        // One selector or a chain of batches, never both and never neither.
+        assert_eq!(
+            refused(dbt("shop", Some("tag:load"), Some(&["tag:marts"]))).await,
+            format!("task `build`: {DBT_NEEDS_SELECT}")
+        );
+        assert_eq!(
+            refused(dbt("shop", None, None)).await,
+            format!("task `build`: {DBT_NEEDS_SELECT}")
+        );
+        // 1 to 16 threads, omitted is 4.
+        let mut no_threads = dbt("shop", Some("tag:load"), None);
+        no_threads.threads = Some(0);
+        assert_eq!(
+            refused(no_threads).await,
+            format!("task `build`: {DBT_BAD_THREADS}")
+        );
+        let mut too_many_threads = dbt("shop", Some("tag:load"), None);
+        too_many_threads.threads = Some(17);
+        assert_eq!(
+            refused(too_many_threads).await,
+            format!("task `build`: {DBT_BAD_THREADS}")
+        );
+        // `vars` is a JSON object string of string values, at most 4096 characters.
+        let mut long_vars = dbt("shop", Some("tag:load"), None);
+        long_vars.vars = Some(BTreeMap::from([("day".to_string(), "7".repeat(5000))]));
+        assert_eq!(
+            refused(long_vars).await,
+            format!("task `build`: {DBT_BAD_VARS}")
+        );
+        // A `vars` value that is not a string never reaches those rules: the request's own type
+        // refuses it in the extractor (`ApiJson`), before Nova sees a body at all.
+        let error = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "name": "shop-marts",
+            "ownerGroup": "analytics",
+            "tasks": [{ "name": "build",
+                        "dbt": { "project": "shop", "select": "tag:load", "vars": { "day": 7 } } }]
+        }))
+        .expect_err("a vars value that is not a string is not this type");
+        assert!(
+            error.to_string().contains("expected a string"),
+            "got {error}"
+        );
+        // Nothing was written by any of the refusals.
+        assert!(stored_pipeline(&resources, "shop-marts").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_dbt_task_cannot_also_carry_a_statement() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-marts", "analytics", "");
+        body.tasks = Some(vec![PipelineTaskRequest {
+            name: "build".into(),
+            sql: "select 1".into(),
+            notebook: None,
+            dbt: Some(DbtRequest {
+                project: "shop".into(),
+                select: Some("tag:load".into()),
+                batches: None,
+                threads: None,
+                vars: None,
+            }),
+            depends_on: vec![],
+        }]);
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("both");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            format!("task `build`: {ONE_OF_STATEMENT_NOTEBOOK_OR_DBT}")
+        );
+        assert!(stored_pipeline(&resources, "shop-marts").await.is_none());
+    }
+
+    #[test]
+    fn a_stored_dbt_task_list_is_a_task_list() {
+        let resource = json!({
+            "spec": {
+                "tasks": [{ "name": "build", "kind": "dbt",
+                            "config": { "project": "shop", "select": "tag:load", "threads": "4" } }]
+            }
+        });
+        assert_eq!(stored_shape(&resource), StoredShape::Tasks);
+    }
+
+    #[test]
+    fn a_dbt_task_reaches_the_detail_view() {
+        let spec = json!({
+            "tasks": [{ "name": "build", "kind": "dbt",
+                        "config": { "project": "shop", "batches": "[\"tag:load\",\"tag:marts\"]",
+                                    "threads": "4" } }]
+        });
+        let detailed = task_specs(&spec, true);
+        assert_eq!(detailed[0].dbt_project.as_deref(), Some("shop"));
+        assert_eq!(
+            detailed[0].dbt_select.as_deref(),
+            Some("tag:load, tag:marts")
+        );
+        let listed = task_specs(&spec, false);
+        assert_eq!(listed[0].dbt_project, None, "the list stays small");
+        assert_eq!(listed[0].dbt_select, None, "the list stays small");
     }
 
     #[tokio::test]
@@ -14078,7 +14404,7 @@ mod tests {
 
     #[tokio::test]
     async fn exactly_one_of_sql_and_notebook() {
-        const SENTENCE: &str = "give a statement or a notebook";
+        const SENTENCE: &str = "give a statement, a notebook or a dbt run";
         let resources = analytics_ready();
         let s3 = FakeS3::start().await;
         let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
@@ -14569,6 +14895,8 @@ mod tests {
                 notebook: Some("report.ipynb".into()),
                 object_version: Some(version.into()),
                 notebook_params: Some(BTreeMap::new()),
+                dbt_project: None,
+                dbt_select: None,
                 depends_on: vec![],
             }],
             "the edit dialog gets the version and the parameters it must prefill"
@@ -14587,6 +14915,8 @@ mod tests {
                 notebook: None,
                 object_version: None,
                 notebook_params: None,
+                dbt_project: None,
+                dbt_select: None,
                 depends_on: vec![],
             }]
         );
@@ -14605,6 +14935,8 @@ mod tests {
                 notebook: None,
                 object_version: None,
                 notebook_params: None,
+                dbt_project: None,
+                dbt_select: None,
                 depends_on: vec![],
             }]
         );

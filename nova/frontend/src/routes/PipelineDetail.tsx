@@ -260,6 +260,12 @@ export default function PipelineDetail() {
                       {' · '}version <span className="font-mono text-xs">{shortVersion(task.objectVersion)}</span>
                     </p>
                   )}
+                  {task.kind === 'dbt' && task.dbtProject && (
+                    <p className="mt-0.5 text-xs text-text-dim break-words">
+                      dbt {task.dbtProject}
+                      {task.dbtSelect ? ` · ${task.dbtSelect}` : ''}
+                    </p>
+                  )}
                   {stored.length > 0 && (
                     <dl className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
                       {stored.map(([paramName, value]) => (

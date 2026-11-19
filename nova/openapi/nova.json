@@ -5470,7 +5470,7 @@
         "tags": [
           "public"
         ],
-        "description": "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+        "description": "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement, a notebook or a dbt run`. A body may instead give `tasks` (`[{ name, sql | notebook | dbt, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_create",
         "requestBody": {
           "content": {
@@ -11101,6 +11101,57 @@
           "disabled"
         ]
       },
+      "DbtRequest": {
+        "type": "object",
+        "description": "A `dbt` task of a task list (`#112`): a project of the tool image, one selector or a chain\nof batches, the threads and the `--vars` text. The rules are `demos/dags/stardelt_pipelines/\nplan.py`'s, so Nova refuses what the loader would refuse.",
+        "required": [
+          "project"
+        ],
+        "properties": {
+          "batches": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "1 to 8 selectors, run in order (`config.batches` as the JSON array text)."
+          },
+          "project": {
+            "type": "string",
+            "description": "A directory name under `/opt/dbt/projects` in the tool image."
+          },
+          "select": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threads": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1 to 16; omitted is 4.",
+            "minimum": 0
+          },
+          "vars": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "DeletedNotebook": {
         "type": "object",
         "required": [
@@ -13146,11 +13197,22 @@
       },
       "PipelineTaskRequest": {
         "type": "object",
-        "description": "One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement and\na notebook, and the tasks that must succeed first.",
+        "description": "One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a\nnotebook and a dbt run, and the tasks that must succeed first.",
         "required": [
           "name"
         ],
         "properties": {
+          "dbt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DbtRequest",
+                "description": "A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the three."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "dependsOn": {
             "type": "array",
             "items": {
@@ -13175,7 +13237,7 @@
           },
           "sql": {
             "type": "string",
-            "description": "The statement to run; exactly one of this and `notebook` is given."
+            "description": "The statement to run; exactly one of this, `notebook` and `dbt` is given."
           }
         }
       },
@@ -15327,6 +15389,20 @@
           "kind"
         ],
         "properties": {
+          "dbtProject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project of a `kind: \"dbt\"` task (`config.project`), detail route only."
+          },
+          "dbtSelect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The selector or the batched selectors, joined with `, `, detail route only."
+          },
           "dependsOn": {
             "type": "array",
             "items": {

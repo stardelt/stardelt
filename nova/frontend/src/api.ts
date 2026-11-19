@@ -701,6 +701,10 @@ export type PipelineTaskSpec = {
   notebook?: string | null
   objectVersion?: string | null
   notebookParams?: Record<string, string> | null
+  /** The project of a `kind: "dbt"` task (`config.project`); detail route only. */
+  dbtProject?: string | null
+  /** The selector or the batched selectors, joined with `, `; detail route only. */
+  dbtSelect?: string | null
   /** The task names this task waits for; absent when it waits for nothing. */
   dependsOn?: string[]
 }
