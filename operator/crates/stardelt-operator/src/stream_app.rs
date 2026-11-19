@@ -922,6 +922,7 @@ mod tests {
             },
             engine: StreamEngine::Spark,
             owner_group: Some("analysts".into()),
+            viewers: Vec::new(),
             run_as: Some("pipeline-analysts".into()),
             restart_policy: StreamRestartPolicy::Always,
             stopped: false,

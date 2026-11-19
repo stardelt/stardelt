@@ -989,6 +989,25 @@ mod tests {
     }
 
     #[test]
+    fn visible_streams_shows_a_stream_to_its_viewers() {
+        let mut shared = app("shared", "sales");
+        shared["spec"]["viewers"] = json!(["visitors"]);
+        let apps = [shared];
+        let viewer = visible_streams(&apps, &who("demo", &["visitors"], false));
+        assert_eq!(viewer.len(), 1, "a viewer sees the stream it was named on");
+        assert_eq!(viewer[0].name, "shared");
+        assert!(
+            visible_streams(&apps, &who("other", &["analytics"], false)).is_empty(),
+            "another group does not"
+        );
+        assert_eq!(
+            visible_streams(&apps, &who("root", &[], true)).len(),
+            1,
+            "an administrator sees it either way"
+        );
+    }
+
+    #[test]
     fn a_stream_without_status_is_pending_and_has_no_error() {
         let mut no_status = app("fresh", "sales");
         no_status.as_object_mut().unwrap().remove("status");
