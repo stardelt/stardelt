@@ -29,17 +29,20 @@ class SparkDemoSandboxTest(unittest.TestCase):
         # kubectl applies the documents in file order; the namespaced objects need it to exist.
         self.assertEqual(self.docs[0].get("kind"), "Namespace")
 
-    def test_it_declares_exactly_the_eight_objects(self):
+    def test_it_declares_exactly_the_ten_objects(self):
         for kind in ("Namespace", "ServiceAccount", "ConfigMap", "Deployment", "Service",
                      "NetworkPolicy", "Role", "RoleBinding"):
-            self.one(kind)
-        self.assertEqual(len(self.docs), 8)
+            self.assertTrue(self.by_kind(kind), f"expected a {kind} in {MANIFEST}")
+        # Two of each Role kind since nova#271: the nightly reset, and Nova's read.
+        self.assertEqual(len(self.by_kind("Role")), 2)
+        self.assertEqual(len(self.by_kind("RoleBinding")), 2)
+        self.assertEqual(len(self.docs), 10)
 
     def test_it_grants_no_cluster_rights(self):
         for kind in ("ClusterRole", "ClusterRoleBinding"):
             self.assertEqual(self.by_kind(kind), [], f"the sandbox must declare no {kind}")
 
-    def test_the_one_role_is_the_nightly_reset_patching_one_deployment(self):
+    def test_the_reset_role_patches_one_deployment_and_nothing_else(self):
         # stardelt/stardelt#201 item 6: the reset's ServiceAccount, in another namespace,
         # may do nothing but bump this Deployment's pod template.
         role = self.one("Role", "demo-reset-spark")
@@ -57,6 +60,27 @@ class SparkDemoSandboxTest(unittest.TestCase):
         self.assertEqual(
             binding["subjects"],
             [{"kind": "ServiceAccount", "name": "demo-reset", "namespace": "stardelt"}],
+        )
+
+    def test_nova_may_read_the_server_and_its_config_and_nothing_else(self):
+        # nova#271: the Compute page lists the labelled Deployment and reads
+        # `spark-demo-config`. It never writes, and the sandbox's own ServiceAccount gains
+        # nothing from it — the binding names `nova` in `stardelt`.
+        role = self.one("Role", "nova-compute-reader")
+        self.assertEqual(role["metadata"]["namespace"], "stardelt-demo-spark")
+        self.assertEqual(
+            role["rules"],
+            [{"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list"]},
+             {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "list"]}],
+        )
+        binding = self.one("RoleBinding", "nova-compute-reader")
+        self.assertEqual(binding["metadata"]["namespace"], "stardelt-demo-spark")
+        self.assertEqual(binding["roleRef"],
+                         {"kind": "Role", "name": "nova-compute-reader",
+                          "apiGroup": "rbac.authorization.k8s.io"})
+        self.assertEqual(
+            binding["subjects"],
+            [{"kind": "ServiceAccount", "name": "nova", "namespace": "stardelt"}],
         )
 
     def test_the_service_account_mounts_no_token(self):
