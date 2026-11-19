@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -50,6 +52,11 @@ jobs:
 
       - name: README lists every served CRD
         run: bash scripts/check-readme-crds.sh
+
+      - name: CRDs stay compatible with the last release, or CHANGELOG.md names the change (#23)
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check_crd_compat.py
 
       - name: Chart pins agree with stardelt-platform
         run: bash scripts/check-platform-pins.sh

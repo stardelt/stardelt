@@ -33,6 +33,8 @@ the transitional dev install until the operator path is proven on a fresh node
 
 The ML plugs (`ModelRegistry`, `ModelService`) are planned (see the master spec §5).
 
+Every kind is `v1alpha1` until `0.1.0`. A release upgrades the one before it; a field that is removed, retyped or newly required must be named in the root `CHANGELOG.md` (`scripts/check_crd_compat.py` enforces it against the last `v0.0.*` tag).
+
 ### Pillars
 
 `PlatformInstance` carries what belongs to the platform rather than to one lakehouse:
