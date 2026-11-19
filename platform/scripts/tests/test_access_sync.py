@@ -669,7 +669,12 @@ class WarehouseBodyTest(JobTestCase):
         self.assertEqual(profile["region"], S3["region"])
         self.assertTrue(profile["path-style-access"])
         self.assertEqual(profile["flavor"], "minio")
-        self.assertFalse(profile["sts-enabled"])
+        self.assertTrue(profile["sts-enabled"])
+        self.assertEqual(
+            profile["sts-role-arn"], "arn:aws:iam::000000000000:role/stardelt"
+        )
+        self.assertEqual(profile["sts-endpoint"], S3["endpoint"])
+        self.assertFalse(profile["sts-session-policy-principal"])
         self.assertFalse(profile["remote-signing-enabled"])
 
     def test_uses_the_declared_key_prefix(self):

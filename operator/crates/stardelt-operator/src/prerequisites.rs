@@ -1409,6 +1409,8 @@ mod tests {
             "grant data_admin /var/run/secrets/catalog-trino",
             "authz-backend",
             "AUTH_ARGS=\"-H @$AUTH_FILE\"",
+            "\"sts-enabled\": true",
+            "\"sts-endpoint\": \"$S3_ENDPOINT\"",
         ] {
             assert!(
                 BOOTSTRAP_SCRIPT.contains(needle),
