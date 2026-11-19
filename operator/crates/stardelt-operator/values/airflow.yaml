@@ -398,7 +398,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:547359e99b9789a5010f8de0f430284bb342b52d73d8d9d56e973954f7159a10
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:6c80e6339f980a6143a5ee171239472a6817ec18a8bc868e0ee16da590f79a69
 
 # The internal CA that signs the query engine's certificate (Secret trino-ca, manifests/trino-tls.yaml),
 # mounted into every Airflow container, task pods included, so the pipeline loader can verify
