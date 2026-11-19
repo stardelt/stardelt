@@ -11317,6 +11317,7 @@
           "name",
           "kind",
           "config",
+          "viewers",
           "created_at",
           "updated_at"
         ],
@@ -11347,6 +11348,13 @@
             "type": "integer",
             "format": "int64",
             "description": "Epoch milliseconds, like `Job.started_at`."
+          },
+          "viewers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups that may see this destination, read-only. Empty: its owner group only."
           }
         }
       },
@@ -12431,6 +12439,12 @@
           },
           "owner_group": {
             "type": "string"
+          },
+          "viewers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "additionalProperties": false
