@@ -210,10 +210,11 @@ jobs:
             -f helm-values/trino.yaml \
             -f helm-values/trino-identity.yaml > /tmp/trino-identity.yaml
           test "$(grep -c 'web-ui.legacy' /tmp/trino-identity.yaml)" = 0
-          # access rules (#181, #363): `catalogs` + `queries` + `tables` +
-          # `impersonation`. `system`, `tpch` and `tpcds` are administrator-only
-          # (first rule admin, second rule none, third the catch-all — without
-          # it every managed catalog would be denied for everyone). The runtime
+          # access rules (#181, #363, #416): `catalogs` + `queries` + `tables` +
+          # `impersonation`. `tpch` and `tpcds` are administrator-only, and `system` is
+          # `read-only` for everyone else (dbt lists relations there, #366 option A);
+          # first rule admin, then `none`, then `read-only`, then the catch-all —
+          # without it every managed catalog would be denied for everyone. The runtime
           # tables stay denied, and the catch-all is still LAST in `tables`.
           # `impersonation` (#310) has exactly one rule: only the Superset service
           # account, only UUID principals — never `.*`, never an admin or a service
@@ -227,12 +228,13 @@ jobs:
           catalogs = rules['catalogs']
           assert catalogs == [
               {'group': 'stardelt-admins', 'allow': 'all'},
-              {'catalog': '(system|tpch|tpcds)', 'allow': 'none'},
+              {'catalog': '(tpch|tpcds)', 'allow': 'none'},
+              {'catalog': 'system', 'allow': 'read-only'},
               {'allow': 'all'},
           ], catalogs
-          denied = [name for name in ('system', 'tpch', 'tpcds', 'warehouse', 'shared', 'bronze', 'silver', 'gold')
+          closed = [name for name in ('system', 'tpch', 'tpcds', 'warehouse', 'shared', 'bronze', 'silver', 'gold')
                     if re.fullmatch(catalogs[1]['catalog'], name)]
-          assert denied == ['system', 'tpch', 'tpcds'], denied
+          assert closed == ['tpch', 'tpcds'], closed
           if catalogs[-1] != {'allow': 'all'}:
               raise AssertionError('the last catalogs rule must be the catch-all')
           assert rules['impersonation'] == [{'original_user': 'superset', 'new_user': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'allow': True}], rules['impersonation']

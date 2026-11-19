@@ -396,8 +396,8 @@ authorizer.
 coordinator so `lakekeeper-ingress` admits it to 8282. It prints five tables — the
 contract, the operations 480 did not send, the reads the bridge must allow (`SELECT 1`,
 `information_schema`, and `system.runtime.nodes` — whose bridge answer is still `allow` for
-everyone, while the file rules have made the catalog administrator-only since
-platform#363; for an ordinary person the engine refuses before the bridge is asked), the
+everyone, while the file rules decide what the engine lets through: `system` is
+administrators `all`, everyone else `read-only` since platform#363/#416), the
 permission matrix, and the
 impersonation rows — and exits 1 on an HTTP error, a non-JSON body, an empty body, a
 missing `result`, a wrong matrix or impersonation row, or a must-work read that is denied.
@@ -414,11 +414,11 @@ that printed nothing), its grants are not enforced — that is the failure mode
 `make verify-catalog-permissions` and `make bridge-replay` are for. The bridge still allows
 those three catalogs for everyone; what a person may actually reach is decided one layer
 up, because both authorizers must allow: the `catalogs` rules in
-`helm-values/trino-identity.yaml` reserve `system`, `tpch` and `tpcds` for administrators
-(platform#363, "Who may read what"). `SELECT * FROM system.runtime.nodes` and
-`SHOW FUNCTIONS FROM tpch.tiny` are therefore administrator-only, while the bridge's own
-answers about them are unchanged — the replay keeps asking them, because it tests the
-bridge, and the differential compares the bridge's two paths, not the file rules.
+`helm-values/trino-identity.yaml` close `tpch` and `tpcds` and make `system` read-only
+(platform#363, #416, "Who may read what"). `SHOW FUNCTIONS FROM tpch.tiny` is therefore
+administrator-only, while the bridge's own answers about these catalogs are unchanged — the
+replay keeps asking them, because it tests the bridge, and the differential compares the
+bridge's two paths, not the file rules.
 
 **What the capture changed** (`platform#333`, before the switch):
 
@@ -489,25 +489,30 @@ before every catalog, schema, table and column operation (`make catalog-enforce`
   cluster-internal tables away from ordinary users. A statement must be allowed by both.
 - Trino takes its catalog list from the same answer, so a person sees exactly the catalogs
   their groups grant — in the SQL editor, in Nova's catalog switcher (a 30-second cache),
-  in Superset's catalog list and in a notebook's `SHOW CATALOGS`. **`system`, `tpch` and
-  `tpcds` are for administrators** (platform#363, below): they are the engine's own
+  in Superset's catalog list and in a notebook's `SHOW CATALOGS`. **`tpch` and `tpcds` are
+  closed, `system` is read-only** (platform#363, #416, below): they are the engine's own
   catalogs, not managed here, so no `Catalog` grant can describe them — and the bridge lets
   every catalog it does not manage through, which is why the file rules, not the bridge,
   are the layer that reserves them.
 
-**The three engine catalogs are administrator-only** (`platform#363`). `system` is
+**The engine catalogs: `tpch`/`tpcds` closed, `system` read-only** (`platform#363`,
+`platform#416`). `system` is
 Trino's own metadata catalog — `runtime.nodes`, `runtime.queries`, `runtime.tasks`,
 `metadata.*`, `jdbc.*` — and `tpch`/`tpcds` are the sample connectors the chart mounts.
 Nobody's data lives in them, so no `Catalog` grant can express who may read them, and
 nobody needs them for ordinary work: Nova's query log has its own store, cancel goes
 through the statement's `nextUri`, Superset reflects through `information_schema`/`SHOW`,
-and notebooks use the managed catalogs. The reservation is a `catalogs` section in
-`helm-values/trino-identity.yaml` — administrators `all`, `(system|tpch|tpcds)` `none`,
-then a catch-all `all` for every other catalog (first match wins; without the catch-all a
-catalog no rule matches would be denied, which would hide the managed five too). Trino
-hides a catalog from `SHOW CATALOGS` when a person's catalog access is `none`, so the
-shrink is immediate in the SQL editor, Nova, Superset and notebooks, and a statement that
-names one is refused by the engine:
+and notebooks use the managed catalogs. The one exception is `system`: dbt-trino reads
+`system.metadata.materialized_views` (and lists `system.metadata.table_comments`) before
+every run, so `system` is **read-only** for signed-in people — `SELECT` only. `CALL`, the
+runtime tables `system.runtime.{tasks,transactions,optimizer_rule_stats}` and
+`tpch`/`tpcds` stay denied (`platform#416`, decision on #366). The reservation is a
+`catalogs` section in `helm-values/trino-identity.yaml` — administrators `all`,
+`(tpch|tpcds)` `none`, `system` `read-only`, then a catch-all `all` for every other catalog
+(first match wins; without the catch-all a catalog no rule matches would be denied, which
+would hide the managed five too). Trino hides a catalog from `SHOW CATALOGS` when a
+person's catalog access is `none`, so the shrink is immediate in the SQL editor, Nova,
+Superset and notebooks, and a statement that names one is refused by the engine:
 
 ```text
 PERMISSION_DENIED: Access Denied: Cannot access catalog tpch
@@ -515,22 +520,23 @@ PERMISSION_DENIED: Access Denied: Cannot access catalog tpch
 
 Built-in functions are **not** catalog access: `SELECT abs(-1)`, `now()`,
 `SHOW FUNCTIONS`, `SHOW SESSION LIKE 'query_max%'` and `EXPLAIN SELECT 1` are the
-acceptance battery and stay available to everyone. The documented smoke test
-`SELECT * FROM system.runtime.nodes` is administrator-only from here on; use
-`SELECT 1` as an ordinary person. `CALL system.runtime.kill_query` is administrator-only:
-the `catalogs` rule above refuses `system` to everyone else before the bridge's
-`KillQueryOwnedBy` rule (`helm-values/lakekeeper.yaml`, platform#398) is asked, so the
-bridge answers administrators only (platform#862). A person cancels their own query with
-Nova's Cancel button, which uses `DELETE /v1/statement` and not this rule. Superset's
-catalog list comes from `SHOW CATALOGS`, so it follows the person; adding a dataset and
-previewing it read `information_schema`, and only the *table comment* lookup uses
-`system.metadata.table_comments` — that one is denied now, Superset catches it and the
-dataset has no comment (its dialect's own `PERMISSION_DENIED` fallback never fires,
-because SQLAlchemy wraps the driver error before the dialect sees it).
+acceptance battery and stay available to everyone. `SELECT * FROM system.runtime.nodes`
+now answers an ordinary person (`read-only`); `CALL system.runtime.kill_query` stays
+administrator-only: `read-only` excludes `CALL`, so the `catalogs` rule above refuses it
+to everyone else before the bridge's `KillQueryOwnedBy` rule
+(`helm-values/lakekeeper.yaml`, platform#398) is asked, so the bridge answers administrators
+only (platform#862). A person cancels their own query with Nova's Cancel button, which uses
+`DELETE /v1/statement` and not this rule. Superset's catalog list comes from `SHOW
+CATALOGS`, so it follows the person; adding a dataset and previewing it read
+`information_schema`, and the *table comment* lookup uses
+`system.metadata.table_comments`, which a person may now read — the rows are filtered by
+the engine to the catalogs they may reach, so a catalog they cannot access yields none
+(`platform#416`).
 
-To see it: a person's `SHOW CATALOGS` lists only the managed catalogs, an
-administrator's still lists the three extra, and the three engine catalogs answer
-administrators only. The policy is live when the coordinator has rolled on the
+To see it: a person's `SHOW CATALOGS` lists the managed catalogs and `system` but not
+`tpch`/`tpcds`, an administrator's lists all of them, and `CALL system.…` is refused to
+everyone but administrators. `make verify-trino-system-catalog` proves all four statements
+with a real person token. The policy is live when the coordinator has rolled on the
 `checksum/access-control-config` annotation and `/etc/trino/access-control/rules.json`
 inside the pod carries the `catalogs` section — the two places to look when a person
 still sees `tpch`.

@@ -265,7 +265,8 @@ accessControl:
       {
         "catalogs": [
           {"group": "stardelt-admins", "allow": "all"},
-          {"catalog": "(system|tpch|tpcds)", "allow": "none"},
+          {"catalog": "(tpch|tpcds)", "allow": "none"},
+          {"catalog": "system", "allow": "read-only"},
           {"allow": "all"}
         ],
         "queries": [
