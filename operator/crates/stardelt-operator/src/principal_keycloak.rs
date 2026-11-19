@@ -98,6 +98,7 @@ fn audience_value(audience: PrincipalAudience) -> &'static str {
     match audience {
         PrincipalAudience::Trino => "trino",
         PrincipalAudience::Lakekeeper => "lakekeeper",
+        PrincipalAudience::LakekeeperTrino => "lakekeeper-trino",
     }
 }
 
@@ -872,6 +873,22 @@ mod tests {
                 .is_none()
         );
         assert!(payload.get("secret").is_none(), "must not contain a secret");
+    }
+
+    #[test]
+    fn the_trusted_engine_audience_is_its_own_mapper() {
+        let spec = spec_json(&["lakekeeper", "lakekeeper-trino"]);
+        let payload = client_payload("catalog-trino", &spec);
+        let mappers = payload["protocolMappers"].as_array().expect("mappers");
+        let names: Vec<&str> = mappers
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["aud-lakekeeper", "aud-lakekeeper-trino", "groups"]);
+        assert_eq!(
+            mappers[1]["config"]["included.custom.audience"],
+            "lakekeeper-trino"
+        );
     }
 
     type Recorded = Arc<Mutex<Vec<(String, String, String)>>>;

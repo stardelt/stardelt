@@ -289,6 +289,9 @@ struct OverridesContext<'a> {
     /// datasources). `None` on the Lakehouse path: a Lakehouse has no base domain and its plan
     /// contains no Superset.
     base_domain: Option<&'a str>,
+    /// The issuer URL from the identity contract (ConfigMap `stardelt-identity` key `issuerUrl`):
+    /// the catalog's `LAKEKEEPER__OPENID_PROVIDER_URI`. `None` without an identity contract.
+    issuer: Option<&'a str>,
     /// `metadata.resourceVersion` of ConfigMap `trino-warehouses`, stamped into the coordinator's
     /// pod template. The resource-group file manager reads the file once at startup and the
     /// operator installs no Reloader (D-op-3), so this is what turns a `SqlWarehouse` class
@@ -462,6 +465,13 @@ async fn resolve_component_values(
     {
         crate::values::substitute_base_domain(&mut values, domain);
     }
+    // The catalog overlay's issuer (see values/lakekeeper-identity.yaml): a literal, because the
+    // operator installs no Reloader, so a ConfigMap reference would never roll the pod.
+    if overrides.identity
+        && let Some(issuer) = overrides.issuer
+    {
+        crate::values::substitute_issuer(&mut values, issuer);
+    }
     // The coordinator reads the resource-group file once (D-op-3): the stamp is the change
     // signal, not a preference — it must not be an override the CR can set.
     if component == "trino"
@@ -492,16 +502,24 @@ fn profile_name(profile: Profile) -> &'static str {
     }
 }
 
-/// The platform's rule for its identity overlay: ConfigMap `stardelt-identity` exists in the
-/// namespace (stardelt-platform `Makefile`, target `trino:`). A `Lakehouse` has no identity
-/// field of its own.
-async fn identity_contract_present(client: &Client, namespace: &str) -> bool {
+/// The identity contract's issuer, from ConfigMap `stardelt-identity` key `issuerUrl`. `None`
+/// without an identity contract: sign-in is off and the overlays do not apply.
+async fn identity_issuer(client: &Client, namespace: &str) -> Option<String> {
     Api::<ConfigMap>::namespaced(client.clone(), namespace)
         .get_opt(crate::identity::CONFIGMAP_NAME)
         .await
         .ok()
         .flatten()
-        .is_some()
+        .and_then(|cm| cm.data)
+        .and_then(|data| data.get("issuerUrl").cloned())
+        .filter(|issuer| !issuer.is_empty())
+}
+
+/// The platform's rule for its identity overlay: ConfigMap `stardelt-identity` exists in the
+/// namespace (stardelt-platform `Makefile`, target `trino:`). A `Lakehouse` has no identity
+/// field of its own.
+async fn identity_contract_present(client: &Client, namespace: &str) -> bool {
+    identity_issuer(client, namespace).await.is_some()
 }
 
 /// The change stamp of the resource-group file: ConfigMap `trino-warehouses` is written by
@@ -1645,12 +1663,18 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     } else {
         None
     };
+    let issuer = if identity_contract {
+        identity_issuer(&ctx.client, &namespace).await
+    } else {
+        None
+    };
     let overrides = OverridesContext {
         scope_namespace: Some(&namespace),
         overrides: &lh.spec.component_values,
         profile: lh.spec.profile,
         identity: identity_contract && trino_ready,
         base_domain: None,
+        issuer: issuer.as_deref(),
         trino_warehouses: warehouses_stamp.as_deref(),
         streaming: false,
     };
@@ -2014,6 +2038,7 @@ async fn reconcile_platform(
     }
 
     let plan = plan_platform(&instance.spec);
+    let issuer = crate::identity::issuer_url(&instance.spec).ok().flatten();
     let overrides = OverridesContext {
         // PlatformInstance is cluster-scoped: valuesFrom refs must name their
         // namespace explicitly.
@@ -2022,6 +2047,7 @@ async fn reconcile_platform(
         profile: instance.spec.profile,
         identity: instance.spec.identity.mode != IdentityMode::None,
         base_domain: instance.spec.base_domain.as_deref(),
+        issuer: issuer.as_deref(),
         trino_warehouses: None,
         streaming: instance.spec.pillars.streaming,
     };
@@ -2249,6 +2275,7 @@ mod tests {
             profile: Profile::Demo,
             identity: false,
             base_domain: Some("data.example.com"),
+            issuer: None,
             trino_warehouses: None,
             streaming: false,
         }

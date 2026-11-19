@@ -2037,6 +2037,10 @@ pub enum PrincipalAudience {
     Trino,
     /// The catalog.
     Lakekeeper,
+    /// The catalog, as the trusted-engine audience: only a client that carries it may write
+    /// the reserved view property `trino.run-as-owner` (#486/#393). Never a person's client.
+    #[serde(rename = "lakekeeper-trino")]
+    LakekeeperTrino,
 }
 
 /// A secret that already holds the credentials of an app registration made by the identity

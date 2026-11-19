@@ -37,6 +37,7 @@ spec:
                   enum:
                   - trino
                   - lakekeeper
+                  - lakekeeper-trino
                   type: string
                 maxItems: 2
                 minItems: 1

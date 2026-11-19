@@ -116,6 +116,10 @@ pub fn identity_values(component: &str) -> Value {
         // Superset's datasources move to the public Trino host, which exists only with an IdP.
         "superset" => serde_yaml::from_str(include_str!("../values/superset-identity.yaml"))
             .expect("values/superset-identity.yaml is not valid YAML"),
+        // The catalog authenticates (twin of platform/helm-values/lakekeeper.yaml:501-529) and
+        // trusts Trino's trusted-engine audience. Merged last, so a CR cannot undo it.
+        "lakekeeper" => serde_yaml::from_str(include_str!("../values/lakekeeper-identity.yaml"))
+            .expect("values/lakekeeper-identity.yaml is not valid YAML"),
         _ => Value::Object(Map::new()),
     }
 }
@@ -142,6 +146,21 @@ pub fn substitute_base_domain(values: &mut Value, domain: &str) {
         Value::Object(map) => map
             .values_mut()
             .for_each(|item| substitute_base_domain(item, domain)),
+        _ => {}
+    }
+}
+
+/// Replace `__ISSUER_URL__`, the identity contract's `issuerUrl`, in a values document. The
+/// overlay is a checked-in file, so the issuer — install-time state — arrives this way.
+pub fn substitute_issuer(values: &mut Value, issuer: &str) {
+    match values {
+        Value::String(text) => *text = text.replace("__ISSUER_URL__", issuer),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| substitute_issuer(item, issuer)),
+        Value::Object(map) => map
+            .values_mut()
+            .for_each(|item| substitute_issuer(item, issuer)),
         _ => {}
     }
 }
@@ -790,6 +809,10 @@ mod tests {
     fn every_curated_values_file_is_a_non_empty_mapping() {
         for (name, document) in [
             ("lakekeeper.yaml", include_str!("../values/lakekeeper.yaml")),
+            (
+                "lakekeeper-identity.yaml",
+                include_str!("../values/lakekeeper-identity.yaml"),
+            ),
             ("seaweedfs.yaml", include_str!("../values/seaweedfs.yaml")),
             ("trino.yaml", include_str!("../values/trino.yaml")),
             (
@@ -1829,14 +1852,41 @@ mod tests {
     }
 
     #[test]
-    fn only_trino_has_identity_values() {
-        for component in ["lakekeeper", "airflow", "cnpg"] {
+    fn only_trino_and_lakekeeper_have_identity_values() {
+        for component in ["airflow", "cnpg"] {
             assert_eq!(
                 identity_values(component),
                 serde_json::json!({}),
                 "{component}"
             );
         }
+    }
+
+    #[test]
+    fn lakekeeper_identity_values_authenticate_and_trust_trino() {
+        let values = identity_values("lakekeeper");
+        let env = values["catalog"]["extraEnv"]
+            .as_array()
+            .expect("catalog.extraEnv");
+        let names: Vec<&str> = env
+            .iter()
+            .map(|e| e["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "LAKEKEEPER__OPENID_PROVIDER_URI",
+                "LAKEKEEPER__OPENID_AUDIENCE",
+                "LAKEKEEPER__TRUSTED_ENGINES__TRINO__TYPE",
+                "LAKEKEEPER__TRUSTED_ENGINES__TRINO__OWNER_PROPERTY",
+                "LAKEKEEPER__TRUSTED_ENGINES__TRINO__IDENTITIES__OIDC__AUDIENCES",
+            ]
+        );
+        assert_eq!(env[0]["value"], serde_json::json!("__ISSUER_URL__"));
+        assert_eq!(
+            env[4]["value"],
+            serde_json::json!(r#"["lakekeeper-trino"]"#)
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use stardelt_operator::crd::{PlatformInstanceSpec, Profile};
 use stardelt_operator::identity_checklist;
 use stardelt_operator::values::{
-    deep_merge, effective_values, identity_values, substitute_base_domain,
+    deep_merge, effective_values, identity_values, substitute_base_domain, substitute_issuer,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -48,6 +48,7 @@ fn values_command(args: Vec<String>) -> anyhow::Result<()> {
     if let Some(domain) = identity_domain {
         values = deep_merge(values, identity_values(component));
         substitute_base_domain(&mut values, domain);
+        substitute_issuer(&mut values, &format!("https://id.{domain}/realms/stardelt"));
     }
     let mut document = serde_yaml::to_string(&values)?;
     if !document.ends_with('\n') {
