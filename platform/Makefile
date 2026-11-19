@@ -82,7 +82,7 @@ CHART_EXTRA ?=
 # client redirect URIs on the app subdomains. Same default as `dev-dns`.
 BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
-.PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
+.PHONY: _context help deps lint install install-core install-notebooks install-spark install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
@@ -239,6 +239,10 @@ verify-spark-cluster: _context ## One SparkCluster up and down: identity, guards
 
 verify-spark-guard: _context ## The Spark Connect driver may create executor pods only (platform#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-spark-pod-guard.sh
+
+.PHONY: verify-spark-config
+verify-spark-config: _context ## The ConfigMap that pins the Spark executor image carries manifests/spark.yaml's digest
+	@NS=$(NAMESPACE) bash scripts/verify-spark-config.sh
 
 verify-maintenance: _context ## Every Catalog's maint-<catalog> CronJob, its staggered schedule and its principal (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-maintenance.sh
@@ -554,7 +558,7 @@ step-pins: ## The image digests this cluster runs
 	fi
 
 step-verify: ## The verify targets the upgrade path runs after it converged the cluster
-	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins verify-restarts check-spark-runtimes-live verify-operator-values verify-connections verify-maintenance
+	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins verify-spark-config verify-restarts check-spark-runtimes-live verify-operator-values verify-connections verify-maintenance
 
 install-core: deps _context _helm-repos ## Install the core only (storage+catalog+query+Nova)
 	@echo "› Reloader (restarts workloads when a credential they read changes)"
