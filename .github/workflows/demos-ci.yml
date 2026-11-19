@@ -28,6 +28,9 @@ jobs:
       - name: hadolint airflow Dockerfile
         run: hadolint images/airflow/Dockerfile
 
+      - name: hadolint dbt Dockerfile
+        run: hadolint images/dbt/Dockerfile
+
   python-tests:
     name: Pipeline loader tests (pytest)
     runs-on: ubuntu-latest
@@ -114,3 +117,81 @@ jobs:
           file: demos/images/airflow/Dockerfile
           push: false
           cache-from: type=gha
+
+  image-dbt:
+    name: Build + push dbt demo image
+    runs-on: ubuntu-latest
+    # Only on push to main (not on PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, python-tests]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build and push ghcr.io/stardelt/dbt:demo
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          # The dbt image's context is its own directory: the Dockerfile COPYs
+          # check-licenses.py, license-exceptions.txt and stardelt-dbt from beside it.
+          context: demos/images/dbt
+          file: demos/images/dbt/Dockerfile
+          push: true
+          tags: ghcr.io/stardelt/dbt:demo
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pull the pushed image
+        run: docker pull ghcr.io/stardelt/dbt:demo
+
+      - name: Smoke test the dbt image
+        env: { IMAGE: ghcr.io/stardelt/dbt:demo }
+        run: |
+          docker run --rm --entrypoint /opt/dbt/bin/dbt "$IMAGE" --version
+          docker run --rm --entrypoint python "$IMAGE" /opt/dbt/check-licenses.py /opt/dbt/licenses.json /opt/dbt/license-exceptions.txt
+          docker run --rm -v "$PWD/examples/shop:/work" -w /work \
+            --entrypoint /opt/dbt/bin/dbt "$IMAGE" parse --profiles-dir . --project-dir .
+
+  # The push job above runs only on main, so without this a pull request would merge an
+  # image that has never been built.
+  image-dbt-check:
+    name: Build dbt demo image (no push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      # `push: false` cannot be combined with `load: false`: the smoke test needs the image
+      # in the local daemon, so this job loads it under a local tag instead of pushing it.
+      - name: Build stardelt-dbt:test (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: demos/images/dbt
+          file: demos/images/dbt/Dockerfile
+          push: false
+          load: true
+          tags: stardelt-dbt:test
+          cache-from: type=gha
+
+      - name: Smoke test the dbt image
+        env: { IMAGE: stardelt-dbt:test }
+        run: |
+          docker run --rm --entrypoint /opt/dbt/bin/dbt "$IMAGE" --version
+          docker run --rm --entrypoint python "$IMAGE" /opt/dbt/check-licenses.py /opt/dbt/licenses.json /opt/dbt/license-exceptions.txt
+          docker run --rm -v "$PWD/examples/shop:/work" -w /work \
+            --entrypoint /opt/dbt/bin/dbt "$IMAGE" parse --profiles-dir . --project-dir .

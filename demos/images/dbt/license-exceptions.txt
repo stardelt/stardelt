@@ -1,0 +1,9 @@
+# The only exception list for check-licenses.py: one package per line, `#` comments allowed.
+# The licence column is the string `pip-licenses` prints, character for character; the gate
+# compares it literally, so a version bump that changes a licence fails the build.
+# All four are unmodified dependencies of a tool image, never linked into stardelt code.
+# package         licence exactly as pip-licenses prints it
+pathspec          Mozilla Public License 2.0 (MPL 2.0)
+certifi           Mozilla Public License 2.0 (MPL 2.0)
+orjson            MPL-2.0 AND (Apache-2.0 OR MIT)
+text-unidecode    Artistic License; GNU General Public License (GPL); GNU General Public License v2 or later (GPLv2+)
