@@ -13079,6 +13079,16 @@
               "null"
             ],
             "description": "The statement of a statement pipeline."
+          },
+          "tasks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PipelineTaskRequest"
+            },
+            "description": "The tasks of a task-list pipeline (`sql`, `notebook` and `dbt` tasks), in the shape\n`pipelines_validate` accepts; left out for a single-task pipeline."
           }
         }
       },

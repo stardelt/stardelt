@@ -2233,41 +2233,41 @@ pub struct NotebookRequest {
 /// A `dbt` task of a task list (`#112`): a project of the tool image, one selector or a chain
 /// of batches, the threads and the `--vars` text. The rules are `demos/dags/stardelt_pipelines/
 /// plan.py`'s, so Nova refuses what the loader would refuse.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DbtRequest {
     /// A directory name under `/opt/dbt/projects` in the tool image.
     pub project: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select: Option<String>,
     /// 1 to 8 selectors, run in order (`config.batches` as the JSON array text).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batches: Option<Vec<String>>,
     /// 1 to 16; omitted is 4.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads: Option<u8>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vars: Option<BTreeMap<String, String>>,
 }
 
 /// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a
 /// notebook and a dbt run, and the tasks that must succeed first.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineTaskRequest {
     /// Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}` (the CRD also accepts capitals).
     pub name: String,
     /// The statement to run; exactly one of this, `notebook` and `dbt` is given.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sql: String,
     /// A published notebook version to run instead (#237).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notebook: Option<NotebookRequest>,
     /// A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the three.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbt: Option<DbtRequest>,
     /// Names of the tasks that must succeed first; at most 8, each a task of this list.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
 }
 
@@ -2475,6 +2475,10 @@ pub struct PipelineDocument {
     /// The pinned notebook of a notebook pipeline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notebook: Option<NotebookRequest>,
+    /// The tasks of a task-list pipeline (`sql`, `notebook` and `dbt` tasks), in the shape
+    /// `pipelines_validate` accepts; left out for a single-task pipeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<Vec<PipelineTaskRequest>>,
     /// The cron and its zone; a resource without a zone is `UTC`, as the loader reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<ScheduleRequest>,
@@ -3631,6 +3635,86 @@ async fn pipeline_detail(
 
 /// The editable document of a stored pipeline (see [`PipelineDocument`]); built from the
 /// resource alone, so it needs neither Airflow nor a notebook store.
+/// The tasks a task-list resource declares, as `pipelines_validate` accepts them: the inverse of
+/// `dbt_config`, with a notebook task's pinned version and parameters read back. `None` when a
+/// task is of an unknown kind or carries a value that cannot be read back, so the document never
+/// names a task the validator would refuse.
+fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
+    let tasks = spec.get("tasks")?.as_array()?;
+    let mut requests = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let depends_on = match task.get("dependsOn") {
+            Some(names) => names
+                .as_array()?
+                .iter()
+                .map(|name| name.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()?,
+            None => Vec::new(),
+        };
+        let mut request = PipelineTaskRequest {
+            name: task.get("name")?.as_str()?.to_string(),
+            sql: String::new(),
+            notebook: None,
+            dbt: None,
+            depends_on,
+        };
+        match task.get("kind")?.as_str()? {
+            "sql" => {
+                request.sql = task
+                    .get("sql")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            "notebook" => {
+                let config = task.get("config")?;
+                let params = match config.get("params").and_then(Value::as_str) {
+                    Some(params) => {
+                        serde_json::from_str::<BTreeMap<String, String>>(params).ok()?
+                    }
+                    None => BTreeMap::new(),
+                };
+                request.notebook = Some(NotebookRequest {
+                    name: config.get("notebook")?.as_str()?.to_string(),
+                    object_version: config.get("objectVersion")?.as_str()?.to_string(),
+                    params,
+                    connection: task
+                        .get("connection")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+            "dbt" => {
+                let config = task.get("config")?;
+                request.dbt = Some(DbtRequest {
+                    project: config.get("project")?.as_str()?.to_string(),
+                    select: config
+                        .get("select")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    batches: match config.get("batches").and_then(Value::as_str) {
+                        Some(batches) => Some(serde_json::from_str::<Vec<String>>(batches).ok()?),
+                        None => None,
+                    },
+                    threads: match config.get("threads").and_then(Value::as_str) {
+                        Some(threads) => Some(serde_json::from_str::<u8>(threads).ok()?),
+                        None => None,
+                    },
+                    vars: match config.get("vars").and_then(Value::as_str) {
+                        Some(vars) => {
+                            Some(serde_json::from_str::<BTreeMap<String, String>>(vars).ok()?)
+                        }
+                        None => None,
+                    },
+                });
+            }
+            _ => return None,
+        }
+        requests.push(request);
+    }
+    Some(requests)
+}
+
 fn spec_response(resource: &Value) -> PipelineSpecResponse {
     let spec = spec_of(resource);
     let kind = run_task_kind(resource);
@@ -3675,6 +3759,11 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
                 .map(str::to_string),
             sql,
             notebook,
+            tasks: if is_task_list(resource) {
+                task_requests_of(spec)
+            } else {
+                None
+            },
             schedule,
             params: params_of(spec),
             options: options_of(spec),
@@ -14036,6 +14125,50 @@ mod tests {
         assert!(verdict.ok, "{verdict:?}");
         assert_eq!(verdict.action.as_deref(), Some("update"));
         assert!(verdict.changes.is_empty(), "{:?}", verdict.changes);
+    }
+
+    #[tokio::test]
+    async fn spec_returns_a_task_list_with_a_dbt_task() {
+        let mut stored = nova_pipeline("shop-dbt", "analytics");
+        stored["spec"]["tasks"] = json!([
+            { "name": "load", "kind": "sql", "sql": "select 1" },
+            {
+                "name": "build",
+                "kind": "dbt",
+                "dependsOn": ["load"],
+                "config": {
+                    "project": "shop",
+                    "batches": "[\"tag:seed\",\"tag:marts\"]",
+                    "threads": "4",
+                    "vars": "{\"day\":\"7\"}"
+                }
+            }
+        ]);
+        let resources = memory_with(&[("shop-dbt", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let answer = pipeline_spec(Some(&resources), &ada, &namespace, "shop-dbt")
+            .await
+            .expect("visible to its group");
+
+        assert!(!answer.editable, "a task list is not edited by the dialog");
+        assert_eq!(
+            serde_json::to_value(&answer.document).unwrap()["tasks"],
+            json!([
+                { "name": "load", "sql": "select 1" },
+                {
+                    "name": "build",
+                    "dbt": {
+                        "project": "shop",
+                        "batches": ["tag:seed", "tag:marts"],
+                        "threads": 4,
+                        "vars": { "day": "7" }
+                    },
+                    "dependsOn": ["load"]
+                }
+            ])
+        );
     }
 
     #[tokio::test]

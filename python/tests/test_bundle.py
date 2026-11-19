@@ -346,6 +346,56 @@ def test_a_pipeline_description_validates_and_round_trips(tmp_path):
     assert "description" in text
 
 
+def test_generate_writes_a_dbt_task_list(tmp_path):
+    class Nova:
+        """The one call `generate` makes: a task list with a statement, a dependency and a dbt run."""
+
+        def call(self, method, path=None):
+            assert (method, path) == ("pipelines_spec", {"namespace": "stardelt", "name": "daily"})
+            return {
+                "managedBy": "nova",
+                "editable": False,
+                "document": {
+                    "name": "daily",
+                    "ownerGroup": "sales",
+                    "tasks": [
+                        {"name": "load", "sql": "select 1"},
+                        {"name": "build", "dependsOn": ["load"], "dbt": {"project": "shop", "batches": ["tag:seed"], "threads": 4}},
+                    ],
+                },
+            }
+
+    directory = tmp_path / "task-list"
+    directory.mkdir()
+    bundle.generate(Nova(), make(directory), "stardelt", "daily")
+    written = yaml.safe_load((directory / "resources" / "daily.yaml").read_text())
+    assert written["tasks"][1]["dbt"] == {"project": "shop", "batches": ["tag:seed"], "threads": 4}
+    assert (directory / "sql" / "daily-load.sql").read_text() == "select 1\n"
+    assert bundle.validate(directory)[0] == []
+
+
+def test_generate_refuses_a_notebook_task_list(tmp_path):
+    class Nova:
+        """The one call `generate` makes: a task list with a notebook task."""
+
+        def call(self, method, path=None):
+            assert (method, path) == ("pipelines_spec", {"namespace": "stardelt", "name": "daily"})
+            return {
+                "managedBy": "nova",
+                "editable": False,
+                "document": {
+                    "name": "daily",
+                    "ownerGroup": "sales",
+                    "tasks": [{"name": "nb", "notebook": {"name": "a.ipynb", "objectVersion": "v1"}}],
+                },
+            }
+
+    directory = tmp_path / "notebook-task"
+    directory.mkdir()
+    with pytest.raises(bundle.GenerateError, match="notebook task"):
+        bundle.generate(Nova(), make(directory), "stardelt", "daily")
+
+
 def _git(directory, *args):
     subprocess.run(["git", "-C", str(directory), *args], check=True, capture_output=True, text=True)
 
