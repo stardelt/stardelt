@@ -143,9 +143,9 @@ jobs:
       - name: Build and push ghcr.io/stardelt/dbt:demo
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          # The dbt image's context is its own directory: the Dockerfile COPYs
-          # check-licenses.py, license-exceptions.txt and stardelt-dbt from beside it.
-          context: demos/images/dbt
+          # The dbt image's context is `demos`: the Dockerfile COPYs the tool image's own files
+          # from `images/dbt/` and the sample project from `examples/shop`.
+          context: demos
           file: demos/images/dbt/Dockerfile
           push: true
           tags: ghcr.io/stardelt/dbt:demo
@@ -162,6 +162,7 @@ jobs:
           docker run --rm --entrypoint python "$IMAGE" /opt/dbt/check-licenses.py /opt/dbt/licenses.json /opt/dbt/license-exceptions.txt
           docker run --rm -v "$PWD/examples/shop:/work" -w /work \
             --entrypoint /opt/dbt/bin/dbt "$IMAGE" parse --profiles-dir . --project-dir .
+          docker run --rm --entrypoint /opt/dbt/bin/dbt "$IMAGE" parse --project-dir /opt/dbt/projects/shop --profiles-dir /opt/dbt/projects/shop
 
   # The push job above runs only on main, so without this a pull request would merge an
   # image that has never been built.
@@ -181,7 +182,7 @@ jobs:
       - name: Build stardelt-dbt:test (not pushed)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: demos/images/dbt
+          context: demos
           file: demos/images/dbt/Dockerfile
           push: false
           load: true
@@ -195,3 +196,4 @@ jobs:
           docker run --rm --entrypoint python "$IMAGE" /opt/dbt/check-licenses.py /opt/dbt/licenses.json /opt/dbt/license-exceptions.txt
           docker run --rm -v "$PWD/examples/shop:/work" -w /work \
             --entrypoint /opt/dbt/bin/dbt "$IMAGE" parse --profiles-dir . --project-dir .
+          docker run --rm --entrypoint /opt/dbt/bin/dbt "$IMAGE" parse --project-dir /opt/dbt/projects/shop --profiles-dir /opt/dbt/projects/shop

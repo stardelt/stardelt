@@ -438,6 +438,15 @@ extraEnv: |
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
     value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:6c80e6339f980a6143a5ee171239472a6817ec18a8bc868e0ee16da590f79a69
+  # dbt tasks (#11): the DAG that runs them (demos/dags/stardelt_pipelines/dbt.py) gives a `dbt`
+  # task a pod of its own, because the tool image has no Airflow. The image contains the sample
+  # project (demos/examples/shop) and must be rebuilt by `demos / CI` on main; this is a moving
+  # tag, not a digest pin (the pin lands with the demo install slice, where `verify-pins` checks
+  # it). The Secret is the one the pod mounts for the engine's CA.
+  - name: PIPELINE_DBT_IMAGE
+    value: ghcr.io/stardelt/dbt:demo
+  - name: PIPELINE_DBT_TRINO_CA_SECRET
+    value: trino-ca
 
 # The internal CA that signs the query engine's certificate (Secret trino-ca, manifests/trino-tls.yaml),
 # mounted into every Airflow container, task pods included, so the pipeline loader can verify
