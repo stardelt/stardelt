@@ -243,16 +243,25 @@ if [ "$mode" = check ]; then
   }
 
   # 0b. The CLI a human needs to re-deploy the shop (stardelt bundle deploy, step 9).
+  # Answering is not enough: a CLI from an older release refuses the bundle this checkout
+  # ships (`description:` on every file, the `dbt` task) and names a bundle file instead of
+  # itself. `bundle validate` is offline and read-only, so the check stays read-only.
   check_0b() {
-    local venv="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}" cli
+    local venv="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}" cli out
     for cli in "$(command -v stardelt 2>/dev/null || true)" "$venv/bin/stardelt"; do
-      if [ -n "$cli" ] && [ -x "$cli" ] && "$cli" --help >/dev/null 2>&1; then
-        check_msg="the stardelt CLI answers ($cli)"
-        return 0
+      if [ -z "$cli" ] || [ ! -x "$cli" ] || ! "$cli" --help >/dev/null 2>&1; then
+        continue
       fi
+      out="$("$cli" bundle validate "$PWD/../demos/examples/shop-bundle" 2>&1)" || {
+        check_msg="the stardelt CLI at $cli answers but refuses this repository's shop bundle: $(printf '%s' "$out" | head -n 1)"
+        check_fix="install the CLI from this repository: python3 -m venv $venv && $venv/bin/pip install -e $(git rev-parse --show-toplevel)/python"
+        return 1
+      }
+      check_msg="the stardelt CLI answers and validates this repository's shop bundle ($cli)"
+      return 0
     done
     check_msg="the stardelt CLI is not installed — needed only to re-deploy the shop with stardelt bundle deploy"
-    check_fix="python3 -m venv $venv && $venv/bin/pip install 'stardelt @ git+https://github.com/stardelt/stardelt@python/v0.3.0#subdirectory=python'"
+    check_fix="python3 -m venv $venv && $venv/bin/pip install 'stardelt @ git+https://github.com/stardelt/stardelt@python/v0.4.3#subdirectory=python'"
     return 1
   }
 
