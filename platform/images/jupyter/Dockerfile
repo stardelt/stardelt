@@ -122,19 +122,21 @@ COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
 #
 # Pinned by commit SHA, not by tag: a moving tag is not an upgrade path — the
 # same rule the image pins follow (scripts/pin-image.sh). The SHA below is the
-# v0.4.1 release
-# (tag python/v0.4.1 in stardelt/stardelt): it carries
-# `stardelt.notebook` (the native `spark` and `display`), the publish source
-# header (`X-Stardelt-Source`, the hand publish and a bundle deploy report the
-# notebook's commit) and a failed deploy that records a `failed` row. It reports
-# version 0.4.1.
+# v0.4.2 release
+# (tag python/v0.4.2 in stardelt/stardelt): it carries the fail-fast `spark`
+# (a refused Spark Connect endpoint fails in seconds instead of ten minutes,
+# #200/#202) and no `stardelt.sql()` FutureWarning from the library's own
+# catalog listing (#273). Before it, v0.4.1 carried `stardelt.notebook` (the
+# native `spark` and `display`), the publish source header (`X-Stardelt-Source`,
+# the hand publish and a bundle deploy report the notebook's commit) and a
+# failed deploy that records a `failed` row. It reports version 0.4.2.
 #
 # The Makefile holds the pin (STARDELT_LIB_REF) and passes it as a build arg;
 # scripts/check-stardelt-pin.sh fails the build when this default and the
 # Makefile's ref disagree. Installed rather than copied so every notebook
 # imports it with no sys.path tweak; the import check fails the build here, not
 # in a user's first cell.
-ARG STARDELT_LIB_REF=15dff221646fab7ae8c82c1d39c01ca781a3fad0
+ARG STARDELT_LIB_REF=e117d6f09a418019ad74af8972c8e2ccfdd3a461
 RUN python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
         "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt@${STARDELT_LIB_REF}#subdirectory=python" \
     && python3 -c "import stardelt; print('stardelt', stardelt.__version__)" \
