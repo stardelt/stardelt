@@ -293,13 +293,27 @@ class VerifyRestarts(unittest.TestCase):
         self.assertIn("1 pod(s) ready, 0 restart(s) in total", done.stdout)
         self.assertNotIn("nova-pg", done.stdout)
 
+    def test_a_spark_connect_restart_is_reported(self):
+        pods = [
+            pod("spark-connect-649c65f694-zw4md", "spark-connect-649c65f694", restarts=0),
+            pod("spark-connect-auth-5f9975b8f6-2thdc", "spark-connect-auth-5f9975b8f6", restarts=6),
+        ]
+        done = self.run_script(pods)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertIn("✓ spark-connect ", done.stdout)
+        self.assertIn("! spark-connect-auth", done.stdout)
+        self.assertIn("1 pod(s) ready, 6 restart(s) in total", done.stdout)
+        self.assertNotIn("2 pod(s) ready", done.stdout)
+
     def test_the_default_rows_include_the_deployments_that_restart(self):
         done = self.run_script(deployment_pods("nova", replicas=1))
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertIn("– cnpg-cloudnative-pg", done.stdout)
         self.assertIn("– barman-cloud-plugin-barman-cloud", done.stdout)
         self.assertIn("– lakekeeper", done.stdout)
-        self.assertIn("verify-restarts: PASS (1 of 11 Deployment(s)", done.stdout)
+        self.assertIn("– spark-connect", done.stdout)
+        self.assertIn("– spark-connect-auth", done.stdout)
+        self.assertIn("verify-restarts: PASS (1 of 13 Deployment(s)", done.stdout)
 
     def test_the_script_only_reads(self):
         self.run_script(deployment_pods("nova", replicas=1), ROWS="nova")

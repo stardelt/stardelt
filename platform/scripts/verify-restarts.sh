@@ -34,6 +34,10 @@
 # Pods are matched by owner, not by name prefix: `nova-` also matches the StatefulSet pod
 # `nova-pg-1`, so a pod counts only when `ownerReferences[0].kind == "ReplicaSet"` and the
 # ReplicaSet name starts with `<deployment>-`.
+# A ReplicaSet belongs to the longest row that matches it: `spark-connect-auth-…` is the front's row,
+# not the driver's, even though `spark-connect` is its prefix.
+# spark-connect and spark-connect-auth are rows too: a driver restart drops every live session
+# (stardelt/stardelt#215), and the front's crash-loop is what an unrenderable envoy.yaml looks like.
 #
 # Exit codes: 0 every listed Deployment has all pods Ready and no container crashed inside the
 # window, 1 at least one Deployment has a pod that is not Ready or a container crashed inside
@@ -55,6 +59,8 @@ rows=(
   user-scheduler
   hub
   proxy
+  spark-connect
+  spark-connect-auth
   spark-operator-controller
   spark-operator-webhook
   strimzi-cluster-operator
@@ -78,7 +84,7 @@ if ! pods_json="$(kubectl -n "$NS" get pods -o json 2>&1)"; then
   exit 3
 fi
 
-if ! report="$(printf '%s' "$pods_json" | RESTART_ROWS="$selected" RESTART_NS="$NS" RESTART_MAX_AGE="$MAX_AGE" python3 /dev/fd/3 3<<'PY'
+if ! report="$(printf '%s' "$pods_json" | RESTART_ROWS="$selected" RESTART_ALL_ROWS="${rows[*]}" RESTART_NS="$NS" RESTART_MAX_AGE="$MAX_AGE" python3 /dev/fd/3 3<<'PY'
 import calendar, json, os, sys, time
 
 raw = sys.stdin.read()
@@ -89,6 +95,7 @@ except ValueError:
     sys.exit(0)
 
 rows = [r for r in (os.environ.get("RESTART_ROWS") or "").split(",") if r]
+all_rows = [r for r in (os.environ.get("RESTART_ALL_ROWS") or "").split() if r] or rows
 
 MAX_AGE = int(os.environ.get("RESTART_MAX_AGE") or "3600")
 NS_NAME = os.environ.get("RESTART_NS") or "stardelt"
@@ -107,12 +114,17 @@ for pod in pods:
     owned.setdefault(owner, []).append(pod)
 
 
+def row_of(owner):
+    """The longest row that owns this ReplicaSet: `spark-connect-auth-…` is the front's, not the driver's."""
+    best = ""
+    for candidate in all_rows:
+        if (owner == candidate or owner.startswith(candidate + "-")) and len(candidate) > len(best):
+            best = candidate
+    return best
+
+
 def pods_of(name):
-    found = []
-    for owner, items in owned.items():
-        if owner == name or owner.startswith(name + "-"):
-            found.extend(items)
-    return found
+    return [pod for owner, items in owned.items() if row_of(owner) == name for pod in items]
 
 
 def is_ready(pod):
