@@ -12,23 +12,34 @@
 #   scripts/verify-restarts.sh
 #   ROWS=nova,user-scheduler scripts/verify-restarts.sh   # only these rows (the test uses it)
 #
-# Read-only: one `kubectl get pods -o json`, nothing applied, patched or deleted. The restart
-# count is the evidence, never fatal: a Deployment fails only when one of its pods is not
-# Ready, and a listed Deployment with no pod is the honest `–` row (hub and proxy are not
-# installed in every install).
+# Read-only: one `kubectl get pods -o json`, nothing applied, patched or deleted. A listed
+# Deployment with no pod is the honest `–` row (hub and proxy are not installed in every
+# install).
+#
+# Two classes of restart, and only one of them fails (platform#233):
+#  - a node-level restart is evidence, never a failure: `Unknown` (exit 255) is the node
+#    closing every pod in the same second (the disk stall of platform#554), `Completed`
+#    (exit 0) is a normal end. The row keeps `!` and the newest exit is printed.
+#  - a real crash inside the window is a failure: a container whose newest exit is anything
+#    the node did not cause (`Error`, `OOMKilled`, `ContainerCannotRun`, …) and that finished
+#    within RESTART_MAX_AGE_SECONDS (default 3600) makes the row `✗` and the check exit 1.
+#    A crash older than the window is still printed on the row but does not fail — the
+#    incident's history stays visible.
 #
 # Pods are matched by owner, not by name prefix: `nova-` also matches the StatefulSet pod
 # `nova-pg-1`, so a pod counts only when `ownerReferences[0].kind == "ReplicaSet"` and the
 # ReplicaSet name starts with `<deployment>-`.
 #
-# Exit codes: 0 every listed Deployment has all pods Ready (restarts do not fail), 1 at least
-# one Deployment has a pod that is not Ready, 3 UNVERIFIED (no kubectl, or no listed
-# Deployment has a pod in the namespace — the check proved nothing).
+# Exit codes: 0 every listed Deployment has all pods Ready and no container crashed inside the
+# window, 1 at least one Deployment has a pod that is not Ready or a container crashed inside
+# the window, 3 UNVERIFIED (no kubectl, or no listed Deployment has a pod in the namespace —
+# the check proved nothing).
 # Needs: kubectl, python3.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
+MAX_AGE="${RESTART_MAX_AGE_SECONDS:-3600}"
 
 command -v kubectl >/dev/null || { echo "verify-restarts: UNVERIFIED (kubectl not found)"; exit 3; }
 command -v python3 >/dev/null || { echo "verify-restarts: UNVERIFIED (python3 not found)"; exit 3; }
@@ -62,8 +73,8 @@ if ! pods_json="$(kubectl -n "$NS" get pods -o json 2>&1)"; then
   exit 3
 fi
 
-if ! report="$(printf '%s' "$pods_json" | RESTART_ROWS="$selected" python3 /dev/fd/3 3<<'PY'
-import json, os, sys
+if ! report="$(printf '%s' "$pods_json" | RESTART_ROWS="$selected" RESTART_NS="$NS" RESTART_MAX_AGE="$MAX_AGE" python3 /dev/fd/3 3<<'PY'
+import calendar, json, os, sys, time
 
 raw = sys.stdin.read()
 try:
@@ -73,6 +84,9 @@ except ValueError:
     sys.exit(0)
 
 rows = [r for r in (os.environ.get("RESTART_ROWS") or "").split(",") if r]
+
+MAX_AGE = int(os.environ.get("RESTART_MAX_AGE") or "3600")
+NS_NAME = os.environ.get("RESTART_NS") or "stardelt"
 
 owned = {}
 for pod in pods:
@@ -102,6 +116,38 @@ def is_ready(pod):
     return False
 
 
+def _epoch(ts):
+    """RFC3339 (`2026-11-19T01:06:45Z`, kubelet sometimes adds a fraction) to epoch seconds."""
+    if not ts or not ts.endswith("Z"):
+        return None
+    stamp = ts[:-1]                      # drop the Z …
+    if "." in stamp:
+        stamp = stamp.split(".")[0]      # … and kubelet's optional fraction
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def crash_of(pod):
+    """The newest exit the node did not cause, as (reason, exitCode, finishedAt), or None.
+
+    `Unknown` (exit 255) is the node closing a pod — the disk stall of stardelt-platform#554 —
+    and `Completed` (exit 0) is a normal end. Neither is a crash. Everything else (Error,
+    OOMKilled, ContainerCannotRun) is one, and the caller decides by its age.
+    """
+    newest = None
+    for status in (pod.get("status") or {}).get("containerStatuses") or []:
+        term = ((status.get("lastState") or {}).get("terminated") or {})
+        finished = term.get("finishedAt")
+        reason = term.get("reason") or "?"
+        if not finished or reason in ("Completed", "Unknown"):
+            continue
+        if newest is None or finished > newest[2]:
+            newest = (reason, term.get("exitCode"), finished)
+    return newest
+
+
 width = max(len(name) for name in rows) + 2
 
 
@@ -111,7 +157,9 @@ def row(mark, name, rest):
 
 lines = []
 not_ready = 0
+crashed = 0
 found = 0
+now = int(time.time())
 for name in rows:
     pods = pods_of(name)
     if not pods:
@@ -141,11 +189,27 @@ for name in rows:
             "?" if code is None else code,
             finished,
         )
+    crashes = []
+    for pod in pods:
+        term = crash_of(pod)
+        if term is None:
+            continue
+        finished_epoch = _epoch(term[2])
+        if finished_epoch is None or finished_epoch < now - MAX_AGE:
+            continue  # unparseable or older than the window: printed with the row, never fatal
+        crashes.append((pod, term))
+    if crashes:
+        pod, (reason, code, finished) = crashes[0]
+        text += "; %d crash(es) within %ds: %s exit=%s at %s — read kubectl -n %s logs %s --previous" % (
+            len(crashes), MAX_AGE, reason, "?" if code is None else code, finished, NS_NAME, pod["metadata"]["name"])
+        crashed += 1
+        lines.append(row("✗", name, text))
+        continue
     lines.append(row(mark, name, text))
 
 for line in lines:
     print(line)
-print("__meta__ %d|%d|%d" % (not_ready, found, len(rows)))
+print("__meta__ %d|%d|%d|%d" % (not_ready, crashed, found, len(rows)))
 PY
 )"; then
   echo "verify-restarts: UNVERIFIED (cannot evaluate the pod list: $report)"
@@ -163,7 +227,7 @@ if [ -z "$meta" ]; then
   echo "verify-restarts: UNVERIFIED (cannot evaluate the pod list)"
   exit 3
 fi
-IFS='|' read -r not_ready found total <<< "${meta#__meta__ }"
+IFS='|' read -r not_ready crashed found total <<< "${meta#__meta__ }"
 
 if [ "$found" -eq 0 ]; then
   echo "verify-restarts: UNVERIFIED (no listed Deployment has a pod in $NS)"
@@ -172,6 +236,11 @@ fi
 
 if [ "$not_ready" -gt 0 ]; then
   echo "verify-restarts: FAIL ($not_ready Deployment(s) with a not-Ready pod)"
+  exit 1
+fi
+
+if [ "$crashed" -gt 0 ]; then
+  echo "verify-restarts: FAIL ($crashed Deployment(s) had a container crash within ${MAX_AGE}s)"
   exit 1
 fi
 
