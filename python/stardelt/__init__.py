@@ -191,7 +191,9 @@ def _token():
     Hub pod: the token is the signed-in person's; ``_hub_token()`` re-reads it from the hub,
     and only when the hub refuses (a revoked session) does the message ask for a restart.
     Pipeline pod: the token came from the pod's own client-credentials grant, so the same
-    grant gets another one. The new token replaces ``TRINO_TOKEN`` so ``stardelt.connection()``
+    grant gets another one. Laptop: ``STARDELT_TOKEN`` when set, else the sign-in kept by
+    ``stardelt login``, renewed through ``login.fresh_token``; a laptop with neither keeps the
+    existing sentence. The new token replaces ``TRINO_TOKEN`` so ``stardelt.connection()``
     (which reads the environment) uses the same one.
     """
     token = os.environ.get("TRINO_TOKEN", "").strip()
@@ -202,6 +204,19 @@ def _token():
     if fresh:
         os.environ["TRINO_TOKEN"] = fresh
         return fresh
+    explicit = os.environ.get("STARDELT_TOKEN", "").strip()
+    if explicit:
+        return explicit
+    from stardelt import login
+
+    if login.load(os.environ) is not None:
+        try:
+            token = login.fresh_token(os.environ, _local_session())
+        except login.LoginError:
+            pass  # fall through to the platform sentences below
+        else:
+            os.environ["TRINO_TOKEN"] = token
+            return token
     if not _can_refresh():
         if not token:
             raise RuntimeError(
@@ -280,6 +295,14 @@ def _on_platform() -> bool:
 _LOCAL_SESSION = None
 
 
+def _local_session():
+    """One requests session for the laptop path: renews the stored token, and reaches Nova with the same one."""
+    global _LOCAL_SESSION
+    if _LOCAL_SESSION is None:
+        _LOCAL_SESSION = requests.Session()
+    return _LOCAL_SESSION
+
+
 def _local_client():
     """A Nova client for the stored sign-in, or ``None`` when there is neither a host nor a sign-in.
 
@@ -287,8 +310,6 @@ def _local_client():
     ``stardelt login`` second. The token is ``STARDELT_TOKEN`` when set, otherwise the stored
     access token, renewed through the same session (as the command line does).
     """
-    global _LOCAL_SESSION
-
     from stardelt import api, login
 
     host = (
@@ -296,9 +317,7 @@ def _local_client():
     ).strip()
     if not host:
         return None
-    if _LOCAL_SESSION is None:
-        _LOCAL_SESSION = requests.Session()
-    session = _LOCAL_SESSION
+    session = _local_session()
     token = os.environ.get("STARDELT_TOKEN", "").strip()
     if not token:
         token = lambda: login.fresh_token(os.environ, session)  # noqa: E731
@@ -477,6 +496,19 @@ def _platform_only(name):
             f"{name}: Spark and table writes run on the platform — connect VS Code to your "
             "workspace (Nova → Profile → VS Code)."
         )
+
+
+def _signed_in_locally() -> bool:
+    """Whether this laptop has a stored sign-in and a Nova to reach (the `stardelt setup vscode` kernel)."""
+    from stardelt import login
+
+    stored = login.load(os.environ) or {}
+    return bool((os.environ.get("STARDELT_NOVA_URL", "") or stored.get("host") or "").strip())
+
+
+def _spark_allowed() -> bool:
+    """Spark runs on the platform, or on a laptop signed in to one (`stardelt setup vscode`)."""
+    return _on_platform() or _signed_in_locally()
 
 
 def write_df(df, table, mode="append", batch_rows=DEFAULT_BATCH_ROWS, bronze=False, source="notebook"):
@@ -813,11 +845,17 @@ def _remote_for_cluster(cluster):
     Never starts anything: a Stopped/Failed cluster raises `ClusterStopped`; a
     Starting/Stopping one raises `RuntimeError` (call `stardelt.compute.start` and
     wait). The sentence names the two ways to start it.
+
+    ``SPARK_REMOTE`` may carry ``token=__TOKEN__`` (the ``stardelt setup vscode`` kernel
+    does): it is replaced with the current token on every resolution, so a renewed token
+    changes the endpoint string and ``_cached_spark_session`` opens a new channel.
     """
     if cluster is None:
         remote = os.environ.get("SPARK_REMOTE", SPARK_REMOTE_DEFAULT).strip()
         if not remote:
             raise RuntimeError("SPARK_REMOTE is not set — point it at the Spark Connect endpoint.")
+        if "__TOKEN__" in remote:
+            remote = remote.replace("__TOKEN__", _token())
         return remote
     from stardelt import compute
 
@@ -887,7 +925,8 @@ def _session(app_name="stardelt-notebook", cluster=None):
     Keep the shared driver small: see ``stardelt.spark_tips()`` for the patterns
     that do (the cheat sheet is also in the helper's README).
     """
-    _platform_only("stardelt.spark")
+    if not _spark_allowed():
+        _platform_only("stardelt.spark")  # raises the same "connect VS Code to your workspace" sentence
     from pyspark.sql import SparkSession
 
     global _SPARK_SESSION, _SPARK_TOKEN, _SPARK_REMOTE

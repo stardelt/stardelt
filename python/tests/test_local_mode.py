@@ -5,12 +5,15 @@ temporary XDG_CONFIG_HOME, and the platform path uses the stub Trino connection 
 ``tests/test_stardelt.py``.
 """
 
+import os
+import time
+
 import pandas as pd
 import pytest
 
 import stardelt
 import stardelt.api as api
-from stardelt import statements
+from stardelt import login, statements
 from tests.test_stardelt import StubConnection, _jwt
 
 LOCAL_ENV = ("TRINO_URL", "TRINO_TOKEN", "STARDELT_NOVA_URL", "STARDELT_TOKEN", "PIPELINE_TOKEN_URL", "PIPELINE_CLIENT_SECRET")
@@ -102,3 +105,64 @@ def test_on_the_platform_the_trino_path_is_used(monkeypatch):
     frame = stardelt.sql("SELECT id, note FROM t")
     assert list(frame.columns) == ["id", "note"] and len(frame) == 2
     assert run.queries == []
+
+
+def _stored(**overrides):
+    """Write a sign-in to the empty XDG_CONFIG_HOME of the fixture."""
+    creds = {
+        "issuer": "https://id.example/realms/stardelt",
+        "client_id": "stardelt-dev",
+        "token_endpoint": "https://id.example/realms/stardelt/protocol/openid-connect/token",
+        "access_token": "stored-token",
+        "refresh_token": "refresh-token",
+        "expires_at": int(time.time()) + 3600,
+        "host": "https://nova.example",
+    }
+    creds.update(overrides)
+    login.save(os.environ, creds)
+    return creds
+
+
+def test_a_stored_sign_in_is_the_laptop_token(monkeypatch):
+    _stored()
+    assert stardelt._token() == "stored-token"
+
+
+def test_an_expired_stored_token_is_renewed(monkeypatch):
+    _stored(expires_at=0)
+    monkeypatch.setattr(
+        login, "_post", lambda session, url, form: (200, {"access_token": "renewed", "expires_in": 300})
+    )
+    assert stardelt._token() == "renewed"
+    assert login.load(os.environ)["access_token"] == "renewed"
+
+
+def test_a_laptop_without_a_sign_in_keeps_the_platform_sentence():
+    with pytest.raises(RuntimeError, match="restart this server"):
+        stardelt._token()
+
+
+def test_spark_runs_on_a_signed_in_laptop_only(monkeypatch):
+    assert stardelt._spark_allowed() is False
+    _stored()
+    assert stardelt._spark_allowed() is True
+    monkeypatch.setenv("TRINO_URL", "https://trino.example:8443")
+    assert stardelt._spark_allowed() is True
+
+
+def test_a_nova_url_alone_admits_spark(monkeypatch):
+    monkeypatch.setenv("STARDELT_NOVA_URL", "https://nova.example")
+    assert stardelt._spark_allowed() is True
+
+
+def test_the_token_placeholder_is_filled_each_time(monkeypatch):
+    monkeypatch.setenv("SPARK_REMOTE", "sc://spark.example:443/;use_ssl=true;token=__TOKEN__")
+    monkeypatch.setattr(stardelt, "_token", lambda: "t1")
+    assert stardelt._remote_for_cluster(None) == "sc://spark.example:443/;use_ssl=true;token=t1"
+    monkeypatch.setattr(stardelt, "_token", lambda: "t2")
+    assert stardelt._remote_for_cluster(None).endswith("token=t2")
+
+
+def test_a_refused_spark_on_a_bare_laptop_names_the_way_back():
+    with pytest.raises(RuntimeError, match="connect VS Code to your workspace"):
+        stardelt._session()
