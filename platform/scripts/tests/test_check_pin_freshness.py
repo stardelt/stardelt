@@ -13,6 +13,7 @@ from scripts.check_pin_freshness import (
     compare,
     compare_lib_tag,
     exit_code,
+    lib_ahead_line,
     parse_pins,
     pin_text,
 )
@@ -126,6 +127,21 @@ class CompareLibTagTest(unittest.TestCase):
         for needle in ("v0.3.0", "681e8734…", "fb56e46d…", "STARDELT_LIB_TAG"):
             self.assertIn(needle, line)
         self.assertEqual(exit_code([line]), 1)
+
+
+class LibAheadLineTest(unittest.TestCase):
+    """A release is owed when main's python/ moved past the pinned tag."""
+
+    def test_lib_ahead_line_is_silent_when_main_is_the_tag(self):
+        self.assertEqual(lib_ahead_line(0, "", "v0.4.1", REF), "")
+
+    def test_lib_ahead_line_names_the_count_and_the_newest_commit(self):
+        line = lib_ahead_line(8, "ad80664f", "v0.4.1", REF)
+        self.assertTrue(line.startswith("! "), line)
+        for needle in ("8 commit(s)", "python/v0.4.1@", "ad80664f", "STARDELT_LIB_REF"):
+            self.assertIn(needle, line)
+        # Advisory: it is not a '✗', so the plain run still exits 0.
+        self.assertEqual(exit_code([line]), 0)
 
 
 class PinTextTest(unittest.TestCase):
