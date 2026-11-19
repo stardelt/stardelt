@@ -635,6 +635,24 @@ mod tests {
         }
     }
 
+    /// A notification destination is an address a tool points at, so the four routes are a
+    /// public promise (stardelt/stardelt#464): the SDK, the CLI and the MCP server are generated
+    /// from `public` operations only, and the demo's ntfy run feed creates one from a script.
+    #[test]
+    fn the_notification_destination_routes_are_public() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        for (path, method, id) in [
+            ("/api/destinations", "get", "destinations_list"),
+            ("/api/destinations", "post", "destinations_create"),
+            ("/api/destinations/{id}", "delete", "destinations_remove"),
+            ("/api/destinations/{id}/test", "post", "destinations_test"),
+        ] {
+            let op = &value["paths"][path][method];
+            assert_eq!(op["operationId"], id, "{path}");
+            assert_eq!(op["tags"], serde_json::json!(["public"]), "{path}");
+        }
+    }
+
     /// Loading and copying a table are for the interface: `internal`, open to every
     /// signed-in user (the engine's own permissions decide), and the two writes are POSTs.
     #[test]
