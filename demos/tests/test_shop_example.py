@@ -67,3 +67,12 @@ def test_changing_the_scale_is_a_full_refresh_because_the_gold_table_is_incremen
     assert "--full-refresh" in command and "scale: 1000000" in command
     readme = (SHOP / "README.md").read_text()
     assert "make demo SCALE=1000000 FULL=1" in readme
+
+
+def test_the_shop_overrides_the_relation_listing_without_the_system_catalog():
+    macro = (SHOP / "macros" / "list_relations_without_caching.sql").read_text()
+    assert "macro trino__list_relations_without_caching(relation)" in macro
+    assert "system." not in macro, "the override exists so dbt reads no system.* catalog"
+    assert "materialized_view" not in macro, "the shop has no materialized views to detect"
+    project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
+    assert "macros" in project["macro-paths"]
