@@ -520,7 +520,7 @@ function validGroup(group: string): boolean {
  * request cannot be refused for something the form did not say first.
  *
  * Two changes are destructive enough to need a second click (`Confirm`): removing every
- * grant, and taking `stardelt-users` off `warehouse`. The resource is still the source of
+ * grant, and taking `stardelt-users` (everybody signed in) off a catalog. The resource is still the source of
  * truth — the dialog only writes `spec`; the sync job applies it.
  */
 function EditCatalogDialog({
@@ -574,7 +574,6 @@ function EditCatalogDialog({
 
   const removesAll = catalog.grants.length > 0 && grants.length === 0
   const removesUsers =
-    catalog.name === 'warehouse' &&
     catalog.grants.some((grant) => grant.group === 'stardelt-users') &&
     !grants.some((grant) => grant.group === 'stardelt-users')
   const confirmSentences = [
