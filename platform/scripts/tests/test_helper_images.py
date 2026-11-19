@@ -64,6 +64,30 @@ def helm_values_files():
     return [path for path in sorted((REPO / "helm-values").rglob("*.yaml")) if path.is_file()]
 
 
+# manifests/spark-demo-sandbox.yaml carries no digest: `make install-spark-demo` renders
+# `__SPARK_IMAGE__` from manifests/spark.yaml's image line at install time, so the public demo's
+# sandbox follows the pin without a second copy of it (stardelt/stardelt#246). The placeholder is
+# judged where it is resolved — the pin it renders must itself carry a digest — so nothing here
+# floats by tag.
+SPARK_IMAGE_PLACEHOLDER = "__SPARK_IMAGE__"
+
+
+def spark_pin():
+    """manifests/spark.yaml's image line, the value `make install-spark-demo` renders."""
+    for _, line in code_lines(REPO / "manifests" / "spark.yaml"):
+        match = IMAGE_LINE.match(line)
+        if match and match.group(1).startswith("ghcr.io/stardelt/spark"):
+            return match.group(1)
+    return None
+
+
+def resolved_image(reference):
+    """The reference a pod runs: a placeholder is rendered from the manifest it names."""
+    if reference == SPARK_IMAGE_PLACEHOLDER:
+        return spark_pin() or reference
+    return reference
+
+
 def image_values(value, path=""):
     """Yield (path, tag, digest) for every image reference in one loaded values document.
 
@@ -132,7 +156,7 @@ class TestHelperImages(unittest.TestCase):
                     total += 1
                     self.assertIn(
                         "@sha256:",
-                        match.group(1),
+                        resolved_image(match.group(1)),
                         f"{relative}:{number}: the bare image reference",
                     )
                 name_match = IMAGE_NAME_LINE.match(line)
@@ -145,7 +169,7 @@ class TestHelperImages(unittest.TestCase):
                     )
         self.assertEqual(
             total,
-            22,
+            23,
             "an image line was added or removed — pin it and update this count",
         )
         self.assertEqual(
