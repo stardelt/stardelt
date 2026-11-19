@@ -12,14 +12,24 @@
 #       (stardelt#201 item 3, storage access for the demo sandbox; Q3-B of stardelt#75)?
 #   Q6  what can Lakekeeper 0.15.0 be told about STS for a warehouse (read-only: the
 #       pinned release's management OpenAPI, plus one grep of the bootstrap script)?
+#   Q7  can one config file serve both -s3.config and -s3.iam.config, so the gateway keeps
+#       the platform's identities and gains STS (stardelt#245, the platform path for #201)?
+#   Q8  which values of the pinned chart reach the gateway's command line, can a second
+#       config file be mounted there, and what do the rendered args look like (read-only,
+#       no cluster: the vendored chart, helm-values/seaweedfs.yaml and `helm template`)?
+#   Q9  does a session Policy at a table-shaped deep prefix scope correctly, and what does
+#       it need — the trailing `/*` or the bare prefix (stardelt#245)?
+#   Q10 can Lakekeeper 0.15.0 replace a warehouse's storage profile in place, or only at
+#       creation (read-only: the same management OpenAPI document as Q6)?
 #
 # Every answer is one `Q<n>: ...` line on stdout; detail lines start with `  - `. A
 # "not supported" / "absent" is a successful measurement: the script exits 0 either way.
 # No secret is printed, nothing is written to a cluster, and the container and temp dir
 # are removed on exit (including SIGINT).
 #
-# Docker is required; the image and digest are the ones the lab runs. Q6 needs kubectl and
-# curl and degrades to `not measured` when the management port-forward is unreachable.
+# Docker is required; the image and digest are the ones the lab runs. Q6 and Q10 need
+# kubectl and curl and degrade to `not measured` when the management port-forward is
+# unreachable; Q8 needs the vendored chart (`make chart-deps`) and helm.
 set -euo pipefail
 
 IMAGE="chrislusf/seaweedfs:4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
@@ -383,10 +393,184 @@ else
 fi
 echo "Q6: $q6"
 
+# --- Q7: one config document for both gateway flags (stardelt#245) -----------------------
+echo "Q7: measuring one config file for both -s3.config and -s3.iam.config"
+
+# The platform ships one Secret with one key (seaweedfs_s3_config); this document carries
+# the identities *and* the STS half, and both flags read it.
+cat > "$tmp/s3.json" <<EOF
+{"identities":[{"name":"full","credentials":[{"accessKey":"$FULL_AK","secretKey":"$FULL_SK"}],"actions":["Admin","Read","Write"]}],
+ "sts":{"signingKey":"$SIGNING_KEY"},"policy":{"storeType":"memory","defaultEffect":"Deny"},
+ "policies":[{"name":"spike-d","document":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::spike-d","arn:aws:s3:::spike-d/*"]}]}}],
+ "roles":[{"roleName":"spike","roleArn":"$ROLE_ARN","trustPolicy":$TRUST_POLICY,"attachedPolicies":["spike-d"]}]}
+EOF
+start_gateway "-s3.iam.config=/spike/s3.json"
+
+q7_identity="$(printf '%s %s %s' \
+  "$(s3 "$FULL_AK" "$FULL_SK" PUT /spike-d)" \
+  "$(s3 "$FULL_AK" "$FULL_SK" PUT /spike-d/q7.txt 'q7')" \
+  "$(s3 "$FULL_AK" "$FULL_SK" GET /spike-d/q7.txt)")"
+q7_assume="$(sts_signed "$FULL_AK" "$FULL_SK" POST "/?Action=AssumeRole&Version=2011-06-15&RoleArn=$ROLE_ARN&RoleSessionName=spike")"
+creds
+q7_session="not tested: AssumeRole returned no credentials"
+if [ -n "$S_AK" ] && [ -n "$S_SK" ] && [ -n "$S_TOK" ]; then
+  q7_session="$(printf '%s %s' \
+    "$(session_s3 PUT /spike-d/q7-session.txt 'session')" \
+    "$(session_s3 GET /spike-d/q7.txt)")"
+fi
+
+echo "  - platform identity (actions [Admin,Read,Write]): create-bucket/PUT/GET = $q7_identity"
+echo "  - AssumeRole signed with the same credentials = $q7_assume; session PUT/GET = $q7_session"
+echo "  - gateway log: $(docker logs "$NAME" 2>&1 | grep -c 'Failed to load IAM configuration') × 'Failed to load IAM configuration' (one file for both flags)"
+read -r q7_bucket q7_put q7_get <<<"$q7_identity"
+q7="one document for both flags: identity PUT/GET = $q7_put $q7_get, AssumeRole = $q7_assume"
+if [ "$q7_bucket" != "200" ] || [ "$q7_put" != "200" ] || [ "$q7_get" != "200" ] || [ "$q7_assume" != "200" ]; then
+  q7="not one document for both flags: create-bucket/PUT/GET = $q7_identity, AssumeRole = $q7_assume"
+fi
+echo "Q7: $q7"
+
+# --- Q8: what the pinned chart can pass to the gateway (read-only) -----------------------
+echo "Q8: reading the pinned chart's S3 gateway flags (no cluster)"
+
+SEAWEED_CHART="$(awk '/^ *- name: seaweedfs$/{f=1;next} f&&/version:/{print $2;exit}' "$ROOT/platform/chart/Chart.yaml")"
+S3_TEMPLATE="$ROOT/platform/chart/charts/seaweedfs/templates/s3/s3-deployment.yaml"
+S3_VALUES="$ROOT/platform/chart/charts/seaweedfs/values.yaml"
+VALUES="$ROOT/platform/helm-values/seaweedfs.yaml"
+
+if [ -f "$S3_TEMPLATE" ]; then
+  s3_config_line="$(grep -n '\-config=/etc/sw/' "$S3_TEMPLATE" | head -n1 | cut -d: -f1)"
+  extra_args_line="$(grep -n 'Values.s3.extraArgs' "$S3_TEMPLATE" | head -n1 | cut -d: -f1)"
+  extra_mount_line="$(grep -n 's3.extraVolumeMounts' "$S3_TEMPLATE" | head -n1 | cut -d: -f1)"
+  extra_vol_line="$(grep -n 's3.extraVolumes' "$S3_TEMPLATE" | head -n1 | cut -d: -f1)"
+  iam_hits="$(grep -ci 'iamConfig\|iam\.config' "$S3_TEMPLATE" "$S3_VALUES" | awk -F: '{s+=$2} END {print s+0}' || true)"
+  secret_hits="$(grep -c 'existingConfigSecret' "$S3_TEMPLATE" || true)"
+  echo "  - chart seaweedfs $SEAWEED_CHART: the gateway mounts the Secret's key as one file and passes it with -config (templates/s3/s3-deployment.yaml:$s3_config_line; existingConfigSecret at :$secret_hits)"
+  echo "  - no -iam.config / iamConfig anywhere in the chart's s3 template or values ($iam_hits hits)"
+  echo "  - s3.extraArgs reach the command line (templates/s3/s3-deployment.yaml:$extra_args_line); s3.extraVolumeMounts/extraVolumes render free-form YAML (:${extra_mount_line}/:${extra_vol_line})"
+  echo "  - platform values: s3.existingConfigSecret $(grep -m1 '^  existingConfigSecret:' "$VALUES" | sed 's/^  existingConfigSecret: *//'), no extraArgs/extraVolumes"
+else
+  echo "  - chart not vendored: chart/charts/seaweedfs is absent (run \`make chart-deps\`)"
+fi
+
+q8="not measured"
+if [ -f "$S3_TEMPLATE" ] && command -v helm >/dev/null 2>&1; then
+  if helm template seaweedfs "$ROOT/platform/chart/charts/seaweedfs" --values "$VALUES" > "$tmp/rendered.yaml" 2>"$tmp/helm.err"; then
+    python3 - "$tmp/rendered.yaml" <<'PY' | sed 's/^/  | /'
+import sys
+for doc in open(sys.argv[1]).read().split("\n---\n"):
+    if "kind: Deployment" not in doc or "swfs-s3" not in doc:
+        continue
+    name = [l.split("name:", 1)[1].strip() for l in doc.splitlines() if l.strip().startswith("name:")][0]
+    body = doc[doc.index("command:"):]
+    body = body[:body.index("volumeMounts:")]
+    print("rendered command of Deployment " + name + ":")
+    for line in body.splitlines()[1:]:
+        if line.strip():
+            print(line.rstrip())
+    break
+PY
+    rendered_config="$(grep -c '\-config=/etc/sw/seaweedfs_s3_config' "$tmp/rendered.yaml" || true)"
+    q8="the chart passes -config from Secret seaweedfs-s3-config key seaweedfs_s3_config ($rendered_config rendered s3 deployment(s)); it has no iam flag, and s3.extraArgs plus s3.extraVolumes/extraVolumeMounts can add -iam.config and its second file"
+  else
+    echo "  - helm template failed: $(tail -n1 "$tmp/helm.err" | cut -c1-140)"
+    q8="not measured: helm template failed"
+  fi
+fi
+echo "Q8: $q8"
+
+# --- Q9: a session policy at a table-shaped deep prefix (stardelt#245) -------------------
+echo "Q9: measuring an inline session Policy at a table-shaped deep prefix"
+
+DEEP_PREFIX="warehouse/00000000-0000-0000-0000-000000000000/ns/table"
+DEEP_SIBLING="warehouse/00000000-0000-0000-0000-000000000000/ns/table2"
+DEEP_RESOURCES='["arn:aws:s3:::spike-d/'"$DEEP_PREFIX"'","arn:aws:s3:::spike-d/'"$DEEP_PREFIX"'/*"]'
+DEEP_RESOURCES_BARE='["arn:aws:s3:::spike-d/'"$DEEP_PREFIX"'"]'
+
+deep_assume() { # <policy document JSON> -> AssumeRole into S_AK/S_SK/S_TOK (runs in this shell)
+  local policy="$1" code
+  code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:sts" --user "$FULL_AK:$FULL_SK" \
+    -X POST -d "Action=AssumeRole&Version=2011-06-15&RoleArn=$ROLE_ARN&RoleSessionName=spike-deep" \
+    --data-urlencode "Policy=$policy" "$ENDPOINT/" 2>/dev/null)" || code="000"
+  S_AK=""; S_SK=""; S_TOK=""
+  creds
+  DEEP_CODE="${code:-000}"
+}
+
+deep_session_codes() { # the session in S_AK/S_SK/S_TOK -> "put-in get-in put-out get-out"
+  if [ -z "$S_AK" ] || [ -z "$S_SK" ] || [ -z "$S_TOK" ]; then
+    printf 'not tested: AssumeRole returned %s and no credentials' "${DEEP_CODE:-000}"
+    return 0
+  fi
+  printf '%s %s %s %s' \
+    "$(session_s3 PUT "/spike-d/$DEEP_PREFIX/data/f.parquet" 'deep')" \
+    "$(session_s3 GET "/spike-d/$DEEP_PREFIX/data/f.parquet")" \
+    "$(session_s3 PUT "/spike-d/$DEEP_SIBLING/data/f.parquet" 'deep')" \
+    "$(session_s3 GET "/spike-d/$DEEP_SIBLING/data/f.parquet")"
+}
+
+DEEP_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":'"$DEEP_RESOURCES"'}]}'
+DEEP_POLICY_BARE='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":'"$DEEP_RESOURCES_BARE"'}]}'
+
+q9_deep="not tested: AssumeRole returned no credentials"
+q9_root="not tested: AssumeRole returned no credentials"
+q9_bare="not tested: AssumeRole returned no credentials"
+deep_assume "$DEEP_POLICY"
+if [ -n "$S_AK" ] && [ -n "$S_SK" ] && [ -n "$S_TOK" ]; then
+  q9_deep="$(deep_session_codes)"
+  q9_root="$(printf '%s %s' \
+    "$(session_s3 PUT /spike-d/root-q9.txt 'root')" \
+    "$(session_s3 GET /spike-d/q7.txt)")"
+  deep_assume "$DEEP_POLICY_BARE"
+  q9_bare="$(deep_session_codes)"
+fi
+
+echo "  - prefix: arn:aws:s3:::spike-d/$DEEP_PREFIX and …/$DEEP_PREFIX/*"
+echo "  - bucket root (PUT /spike-d/root-q9.txt, GET /spike-d/q7.txt): $q9_root"
+echo "  - without the trailing /*: put-in/get-in/put-out/get-out = $q9_bare"
+q9="the deep session policy: put-in/get-in/put-out/get-out = $q9_deep"
+case "$q9_bare" in
+  "403 403 403 403") echo "  - finding: the gateway needs the trailing /* — the bare deep prefix allows nothing" ;;
+esac
+if [ "$q9_deep" != "200 200 403 403" ]; then
+  q9="the deep session policy does not scope as the design needs: put-in/get-in/put-out/get-out = $q9_deep"
+fi
+echo "Q9: $q9"
+
+# --- Q10: can Lakekeeper 0.15.0 update a storage profile in place? (read-only) -----------
+echo "Q10: reading the pinned release's warehouse update operations (no write)"
+
+if [ "$lk_ok" = yes ]; then
+  wh_ops="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+out=[]
+for p,v in sorted(d["paths"].items()):
+    if not p.startswith("/management/v1/warehouse"): continue
+    for m,op in sorted(v.items()):
+        if "storage" in p and m in ("get","post","put","patch","delete"):
+            out.append(m.upper()+" "+p+" ("+op.get("summary","")+")")
+print("; ".join(out))' "$LK_JSON")"
+  wh_writers="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+print(", ".join(sorted(m.upper()+" "+p for p,v in d["paths"].items() if p.startswith("/management/v1/warehouse") for m in v if m in ("put","patch"))) or "none")' "$LK_JSON")"
+  wh_rule="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+s=d["components"]["schemas"]["UpdateWarehouseStorageRequest"]["properties"]["storage-profile"]
+print(" ".join(s.get("description","").split())[:260])' "$LK_JSON")"
+  echo "  - operations that take a storage profile: $wh_ops"
+  echo "  - PUT or PATCH on a warehouse path: $wh_writers"
+  echo "  - UpdateWarehouseStorageRequest: $wh_rule"
+  q10="Lakekeeper $lk_ver updates a storage profile by POST /management/v1/warehouse/{warehouse_id}/storage, in place (credential-only: /storage-credential; dry run: /storage/validate-profile); no PUT or PATCH"
+else
+  echo "  - management OpenAPI: not reachable (the same document as Q6)"
+  q10="not measured: the management OpenAPI was not reachable"
+fi
+echo "Q10: $q10"
+
 # --- the two lines the design quotes ------------------------------------------------------
 b_shape="not available"
 case "$q4" in supported*) b_shape="available" ;; esac
 a_shape="not configurable"
 if [ "$sts_endpoint" = present ] && [ "$sts_principal" = present ]; then a_shape="configurable"; fi
 echo "for #201 item 3: prefix-scoped static identity = $q4; STS session policy at a prefix = $q5"
+echo "for #201 item 3 (STS path): one file for both gateway flags = $q7; deep table-shaped session policy = $q9; Lakekeeper profile update = $q10"
 echo "recommendation input: B is $b_shape; A is $a_shape (Q6)"
