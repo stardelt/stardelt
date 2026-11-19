@@ -65,6 +65,8 @@ Part of the [stardelt-platform](../README.md) manual.
 | `dev-up` / `dev-down` | Create / delete the Hetzner k3s development cluster |
 | `dev-dns` / `dev-dns-down` | Point / remove the playground DNS records |
 
+`make verify-release` runs the release set (the `step-verify` targets plus the read-only security, identity, image and Airflow checks) without stopping at the first failure and prints one line per check; a release is cut only when it is all ✓ (stardelt/stardelt#401).
+
 ---
 
 # Repository layout

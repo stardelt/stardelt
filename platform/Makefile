@@ -578,6 +578,10 @@ step-pins: ## The image digests this cluster runs
 step-verify: ## The verify targets the upgrade path runs after it converged the cluster
 	@$(MAKE) --no-print-directory verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming verify-crds verify-pins verify-spark-config verify-restarts check-spark-runtimes-live verify-operator-values verify-connections verify-maintenance
 
+.PHONY: verify-release
+verify-release: _context ## One line per check a release depends on; runs all, exits 1 if any failed (#401)
+	@bash scripts/verify-release.sh
+
 install-core: deps _context _helm-repos ## Install the core only (storage+catalog+query+Nova)
 	@echo "› Reloader (restarts workloads when a credential they read changes)"
 	@helm upgrade --install reloader stakater/reloader --version $(RELOADER_VERSION) $(HELM_FLAGS) -f helm-values/reloader.yaml
