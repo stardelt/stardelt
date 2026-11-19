@@ -50,7 +50,8 @@
 #                     access; (a) still runs. Deliberate escape, not a way to make
 #                     a red check green.
 #   S3_CHECK_IMAGE    image for the listing pod (default amazon/aws-cli:2.17.0,
-#                     same as the platform's own S3 jobs)
+#                     same as the platform's own S3 jobs). Must be repo@sha256:<digest>
+#                     or this default: a floating tag is refused.
 #
 # Exit status: 0 only if every check that ran passed.
 set -euo pipefail
@@ -378,6 +379,14 @@ pod_spec="$(jq -n \
 # apiserver blip). That is a retry, never a lower verdict: on 2026-11-17 the same
 # listing failed three times and passed two minutes later, and one UNVERIFIED/exit 3
 # failed step-verify after a successful upgrade (stardelt/stardelt#29).
+# A refused merge (a floating S3_CHECK_IMAGE) prints nothing and would leave
+# `--overrides ""`; kubectl then starts a bare pod that exits 0 with no output and
+# the listing reads as an empty bucket (stardelt/stardelt#212). Build it once and stop.
+if ! list_overrides="$(printf '%s' "$pod_spec" | python3 scripts/probe-pod-spec.py --merge)"; then
+  err "cannot build the listing pod spec (probe-pod-spec failed) — bucket state unknown"
+  exit 1
+fi
+
 attempts=3
 started=0
 pod_out=""
@@ -388,7 +397,7 @@ for attempt in $(seq 1 "$attempts"); do
     --rm --attach --quiet --restart=Never \
     --image "$S3_CHECK_IMAGE" \
     --pod-running-timeout=3m \
-    --overrides "$(printf '%s' "$pod_spec" | python3 scripts/probe-pod-spec.py --merge)" 2>&1)"; then
+    --overrides "$list_overrides" 2>&1)"; then
     started=1
     break
   fi

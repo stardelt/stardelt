@@ -112,12 +112,21 @@ class ProbePodSpecTest(unittest.TestCase):
             # A trailing `\` continues the command; the flags may be on the next line. A `kubectl`
             # that is not creating a pod (`get`, `exec`, …) never has ` run ` before a shell
             # operator, so `|;&` in between keeps it out.
-            for number, line in enumerate(text.replace("\\\n", " ").splitlines(), start=1):
+            text = text.replace("\\\n", " ")
+            # The merge may be captured once into a variable, guarded so that a refused merge
+            # stops the script instead of passing an empty `--overrides` (#212). Such a variable
+            # is a reference to the helper, exactly like an inline substitution is.
+            merged = set(re.findall(r'(?:^|\n)\s*(?:if ! )?(\w+)="?\$\([^)]*probe-pod-spec\.py', text))
+            for number, line in enumerate(text.splitlines(), start=1):
                 if not re.search(r"\bkubectl\b[^\n|;&]*\srun\s", line):
                     continue
-                for flag in ("--overrides", "probe-pod-spec.py"):
-                    if flag not in line:
-                        problems.append("%s:%d %s is missing %s" % (relative, number, line.strip(), flag))
+                if "--overrides" not in line:
+                    problems.append("%s:%d %s is missing --overrides" % (relative, number, line.strip()))
+                if "probe-pod-spec.py" in line:
+                    continue
+                if any(re.search(r"\$[{]?%s\b" % re.escape(name), line) for name in merged):
+                    continue
+                problems.append("%s:%d %s is missing probe-pod-spec.py" % (relative, number, line.strip()))
         self.assertEqual(problems, [], "\n".join(problems))
 
     def test_bucket_pods_declare_the_floor(self):
