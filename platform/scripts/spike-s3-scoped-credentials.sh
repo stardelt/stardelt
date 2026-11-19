@@ -21,6 +21,14 @@
 #       it need — the trailing `/*` or the bare prefix (stardelt#245)?
 #   Q10 can Lakekeeper 0.15.0 replace a warehouse's storage profile in place, or only at
 #       creation (read-only: the same management OpenAPI document as Q6)?
+#   Q11 does the command the chart actually runs (`weed s3`, not `weed server`) accept one
+#       document for -config and -iam.config and keep static identities *and* AssumeRole
+#       with a prefix session policy — or does it need two files (stardelt#201 slice 2)?
+#   Q12 do s3.extraArgs and s3.extraVolumes/s3.extraVolumeMounts render into the pinned
+#       chart's s3 Deployment, and in which values shape (read-only, helm template)?
+#   Q13 which top-level keys does the live `seaweedfs_s3_config` carry (read-only:
+#       key names only, never key material; slice 2 has to add the same keys to the two
+#       places that write it)?
 #
 # Every answer is one `Q<n>: ...` line on stdout; detail lines start with `  - `. A
 # "not supported" / "absent" is a successful measurement: the script exits 0 either way.
@@ -34,8 +42,14 @@ set -euo pipefail
 
 IMAGE="chrislusf/seaweedfs:4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
 NAME="s3-scope-spike"
+GW="spike-s3-gw"
 PORT="18333"
 ENDPOINT="http://127.0.0.1:${PORT}"
+PORT2=$((PORT + 1))
+ENDPOINT2="http://127.0.0.1:${PORT2}"
+# The endpoint the S3/STS helpers talk to: the first container everywhere except Q11,
+# which measures the chart's own `weed s3` in the second container.
+EP="$ENDPOINT"
 # Throwaway credentials of the spike only; never a real key pair.
 FULL_AK="SPIKEFULLACCESS0001"
 FULL_SK="spike-full-secret-key-000000000001"
@@ -51,7 +65,7 @@ PF_PID=""
 
 cleanup() {
   if [ -n "$PF_PID" ]; then kill "$PF_PID" >/dev/null 2>&1 || true; fi
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" spike-s3-gw >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT INT TERM
@@ -83,10 +97,10 @@ s3() {
   local ak="$1" sk="$2" method="$3" path="$4" data="${5-}" code
   if [ -n "$data" ]; then
     code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" \
-      --user "$ak:$sk" -X "$method" --data-binary "$data" "$ENDPOINT$path" 2>/dev/null)" || code="000"
+      --user "$ak:$sk" -X "$method" --data-binary "$data" "$EP$path" 2>/dev/null)" || code="000"
   else
     code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" \
-      --user "$ak:$sk" -X "$method" "$ENDPOINT$path" 2>/dev/null)" || code="000"
+      --user "$ak:$sk" -X "$method" "$EP$path" 2>/dev/null)" || code="000"
   fi
   echo "${code:-000}"
 }
@@ -137,10 +151,10 @@ sts_signed() { # <ak> <sk> <method> <path> [data] -> code
   local ak="$1" sk="$2" method="$3" path="$4" data="${5-}" code
   if [ -n "$data" ]; then
     code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:sts" \
-      --user "$ak:$sk" -X "$method" --data-urlencode "$data" "$ENDPOINT$path" 2>/dev/null)" || code="000"
+      --user "$ak:$sk" -X "$method" --data-urlencode "$data" "$EP$path" 2>/dev/null)" || code="000"
   else
     code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:sts" \
-      --user "$ak:$sk" -X "$method" "$ENDPOINT$path" 2>/dev/null)" || code="000"
+      --user "$ak:$sk" -X "$method" "$EP$path" 2>/dev/null)" || code="000"
   fi
   echo "${code:-000}"
 }
@@ -154,11 +168,11 @@ session_s3() { # <method> <path> [data] -> code, signed with the session in S_AK
   if [ -n "$data" ]; then
     code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" \
       --user "$S_AK:$S_SK" -H "x-amz-security-token: $S_TOK" -X "$method" \
-      --data-binary "$data" "$ENDPOINT$path" 2>/dev/null)" || code="000"
+      --data-binary "$data" "$EP$path" 2>/dev/null)" || code="000"
   else
     code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" \
       --user "$S_AK:$S_SK" -H "x-amz-security-token: $S_TOK" -X "$method" \
-      "$ENDPOINT$path" 2>/dev/null)" || code="000"
+      "$EP$path" 2>/dev/null)" || code="000"
   fi
   echo "${code:-000}"
 }
@@ -566,6 +580,243 @@ else
 fi
 echo "Q10: $q10"
 
+# --- Q11: the chart's own command, `weed s3`, with one document (stardelt#201 slice 2) ----
+echo "Q11: measuring the chart's gateway (\`weed s3\`) with STS"
+
+# The chart runs `weed s3 -config=<file>` (Q8), not `weed server -s3.config=<file>`. One
+# document carries the identity and the STS half (Q7's template), and both flags read it.
+Q11_BUCKET="spike-g"
+Q11_PREFIX="warehouse/ns/table"
+Q11_SIBLING="warehouse/ns/table2"
+Q11_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::'"$Q11_BUCKET/$Q11_PREFIX"'","arn:aws:s3:::'"$Q11_BUCKET/$Q11_PREFIX"'/*"]}]}'
+
+cat > "$tmp/s3.json" <<EOF
+{"identities":[{"name":"full","credentials":[{"accessKey":"$FULL_AK","secretKey":"$FULL_SK"}],"actions":["Admin","Read","Write"]}],
+ "sts":{"signingKey":"$SIGNING_KEY"},"policy":{"storeType":"memory","defaultEffect":"Deny"},
+ "policies":[{"name":"full","document":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::*"]}]}}],
+ "roles":[{"roleName":"spike","roleArn":"$ROLE_ARN","trustPolicy":$TRUST_POLICY,"attachedPolicies":["full"]}]}
+EOF
+
+# `weed s3` is stateless: it reads the filer of the container that already serves 8333 and
+# is the filer on 8888. The default bridge has no embedded DNS, so --link gives the second
+# container the first one's name.
+start_gateway2() { # <config file> <iam config file> -> 0 when the gateway answers
+  docker rm -f "$GW" >/dev/null 2>&1 || true
+  docker run -d --rm --name "$GW" -p "${PORT2}:8333" -v "$tmp:/spike" --link "$NAME:$NAME" \
+    "$IMAGE" s3 -port=8333 -filer="$NAME:8888" -config="/spike/$1" -iam.config="/spike/$2" \
+    >/dev/null 2>"$tmp/gw.err"
+  local code
+  for _ in $(seq 1 60); do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$ENDPOINT2/" 2>/dev/null)" || code="000"
+    if [ "${code:-000}" != "000" ]; then return 0; fi
+    sleep 1
+  done
+  echo "  - the gateway did not answer within 60s; docker logs tail:" >&2
+  docker logs "$GW" 2>&1 | tail -n 5 >&2
+  tail -n1 "$tmp/gw.err" >&2 || true
+  return 1
+}
+
+# q11_measure -> sets Q11_IDENT ("PUT GET"), Q11_ASSUME, Q11_SESSION (four codes);
+# talks to the second container because EP points there.
+q11_measure() {
+  s3 "$FULL_AK" "$FULL_SK" PUT "/$Q11_BUCKET" >/dev/null
+  s3 "$FULL_AK" "$FULL_SK" PUT "/$Q11_BUCKET/$Q11_PREFIX/data/inside.parquet" 'inside' >/dev/null
+  s3 "$FULL_AK" "$FULL_SK" PUT "/$Q11_BUCKET/$Q11_SIBLING/data/outside.parquet" 'outside' >/dev/null
+  Q11_IDENT="$(printf '%s %s' \
+    "$(s3 "$FULL_AK" "$FULL_SK" PUT "/$Q11_BUCKET/q11.txt" 'q11')" \
+    "$(s3 "$FULL_AK" "$FULL_SK" GET "/$Q11_BUCKET/q11.txt")")"
+  Q11_ASSUME="$(sts_signed "$FULL_AK" "$FULL_SK" POST "/?Action=AssumeRole&Version=2011-06-15&RoleArn=$ROLE_ARN&RoleSessionName=spike")"
+  # The Q5 shape: a signed AssumeRole carrying an inline session Policy at the prefix.
+  local policy_code
+  policy_code="$(curl -sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:sts" --user "$FULL_AK:$FULL_SK" \
+    -X POST -d "Action=AssumeRole&Version=2011-06-15&RoleArn=$ROLE_ARN&RoleSessionName=spike" \
+    --data-urlencode "Policy=$Q11_POLICY" "$EP/" 2>/dev/null)" || policy_code="000"
+  Q11_SESSION="not tested: AssumeRole with a session Policy returned ${policy_code:-000} and no credentials"
+  creds
+  if [ -n "$S_AK" ] && [ -n "$S_SK" ] && [ -n "$S_TOK" ]; then
+    Q11_SESSION="$(printf '%s %s %s %s' \
+      "$(session_s3 PUT "/$Q11_BUCKET/$Q11_PREFIX/data/session.parquet" 'session')" \
+      "$(session_s3 GET "/$Q11_BUCKET/$Q11_PREFIX/data/inside.parquet")" \
+      "$(session_s3 PUT "/$Q11_BUCKET/$Q11_SIBLING/data/session.parquet" 'session')" \
+      "$(session_s3 GET "/$Q11_BUCKET/$Q11_SIBLING/data/outside.parquet")")"
+  fi
+}
+
+q11_one_ok=no
+q11_two_ok=no
+q11_one_ident="not tested"
+q11_one_assume="not tested"
+q11_one_session="not tested"
+q11_two_ident="not tested"
+q11_two_assume="not tested"
+q11_two_session="not tested"
+q11_warn_one=0
+q11_warn_two=0
+
+start_gateway   # the container that already serves 8333 is also the filer
+EP="$ENDPOINT2"
+if start_gateway2 s3.json s3.json; then
+  q11_measure
+  q11_one_ident="$Q11_IDENT"; q11_one_assume="$Q11_ASSUME"; q11_one_session="$Q11_SESSION"
+  q11_warn_one="$(docker logs "$GW" 2>&1 | grep -c 'invalid policy' || true)"
+  echo "  - one file, both flags: identities PUT/GET = $q11_one_ident, AssumeRole = $q11_one_assume, session put-in/get-in/put-out/get-out = $q11_one_session"
+
+  # The IAM keys only, written here: `-config` keeps the identities, `-iam.config` the STS half.
+  cat > "$tmp/s3.json" <<EOF
+{"identities":[{"name":"full","credentials":[{"accessKey":"$FULL_AK","secretKey":"$FULL_SK"}],"actions":["Admin","Read","Write"]}]}
+EOF
+  cat > "$tmp/iam.json" <<EOF
+{"sts":{"signingKey":"$SIGNING_KEY"},"policy":{"storeType":"memory","defaultEffect":"Deny"},
+ "policies":[{"name":"full","document":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::*"]}]}}],
+ "roles":[{"roleName":"spike","roleArn":"$ROLE_ARN","trustPolicy":$TRUST_POLICY,"attachedPolicies":["full"]}]}
+EOF
+  if start_gateway2 s3.json iam.json; then
+    q11_measure
+    q11_two_ident="$Q11_IDENT"; q11_two_assume="$Q11_ASSUME"; q11_two_session="$Q11_SESSION"
+    q11_warn_two="$(docker logs "$GW" 2>&1 | grep -c 'invalid policy' || true)"
+    echo "  - two files: identities PUT/GET = $q11_two_ident, AssumeRole = $q11_two_assume, session put-in/get-in/put-out/get-out = $q11_two_session"
+  fi
+
+  if [ "$q11_one_ident" = "200 200" ] && [ "$q11_one_assume" = "200" ] && \
+     [ "$q11_one_session" = "200 200 403 403" ]; then q11_one_ok=yes; fi
+  if [ "$q11_two_ident" = "200 200" ] && [ "$q11_two_assume" = "200" ] && \
+     [ "$q11_two_session" = "200 200 403 403" ]; then q11_two_ok=yes; fi
+  echo "  - gateway log: $q11_warn_one × 'invalid policy' with one file (the identities pass drops them; -iam.config loads them), $q11_warn_two × with two files"
+fi
+EP="$ENDPOINT"
+
+case "$q11_one_ok:$q11_two_ok" in
+  yes:*) q11="one document for both flags (identities PUT/GET = $q11_one_ident, AssumeRole = $q11_one_assume, session put-in/get-in/put-out/get-out = $q11_one_session; two files: $q11_two_ident, $q11_two_assume, $q11_two_session)" ;;
+  no:yes) q11="two files needed (one file: PUT/GET = $q11_one_ident, AssumeRole = $q11_one_assume, session = $q11_one_session; two files: PUT/GET = $q11_two_ident, AssumeRole = $q11_two_assume, session = $q11_two_session)" ;;
+  *)
+    if [ "$q11_one_ident" = "not tested" ] && [ "$q11_two_ident" = "not tested" ]; then
+      q11="not supported: the gateway did not start"
+    else
+      q11="not supported (one file: PUT/GET = $q11_one_ident, AssumeRole = $q11_one_assume, session = $q11_one_session; two files: PUT/GET = $q11_two_ident, AssumeRole = $q11_two_assume, session = $q11_two_session)"
+    fi ;;
+esac
+echo "Q11: $q11"
+
+# --- Q12: the values shape that renders the flag and the mount (read-only) ---------------
+echo "Q12: rendering the pinned chart's s3 Deployment with slice 2's values (no cluster)"
+
+CHART_DIR="$ROOT/platform/chart"
+seaweed_tgz() { # -> the vendored seaweedfs .tgz, or nothing (helm dependency update's output)
+  local f
+  for f in "$CHART_DIR"/charts/seaweedfs-*.tgz; do
+    if [ -f "$f" ]; then printf '%s' "$f"; return 0; fi
+  done
+  return 0
+}
+if [ ! -d "$CHART_DIR/charts/seaweedfs" ] && [ -z "$(seaweed_tgz)" ]; then
+  if make -C "$ROOT/platform" chart-deps >"$tmp/chart-deps.log" 2>&1; then
+    echo "  - chart/charts/seaweedfs was absent; \`make chart-deps\` fetched $(basename "$(seaweed_tgz)")"
+  else
+    echo "  - chart/charts/seaweedfs is absent and \`make chart-deps\` failed: $(tail -n1 "$tmp/chart-deps.log" | cut -c1-140)"
+  fi
+fi
+# helm dependency update leaves a .tgz; an extracted chart directory is used when present.
+SEAWEED_REF=""
+if [ -d "$CHART_DIR/charts/seaweedfs" ]; then
+  SEAWEED_REF="$CHART_DIR/charts/seaweedfs"
+else
+  SEAWEED_REF="$(seaweed_tgz)"
+fi
+
+q12="not measured"
+mount_answer="not rendered"
+argv_answer="absent"
+if [ -n "$SEAWEED_REF" ] && command -v helm >/dev/null 2>&1; then
+  # The ticket's shape: every value as a --set list entry.
+  if helm template seaweedfs "$SEAWEED_REF" --values "$VALUES" \
+      --set 's3.extraArgs[0]=-iam.config=/etc/sw/seaweedfs_s3_config' \
+      --set 's3.extraVolumes[0].name=sw-iam' --set 's3.extraVolumes[0].configMap.name=spike-iam' \
+      --set 's3.extraVolumeMounts[0].name=sw-iam' --set 's3.extraVolumeMounts[0].mountPath=/etc/sw-iam' \
+      >"$tmp/q12-list.yaml" 2>"$tmp/q12-list.err"; then
+    q12_list="rendered"
+  else
+    q12_list="$(grep -m1 '^Error:' "$tmp/q12-list.err" | cut -c1-200)"
+    [ -n "$q12_list" ] || q12_list="failed: $(tail -n1 "$tmp/q12-list.err" | cut -c1-160)"
+    echo "  - --set '<path>[0]=…' for the volumes: $q12_list"
+  fi
+
+  # The chart tpl's s3.extraVolumes and s3.extraVolumeMounts as YAML strings; that is the
+  # shape a values file carries (helm-values/seaweedfs.yaml is where slice 2 would add it).
+  cat > "$tmp/q12-values.yaml" <<'EOF'
+s3:
+  extraArgs: ["-iam.config=/etc/sw/seaweedfs_s3_config"]
+  extraVolumes: |
+    - name: sw-iam
+      configMap:
+        name: spike-iam
+  extraVolumeMounts: |
+    - name: sw-iam
+      mountPath: /etc/sw-iam
+      readOnly: true
+EOF
+  if helm template seaweedfs "$SEAWEED_REF" --values "$VALUES" -f "$tmp/q12-values.yaml" \
+      >"$tmp/q12.yaml" 2>"$tmp/q12.err"; then
+    python3 - "$tmp/q12.yaml" <<'PY' | sed 's/^/  | /'
+import sys
+for doc in open(sys.argv[1]).read().split("\n---\n"):
+    if "kind: Deployment" not in doc or "swfs-s3" not in doc:
+        continue
+    name = [l.split("name:", 1)[1].strip() for l in doc.splitlines() if l.strip().startswith("name:")][0]
+    body = doc[doc.index("command:"):]
+    mounts = body[body.index("volumeMounts:"):]
+    mounts = mounts[:mounts.index("ports:")]
+    print("rendered command of Deployment " + name + ":")
+    for line in body[:body.index("volumeMounts:")].splitlines()[1:]:
+        if line.strip():
+            print(line.rstrip())
+    print("rendered volumeMounts of Deployment " + name + ":")
+    for line in mounts.splitlines()[1:]:
+        if line.strip():
+            print(line.rstrip())
+    break
+PY
+    if grep -q -- '-iam.config=/etc/sw/seaweedfs_s3_config' "$tmp/q12.yaml"; then argv_answer="present"; fi
+    if grep -q 'mountPath: /etc/sw-iam' "$tmp/q12.yaml" && grep -q 'name: spike-iam' "$tmp/q12.yaml"; then
+      mount_answer="rendered (mount + the spike-iam volume)"
+    fi
+    q12="s3.extraArgs puts -iam.config=… in the argv: $argv_answer; s3.extraVolumes/s3.extraVolumeMounts render the second file: $mount_answer; the chart runs both values through tpl as strings, so the --set '<path>[0]=…' list form fails and the values-file string form (helm-values/seaweedfs.yaml) is the shape slice 2 needs"
+  else
+    echo "  - helm template failed: $(tail -n1 "$tmp/q12.err" | cut -c1-160)"
+    q12="not measured: helm template failed"
+  fi
+else
+  echo "  - chart not vendored and no seaweedfs .tgz under chart/charts (run \`make chart-deps\`)"
+  q12="not measured: the chart is not vendored"
+fi
+echo "Q12: $q12"
+
+# --- Q13: the live Secret's top-level keys (read-only, names only) -----------------------
+echo "Q13: reading the live seaweedfs_s3_config keys (no cluster write)"
+
+q13="not measured"
+if command -v kubectl >/dev/null 2>&1; then
+  # The document goes Secret -> base64 -> python over one pipe; key names only, no value is
+  # printed and nothing decoded is written to disk.
+  q13_keys="$(kubectl -n stardelt get secret seaweedfs-s3-config -o jsonpath='{.data.seaweedfs_s3_config}' 2>"$tmp/q13.err" \
+    | base64 -d 2>>"$tmp/q13.err" \
+    | python3 -c 'import json,sys
+try:
+    print(", ".join(sorted(json.load(sys.stdin))))
+except Exception:
+    print("")' 2>>"$tmp/q13.err")" || q13_keys=""
+  if [ -n "$q13_keys" ]; then
+    q13="$q13_keys"
+  else
+    echo "  - live config: not reachable ($(tail -n1 "$tmp/q13.err" 2>/dev/null | cut -c1-140))"
+    q13="not measured: the live Secret was not reachable"
+  fi
+else
+  echo "  - live config: not reachable (kubectl is not installed)"
+  q13="not measured: kubectl is not installed"
+fi
+echo "Q13: live seaweedfs_s3_config keys: $q13"
+
 # --- the two lines the design quotes ------------------------------------------------------
 b_shape="not available"
 case "$q4" in supported*) b_shape="available" ;; esac
@@ -573,4 +824,5 @@ a_shape="not configurable"
 if [ "$sts_endpoint" = present ] && [ "$sts_principal" = present ]; then a_shape="configurable"; fi
 echo "for #201 item 3: prefix-scoped static identity = $q4; STS session policy at a prefix = $q5"
 echo "for #201 item 3 (STS path): one file for both gateway flags = $q7; deep table-shaped session policy = $q9; Lakekeeper profile update = $q10"
+echo "for #201 slice 2: gateway flags = $q11; chart values = $q12; live config keys = $q13"
 echo "recommendation input: B is $b_shape; A is $a_shape (Q6)"
