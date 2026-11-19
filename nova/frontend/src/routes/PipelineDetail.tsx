@@ -262,6 +262,12 @@ export default function PipelineDetail() {
                     <p className="mt-0.5 text-text-dim break-words">
                       Notebook <span className="font-mono text-xs break-all">{task.notebook || '—'}</span>
                       {' · '}version <span className="font-mono text-xs">{shortVersion(task.objectVersion)}</span>
+                      {task.connection && (
+                        <>
+                          {' · '}connection{' '}
+                          <span className="font-mono text-xs">{task.connection}</span>
+                        </>
+                      )}
                     </p>
                   )}
                   {task.kind === 'dbt' && task.dbtProject && (
