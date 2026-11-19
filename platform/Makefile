@@ -934,7 +934,7 @@ public-demo-catalogs: _context ## The public demo's bronze/silver/gold Catalogs,
 	fi
 	@kubectl apply -f manifests/public-demo-catalogs.yaml
 
-.PHONY: demo-reset-sync demo-reset-install demo-reset-now demo-reset-grant
+.PHONY: demo-reset-sync demo-reset-install demo-reset-now demo-reset-grant demo-dbt-grant demo-dbt-grant-check
 demo-reset-sync: _context ## Refresh the demo-reset script ConfigMap and its CronJob without running a reset (safe after a merge)
 	@kubectl -n $(NAMESPACE) create configmap demo-reset-script --from-file=job.py=scripts/demo-reset-job.py \
 	  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -943,6 +943,10 @@ demo-reset-install: demo-reset-sync demo-reset-grant ## Install CronJob demo-res
 	@$(MAKE) --no-print-directory demo-reset-now
 demo-reset-grant: _context ## Give the reset principal the playground warehouse's modify role (platform#1310)
 	@NAMESPACE=$(NAMESPACE) bash scripts/demo-reset-grant.sh
+demo-dbt-grant: _context ## Let the demo's dbt run drop and rename its own tables: Lakekeeper modify for pipeline-demo (lab only; needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-dbt-grant.sh
+demo-dbt-grant-check: _context ## Read-only: does pipeline-demo hold modify where the shop's dbt project writes
+	@NAMESPACE=$(NAMESPACE) bash scripts/demo-dbt-grant.sh --check
 demo-reset-now: _context ## Run one demo-reset Job now, wait for it and print its log
 	@name=demo-reset-now-$$(date +%s); \
 	  kubectl -n $(NAMESPACE) create job --from=cronjob/demo-reset "$$name" >/dev/null; \

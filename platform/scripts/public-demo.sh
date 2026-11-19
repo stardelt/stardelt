@@ -39,7 +39,10 @@
 # pipelines and row 19 the dbt run (shop-dbt, a dbt task on project shop, viewers=[visitors]),
 # both fixed by `make demo-shop YES=1` (#335). Row 20 is the demo's Connection to
 # RNAcentral's public PostgreSQL (scope managed, usableBy visitors) and row 21 the key
-# names of its Secret, both fixed by `make demo-connection YES=1` (#349).
+# names of its Secret, both fixed by `make demo-connection YES=1` (#349). Row 22 is the
+# grant the dbt run itself needs — dbt drops the table it replaces, which is Lakekeeper
+# `modify` and not the `write` the pipeline principal holds (#373), fixed by
+# `make demo-dbt-grant YES=1`.
 #
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
@@ -187,6 +190,7 @@ if [ "$mode" = check ]; then
       19) check_19 || rc=1 ;;
       20) check_20 || rc=1 ;;
       21) check_21 || rc=1 ;;
+      22) check_22 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -739,6 +743,24 @@ PY
     fi
   }
 
+  # 22. The dbt run may drop and rename its own tables (#373). dbt's table materialization
+  # builds `<model>__dbt_tmp` and drops the table it replaces, which is Lakekeeper `modify`;
+  # the shop's principal holds `write` only, so the run ends in "Cannot drop table
+  # bronze.shop_dbt.order_lines__dbt_tmp". The script explains why the grant is
+  # warehouse-scoped (a namespace name cannot be resolved to its id through the API).
+  check_22() {
+    local out missing
+    if out="$(NAMESPACE="$NAMESPACE" bash scripts/demo-dbt-grant.sh --check 2>&1)"; then
+      check_msg="the shop's dbt run holds modify on bronze, silver and gold"
+      return 0
+    fi
+    missing="$(printf '%s\n' "$out" \
+      | sed -n 's/^MISSING  modify on warehouse \([a-z]*\) .*/\1/p' | paste -sd, -)"
+    check_msg="the shop's dbt run cannot drop its own tables: no modify on ${missing:-unknown}"
+    check_fix="make demo-dbt-grant YES=1"
+    return 1
+  }
+
   render 0a
   render 0b
   render 0
@@ -765,6 +787,7 @@ PY
   render 19
   render 20
   render 21
+  render 22
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then

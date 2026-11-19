@@ -45,6 +45,7 @@ Part of the [stardelt-platform](../README.md) manual.
 | `trino` | Install/upgrade Trino; adds `helm-values/trino-identity.yaml` (Keycloak OAuth2 + service-account password) when `stardelt-identity` exists. Ensures the two ConfigMaps and runs one `access-sync-now` before the upgrade (platform#312) |
 | `install-operator` | Install the stardelt Operator from `../stardelt-operator/chart` (dev path) |
 | `demo-reset-grant` | Give the nightly reset's principal `pipeline-demo` the `playground` warehouse's `modify` role — dropping is an administrator action since platform#1130; idempotent, `bash scripts/demo-reset-grant.sh --check` is the read-only question (platform#1316) |
+| `demo-dbt-grant` | Give the shop's dbt run `modify` on `bronze`, `silver` and `gold` — dbt's table materialization drops the table it replaces, which `write` does not allow; needs `YES=1`, `bash scripts/demo-dbt-grant.sh --check` is the read-only question (#373) |
 | `pin` | Pin a deployment to the newest published digest **and write it back into the manifest** (`make pin APP=nova`, `APP=spark DEPLOY=spark-connect`), so a later `kubectl apply` cannot put the mutable tag back |
 | `pin-images` | Pin Nova, the operator and Spark to their digests (the install targets do this themselves) |
 | `upgrade` | The upgrade path: converge the cluster to this release, move the image pins, run the schema migrations, converge the access-sync, then the verify targets. Safe to run twice |
