@@ -293,8 +293,8 @@ for name in rows:
         pod, (reason, code, finished) = node_rows[0]
         stamp = _epoch(finished)
         mark = "!"
-        if stalls:
-            nearest = min(abs(stamp - s) for s in stalls)
+        nearest = min((abs(stamp - s) for s in stalls), default=None)
+        if nearest is not None and nearest <= NODE_STALL_WINDOW:
             text += "; %d node-caused exit(s) within %ds: %s exit=%s at %s (%ds of an unknown exit=255) — see stardelt/stardelt#60" % (
                 len(node_rows), MAX_AGE, reason, "?" if code is None else code, finished, nearest)
         else:
