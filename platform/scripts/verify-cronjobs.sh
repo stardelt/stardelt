@@ -6,19 +6,29 @@
 # carried the failure, no existing verifier read them.
 #
 #   NS=stardelt bash scripts/verify-cronjobs.sh
+#   NS=stardelt bash scripts/verify-cronjobs.sh --max-age
 #
 # Read-only: it creates, patches and deletes nothing. Exit 0 = PASS, 1 = FAIL,
 # 3 = UNVERIFIED (could not see the subject).
 #
-# It does not parse the schedule or age the Job: a scheduler that stops creating Jobs
-# at all is a different check. The newest Job is the signal, not the CronJob's
-# `lastScheduleTime` (that advances on a failing run) and not `lastSuccessfulTime`
-# (`successfulJobsHistoryLimit: 1` prunes the old success).
+# The newest Job is the signal, not the CronJob's `lastScheduleTime` (that advances on
+# a failing run) and not `lastSuccessfulTime` (`successfulJobsHistoryLimit: 1` prunes
+# the old success). `--max-age` (`make verify-cron-schedule`) also ages that Job against
+# the CronJob's own `spec.schedule` plus a 900-second grace, so a scheduler that stops
+# creating Jobs after a success is a failure too (platform#216).
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 NS="${NS:-${NAMESPACE:-stardelt}}"
+MAX_AGE="${MAX_AGE:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --max-age) MAX_AGE=1 ;;
+    *) echo "verify-cronjobs: unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+export MAX_AGE
 
 command -v kubectl >/dev/null 2>&1 || { echo "verify-cronjobs: UNVERIFIED (kubectl not found)"; exit 3; }
 command -v python3 >/dev/null 2>&1 || { echo "UNVERIFIED (python3 not found)"; exit 3; }
@@ -39,11 +49,50 @@ if ! jobs_json="$(kubectl -n "$NS" get jobs -o json 2>&1)"; then
 fi
 
 if ! report="$({ printf '%s\0%s' "$cronjobs" "$jobs_json"; } | python3 -c '
-import json, sys
+import json, os, sys, datetime
 
 raw = sys.stdin.buffer.read()
 cronjobs_raw, _, jobs_raw = raw.partition(b"\0")
 ns = sys.argv[1] if len(sys.argv) > 1 else "stardelt"
+MAX_AGE = bool(os.environ.get("MAX_AGE"))
+
+GRACE_SECONDS = 900
+
+
+def expected_gap_seconds(schedule):
+    """Seconds between two firings for the schedule shapes this platform ships.
+
+    */N * * * *  -> N*60     (the maint-* crons, ddns, the janitor)
+    <m> * * * *  -> 3600     (hourly)
+    <m> <h> * * * -> 86400   (the daily backups, demo-reset)
+    Anything else is unsupported and not aged.
+    """
+    fields = (schedule or "").split()
+    if len(fields) != 5:
+        return None
+    minute, hour, dom, mon, dow = fields
+    if dom != "*" or mon != "*" or dow != "*":
+        return None
+    if minute.startswith("*/") and minute[2:].isdigit() and int(minute[2:]) > 0 and hour == "*":
+        return int(minute[2:]) * 60
+    if minute.isdigit() and hour == "*":
+        return 3600
+    if minute.isdigit() and hour.isdigit():
+        return 86400
+    return None
+
+
+def timestamp(raw_ts):
+    """RFC3339 from the API server as an aware datetime, or None."""
+    if not raw_ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+now = datetime.datetime.now(datetime.timezone.utc)
 
 cronjobs = (json.loads(cronjobs_raw or b"{}").get("items") or [])
 jobs = (json.loads(jobs_raw or b"{}").get("items") or [])
@@ -93,6 +142,26 @@ for cronjob in sorted(cronjobs, key=lambda i: (i.get("metadata") or {}).get("nam
     else:
         lines.append(row("…", name, "%s is waiting" % job_name))
 
+    if MAX_AGE:
+        spec = cronjob.get("spec") or {}
+        schedule = spec.get("schedule") or "?"
+        gap = expected_gap_seconds(spec.get("schedule"))
+        if gap is None:
+            lines.append(row("?", name, "schedule %s not aged (unsupported shape)" % schedule))
+            continue
+        created = timestamp((cronjob.get("metadata") or {}).get("creationTimestamp"))
+        if created is None:
+            continue
+        # A CronJob younger than one interval plus the grace has not had its first real chance.
+        if (now - created).total_seconds() <= gap + GRACE_SECONDS:
+            continue
+        job_created_raw = (newest.get("metadata") or {}).get("creationTimestamp")
+        job_created = timestamp(job_created_raw)
+        if job_created is not None and (now - job_created).total_seconds() > gap + GRACE_SECONDS:
+            lines.append(row("✗", name, "no Job since %s (the schedule fires every %d min)"
+                             % (job_created_raw, gap // 60)))
+            problems += 1
+
 for line in lines:
     print(line)
 print("__meta__ %d|%d" % (problems, count))
@@ -110,8 +179,16 @@ fi
 IFS='|' read -r problems count <<< "${meta#__meta__ }"
 
 if [ "$problems" -gt 0 ]; then
-  echo "FAIL ($problems CronJob(s) with a failed newest Job)"
+  if [ -n "$MAX_AGE" ]; then
+    echo "FAIL ($problems CronJob(s) with a failed newest Job or no Job within its schedule)"
+  else
+    echo "FAIL ($problems CronJob(s) with a failed newest Job)"
+  fi
   exit 1
 fi
 
-echo "PASS ($count CronJobs: every newest Job succeeded, is running, or is suspended)"
+if [ -n "$MAX_AGE" ]; then
+  echo "PASS ($count CronJobs: every newest Job succeeded, is running, or is suspended, and none is older than its schedule)"
+else
+  echo "PASS ($count CronJobs: every newest Job succeeded, is running, or is suspended)"
+fi

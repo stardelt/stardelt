@@ -12,10 +12,18 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "verify-cronjobs.sh"
+
+NOW = datetime.now(timezone.utc)
+
+
+def ago(**delta):
+    """An RFC3339 timestamp the given timedelta before the run, for the age rule."""
+    return (NOW - timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 SHIM = """#!/usr/bin/env bash
 set -euo pipefail
@@ -45,12 +53,12 @@ esac
 """
 
 
-def cronjob(name, suspend=False):
+def cronjob(name, suspend=False, schedule="*/10 * * * *", created="2026-01-01T00:00:00Z"):
     return {
         "apiVersion": "batch/v1",
         "kind": "CronJob",
-        "metadata": {"name": name, "namespace": "stardelt"},
-        "spec": {"schedule": "*/10 * * * *", "suspend": suspend},
+        "metadata": {"name": name, "namespace": "stardelt", "creationTimestamp": created},
+        "spec": {"schedule": schedule, "suspend": suspend},
     }
 
 
@@ -86,7 +94,7 @@ class VerifyCronJobs(unittest.TestCase):
         self.cronjobs = self.dir / "cronjobs.json"
         self.jobs = self.dir / "jobs.json"
 
-    def run_script(self, cronjobs, jobs, **extra):
+    def run_script(self, cronjobs, jobs, args=(), **extra):
         self.cronjobs.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": cronjobs}))
         self.jobs.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": jobs}))
         env = dict(
@@ -98,7 +106,7 @@ class VerifyCronJobs(unittest.TestCase):
             FAKE_JOBS=str(self.jobs),
         )
         env.update(extra)
-        return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True, timeout=60)
 
     def test_a_succeeded_newest_job_is_green(self):
         done = self.run_script(
@@ -178,6 +186,53 @@ class VerifyCronJobs(unittest.TestCase):
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertIn("demo-reset-29913300 succeeded", done.stdout)
         self.assertNotIn("demo-reset-verify", done.stdout)
+
+    def test_max_age_fails_when_a_successful_job_is_older_than_its_schedule(self):
+        # A 2-minute cron whose newest Job is a success from an hour ago: the success is
+        # green to the default check and the scheduler has silently stopped (platform#216).
+        done = self.run_script(
+            [cronjob("access-sync", schedule="*/2 * * * *", created=ago(days=2))],
+            [job("access-sync-29908980", "access-sync", ago(minutes=60), succeeded=1)],
+            args=["--max-age"],
+        )
+        self.assertEqual((done.returncode, done.stderr), (1, ""))
+        self.assertIn("✓ access-sync", done.stdout)
+        self.assertIn("✗ access-sync", done.stdout)
+        self.assertIn("no Job since", done.stdout)
+        self.assertIn("the schedule fires every 2 min", done.stdout)
+        self.assertIn("FAIL (1 CronJob(s)", done.stdout)
+
+    def test_max_age_passes_for_a_daily_cron_with_yesterdays_job(self):
+        done = self.run_script(
+            [cronjob("demo-reset", schedule="0 3 * * *", created=ago(days=30))],
+            [job("demo-reset-29916180", "demo-reset", ago(hours=20), succeeded=1)],
+            args=["--max-age"],
+        )
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertNotIn("no Job since", done.stdout)
+        self.assertIn("PASS (1 CronJobs: every newest Job succeeded, is running, or is suspended, "
+                      "and none is older than its schedule)", done.stdout)
+
+    def test_max_age_skips_a_suspended_cron(self):
+        done = self.run_script(
+            [cronjob("paused", suspend=True, schedule="*/2 * * * *", created=ago(days=30))],
+            [job("paused-29908980", "paused", ago(days=5), succeeded=1)],
+            args=["--max-age"],
+        )
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertEqual(done.stdout.count("– "), 1)
+        self.assertIn("– paused", done.stdout)
+        self.assertNotIn("no Job since", done.stdout)
+
+    def test_without_max_age_the_old_verdict_is_unchanged(self):
+        done = self.run_script(
+            [cronjob("access-sync", schedule="*/2 * * * *", created=ago(days=2))],
+            [job("access-sync-29908980", "access-sync", ago(minutes=60), succeeded=1)],
+        )
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertIn("✓ access-sync", done.stdout)
+        self.assertNotIn("no Job since", done.stdout)
+        self.assertIn("PASS (1 CronJobs: every newest Job succeeded, is running, or is suspended)", done.stdout)
 
     def test_the_script_only_reads(self):
         self.run_script(
