@@ -24,9 +24,10 @@ Endpoint (ClusterIP only — there is deliberately no Ingress):
 sc://spark-connect.stardelt.svc.cluster.local:15002
 ```
 
-From a notebook, `spark` is already there: the single-user image loads the pinned release of
-`python/` (the `stardelt` library) into every kernel, and its `spark` opens the session on first use with
-every catalog Trino lists for you and your token (a named cluster: set `STARDELT_CLUSTER`):
+From a notebook, `spark` is already there: the single-user image installs `python/` (the
+`stardelt` library, from its own commit) into every kernel, and its `spark` opens the session on
+first use with every catalog Trino lists for you and your token (a named cluster: set
+`STARDELT_CLUSTER`):
 
 ```python
 spark.sql("SHOW CATALOGS").show()

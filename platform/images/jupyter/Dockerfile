@@ -119,34 +119,16 @@ RUN python3 -m pip install --no-cache-dir "${STARDELT_JUPYTERLAB_WHEEL}" \
 # newer image replaces the source without touching the user's copy.
 COPY --chown=${NB_UID}:${NB_GID} notebooks/ /opt/stardelt/notebooks/
 
-# The stardelt notebook helper (`import stardelt`: sql, write_df, publish,
-# spark, and the connection() stub) has its own repository
-# (python/ in stardelt/stardelt) and is installed here as a **pinned release**.
-# Pure Python, MIT, versioned and tested there; the platform consumes one
-# release of it (platform#417).
-#
-# Pinned by commit SHA, not by tag: a moving tag is not an upgrade path — the
-# same rule the image pins follow (scripts/pin-image.sh). The SHA below is the
-# v0.4.3 release
-# (tag python/v0.4.3 in stardelt/stardelt): it carries the `dbt` task in a
-# bundle file (#344), `Pipeline.spec.description` through the bundle (#333),
-# `stardelt setup vscode` (#302) and the stored-token Spark (#300). Before it,
-# v0.4.2 carried the fail-fast `spark` (a refused Spark Connect endpoint fails
-# in seconds instead of ten minutes, #200/#202) and no `stardelt.sql()`
-# FutureWarning from the library's own catalog listing (#273); v0.4.1 carried
-# `stardelt.notebook` (the native `spark` and `display`), the publish source
-# header (`X-Stardelt-Source`, the hand publish and a bundle deploy report the
-# notebook's commit) and a failed deploy that records a `failed` row. It
-# reports version 0.4.3.
-#
-# The Makefile holds the pin (STARDELT_LIB_REF) and passes it as a build arg;
-# scripts/check-stardelt-pin.sh fails the build when this default and the
-# Makefile's ref disagree. Installed rather than copied so every notebook
-# imports it with no sys.path tweak; the import check fails the build here, not
-# in a user's first cell.
-ARG STARDELT_LIB_REF=28b9a051a0cddbb5ad24077b8b3eea4f328ce9e1
-RUN python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        "stardelt[jupyter] @ git+https://github.com/stardelt/stardelt@${STARDELT_LIB_REF}#subdirectory=python" \
+# The stardelt notebook helper (`import stardelt`: sql, write_df, publish, spark, and the
+# connection() stub) is python/ in this repository. It is installed from the SAME commit as
+# this image: the build passes the folder as the named context `stardelt-python`
+# (`make build-jupyter-image` and .github/workflows/platform-image.yml do). A release tags this
+# image and the library together (stardelt/stardelt#2), so there is no commit pin to move.
+# Installed rather than copied so every notebook imports it with no sys.path tweak; the import
+# checks fail the build here, not in a user's first cell.
+COPY --from=stardelt-python --chown=${NB_UID}:${NB_GID} . /tmp/stardelt-python
+RUN python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed "/tmp/stardelt-python[jupyter]" \
+    && rm -rf /tmp/stardelt-python \
     && python3 -c "import stardelt; print('stardelt', stardelt.__version__)" \
     && python3 -c "import stardelt.notebook_run; print('stardelt.notebook_run: the notebook task wrapper is installed')" \
     && python3 -c "import sql; print('jupysql', sql.__version__)"
@@ -165,17 +147,8 @@ COPY jupyter_server_config.py /usr/local/etc/jupyter/jupyter_server_config.py
 
 # The demo's shop bundle, baked in (stardelt-platform#1101). The public demo's
 # notebook must not depend on a network clone at spawn: once a visitor has no
-# public egress, the clone fails silently and the demo loses its bundle. Pinned
-# by commit, like the library above; the archive is public, no credential.
-ARG STARDELT_DEMOS_REF=4509d63ec61865f060b40eaa5eae3dd18b629480
-USER root
-# The bundle is the demos/ folder of stardelt/stardelt at that commit; only that folder is
-# extracted, to the path the notebooks have always used.
-RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/stardelt/stardelt/archive/${STARDELT_DEMOS_REF}.tar.gz', '/tmp/demos.tar.gz')" \
-    && mkdir -p /opt/stardelt \
-    && tar -xzf /tmp/demos.tar.gz -C /opt/stardelt "stardelt-${STARDELT_DEMOS_REF}/demos" \
-    && mv "/opt/stardelt/stardelt-${STARDELT_DEMOS_REF}/demos" /opt/stardelt/stardelt-demos \
-    && rmdir "/opt/stardelt/stardelt-${STARDELT_DEMOS_REF}" \
-    && test -f /opt/stardelt/stardelt-demos/examples/shop-bundle/bundle.yaml \
-    && rm /tmp/demos.tar.gz
-USER ${NB_UID}
+# public egress, the clone fails silently and the demo loses its bundle. The
+# bundle is demos/ of this repository at the same commit, passed as the named
+# context `stardelt-demos`; the build fails when the bundle is missing.
+COPY --from=stardelt-demos . /opt/stardelt/stardelt-demos
+RUN test -f /opt/stardelt/stardelt-demos/examples/shop-bundle/bundle.yaml

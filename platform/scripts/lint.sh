@@ -77,12 +77,6 @@ bash scripts/check-python-parity.sh
 echo "› script: check-spark-runtimes"
 bash scripts/check-spark-runtimes.sh
 
-# The notebook image installs the stardelt library from a pinned release
-# (platform#417): the Dockerfile's pin and the Makefile's must be the same
-# commit, and a commit — a moving tag is not an upgrade path.
-echo "› script: check-stardelt-pin"
-bash scripts/check-stardelt-pin.sh
-
 # The create-user Job makes the read-only `nova-api` user Nova signs in to Airflow with
 # (platform#476): a clean install without it answers 401 on every Pipelines call.
 echo "› script: check-airflow-users"

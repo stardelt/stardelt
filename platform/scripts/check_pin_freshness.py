@@ -12,10 +12,8 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,18 +32,12 @@ APPS = [
 ]
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-# The notebook library's pin in the Makefile: the commit and the release it belongs to.
-LIB_REF_RE = re.compile(r"^STARDELT_LIB_REF\s*:?=\s*([0-9a-f]{40})\s*$", re.M)
-LIB_TAG_RE = re.compile(r"^STARDELT_LIB_TAG\s*:?=\s*(v\d+\.\d+\.\d+)\s*$", re.M)
 
 
 def _short(digest: str) -> str:
     m = re.search(r"sha256:([0-9a-f]{8})", digest)
     if m:
         return m.group(1) + "…"
-    # A bare commit SHA: `_short` names the notebook library's pinned commit too.
-    if re.fullmatch(r"[0-9a-f]{40}", digest):
-        return digest[:8] + "…"
     return digest
 
 
@@ -116,81 +108,6 @@ def compare(
 def exit_code(lines: list[str]) -> int:
     """0 when no line starts with '✗', else 1."""
     return 1 if any(line.startswith("✗") for line in lines) else 0
-
-
-def compare_lib_tag(tag: str, ref: str, tag_commit: str) -> str:
-    """One line: the Makefile's tag must be the release that contains its pinned commit."""
-    if tag_commit == ref:
-        return f"✓ notebook library {tag}@{_short(ref)} matches the tag python/{tag} in stardelt/stardelt"
-    return (
-        f"✗ the Makefile names {tag} for {_short(ref)}, but the tag {tag} is {_short(tag_commit)}"
-        " — set STARDELT_LIB_TAG to the release that contains the pinned commit"
-    )
-
-
-def lib_ahead_line(count: int, newest: str, tag: str, ref: str) -> str:
-    """One advisory line: main's python/ carries commits the pinned release does not."""
-    if count <= 0:
-        return ""
-    return (
-        f"! notebook library: main's python/ is {count} commit(s) ahead of the pinned "
-        f"python/{tag}@{_short(ref)} (newest {newest}) — cut the next python/v* release "
-        f"and move STARDELT_LIB_REF/STARDELT_LIB_TAG in platform/Makefile"
-    )
-
-
-def resolve_tag_commit(tag: str) -> tuple[str | None, str]:
-    proc = subprocess.run(
-        ["git", "ls-remote", "--tags", "https://github.com/stardelt/stardelt",
-         f"refs/tags/python/{tag}"],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        return None, (proc.stderr.strip() or "git ls-remote failed").splitlines()[0]
-    line = proc.stdout.strip()
-    if not line:
-        return None, f"tag {tag} not found"
-    return line.split()[0], ""
-
-
-def lib_commits_ahead(ref: str, tag: str = "") -> tuple[int, str]:
-    """(commits on main's python/ after `ref`, newest short hash), or (0, "") when unknown.
-
-    History only: `--filter=blob:none` clones no file contents. Never fails the run — an
-    unreachable main is a note, not a stale pin.
-    """
-    tmp = Path(tempfile.mkdtemp(prefix="pin-freshness-"))
-    try:
-        inner = tmp / "repo"
-        subprocess.run(
-            ["git", "clone", "--bare", "--filter=blob:none", "--quiet", "--branch", "main",
-             "https://github.com/stardelt/stardelt", str(inner)],
-            check=True, capture_output=True, text=True,
-        )
-        if tag:
-            # The pinned commit is in main's history; fetch the tag so a pin that is not
-            # can still be counted instead of failing the rev-list.
-            subprocess.run(
-                ["git", "-C", str(inner), "fetch", "--quiet", "origin",
-                 f"refs/tags/python/{tag}:refs/tags/python/{tag}"],
-                check=True, capture_output=True, text=True,
-            )
-        # A bare clone keeps the branch as refs/heads/main: there is no origin/main here.
-        count = int(subprocess.run(
-            ["git", "-C", str(inner), "rev-list", "--count", f"{ref}..main", "--", "python/"],
-            capture_output=True, text=True, check=True,
-        ).stdout)
-        newest = subprocess.run(
-            ["git", "-C", str(inner), "log", "-1", "--format=%h", "--abbrev=8",
-             f"{ref}..main", "--", "python/"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        return count, newest
-    except (OSError, ValueError, subprocess.CalledProcessError):
-        print("! notebook library: main not reachable, freshness not judged")
-        return 0, ""
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def resolve_digest(app: str, tag: str = "dev") -> tuple[str | None, str]:
@@ -288,32 +205,6 @@ def main(argv: list[str] | None = None) -> int:
                 offline_failed = True
             continue
         lines.extend(compare(app, pinned, resolved, manifest, tag))
-
-    # The notebook library's pin: the Makefile names the release its commit is, and the
-    # release is a tag python/<tag> in stardelt/stardelt — ask the remote which commit it is
-    # (offline in `make lint`; the network lives here, in the daily check).
-    makefile_text, makefile_notes = pin_text(REPO, "Makefile")
-    notes.extend(makefile_notes)
-    ref_match = LIB_REF_RE.search(makefile_text)
-    tag_match = LIB_TAG_RE.search(makefile_text)
-    if not ref_match or not tag_match:
-        lines.append(
-            "✗ the Makefile names no STARDELT_LIB_REF/STARDELT_LIB_TAG pair"
-            " — the notebook library's pin is missing"
-        )
-    else:
-        lib_ref, lib_tag = ref_match.group(1), tag_match.group(1)
-        tag_commit, err = resolve_tag_commit(lib_tag)
-        if tag_commit is None:
-            lines.append(f"– notebook library: git ls-remote did not answer ({err})")
-            if not args.allow_offline:
-                offline_failed = True
-        else:
-            lines.append(compare_lib_tag(lib_tag, lib_ref, tag_commit))
-            ahead, newest = lib_commits_ahead(lib_ref, lib_tag)
-            line = lib_ahead_line(ahead, newest, lib_tag, lib_ref)
-            if line:
-                lines.append(line)
 
     for note in dict.fromkeys(notes):
         print(note)

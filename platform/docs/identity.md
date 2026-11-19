@@ -63,21 +63,13 @@ and, with it, a way to query the warehouse **as themselves**.
   deliberately absent — its last release predates JupyterLab 4 and it cannot carry the per-user
   token. The package is private, like Superset, so
   the pod pulls with the `ghcr-creds` secret.
-* **The notebook library.** The `stardelt` package lives in its own repository,
+* **The notebook library.** The `stardelt` package lives in
   [`python/`](https://github.com/stardelt/stardelt/tree/main/python) (MIT): the `%sql` magic,
   the `spark`/`display` names every kernel gets, its tests and its releases.
-  The image installs **one pinned release** of it, not a vendored copy. The pin lives in the
-  `Makefile` — `STARDELT_LIB_REF` (the commit) and `STARDELT_LIB_TAG` (the release it belongs to,
-  `v0.4.0`) — and the Dockerfile installs that commit as a build arg. It is pinned by **commit
-  SHA, not by tag**: a moving tag is not an upgrade path, the same rule the image pins follow
-  (`scripts/pin-image.sh`). `scripts/check-stardelt-pin.sh` (run by `make lint`, and therefore by
-  CI) fails the build when the Dockerfile's pin and the Makefile's disagree, when the pin is not a
-  full SHA, or when the Dockerfile stops installing that pin. That check is offline, so it never
-  asks the remote: the daily pin-freshness check (`scripts/check_pin_freshness.py`) does — it
-  compares `STARDELT_LIB_TAG` with the tag's commit (`python/<tag>` in `stardelt/stardelt`) and fails when
-  the release the platform names is not the release its pinned commit is. To bump it: change both
-  places (the Makefile and the `ARG` default in `images/jupyter/Dockerfile`), merge, and pin the new
-  image digest as described under [Jupyter single-user image](development.md#jupyter-single-user-image).
+  The image installs the notebook helper (`python/`) and the demo bundle (`demos/`) from the same
+  commit, passed as the named build contexts `stardelt-python` and `stardelt-demos`. A release
+  tags the image and the library together, so there is no pin to move, and `python / CI` runs the
+  library's tests at every commit.
 * **Framing.** The same image installs `/usr/local/etc/jupyter/jupyter_server_config.py`, which
   allows exactly Nova's origin to frame this server — the origin the hub passes as
   `STARDELT_NOVA_ORIGIN` at spawn (from the identity contract). With no IdP the variable is

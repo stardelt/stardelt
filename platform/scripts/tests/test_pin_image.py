@@ -113,7 +113,7 @@ class PinImageTest(unittest.TestCase):
         (self.work / "manifests").mkdir(parents=True)
         # The script resolves manifests/, helm-values/ and chart/files/ from its own directory
         # (`dirname "$0"/..`), not from the caller's cwd, so it is copied into the fixture tree
-        # the way test_stardelt_pin.py copies its script.
+        # and run from there.
         self.scripts = self.work / "scripts"
         self.scripts.mkdir()
         shutil.copy(SCRIPT, self.scripts / SCRIPT.name)
