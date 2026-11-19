@@ -21,7 +21,8 @@ use kube::runtime::controller::Action;
 
 use crate::controller::{Context, delete_ignoring_not_found};
 use crate::crd::{
-    Catalog, Condition, MaintenanceSpec, MaintenanceStatus, ServicePrincipal, principal_client_id,
+    Catalog, CatalogDomainStatus, Condition, MaintenanceSpec, MaintenanceStatus, ServicePrincipal,
+    principal_client_id,
 };
 use crate::identity::PLATFORM_REALM;
 use crate::objects::FIELD_MANAGER;
@@ -274,7 +275,22 @@ pub fn cron_job(
 /// The conditions after replacing the one of `next`'s type and keeping every other one, so a
 /// controller patch never wipes `CatalogReady`/`GrantsReady`/`Drift` (the access-sync job
 /// writes the whole array with a merge-patch).
+///
+/// The replaced condition keeps the `lastTransitionTime` of an existing condition of the same
+/// type *and* the same status: only a change of `status` moves the timestamp, which is the
+/// Kubernetes convention. `next` therefore carries `Timestamp::now()` and a repeated no-op
+/// reconcile still writes the same bytes — without this a status patch lands on every pass, the
+/// watch reports "object updated" and the controller reconciles itself (~9×/s per catalog,
+/// stardelt#272).
 pub fn merge_condition(existing: &[Condition], next: Condition) -> Vec<Condition> {
+    let holding = existing
+        .iter()
+        .find(|c| c.type_ == next.type_ && c.status == next.status)
+        .map(|c| c.last_transition_time.clone());
+    let next = Condition {
+        last_transition_time: holding.unwrap_or(next.last_transition_time),
+        ..next
+    };
     let mut conditions: Vec<Condition> = existing
         .iter()
         .filter(|c| c.type_ != next.type_)
@@ -529,6 +545,14 @@ pub async fn reconcile_catalog(
         // describes nothing on the cluster. Merge patch removes a key whose value is null.
         status["maintenance"] = serde_json::Value::Null;
     }
+    if status_is_current(catalog.status.as_ref(), &status) {
+        tracing::debug!(
+            catalog = %name,
+            %namespace,
+            "maintenance status unchanged; no status patch"
+        );
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
     api.patch_status(
         &name,
         &kube::api::PatchParams::default(),
@@ -537,6 +561,29 @@ pub async fn reconcile_catalog(
     .await?;
     tracing::info!(catalog = %name, %namespace, "reconciled maintenance job");
     Ok(Action::requeue(Duration::from_secs(300)))
+}
+
+/// Whether the `Catalog` already carries the status this reconcile would write. `conditions` and
+/// `observedGeneration` compare exactly; a `maintenance: null` in `next` is a change only when the
+/// `Catalog` has a `maintenance` result to remove. An unchanged status must not be patched: the
+/// write moves `metadata.resourceVersion`, the watch delivers an "object updated" event and the
+/// controller reconciles again at once (stardelt#272).
+fn status_is_current(current: Option<&CatalogDomainStatus>, next: &serde_json::Value) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    let Ok(current) = serde_json::to_value(current) else {
+        return false;
+    };
+    if current.get("conditions") != next.get("conditions")
+        || current.get("observedGeneration") != next.get("observedGeneration")
+    {
+        return false;
+    }
+    match next.get("maintenance") {
+        None | Some(serde_json::Value::Null) => current.get("maintenance").is_none(),
+        Some(maintenance) => current.get("maintenance") == Some(maintenance),
+    }
 }
 
 pub fn error_policy<K>(_object: Arc<K>, error: &kube::Error, _ctx: Arc<Context>) -> Action {
@@ -802,6 +849,66 @@ mod tests {
         assert!(!status.contains("\"Scheduled\""), "{status}");
     }
 
+    #[test]
+    fn merge_condition_keeps_the_transition_time_while_the_status_holds() {
+        let existing = vec![Condition {
+            type_: "MaintenanceReady".into(),
+            status: "True".into(),
+            reason: Some("Scheduled".into()),
+            message: Some("maint-mobility on 0 2 * * *".into()),
+            last_transition_time: Some("2026-01-01T00:00:00Z".into()),
+            observed_generation: Some(3),
+        }];
+        let next = Condition {
+            type_: "MaintenanceReady".into(),
+            status: "True".into(),
+            reason: Some("Scheduled".into()),
+            message: Some("maint-mobility on 44 2 * * *".into()),
+            last_transition_time: Some("2026-11-19T08:10:00Z".into()),
+            observed_generation: Some(3),
+        };
+        let merged = merge_condition(&existing, next);
+        let condition = merged.last().expect("the merged condition");
+        assert_eq!(
+            condition.last_transition_time.as_deref(),
+            Some("2026-01-01T00:00:00Z"),
+            "an unchanged status keeps the old transition time"
+        );
+        assert_eq!(
+            condition.message.as_deref(),
+            Some("maint-mobility on 44 2 * * *"),
+            "every other field comes from next"
+        );
+    }
+
+    #[test]
+    fn merge_condition_moves_the_transition_time_when_the_status_changes() {
+        let existing = vec![Condition {
+            type_: "MaintenanceReady".into(),
+            status: "True".into(),
+            reason: Some("Scheduled".into()),
+            message: None,
+            last_transition_time: Some("2026-01-01T00:00:00Z".into()),
+            observed_generation: Some(3),
+        }];
+        let next = Condition {
+            type_: "MaintenanceReady".into(),
+            status: "False".into(),
+            reason: Some("NoRunner".into()),
+            message: None,
+            last_transition_time: Some("2026-11-19T08:10:00Z".into()),
+            observed_generation: Some(3),
+        };
+        let merged = merge_condition(&existing, next);
+        let condition = merged.last().expect("the merged condition");
+        assert_eq!(condition.status, "False");
+        assert_eq!(
+            condition.last_transition_time.as_deref(),
+            Some("2026-11-19T08:10:00Z"),
+            "a status change takes next's transition time"
+        );
+    }
+
     /// The API of a reconcile that applies `maint-mobility`: the identity ConfigMap, the pipeline
     /// principal, the CronJob, the catalog's Jobs (`jobs`), their Pods (`pods`) and one pod log.
     fn maintenance_client(
@@ -938,6 +1045,64 @@ mod tests {
             .expect("reconcile");
         let status = status_patch(&requests);
         assert!(!status.contains("\"maintenance\""), "{status}");
+    }
+
+    /// A catalog whose status already holds what a reconcile against [`maintenance_client`]'s
+    /// ready principal and [`one_failed_job`] computes: the same `MaintenanceReady` condition and
+    /// the same maintenance result, including the run's counts.
+    fn catalog_with_the_current_maintenance_status() -> Catalog {
+        let mut catalog = catalog();
+        catalog.status = Some(
+            serde_json::from_value(serde_json::json!({
+                "conditions": [
+                    { "type": "CatalogReady", "status": "True" },
+                    {
+                        "type": "MaintenanceReady",
+                        "status": "True",
+                        "reason": "Scheduled",
+                        "message": "maint-mobility on 44 2 * * *",
+                        "lastTransitionTime": "2026-01-01T00:00:00Z",
+                        "observedGeneration": 3
+                    }
+                ],
+                "observedGeneration": 3,
+                "maintenance": {
+                    "lastRun": "2026-11-10T09:28:56Z",
+                    "lastResult": "Failed",
+                    "tablesDone": 2,
+                    "tablesFailed": 0
+                }
+            }))
+            .expect("deserialize a Catalog status"),
+        );
+        catalog
+    }
+
+    /// A pass that changes nothing must not write the status: the write moves
+    /// `metadata.resourceVersion`, the watch reports "object updated" and the controller
+    /// reconciles again at once (stardelt#272).
+    #[tokio::test]
+    async fn an_unchanged_catalog_sends_no_status_patch() {
+        let log = "{\"catalog\":\"mobility\",\"tablesDone\":2,\"tablesFailed\":0}\n".to_string();
+        let (client, requests) = maintenance_client(one_failed_job(), one_pod(), log);
+        let action = reconcile_catalog(
+            Arc::new(catalog_with_the_current_maintenance_status()),
+            ctx(client),
+        )
+        .await
+        .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        let log = requests.lock().expect("requests").join("\n");
+        assert!(
+            !log.contains(
+                "PATCH /apis/stardelt.io/v1alpha1/namespaces/data/catalogs/mobility/status"
+            ),
+            "an unchanged status must not be patched\n{log}"
+        );
+        assert!(
+            log.contains("PATCH /apis/batch/v1/namespaces/data/cronjobs/maint-mobility"),
+            "the CronJob is still applied\n{log}"
+        );
     }
 
     fn owner() -> OwnerReference {
