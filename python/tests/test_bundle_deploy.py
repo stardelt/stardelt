@@ -71,8 +71,8 @@ def test_plan_asks_nova_about_every_pipeline_and_writes_nothing(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"]},
-        {"action": "would-update", "name": "nightly", "changes": ["statement"]},
+        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"], "kind": "Pipeline"},
+        {"action": "would-update", "name": "nightly", "changes": ["statement"], "kind": "Pipeline"},
     ]
     assert calls(session) == [("GET", "/api/me"), ("POST", "/api/pipelines/validate"), ("POST", "/api/pipelines/validate")]
     assert session.calls[1][2]["json"] == {**LOAD, "provenance": {"bundle": "sales-etl", "target": "prod"}}, (
@@ -90,10 +90,10 @@ def test_plan_format_markdown_is_a_table_a_pull_request_can_carry(tmp_path):
     files = bundle._digests(tmp_path)
     assert out == (
         "### Bundle plan · `prod`\n\n"
-        "| Action | Pipeline | Notes |\n"
-        "|---|---|---|\n"
-        "| would-create | load | next: 2026-11-02T03:00:00+01:00 |\n"
-        "| would-update | nightly | statement |\n"
+        "| Action | Kind | Name | Notes |\n"
+        "|---|---|---|---|\n"
+        "| would-create | Pipeline | load | next: 2026-11-02T03:00:00+01:00 |\n"
+        "| would-update | Pipeline | nightly | statement |\n"
         "\n### Bundle files · `prod`\n\n"
         "| File | sha256 | State |\n"
         "|---|---|---|\n"
@@ -108,8 +108,8 @@ def test_plan_markdown_escapes_a_pipe_and_a_line_break_and_has_one_row_per_resul
         {"action": "would-update", "name": "a|b", "changes": ["schedule"], "modified": True},
         {"action": "not-recorded", "name": "x", "reason": "one\ntwo"},
     ])
-    assert text.splitlines()[4] == "| would-update | a\\|b | schedule; changed since deploy |"
-    assert text.splitlines()[5] == "| not-recorded | x | one two |"
+    assert text.splitlines()[4] == "| would-update | — | a\\|b | schedule; changed since deploy |"
+    assert text.splitlines()[5] == "| not-recorded | — | x | one two |"
 
 
 def test_plan_of_a_development_target_sends_the_prefixed_name_and_no_schedule(tmp_path):
@@ -139,8 +139,8 @@ def test_deploy_creates_or_updates_after_every_pipeline_passed(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
-        {"action": "updated", "name": "nightly"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert calls(session) == [
@@ -166,7 +166,7 @@ def test_a_write_that_fails_reports_the_sentence_and_what_was_already_written(tm
     assert err == "stardelt: prod: nightly: the scheduler is not reachable (HTTP 503)\n"
     assert "Traceback" not in err
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
         {"action": "recorded", "id": 9},
     ]
 
@@ -185,7 +185,7 @@ def test_a_failed_deploy_whose_record_is_refused_still_exits_2_with_its_own_sent
     assert code == 2
     assert err == "stardelt: prod: nightly: the scheduler is not reachable (HTTP 503)\n"
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
         {"action": "not-recorded", "reason": "database is down (HTTP 503)"},
     ]
 
@@ -305,9 +305,9 @@ def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
-        {"action": "updated", "name": "nightly"},
-        {"action": "deleted", "name": "old"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "kind": "Pipeline"},
+        {"action": "deleted", "name": "old", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert calls(session)[-3] == ("DELETE", "/api/pipelines/stardelt/old")
@@ -331,8 +331,8 @@ def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(
     assert err == "stardelt: prod: old: the scheduler is not reachable (HTTP 503)\n"
     assert "Traceback" not in err
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
-        {"action": "updated", "name": "nightly"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "kind": "Pipeline"},
         {"action": "recorded", "id": 9},
     ]
     recorded = session.calls[-1][2]["json"]
@@ -418,8 +418,8 @@ def test_plan_lists_a_stream_as_would_create_and_writes_nothing(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"]},
-        {"action": "would-create", "name": "measurements"},
+        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"], "kind": "Pipeline"},
+        {"action": "would-create", "name": "measurements", "kind": "StreamApp"},
     ]
     assert calls(session) == [
         ("GET", "/api/me"), ("POST", "/api/pipelines/validate"),
@@ -445,7 +445,7 @@ def test_plan_lists_a_stream_of_this_bundle_target_as_would_update(tmp_path):
         FakeResponse(payload=listed), FakeResponse(payload=STREAM_OK),
     )
     assert code == 0
-    assert [json.loads(line) for line in out.splitlines()][-1] == {"action": "would-update", "name": "measurements"}
+    assert [json.loads(line) for line in out.splitlines()][-1] == {"action": "would-update", "name": "measurements", "kind": "StreamApp"}
 
 
 def test_a_refused_stream_stops_the_command_before_anything_is_written(tmp_path):
@@ -458,7 +458,7 @@ def test_a_refused_stream_stops_the_command_before_anything_is_written(tmp_path)
     assert code == 2
     assert err == "stardelt: prod: measurements: sink.catalog is 1 to 63 lower-case letters, digits and dashes\n"
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"]},
+        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"], "kind": "Pipeline"},
     ], "what passed is still reported"
     assert [method for method, _ in calls(session)] == ["GET", "POST", "GET", "POST"], "no create, no update"
 
@@ -475,8 +475,8 @@ def test_deploy_puts_the_stream_with_its_stamp(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
-        {"action": "created", "name": "measurements"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "created", "name": "measurements", "kind": "StreamApp"},
         {"action": "recorded", "id": 7},
     ]
     method, path, kwargs = session.calls[-3]
@@ -504,8 +504,8 @@ def test_a_deploy_with_prune_removes_a_stale_stream_app(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "created", "name": "load"},
-        {"action": "updated", "name": "measurements"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "measurements", "kind": "StreamApp"},
         {"action": "deleted", "name": "old-stream", "kind": "StreamApp"},
         {"action": "recorded", "id": 11},
     ]
@@ -534,7 +534,7 @@ def test_a_hand_changed_stream_is_refused_by_a_drift_block_target_unless_accepte
     )
     assert (code, err) == (0, "")
     assert calls(session)[-3] == ("PUT", "/api/streams/stardelt/measurements")
-    assert {"action": "updated", "name": "measurements"} in [json.loads(line) for line in out.splitlines()]
+    assert {"action": "updated", "name": "measurements", "kind": "StreamApp"} in [json.loads(line) for line in out.splitlines()]
 
 
 def test_a_deploy_that_cannot_be_recorded_still_succeeds_and_says_so(tmp_path):

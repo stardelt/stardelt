@@ -720,9 +720,9 @@ def _migration_plan(nova, target, catalog, files):
     rows = []
     for planned in answer["files"]:
         if planned["status"] == "applied":
-            rows.append({"action": "migration-in-ledger", "name": planned["name"]})
+            rows.append({"action": "migration-in-ledger", "name": planned["name"], "kind": "Migration"})
         else:
-            row = {"action": "would-apply-migration", "name": planned["name"], "class": planned["class"]}
+            row = {"action": "would-apply-migration", "name": planned["name"], "class": planned["class"], "kind": "Migration"}
             if planned["class"] == "breaking":
                 sql = next((f["sql"] for f in files if f["name"] == planned["name"]), "")
                 impact = _impact(nova, catalog, sql)
@@ -977,11 +977,11 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             if not answer["unchanged"]:
                 # There is no version to pin yet, so Nova cannot check this pipeline: a deploy publishes first.
                 unpublished.append(position)
-                results.append({"action": "would-publish", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{PurePosixPath(spec['notebook']['file']).name}"})
+                results.append({"action": "would-publish", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{PurePosixPath(spec['notebook']['file']).name}", "kind": "Pipeline"})
                 continue
             specs[position] = spec = _pinned(spec, answer)
         try:
-            results.append(apply.apply(nova, spec, dry_run=True))
+            results.append({**apply.apply(nova, spec, dry_run=True), "kind": "Pipeline"})
         except apply.ApplyError as err:
             refused.append((target, str(err)))
         else:
@@ -1001,6 +1001,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             "action": "would-update" if spec["name"] in existing else "would-create",
             "name": spec["name"],
             "position": position,
+            "kind": "StreamApp",
         })
     if changed_by_hand and not accept_drift and _drift_mode(directory, target) == "block":
         refused += _blocked(target, changed_by_hand)
@@ -1016,7 +1017,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             for stream in _deployed_streams(listed, stamp["bundle"], target, mode, user)
             if stream["name"] not in kept
         ]
-    results += [{"action": "would-delete", "name": name} for _, name in stale]
+    results += [{"action": "would-delete", "name": name, "kind": "Pipeline"} for _, name in stale]
     results += [{"action": "would-delete", "name": name, "kind": "StreamApp"} for _, name in stale_streams]
     if refused or dry_run:
         return refused, results
@@ -1034,7 +1035,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
                 done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, str(err))], done
         specs[position] = spec = _pinned(spec, answer)
-        done.append({"action": "published", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{spec['notebook']['name']}", "objectVersion": answer["objectVersion"]})
+        done.append({"action": "published", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{spec['notebook']['name']}", "objectVersion": answer["objectVersion"], "kind": "Pipeline"})
         try:
             verdict = apply.apply(nova, spec, dry_run=True)
         except apply.ApplyError as err:
@@ -1092,6 +1093,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             return [(target, f"{spec['name']}: {err}")], done
         done.append({
             **answer,
+            "kind": "Pipeline",
             **({"modified": True} if spec["name"] in changed_by_hand else {}),
             **({"diff": diffs[spec["name"]]} if diffs.get(spec["name"]) else {}),
         })
@@ -1107,7 +1109,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             else:
                 done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{spec['name']}: {err}")], done
-        done.append({"action": "created" if row["action"] == "would-create" else "updated", "name": spec["name"]})
+        done.append({"action": "created" if row["action"] == "would-create" else "updated", "name": spec["name"], "kind": "StreamApp"})
     for namespace, name in stale:
         try:
             nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
@@ -1120,7 +1122,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             else:
                 done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{name}: {err}")], done
-        done.append({"action": "deleted", "name": name})
+        done.append({"action": "deleted", "name": name, "kind": "Pipeline"})
     for namespace, name in stale_streams:
         try:
             nova.call("streams_delete", path={"namespace": namespace, "name": name})
@@ -1134,7 +1136,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
 def plan_markdown(target, results, files=()):
     """The plan as a Markdown table for a pull request comment (#99, #110).
 
-    One row per result: the action, the pipeline's name, and its notes (what an update changes,
+    One row per result: the action, its kind (`Pipeline`, `StreamApp` or `Migration`, `—` when the row
+    names none), the object's name, and its notes (what an update changes,
     the first next run, the published notebook, that it changed since deploy, or why the row was
     not recorded). `|` and line breaks inside a cell are escaped, so one name cannot break the table.
     ``files`` is the answer of :func:`plan_files`; when it is not empty a second table lists each file, its sha256 and its state.
@@ -1142,7 +1145,7 @@ def plan_markdown(target, results, files=()):
     def cell(value):
         return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
-    lines = [f"### Bundle plan · `{cell(target)}`", "", "| Action | Pipeline | Notes |", "|---|---|---|"]
+    lines = [f"### Bundle plan · `{cell(target)}`", "", "| Action | Kind | Name | Notes |", "|---|---|---|---|"]
     for result in results:
         notes = []
         if result.get("changes"):
@@ -1155,7 +1158,7 @@ def plan_markdown(target, results, files=()):
             notes.append("changed since deploy")
         if result.get("reason"):
             notes.append(str(result["reason"]))
-        lines.append(f"| {cell(result['action'])} | {cell(result['name'])} | {cell('; '.join(notes) or '—')} |")
+        lines.append(f"| {cell(result['action'])} | {cell(result.get('kind', '—'))} | {cell(result['name'])} | {cell('; '.join(notes) or '—')} |")
     if files:
         lines += ["", f"### Bundle files · `{cell(target)}`", ""]
         lines += ["| File | sha256 | State |", "|---|---|---|"]

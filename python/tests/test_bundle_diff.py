@@ -41,8 +41,8 @@ def test_a_changed_statement_is_shown_as_a_unified_diff_and_the_json_lines_keep_
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-update", "name": "load", "changes": ["statement", "deployment"]},
-        {"action": "would-create", "name": "nightly"},
+        {"action": "would-update", "name": "load", "changes": ["statement", "deployment"], "kind": "Pipeline"},
+        {"action": "would-create", "name": "nightly", "kind": "Pipeline"},
     ]
     assert "--- load sql (deployed)\n+++ load sql (bundle)\n@@ -1 +1 @@\n-select 0\n+select 1\n" in err
     assert err.count("---") == 1, "the stamp (deployment) and the created pipeline have no diff"
