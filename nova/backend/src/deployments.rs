@@ -115,6 +115,67 @@ pub struct DeploymentPipeline {
     pub action: String,
 }
 
+/// The row the document shows for a `Deployment` answer (#761): one applied deploy of the
+/// `shop` bundle, with its pipeline, one rendered resource and one file digest. Every 2xx
+/// answer of the four routes uses it, so the document shows the same row everywhere. Written
+/// out by hand on purpose: [`crate::openapi::tests`] fails when a key here is no property of
+/// `Deployment`, so a renamed or removed field cannot stay in the example.
+fn row_example() -> serde_json::Value {
+    serde_json::json!({
+        "id": 41,
+        "bundle": "shop",
+        "ownerGroup": "shop",
+        "target": "production",
+        "status": "applied",
+        "revision": "4f3c2a1",
+        "repository": "https://github.com/acme/shop",
+        "pipelines": [
+            {"namespace": "stardelt", "name": "shop-marts", "action": "updated"}
+        ],
+        "resources": [{
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": {"name": "shop-marts"},
+            "spec": {"tasks": [{"name": "run", "kind": "sql", "sql": "select 1"}]}
+        }],
+        "files": [{
+            "path": "shop-marts.yaml",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }],
+        "previousDeploymentId": null,
+        "actor": "sub-ada",
+        "actorName": "ada",
+        "createdAt": "2026-11-20T09:12:04Z"
+    })
+}
+
+/// [`row_example`] as the rollback route answers it: the new row, pointing at the replayed one.
+fn rollback_row_example() -> serde_json::Value {
+    let mut row = row_example();
+    row["previousDeploymentId"] = serde_json::json!(40);
+    row
+}
+
+/// The example `POST /api/deployments` takes: a creatable deploy, so without rendered
+/// `resources`. It must deserialize as [`NewDeployment`]; a test checks that.
+fn new_deployment_example() -> serde_json::Value {
+    serde_json::json!({
+        "bundle": "shop",
+        "ownerGroup": "shop",
+        "target": "production",
+        "revision": "4f3c2a1",
+        "repository": "https://github.com/acme/shop",
+        "status": "applied",
+        "pipelines": [
+            {"namespace": "stardelt", "name": "shop-marts", "action": "updated"}
+        ],
+        "files": [{
+            "path": "shop-marts.yaml",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }]
+    })
+}
+
 /// A row as the API returns it. `created_at` is RFC 3339 in UTC.
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -271,7 +332,7 @@ async fn prune(pool: &sqlx::PgPool, owner_group: &str, bundle: &str, target: &st
         ("target" = Option<String>, Query, description = "Only rows of this stage"),
     ),
     responses(
-        (status = 200, description = "The rows, newest first", body = Vec<Deployment>),
+        (status = 200, description = "The rows, newest first", body = Vec<Deployment>, example = json!([row_example()])),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
     )
@@ -372,7 +433,7 @@ async fn store(
     description = "One deployment record by id: an administrator sees every row, anybody else only a row of their own groups. A row that does not exist and a row of somebody else's group answer the same 404, so the route never says which ids exist.",
     params(("id" = i64, Path, description = "The deployment's id")),
     responses(
-        (status = 200, description = "The row", body = Deployment),
+        (status = 200, description = "The row", body = Deployment, example = json!(row_example())),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such row among the ones the caller may see", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
@@ -406,9 +467,9 @@ pub async fn detail(
     path = "/api/deployments",
     tag = "public",
     description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the pipelines it touched. Only an administrator or a member of the owner group may record one; the caller is stored as `actor`.",
-    request_body = NewDeployment,
+    request_body(content = NewDeployment, example = json!(new_deployment_example())),
     responses(
-        (status = 201, description = "The stored row", body = Deployment),
+        (status = 201, description = "The stored row", body = Deployment, example = json!(row_example())),
         (status = 400, description = "A name is empty, too long or carries a `/`, the status or an action is not one of the known values, or there are more than 200 pipelines", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
         (status = 403, description = "Only a member of the pipeline's owner group may record a deployment", body = crate::openapi::ErrorResponse),
@@ -473,7 +534,7 @@ fn is_rule_refusal(fail: &Fail) -> bool {
     description = "Roll back to what a recorded deployment applied: the stored rendered Pipeline documents of a row of the caller's groups are replayed as the caller — each missing one is created and each existing one updated — and the replay is recorded as a new deployment row whose `previousDeploymentId` points at the source. It needs no Git: it applies exactly what ran. Only a row with status `applied` and at least one stored resource can be replayed. A document the rules refuse stops the replay: the row is still recorded, as `failed`, and the answer is 409 with the sentence (400 when a stored document no longer fits a pipeline, 502/503 when the cluster did not answer).",
     params(("id" = i64, Path, description = "The deployment's id")),
     responses(
-        (status = 201, description = "The new row recording the replay", body = Deployment),
+        (status = 201, description = "The new row recording the replay", body = Deployment, example = json!(rollback_row_example())),
         (status = 400, description = "A stored document no longer fits a pipeline", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such row among the ones the caller may see", body = crate::openapi::ErrorResponse),

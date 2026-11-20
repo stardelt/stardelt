@@ -6185,15 +6185,86 @@ pub(crate) async fn preview(
     answer(preview_schedule(body, now_utc()))
 }
 
+/// The document the publishing routes show as their size in #761: a scheduled statement.
+const EXAMPLE_STATEMENT: &str = "select count(*) from gold.shop.orders";
+
+/// The body `pipelines_create` and `pipelines_validate` take (#761), one kept in step with
+/// [`CreatePipelineRequest`]: a test deserializes it, and every key must be a property of the
+/// schema.
+fn create_request_example() -> serde_json::Value {
+    serde_json::json!({
+        "name": "shop-marts",
+        "ownerGroup": "shop",
+        "tasks": [{"name": "run", "sql": EXAMPLE_STATEMENT}],
+        "schedule": {"cron": "0 3 * * *", "timezone": "UTC"}
+    })
+}
+
+/// The `PipelineView` a create answers (#761).
+fn pipeline_view_example() -> serde_json::Value {
+    serde_json::json!({
+        "name": "shop-marts",
+        "namespace": "stardelt",
+        "ownerGroup": "shop",
+        "canRun": true,
+        "canEdit": true,
+        "schedule": "0 3 * * *",
+        "paused": false,
+        "loaded": false,
+        "state": "loading",
+        "tasks": [{"name": "run", "kind": "sql", "sql": EXAMPLE_STATEMENT}],
+        "concurrency": "Forbid",
+        "createdAt": "2026-11-20T09:12:04Z"
+    })
+}
+
+/// The verdict `pipelines_validate` answers for [`create_request_example`] (#761).
+fn validate_response_example() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "action": "create",
+        "errors": [],
+        "changes": [],
+        "nextRuns": [
+            "2026-11-21T03:00:00Z",
+            "2026-11-22T03:00:00Z",
+            "2026-11-23T03:00:00Z",
+            "2026-11-24T03:00:00Z",
+            "2026-11-25T03:00:00Z"
+        ]
+    })
+}
+
+/// The document `pipelines_spec` answers (#761), in the shape the create body takes.
+fn spec_response_example() -> serde_json::Value {
+    serde_json::json!({
+        "document": {
+            "name": "shop-marts",
+            "ownerGroup": "shop",
+            "tasks": [{"name": "run", "sql": EXAMPLE_STATEMENT}],
+            "schedule": {"cron": "0 3 * * *", "timezone": "UTC"},
+            "options": {
+                "retries": 1,
+                "backoffMinutes": 5,
+                "timeoutMinutes": 120,
+                "concurrency": "Forbid"
+            }
+        },
+        "resourceVersion": "184931",
+        "managedBy": "nova",
+        "editable": true
+    })
+}
+
 #[utoipa::path(
     post,
     operation_id = "pipelines_create",
     path = "/api/pipelines",
     tag = "public",
     description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement, a notebook or a dbt run`. A body may instead give `tasks` (`[{ name, sql | notebook | dbt, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
-    request_body = CreatePipelineRequest,
+    request_body(content = CreatePipelineRequest, example = json!(create_request_example())),
     responses(
-        (status = 201, description = "The resource as written", body = PipelineView),
+        (status = 201, description = "The resource as written", body = PipelineView, example = json!(pipeline_view_example())),
         (status = 400, description = "The name, the statement, the cron or the timezone is invalid", body = crate::openapi::ErrorResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
         (status = 403, description = "The caller is not a member of the owner group", body = crate::openapi::ErrorResponse),
@@ -6235,9 +6306,9 @@ pub(crate) async fn create(
     path = "/api/pipelines/validate",
     tag = "public",
     description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with `ok: false` at 200 (\"In production a notebook comes from Git. Deploy it with a bundle.\") unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
-    request_body = CreatePipelineRequest,
+    request_body(content = CreatePipelineRequest, example = json!(create_request_example())),
     responses(
-        (status = 200, description = "The verdict: accepted (with the action) or the reason it is not", body = ValidatePipelineResponse),
+        (status = 200, description = "The verdict: accepted (with the action) or the reason it is not", body = ValidatePipelineResponse, example = json!(validate_response_example())),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
@@ -6362,7 +6433,7 @@ pub(crate) async fn remove(
         ("name" = String, Path, description = "Pipeline name"),
     ),
     responses(
-        (status = 200, description = "The document, its resource version, who manages it, and whether it is editable", body = PipelineSpecResponse),
+        (status = 200, description = "The document, its resource version, who manages it, and whether it is editable", body = PipelineSpecResponse, example = json!(spec_response_example())),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
