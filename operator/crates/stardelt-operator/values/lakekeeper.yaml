@@ -15,6 +15,14 @@ externalDatabase:
   userSecretKey: username
   passwordSecret: lakekeeper-pg-app
   passwordSecretKey: password
+# Workloads authenticate with a projected ServiceAccount token (twin of
+# platform/helm-values/lakekeeper.yaml's `auth.k8s`, stardelt/stardelt#492). The audience matches
+# `platform/scripts/spike-k8s-auth.sh`; authentication only, `authz.backend: allowall` stays.
+auth:
+  k8s:
+    enabled: true
+    audience: stardelt-catalog-workload
+    createClusterRoleBinding: true
 authz:
   backend: allowall
 internalOpenFGA: false

@@ -30,6 +30,22 @@ externalDatabase:
   passwordSecret: lakekeeper-pg-app
   passwordSecretKey: password
 
+# Workloads authenticate with a projected ServiceAccount token (stardelt/stardelt#492, design
+# question 1 measured in #538). The catalog validates the token through the API server
+# (TokenReview) and the caller becomes the principal `kubernetes~<ServiceAccount uid>`. The
+# audience is separate from the OIDC `lakekeeper`, so an OIDC token is never read as Kubernetes
+# and an SA token never as OIDC. Authentication only: the authorizer below still decides, so a
+# principal reads nothing until access-sync grants it a role.
+#
+# `createClusterRoleBinding` makes the chart create ClusterRoleBinding
+# `stardelt:lakekeeper-token-review` (roleRef `system:auth-delegator`); without it the catalog
+# cannot call TokenReview, and that binding was the one thing missing on the lab when #538 ran.
+auth:
+  k8s:
+    enabled: true
+    audience: stardelt-catalog-workload
+    createClusterRoleBinding: true
+
 authz:
   backend: openfga
   openfga:
