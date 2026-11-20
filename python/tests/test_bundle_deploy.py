@@ -19,6 +19,7 @@ CREATE = {"ok": True, "action": "create", "errors": [], "changes": [], "nextRuns
 UPDATE = {"ok": True, "action": "update", "errors": [], "changes": ["statement"], "nextRuns": []}
 STREAM_OK = {"ok": True, "errors": []}
 NO_STREAMS = {"namespace": "stardelt", "streams": []}
+NO_CATALOGS = {"catalogs": [], "default": "gold"}
 LOAD = {
     "name": "load",
     "ownerGroup": "sales",
@@ -114,10 +115,10 @@ def test_plan_markdown_escapes_a_pipe_and_a_line_break_and_has_one_row_per_resul
 def test_plan_of_a_development_target_sends_the_prefixed_name_and_no_schedule(tmp_path):
     make(tmp_path)
     code, _, _, session = run(
-        ["bundle", "plan", str(tmp_path), "-t", "dev"], ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE)
+        ["bundle", "plan", str(tmp_path), "-t", "dev"], ME, FakeResponse(payload=NO_CATALOGS), FakeResponse(payload=CREATE), FakeResponse(payload=CREATE)
     )
     assert code == 0
-    assert session.calls[1][2]["json"] == {
+    assert session.calls[2][2]["json"] == {
         "name": "dev-alice-load",
         "ownerGroup": "sales",
         "sql": "select 1",
@@ -236,20 +237,21 @@ def test_a_production_target_refuses_a_dirty_tree_and_a_development_target_recor
     git(tmp_path, "add", "-A")
     git(tmp_path, "commit", "-q", "-m", "bundle")
     commit = git(tmp_path, "rev-parse", "HEAD")
-    answers = (ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE))
+    prod_answers = (ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE))
+    dev_answers = (ME, FakeResponse(payload=NO_CATALOGS), FakeResponse(payload=CREATE), FakeResponse(payload=CREATE))
 
-    _, _, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], *answers)
+    _, _, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], *prod_answers)
     assert session.calls[1][2]["json"]["provenance"] == {"bundle": "sales-etl", "target": "prod", "revision": commit}
 
     (tmp_path / "sql" / "load.sql").write_text("select 2")
-    code, out, err, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], *answers)
+    code, out, err, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], *prod_answers)
     assert (code, out) == (2, "")
     assert "uncommitted changes" in err
     assert len(session.calls) == 1, "only me(); no pipeline is checked"
 
-    code, out, err, session = run(["bundle", "plan", str(tmp_path), "-t", "dev"], *answers)
+    code, out, err, session = run(["bundle", "plan", str(tmp_path), "-t", "dev"], *dev_answers)
     assert (code, err) == (0, "")
-    assert session.calls[1][2]["json"]["provenance"] == {"bundle": "sales-etl", "target": "dev", "revision": commit + "-dirty"}
+    assert session.calls[2][2]["json"]["provenance"] == {"bundle": "sales-etl", "target": "dev", "revision": commit + "-dirty"}
     assert len(commit) == 40 and set(commit) <= set("0123456789abcdef")
 
 
@@ -375,7 +377,7 @@ def test_a_development_target_prunes_only_the_callers_own_pipelines(tmp_path):
     }
     code, out, _, _ = run(
         ["bundle", "plan", str(tmp_path), "-t", "dev", "--prune"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE), FakeResponse(payload=NO_STREAMS),
+        ME, FakeResponse(payload=NO_CATALOGS), FakeResponse(payload=CREATE), FakeResponse(payload=CREATE), FakeResponse(payload=NO_STREAMS),
         FakeResponse(payload=listing),
     )
     assert code == 0
@@ -597,3 +599,30 @@ def test_a_pipeline_with_viewers_publishes_the_notebook_with_them(tmp_path):
     assert code == 0
     publish = [call for call in session.calls if call[0] == "PUT" and "/api/notebooks/" in call[1]][-1]
     assert publish[2]["headers"]["X-Stardelt-Viewers"] == '["visitors"]'
+
+
+PRODUCTION = {"catalogs": [{"name": "sales", "id": "1", "environment": "production", "canWrite": True}], "default": "sales"}
+
+
+def test_a_development_target_may_not_name_a_production_catalog(tmp_path):
+    manifest = MANIFEST.replace(
+        "dev:  {mode: development, variables: {catalog: sales_dev}}",
+        "dev:  {mode: development, variables: {catalog: sales}}",
+    )
+    make(tmp_path, manifest=manifest)
+    code, out, err, session = run(
+        ["bundle", "plan", str(tmp_path), "-t", "dev"], ME, FakeResponse(payload=PRODUCTION)
+    )
+    assert (code, out) == (2, "")
+    assert "a development target may not name the production catalog 'sales'" in err
+    assert calls(session) == [("GET", "/api/me"), ("GET", "/api/catalog/catalogs")], "nothing is checked or written"
+
+
+def test_a_production_target_may_name_a_production_catalog(tmp_path):
+    make(tmp_path)
+    code, _, _, session = run(
+        ["bundle", "plan", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=CREATE),
+        FakeResponse(payload=CREATE),
+    )
+    assert code == 0
+    assert ("GET", "/api/catalog/catalogs") not in calls(session)
