@@ -923,6 +923,9 @@ demo-inventory: ## Read-only: every pipeline, stream and cluster a visitor sees,
 .PHONY: demo-inventory-check
 demo-inventory-check: ## Read-only: the demo converged — no legacy pipelines, viewers, a schedule and a green last run (#79)
 	@python3 scripts/demo_inventory.py --check
+.PHONY: verify-secret-annotations
+verify-secret-annotations: ## Read-only: no Secret keeps a client secret in last-applied-configuration (#544)
+	@NAMESPACE=$(NAMESPACE) python3 scripts/verify_secret_annotations.py
 public-demo-off: _context ## Kill switch: disable the public demo person and sign it out (needs YES=1)
 	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/public-demo.sh --off
 
