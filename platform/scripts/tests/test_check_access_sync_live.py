@@ -4,14 +4,15 @@ Standard library only, like the script: `python3 -m unittest discover -s scripts
 runs them in CI. `verdict()` is pure, so no cluster is touched.
 """
 
+import importlib.util
 import re
-import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-import check_access_sync_live as check
+SCRIPT = Path(__file__).resolve().parents[1] / "check_access_sync_live.py"
+_spec = importlib.util.spec_from_file_location("check_access_sync_live", SCRIPT)
+check = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check)
 
 
 class CheckAccessSyncLiveTest(unittest.TestCase):
