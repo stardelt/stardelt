@@ -45,6 +45,8 @@ use crate::saved_queries::{error, store_failed, unavailable};
 const MAX_NAME_CHARS: usize = 64;
 /// Most pipelines one deployment may list.
 const MAX_PIPELINES: usize = 200;
+/// Most rendered resources one deployment may carry.
+const MAX_RESOURCES: usize = 200;
 /// Rows one list answers, newest first.
 const LIST_LIMIT: usize = 50;
 /// The status a deployment row may carry.
@@ -79,6 +81,9 @@ pub struct NewDeployment {
     /// The pipelines the deploy touched, at most 200.
     #[serde(default)]
     pub pipelines: Vec<DeploymentPipeline>,
+    /// The rendered Pipeline documents this deploy applied; empty for a failed deploy.
+    #[serde(default)]
+    pub resources: Vec<serde_json::Value>,
 }
 
 /// One pipeline of a deploy: what changed in it.
@@ -104,6 +109,9 @@ pub struct Deployment {
     /// The pipelines the deploy touched, as the caller sent them.
     #[schema(value_type = Vec<DeploymentPipeline>)]
     pub pipelines: serde_json::Value,
+    /// The rendered Pipeline documents the deploy applied, as the caller sent them.
+    #[schema(value_type = Vec<Object>)]
+    pub resources: serde_json::Value,
     /// The `sub` of the person who recorded the deploy.
     pub actor: String,
     /// The name the caller's sign-in provided; `None` for rows recorded before migration 0025.
@@ -121,7 +129,7 @@ pub struct ListParams {
 
 /// The columns [`Deployment`] reads; the timestamp as RFC 3339 in UTC.
 const ROW_COLUMNS: &str = "id, bundle, owner_group, target, revision, repository, status, \
-    pipelines, actor, actor_name, \
+    pipelines, resources, actor, actor_name, \
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
 /// Whether `identity` may record a deployment of `owner_group`: an administrator, or a
@@ -159,6 +167,14 @@ pub fn validate(new: &NewDeployment) -> Result<(), String> {
     }
     if new.pipelines.len() > MAX_PIPELINES {
         return Err(format!("pipelines must be at most {MAX_PIPELINES} rows"));
+    }
+    if new.resources.len() > MAX_RESOURCES {
+        return Err(format!(
+            "a deployment may list at most {MAX_RESOURCES} resources"
+        ));
+    }
+    if serde_json::to_vec(&new.resources).unwrap_or_default().len() > 1024 * 1024 {
+        return Err("the rendered resources must be under 1 MiB".into());
     }
     for pipeline in &new.pipelines {
         if pipeline.namespace.is_empty() {
@@ -289,8 +305,8 @@ pub async fn record(
         .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
     let sql = format!(
         "INSERT INTO deployment \
-         (bundle, owner_group, target, revision, repository, status, pipelines, actor, actor_name) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING {ROW_COLUMNS}"
+         (bundle, owner_group, target, revision, repository, status, pipelines, resources, actor, actor_name) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {ROW_COLUMNS}"
     );
     match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
         .bind(&new.bundle)
@@ -300,6 +316,10 @@ pub async fn record(
         .bind(&new.repository)
         .bind(&new.status)
         .bind(&pipelines)
+        .bind(
+            serde_json::to_value(&new.resources)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        )
         .bind(&caller.identity.sub)
         .bind(&caller.identity.display_name)
         .fetch_one(pool)
@@ -340,6 +360,7 @@ mod tests {
             repository: None,
             status: status.into(),
             pipelines: Vec::new(),
+            resources: Vec::new(),
         }
     }
 
@@ -409,6 +430,18 @@ mod tests {
         assert!(validate(&new).is_ok(), "exactly at the limit");
         new.pipelines = (0..=MAX_PIPELINES).map(pipeline).collect();
         let err = validate(&new).expect_err("201 pipelines");
+        assert!(err.contains("200"), "{err}");
+    }
+
+    #[test]
+    fn resources_are_stored_and_limited() {
+        let mut new = deployment("applied");
+        new.resources = vec![serde_json::json!({"kind": "Pipeline", "metadata": {"name": "p"}})];
+        assert!(validate(&new).is_ok(), "one rendered Pipeline document");
+        new.resources = (0..=MAX_RESOURCES)
+            .map(|i| serde_json::json!({"kind": "Pipeline", "metadata": {"name": format!("p{i}")}}))
+            .collect();
+        let err = validate(&new).expect_err("201 resources");
         assert!(err.contains("200"), "{err}");
     }
 
