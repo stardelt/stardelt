@@ -671,6 +671,30 @@ def _drift_mode(directory, target):
     return ((manifest.get("targets") or {}).get(target) or {}).get("drift", "warn")
 
 
+def target_values(directory, target):
+    """The variable values a target deploys with: every default, then the target's overrides."""
+    manifest = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))
+    chosen = (manifest.get("targets") or {}).get(target) or {}
+    values = {
+        v: (d or {}).get("default")
+        for v, d in (manifest.get("variables") or {}).items()
+        if (d or {}).get("default") is not None
+    }
+    values.update(chosen.get("variables") or {})
+    return values
+
+
+def production_catalogs(nova):
+    """The catalogs the platform marks `stardelt.io/environment: production` (#103 S2)."""
+    answer = nova.call("catalogs_list") or {}
+    rows = answer.get("catalogs") if isinstance(answer, dict) else answer
+    return {
+        row["name"]
+        for row in rows or []
+        if isinstance(row, dict) and row.get("name") and row.get("environment") == "production"
+    }
+
+
 def _migration_files(directory, target):
     """The bundle's migrations for ``target``: ``(problems, catalog, files)``; ``files`` is empty when it has none."""
     root = Path(directory)
@@ -897,7 +921,9 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     after an earlier one returns the rows already written and the sentence, and records a row with status `failed` —
     a deploy that did not finish is not recorded as applied. Only ``--prune``
     removes a pipeline the bundle no longer names. A ``production`` target also refuses a bundle directory whose Git revision carries
-    uncommitted changes (``-dirty``); a ``development`` target still records it. A target with ``drift: block``
+    uncommitted changes (``-dirty``); a ``development`` target still records it. A ``development`` target whose
+    variables name a catalog the platform marks ``stardelt.io/environment: production`` is refused before anything is
+    written (#103). A target with ``drift: block``
     refuses, for a plan and a deploy alike, a pipeline someone changed
     after its last deploy (``modified``) unless ``accept_drift``; the default ``warn`` only reports it. With ``diff`` each
     ``would-update`` (and ``updated``) result carries a ``diff`` text: what Nova would change, field by field.
@@ -914,6 +940,20 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     stamp = provenance(directory, target)
     if mode == "production" and str(stamp.get("revision") or "").endswith("-dirty"):
         return [(target, f"a production target cannot deploy from a tree with uncommitted changes (the revision would read {stamp['revision']}): commit or stash them, or deploy a development target")], []
+    if mode == "development":
+        production = production_catalogs(nova)
+        named = sorted(
+            value
+            for value in target_values(directory, target).values()
+            if isinstance(value, str) and value in production
+        )
+        if named:
+            return [
+                (
+                    target,
+                    f"a development target may not name the production catalog {named[0]!r}: deploy a production target, or point this target at a development catalog",
+                )
+            ], []
     specs = [{**spec, "provenance": stamp} for spec in specs]
     stream_problems, _, stream_specs = render_streams(directory, target, user)
     if stream_problems:

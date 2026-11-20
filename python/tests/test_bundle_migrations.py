@@ -168,7 +168,8 @@ def test_a_development_deploy_sends_development_and_no_approval(tmp_path):
     build(tmp_path, manifest=DEV_MANIFEST)
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "dev"],
-        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
+        ME, FakeResponse(payload={"catalogs": [], "default": "gold"}),
+        FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "dev-alice-load"}),
         FakeResponse(payload={"pipelines": [{"name": "dev-alice-load", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "dev", "status": "applied"}),
