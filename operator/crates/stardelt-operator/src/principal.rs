@@ -5,12 +5,14 @@
 //! The decisions that matter are pure functions ([`secret_check`], [`principal_state`]) so they are
 //! tested without a cluster; [`reconcile_principal`] only reads the Secret and writes the status.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
-    Api, ResourceExt,
+    Api, Resource, ResourceExt,
     api::{Patch, PatchParams},
     runtime::controller::Action,
 };
@@ -78,6 +80,7 @@ pub struct PrincipalState {
     pub client_id: Option<String>,
     pub secret_name: Option<String>,
     pub subject: Option<String>,
+    pub workload_identity: Option<String>,
 }
 
 fn not_ready(reason: &'static str, message: String) -> PrincipalState {
@@ -88,6 +91,7 @@ fn not_ready(reason: &'static str, message: String) -> PrincipalState {
         client_id: None,
         secret_name: None,
         subject: None,
+        workload_identity: None,
     }
 }
 
@@ -135,6 +139,7 @@ pub fn principal_state(
                     client_id: None,
                     secret_name: Some(secret_name.to_string()),
                     subject: None,
+                    workload_identity: None,
                 },
             }
         }
@@ -166,9 +171,37 @@ pub fn principal_state(
                     client_id: Some(secret_name.clone()),
                     secret_name: Some(secret_name),
                     subject: subject.clone(),
+                    workload_identity: None,
                 },
             }
         }
+    }
+}
+
+/// The ServiceAccount a principal's workloads run as (#492). Owned by the principal, so
+/// Kubernetes deletes it with the principal. No token is automounted: a run mounts one
+/// projected token for the catalog audience explicitly.
+pub fn principal_service_account(sp: &ServicePrincipal, namespace: &str) -> ServiceAccount {
+    let name = sp.name_any();
+    ServiceAccount {
+        metadata: ObjectMeta {
+            name: Some(principal_client_id(&name)),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    "app.kubernetes.io/part-of".to_string(),
+                    "stardelt".to_string(),
+                ),
+                ("stardelt.io/service-principal".to_string(), name),
+            ])),
+            owner_references: Some(vec![
+                sp.controller_owner_ref(&())
+                    .expect("a ServicePrincipal read from the API has a uid"),
+            ]),
+            ..ObjectMeta::default()
+        },
+        automount_service_account_token: Some(false),
+        ..ServiceAccount::default()
     }
 }
 
@@ -257,6 +290,24 @@ pub async fn reconcile_principal(
         }
     }
 
+    // Every principal gets the ServiceAccount its workloads run as (#492), in every mode: the
+    // catalog principal is the ServiceAccount's UID, so it does not depend on the identity
+    // provider. A failure here changes no readiness: nothing reads the ServiceAccount yet.
+    let mut workload_identity: Option<String> = None;
+    match crate::objects::apply(
+        &ctx.client,
+        &namespace,
+        &principal_service_account(&sp, &namespace),
+        false,
+    )
+    .await
+    {
+        Ok(sa) => workload_identity = sa.metadata.uid.map(|uid| format!("kubernetes~{uid}")),
+        Err(e) => {
+            tracing::warn!(principal = %name, %namespace, error = %e, "ServiceAccount not applied")
+        }
+    }
+
     let secret_name = match &sp.spec.existing_secret_ref {
         Some(reference) => reference.name.clone(),
         None => principal_client_id(&name),
@@ -276,6 +327,10 @@ pub async fn reconcile_principal(
         Err(error) => return Err(error),
     };
     let state = with_subject(state, subject);
+    let state = PrincipalState {
+        workload_identity,
+        ..state
+    };
 
     if state.ready {
         ensure_principal_finalizer(&sp, &ctx).await?;
@@ -346,6 +401,7 @@ fn status_for(
         client_id: state.client_id.clone(),
         secret_name: state.secret_name.clone(),
         subject: state.subject.clone(),
+        workload_identity: state.workload_identity.clone(),
         conditions: vec![ready_condition(
             state.ready,
             state.reason,
@@ -487,6 +543,7 @@ mod tests {
             client_id: Some("sp-etl".into()),
             secret_name: Some("sp-etl".into()),
             subject: Some("e385bcb7-9484-48b9-8d60-8f509fc6cbd9".into()),
+            workload_identity: Some("kubernetes~0000-sa".into()),
         };
         let status = status_for(&state, Some(7), None, "2026-11-10T00:00:00Z");
         assert!(status.ready);
@@ -495,6 +552,10 @@ mod tests {
         assert_eq!(
             status.subject.as_deref(),
             Some("e385bcb7-9484-48b9-8d60-8f509fc6cbd9")
+        );
+        assert_eq!(
+            status.workload_identity.as_deref(),
+            Some("kubernetes~0000-sa")
         );
         assert_eq!(status.observed_generation, Some(7));
         assert_eq!(status.conditions.len(), 1);
@@ -841,6 +902,15 @@ mod tests {
                             "code": 403
                         }),
                     )
+                } else if path.contains("/serviceaccounts/sp-etl") {
+                    (
+                        200,
+                        json!({
+                            "apiVersion": "v1",
+                            "kind": "ServiceAccount",
+                            "metadata": { "name": "sp-etl", "namespace": "stardelt", "uid": "0000-sa" }
+                        }),
+                    )
                 } else {
                     (
                         200,
@@ -873,7 +943,7 @@ mod tests {
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
-            "metadata": { "name": "etl", "namespace": "stardelt", "generation": 3 },
+            "metadata": { "name": "etl", "namespace": "stardelt", "generation": 3, "uid": "0000-sp" },
             "spec": { "ownerGroup": "analytics" }
         }))
         .expect("deserialize ServicePrincipal");
@@ -950,6 +1020,12 @@ mod tests {
                         "metadata": { "name": "external-app", "namespace": "stardelt" },
                         "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
                     })
+                } else if path.contains("/serviceaccounts/sp-etl") {
+                    json!({
+                        "apiVersion": "v1",
+                        "kind": "ServiceAccount",
+                        "metadata": { "name": "sp-etl", "namespace": "stardelt", "uid": "0000-sa" }
+                    })
                 } else {
                     json!({
                         "apiVersion": "stardelt.io/v1alpha1",
@@ -977,7 +1053,7 @@ mod tests {
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
-            "metadata": { "name": "etl", "namespace": "stardelt", "generation": 1 },
+            "metadata": { "name": "etl", "namespace": "stardelt", "generation": 1, "uid": "0000-sp" },
             "spec": { "ownerGroup": "analytics", "existingSecretRef": { "name": "external-app" } }
         }))
         .expect("deserialize ServicePrincipal");
@@ -1003,6 +1079,125 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&patch.2).expect("patch body is JSON");
         assert_eq!(body["status"]["ready"], true);
         assert_eq!(body["status"]["conditions"][0]["reason"], "Provisioned");
+        assert_eq!(body["status"]["workloadIdentity"], "kubernetes~0000-sa");
+
+        let service_account = requests
+            .iter()
+            .find(|(method, path, _)| {
+                method == "PATCH" && path.ends_with("/serviceaccounts/sp-etl")
+            })
+            .expect("ServiceAccount applied");
+        let applied: serde_json::Value =
+            serde_json::from_str(&service_account.2).expect("apply body is JSON");
+        assert_eq!(applied["automountServiceAccountToken"], false);
+        assert_eq!(
+            applied["metadata"]["ownerReferences"][0]["kind"], "ServicePrincipal",
+            "{applied}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_service_account_apply_keeps_the_principal_ready() {
+        let requests: Recorded = Arc::default();
+        let recorder = requests.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let recorder = recorder.clone();
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            async move {
+                let body = request
+                    .into_body()
+                    .collect_bytes()
+                    .await
+                    .expect("mock body");
+                recorder.lock().expect("requests poisoned").push((
+                    method.clone(),
+                    path.clone(),
+                    String::from_utf8_lossy(&body).to_string(),
+                ));
+                let (status, document) = if method == "GET"
+                    && path.contains("/secrets/external-app")
+                {
+                    (
+                        200,
+                        json!({
+                            "apiVersion": "v1", "kind": "Secret",
+                            "metadata": { "name": "external-app", "namespace": "stardelt" },
+                            "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
+                        }),
+                    )
+                } else if path.contains("/serviceaccounts/") {
+                    (
+                        500,
+                        json!({
+                            "apiVersion": "v1",
+                            "kind": "Status",
+                            "status": "Failure",
+                            "message": "serviceaccounts is unavailable",
+                            "reason": "InternalError",
+                            "code": 500
+                        }),
+                    )
+                } else {
+                    (
+                        200,
+                        json!({
+                            "apiVersion": "stardelt.io/v1alpha1",
+                            "kind": "ServicePrincipal",
+                            "metadata": { "name": "etl", "namespace": "stardelt", "uid": "0000-sp" },
+                            "spec": { "ownerGroup": "analytics", "existingSecretRef": { "name": "external-app" } }
+                        }),
+                    )
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(
+                            serde_json::to_vec(&document).expect("mock document"),
+                        ))
+                        .expect("valid mock response"),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "stardelt");
+        let ctx = Arc::new(context_with_platforms(
+            client,
+            &[platform_instance("stardelt", "external")],
+        ));
+        let principal: ServicePrincipal = serde_json::from_value(json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": { "name": "etl", "namespace": "stardelt", "generation": 1, "uid": "0000-sp" },
+            "spec": { "ownerGroup": "analytics", "existingSecretRef": { "name": "external-app" } }
+        }))
+        .expect("deserialize ServicePrincipal");
+
+        let action = reconcile_principal(Arc::new(principal), ctx)
+            .await
+            .expect("reconcile succeeds although the ServiceAccount did not");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+
+        let requests = requests.lock().expect("requests poisoned");
+        assert!(
+            requests
+                .iter()
+                .any(|(method, path, _)| method == "PATCH"
+                    && path.ends_with("/serviceaccounts/sp-etl")),
+            "the ServiceAccount apply was attempted: {requests:?}"
+        );
+        let patch = requests
+            .iter()
+            .rev()
+            .find(|(method, path, _)| method == "PATCH" && path.ends_with("/status"))
+            .expect("status patch");
+        let body: serde_json::Value = serde_json::from_str(&patch.2).expect("patch body is JSON");
+        let status = &body["status"];
+        assert_eq!(status["ready"], true, "{status}");
+        assert!(
+            status.get("workloadIdentity").is_none(),
+            "no catalog principal without a ServiceAccount UID: {status}"
+        );
     }
 
     #[tokio::test]
@@ -1024,11 +1219,19 @@ mod tests {
                     path.clone(),
                     String::from_utf8_lossy(&body).to_string(),
                 ));
-                let document = json!({
-                    "apiVersion": "v1", "kind": "Secret",
-                    "metadata": { "name": "external-app", "namespace": "stardelt" },
-                    "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
-                });
+                let document = if path.contains("/serviceaccounts/sp-etl") {
+                    json!({
+                        "apiVersion": "v1",
+                        "kind": "ServiceAccount",
+                        "metadata": { "name": "sp-etl", "namespace": "stardelt", "uid": "0000-sa" }
+                    })
+                } else {
+                    json!({
+                        "apiVersion": "v1", "kind": "Secret",
+                        "metadata": { "name": "external-app", "namespace": "stardelt" },
+                        "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
+                    })
+                };
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
                         .status(200)
@@ -1049,12 +1252,14 @@ mod tests {
                 "name": "etl",
                 "namespace": "stardelt",
                 "generation": 1,
+                "uid": "0000-sp",
                 "finalizers": [PRINCIPAL_FINALIZER]
             },
             "spec": { "ownerGroup": "analytics", "existingSecretRef": { "name": "external-app" } },
             "status": {
                 "ready": true,
                 "secretName": "external-app",
+                "workloadIdentity": "kubernetes~0000-sa",
                 "conditions": [{
                     "type": "Ready",
                     "status": "True",

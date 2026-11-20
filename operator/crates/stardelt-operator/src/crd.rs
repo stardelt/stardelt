@@ -2201,6 +2201,15 @@ pub struct ServicePrincipalStatus {
     /// the account and the operator never talks to that provider.
     #[serde(default, rename = "subject", skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// The catalog principal of this principal's workloads: `kubernetes~<ServiceAccount UID>`
+    /// of the ServiceAccount `sp-<name>` the operator creates next to it (#492). Set in every
+    /// identity mode: it does not depend on the identity provider.
+    #[serde(
+        default,
+        rename = "workloadIdentity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workload_identity: Option<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
     #[serde(
