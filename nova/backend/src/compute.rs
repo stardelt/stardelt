@@ -107,6 +107,9 @@ pub struct ComputeCluster {
     pub last_activity_at: Option<String>,
     pub idle_stop_minutes: i64,
     pub can_use: bool,
+    /// Whether the caller may start, stop or edit the cluster: an administrator, the owner
+    /// group of a `SparkCluster`, its `owner.user`, or an administrator on `shared` (#706).
+    pub can_act: bool,
     pub shared: bool,
     /// `cluster` for a `SparkCluster`, `platform` for a Spark server the manifests install.
     pub kind: String,
@@ -253,6 +256,7 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
         return None;
     }
     let connect = may_connect(who, &name, &owner);
+    let act = may_act(who, &name, &owner);
     let status = object.get("status").unwrap_or(&Value::Null);
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
     let resources = |pointer: &str| {
@@ -300,6 +304,7 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             .and_then(Value::as_i64)
             .unwrap_or(60),
         can_use: connect,
+        can_act: act,
         kind: "cluster".to_string(),
         mode: None,
         limits: None,
@@ -461,6 +466,7 @@ fn platform_view(
         last_activity_at: None,
         idle_stop_minutes: 0,
         can_use: true,
+        can_act: false,
         shared: audience.as_deref() == Some("members"),
         kind: "platform".to_string(),
         mode: Some(mode.to_string()),
@@ -555,6 +561,7 @@ fn demo_clusters() -> Vec<ComputeCluster> {
         last_activity_at: None,
         idle_stop_minutes: 0,
         can_use: true,
+        can_act: false,
         shared: true,
         kind: "cluster".to_string(),
         mode: None,
@@ -645,10 +652,17 @@ async fn set_state(
     let spec = value.get("spec").unwrap_or(&value);
     let owner = owner_of(spec);
     if !may_act(who, name, &owner) {
-        return Err(Fail::new(
-            StatusCode::FORBIDDEN,
-            "only an administrator may start or stop the shared cluster",
-        ));
+        let sentence = if name == "shared" {
+            "only an administrator may start or stop the shared cluster"
+        } else if viewers_of(spec)
+            .iter()
+            .any(|group| who.groups.iter().any(|own| own == group))
+        {
+            "this cluster belongs to another group: only its owner group starts and stops it, ask them to"
+        } else {
+            "only the cluster's owner group may start or stop it"
+        };
+        return Err(Fail::new(StatusCode::FORBIDDEN, sentence));
     }
     match phase_of(&value).as_str() {
         "Starting" => {
@@ -689,7 +703,7 @@ async fn set_state(
     operation_id = "compute_list",
     path = "/api/compute",
     tag = "public",
-    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs (`endpoint` is absent when the caller reaches the cluster only through `spec.viewers`: such a server acts with its owner group's rights, so Nova issues a viewer no channel — #493), `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
+    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs (`endpoint` is absent when the caller reaches the cluster only through `spec.viewers`: such a server acts with its owner group's rights, so Nova issues a viewer no channel — #493), `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse`, `canAct`, whether the caller may start, stop or edit the cluster, and `shared`. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's clusters, sorted by name", body = ComputeResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -2177,5 +2191,58 @@ mod tests {
             view(&shared, &who("carol", &[], false)).expect("everyone sees the shared one");
         assert_eq!(anyone.endpoint.as_deref(), Some("sc://shared:15002"));
         assert!(anyone.can_use);
+    }
+
+    #[test]
+    fn a_viewer_sees_can_act_false() {
+        let object = cluster(
+            "team",
+            json!({"owner": {"group": "analytics"}, "viewers": ["visitors"]}),
+        );
+        let viewer = view(&object, &who("demo", &["visitors"], false))
+            .expect("a viewer still sees the cluster");
+        assert!(!viewer.can_act);
+        assert!(!viewer.can_use);
+
+        let owner = view(&object, &who("bob", &["analytics"], false)).expect("the owner sees it");
+        assert!(owner.can_act);
+
+        let shared = cluster("shared", json!({"owner": {"group": "stardelt-users"}}));
+        let member =
+            view(&shared, &who("carol", &[], false)).expect("everyone sees the shared one");
+        assert!(!member.can_act);
+        assert!(member.can_use);
+    }
+
+    #[tokio::test]
+    async fn a_viewer_is_refused_with_the_owner_groups_rule() {
+        let items = vec![cluster(
+            "team",
+            json!({"owner": {"group": "analytics"}, "viewers": ["visitors"]}),
+        )];
+        let (app, shared) = app_with(items, Some(who("demo", &["visitors"], false))).await;
+        let (status, body) = call(app, "POST", "/compute/team/start").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body["error"],
+            "this cluster belongs to another group: only its owner group starts and stops it, ask them to"
+        );
+        assert!(shared.lock().unwrap().patches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_shared_cluster_refuses_a_member_with_the_admin_rule() {
+        let items = vec![cluster(
+            "shared",
+            json!({"owner": {"group": "stardelt-users"}, "idleStopMinutes": 0, "state": "Running"}),
+        )];
+        let (app, shared) = app_with(items, Some(who("bob", &[], false))).await;
+        let (status, body) = call(app, "POST", "/compute/shared/stop").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body["error"],
+            "only an administrator may start or stop the shared cluster"
+        );
+        assert!(shared.lock().unwrap().patches.is_empty());
     }
 }

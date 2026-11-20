@@ -1080,6 +1080,11 @@ export type ComputeCluster = {
   idleStopMinutes: number
   /** The caller's group owns the cluster (or it is `shared`); a viewer sees `false`. */
   canUse: boolean
+  /**
+   * Whether the caller may start, stop or edit the cluster: an administrator, the owner
+   * group of a `SparkCluster`, its `owner.user`, or an administrator on `shared` (#706).
+   */
+  canAct: boolean
   shared: boolean
   /** `cluster` for a `SparkCluster`; `platform` for a Spark server the platform's manifests install. */
   kind?: 'cluster' | 'platform'

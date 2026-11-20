@@ -192,7 +192,7 @@ export default function Compute() {
                         <p className="text-sm text-bad">{c.message}</p>
                       )}
                       <div className="flex gap-2">
-                        {c.canUse ? (
+                        {c.canAct ? (
                           <>
                             {(c.phase === 'Stopped' || c.phase === 'Failed') && (
                               <button
