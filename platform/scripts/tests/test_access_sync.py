@@ -1506,7 +1506,7 @@ class MainTest(JobTestCase):
             "a tick that cannot read the principals must not remove the workload identity",
         )
 
-
+    def test_a_converged_workload_assignee_is_a_no_op(self):
         self.use_catalogs(json.loads(json.dumps(CATALOG)), principals=[PRINCIPAL])
         self.assertEqual(access_sync.main(), 0)
         seen = len(self.fake.requests)
