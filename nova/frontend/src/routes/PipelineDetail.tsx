@@ -146,38 +146,48 @@ export default function PipelineDetail() {
           )}
           <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
         </div>
-        {!demo && (
-          <div className="flex flex-wrap items-center gap-2">
-            <PipelineActions
-              pipeline={pipeline}
-              pending={actions.pending}
-              onAct={actions.act}
-              withRunForm
-              onRun={(start) => void actions.act(pipeline, 'run', start)}
-              error={actions.error}
-            />
-            {pipeline.canEdit && (
-              <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
-                Edit schedule
-              </button>
-            )}
-            {pipeline.canEdit && (
-              <button
-                type="button"
-                className="btn-ghost py-1.5 text-xs text-bad"
-                onClick={() => setDeleting(true)}
-              >
-                Delete pipeline
-              </button>
-            )}
-            {!pipeline.canEdit && (
-              <p className="text-text-dim text-sm">
-                Read-only: your group may run this pipeline;{' '}
-                {pipeline.ownerGroup ?? 'the owner group'} changes it.
-              </p>
-            )}
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {pipeline.tasks.some((task) => task.kind === 'notebook') && (
+            <Link
+              to={`/reports/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`}
+              className="btn-ghost px-3 py-1.5 text-sm"
+            >
+              Report
+            </Link>
+          )}
+          {!demo && (
+            <>
+              <PipelineActions
+                pipeline={pipeline}
+                pending={actions.pending}
+                onAct={actions.act}
+                withRunForm
+                onRun={(start) => void actions.act(pipeline, 'run', start)}
+                error={actions.error}
+              />
+              {pipeline.canEdit && (
+                <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
+                  Edit schedule
+                </button>
+              )}
+              {pipeline.canEdit && (
+                <button
+                  type="button"
+                  className="btn-ghost py-1.5 text-xs text-bad"
+                  onClick={() => setDeleting(true)}
+                >
+                  Delete pipeline
+                </button>
+              )}
+              {!pipeline.canEdit && (
+                <p className="text-text-dim text-sm">
+                  Read-only: your group may run this pipeline;{' '}
+                  {pipeline.ownerGroup ?? 'the owner group'} changes it.
+                </p>
+              )}
+            </>
+          )}
+        </div>
       </header>
 
       <PipelineFeedback notice={actions.notice} error={actions.error} />

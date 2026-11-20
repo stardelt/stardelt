@@ -1,11 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ApiError, api, runNotebookUrl } from '../api'
-import { EmptyState } from '../components/EmptyState'
+import { api, runNotebookUrl } from '../api'
 import ErrorBox from '../components/ErrorBox'
-import NotebookFrame from '../components/NotebookFrame'
-import { renderNotebook } from '../notebookHtml'
+import ExecutedNotebook from '../components/ExecutedNotebook'
 import { PipelineStateBadge, formatWhen, runDuration } from './Pipelines'
 
 /**
@@ -14,7 +12,7 @@ import { PipelineStateBadge, formatWhen, runDuration } from './Pipelines'
  *
  * The notebook is rendered into the sandboxed frame `NotebookFrame`, whose sandbox omits the
  * same-origin permission; its HTML, images and scripts can run but reach neither Nova's DOM nor
- * its API.
+ * its API. The drawing itself lives in `ExecutedNotebook`, which the report page shares.
  */
 export default function RunNotebook() {
   const { namespace = '', name = '', runId = '', taskId = '' } = useParams()
@@ -23,11 +21,6 @@ export default function RunNotebook() {
   const [rerunning, setRerunning] = useState(false)
   const [retrying, setRetrying] = useState(false)
   const [retryError, setRetryError] = useState<unknown>(null)
-
-  const notebook = useQuery({
-    queryKey: ['run-notebook', namespace, name, runId, taskId],
-    queryFn: () => api.runNotebook(namespace, name, runId, taskId),
-  })
 
   // The run's state is a fact about the run, not about the notebook: a failure here only
   // leaves the badge out.
@@ -45,9 +38,6 @@ export default function RunNotebook() {
   const spec = pipeline.data?.tasks.find((t) => t.name === taskId)
   const started = formatWhen(run.data?.run.startedAt)
   const params = spec?.notebookParams && Object.keys(spec.notebookParams).length > 0 ? spec.notebookParams : null
-
-  const rendered = notebook.data ? renderNotebook(notebook.data) : null
-  const missing = notebook.isError && notebook.error instanceof ApiError && notebook.error.status === 404
 
   async function again() {
     setRerunning(true)
@@ -117,56 +107,27 @@ export default function RunNotebook() {
         </details>
       )}
 
-      {missing ? (
-        <div className="card p-2">
-          <EmptyState icon="notebook" title="No executed notebook for this run">
-            This run's executed notebook is not there: it was never written, or it expired. The task
-            log still has what the scheduler saw.
-          </EmptyState>
-        </div>
-      ) : notebook.isError ? (
-        <ErrorBox error={notebook.error} onRetry={() => void notebook.refetch()} />
-      ) : !rendered ? (
-        <p className="text-sm text-text-mute">Loading the executed notebook…</p>
-      ) : (
-        <>
-          {rendered.error && (
-            <div role="alert" className="rounded-[10px] border border-bad/30 bg-bad/5 px-4 py-3 text-sm">
-              <p className="text-text font-medium break-words">
-                Failed in cell {(rendered.failedCell ?? 0) + 1}: {rendered.error.ename}: {rendered.error.evalue}
-              </p>
-              <details className="mt-2">
-                <summary className="cursor-pointer text-xs text-text-dim">Traceback</summary>
-                <pre className="mt-2 overflow-x-auto rounded-lg bg-bg-soft px-3 py-2 font-mono text-xs whitespace-pre-wrap break-words">
-                  {rendered.error.traceback}
-                </pre>
-              </details>
-            </div>
-          )}
+      <div className="flex flex-wrap items-center gap-2">
+        {run.data?.run.state === 'failed' && (
+          <button type="button" className="btn-primary py-1.5" onClick={() => void retryFailed()} disabled={retrying}>
+            Retry failed tasks
+          </button>
+        )}
+        <button type="button" className="btn-primary py-1.5" onClick={() => void again()} disabled={rerunning}>
+          Run again
+        </button>
+        <a
+          className="btn-ghost py-1.5"
+          href={runNotebookUrl(namespace, name, runId, taskId, true)}
+          download
+        >
+          Download
+        </a>
+      </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {run.data?.run.state === 'failed' && (
-              <button type="button" className="btn-primary py-1.5" onClick={() => void retryFailed()} disabled={retrying}>
-                Retry failed tasks
-              </button>
-            )}
-            <button type="button" className="btn-primary py-1.5" onClick={() => void again()} disabled={rerunning}>
-              Run again
-            </button>
-            <a
-              className="btn-ghost py-1.5"
-              href={runNotebookUrl(namespace, name, runId, taskId, true)}
-              download
-            >
-              Download
-            </a>
-          </div>
+      {retryError ? <ErrorBox error={retryError} /> : null}
 
-          {retryError ? <ErrorBox error={retryError} /> : null}
-
-          <NotebookFrame title="Executed notebook" html={rendered.html} />
-        </>
-      )}
+      <ExecutedNotebook namespace={namespace} name={name} runId={runId} taskId={taskId} />
     </div>
   )
 }
