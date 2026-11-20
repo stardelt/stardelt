@@ -949,6 +949,8 @@ export type DeploymentRecord = {
   status: 'applied' | 'failed' | string
   /** The pipelines the deploy wrote or removed. */
   pipelines: { namespace: string; name: string; action: string }[]
+  /** The rendered Pipeline documents this deploy applied, as sent (`resources`); a failed deploy sends none. */
+  resources: unknown[]
   /** The `sub` of the person who recorded the deploy. */
   actor: string
   /** The name the sign-in provided (stardelt-nova#1094); null for a row recorded before it was stored. */
@@ -1697,6 +1699,8 @@ export const api = {
    * `keep401` is for dev auth mode: there is no sign-in there, so the 401 is a sentence about the
    * install, not a session to renew (nova#671). */
   deploymentRecords: (keep401 = false) => jget<DeploymentRecord[]>('/api/deployments', keep401),
+  /** One recorded deploy (`GET /api/deployments/{id}`, design nova#357); 404 when it is not one of the caller's groups. */
+  deployment: (id: number, keep401 = false) => jget<DeploymentRecord>(`/api/deployments/${id}`, keep401),
   /** The caller's personal settings as one JSON object (`{}` when none). */
   settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
   putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),

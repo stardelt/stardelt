@@ -204,7 +204,7 @@ function RecordedDeploys({ keep401 }: { keep401: boolean }) {
       <div className="min-w-0">
         <h2 id="recorded-deploys" className="text-lg font-semibold">Recorded deployments</h2>
         <p className="text-sm text-text-mute">
-          Newest first, at most 50: what each deploy put on a stage, from which commit, and who deployed it.
+          Newest first, at most 50: what each deploy put on a stage, from which commit, and who deployed it. A row opens the deploy and the documents it applied.
         </p>
       </div>
       <div className="card relative overflow-x-auto">
@@ -226,7 +226,11 @@ function RecordedDeploys({ keep401 }: { keep401: boolean }) {
               return (
                 <tr key={record.id} className="border-t border-border/70 hover:bg-bg-soft/30">
                   <td className="td px-5 whitespace-nowrap" title={when.title}>{when.text}</td>
-                  <td className="td px-3 font-mono text-xs break-words">{record.bundle} · {record.target}</td>
+                  <td className="td px-3 font-mono text-xs break-words">
+                    <Link to={`/deployments/${record.id}`} className="underline break-words">
+                      {record.bundle} · {record.target}
+                    </Link>
+                  </td>
                   <td className="td px-3 font-mono text-xs" title={record.revision ?? undefined}>
                     {record.revision ? shortRevision(record.revision) : '—'}
                   </td>
