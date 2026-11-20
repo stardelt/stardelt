@@ -11,6 +11,7 @@
 //!   pipeline's owner group may record one, and the row says which person did.
 //! - `GET /api/deployments` lists the caller's rows, newest first, at most 50, optionally
 //!   narrowed to one `bundle` and one `target`.
+//! - `GET /api/deployments/{id}` answers one row of the caller's groups, or 404.
 //! - `actor` is the caller's subject (`sub`, the stable key) and `actor_name` the name the
 //!   sign-in provided (`preferred_username` → `email` → `upn` → `name` → `sub`); the page
 //!   shows the name.
@@ -27,7 +28,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -265,6 +266,52 @@ pub async fn list(
     }
 }
 
+/// `GET /api/deployments/{id}` — one row, or 404 when it is not one the caller may see.
+#[utoipa::path(
+    get,
+    operation_id = "deployments_get",
+    path = "/api/deployments/{id}",
+    tag = "public",
+    description = "One deployment record by id: an administrator sees every row, anybody else only a row of their own groups. A row that does not exist and a row of somebody else's group answer the same 404, so the route never says which ids exist.",
+    params(("id" = i64, Path, description = "The deployment's id")),
+    responses(
+        (status = 200, description = "The row", body = Deployment),
+        (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such row among the ones the caller may see", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn detail(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    caller: Option<Extension<Principal>>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
+    };
+    let sql = format!(
+        "SELECT {ROW_COLUMNS} FROM deployment \
+         WHERE id = $1 AND ($2 = TRUE OR owner_group = ANY($3))"
+    );
+    match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(caller.identity.is_admin)
+        .bind(&caller.identity.groups)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(row)) => Json(row).into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            &format!("no deployment {id} among the ones you may see"),
+        ),
+        Err(e) => store_failed(e),
+    }
+}
+
 /// `POST /api/deployments` — `201` with the stored row.
 #[utoipa::path(
     post,
@@ -344,7 +391,9 @@ pub async fn record(
 
 /// The deployment routes, merged into the API router.
 pub(crate) fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/deployments", get(list).post(record))
+    Router::new()
+        .route("/deployments", get(list).post(record))
+        .route("/deployments/{id}", get(detail))
 }
 
 #[cfg(test)]
@@ -450,6 +499,17 @@ mod tests {
         let response = list(
             State(crate::router_tests::test_state_with_db(None)),
             Query(ListParams::default()),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn detail_answers_503_before_401_without_a_state_store() {
+        let response = detail(
+            State(crate::router_tests::test_state_with_db(None)),
+            Path(1),
             None,
         )
         .await;
@@ -608,5 +668,67 @@ mod tests {
             serde_json::from_slice(&body).expect("a bare JSON array");
         assert_eq!(rows.len(), 1, "{rows:#?}");
         assert_eq!(rows[0]["target"], "prod");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn detail_answers_ones_own_row_and_404_for_another_groups_row() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        insert(&pool, "analytics", "sales", "prod", 0.0).await;
+        insert(&pool, "finance", "sales", "prod", 1.0).await;
+        let own: i64 = sqlx::query_scalar("SELECT id FROM deployment WHERE owner_group = $1")
+            .bind("analytics")
+            .fetch_one(&pool)
+            .await
+            .expect("the analytics row");
+        let other: i64 = sqlx::query_scalar("SELECT id FROM deployment WHERE owner_group = $1")
+            .bind("finance")
+            .fetch_one(&pool)
+            .await
+            .expect("the finance row");
+
+        let ada = || principal("ada", &["analytics"]);
+        let response = detail(
+            State(crate::router_tests::test_state_with_db(Some(pool.clone()))),
+            Path(own),
+            Some(Extension(ada())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("one row is a body");
+        let row: serde_json::Value = serde_json::from_slice(&body).expect("one row");
+        assert_eq!(row["bundle"], "sales");
+
+        let response = detail(State(state), Path(other), Some(Extension(ada()))).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "another group's row is not one the caller may see"
+        );
+
+        let admin = Principal {
+            identity: Identity {
+                is_admin: true,
+                ..identity("root", &[], false)
+            },
+            via: "session",
+            access_token: None,
+        };
+        for id in [own, other] {
+            let response = detail(
+                State(crate::router_tests::test_state_with_db(Some(pool.clone()))),
+                Path(id),
+                Some(Extension(admin.clone())),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "an administrator answers both rows (id {id})"
+            );
+        }
     }
 }

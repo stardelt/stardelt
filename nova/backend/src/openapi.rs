@@ -100,6 +100,7 @@ pub struct ErrorResponse {
         crate::stages::compare,
         crate::deployments::record,
         crate::deployments::list,
+        crate::deployments::detail,
         crate::pipelines::list_runs,
         crate::pipelines::notebook_usage,
         crate::streams::list,

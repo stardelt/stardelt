@@ -33,7 +33,7 @@ def run(argv, *responses, environ=ENV):
 def test_the_shipped_operations_are_well_formed():
     ops = api.operations()
     assert len(ops) >= 40
-    for name in ("me", "query_run", "pipelines_get", "table_history", "query_log_list"):
+    for name in ("me", "query_run", "pipelines_get", "table_history", "query_log_list", "deployments_get"):
         assert name in ops, name
     for op_id, op in ops.items():
         assert op["method"] in {"GET", "POST", "PUT", "DELETE", "PATCH"}, op_id

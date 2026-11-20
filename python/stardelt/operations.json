@@ -207,6 +207,15 @@
       "query_params": [],
       "body": true
     },
+    "deployments_get": {
+      "method": "GET",
+      "path": "/api/deployments/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "deployments_list": {
       "method": "GET",
       "path": "/api/deployments",
