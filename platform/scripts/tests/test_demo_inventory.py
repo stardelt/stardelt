@@ -43,6 +43,13 @@ def stream(name, owner_group="demo", viewers=None, phase="Running", checkpoint="
     return {"metadata": {"name": name}, "spec": spec, "status": status}
 
 
+def connection(name, viewers=None, scope="managed"):
+    spec = {"scope": scope, "type": "postgresql", "usableBy": ["demo"]}
+    if viewers is not None:
+        spec["viewers"] = viewers
+    return {"metadata": {"name": name}, "spec": spec}
+
+
 def cluster(name, group="demo", user=None, viewers=None, phase="Running"):
     owner = {}
     if group is not None:
@@ -247,6 +254,35 @@ class CheckTest(unittest.TestCase):
             for name in schedules
         }
         self.assertEqual(demo_inventory.check(pipelines, [], [], runs), [])
+
+    def test_check_names_an_empty_streams_page(self):
+        """When: no stream names `visitors` but a connection does. Then: check names the
+        streams page and the command that fills it."""
+        problems = demo_inventory.check(
+            [], [], [], {}, [connection("rnacentral", viewers=["visitors"])]
+        )
+        self.assertIn(
+            "no stream is visible to visitors: the visitors' streams page is empty"
+            " — run make demo-stream YES=1",
+            problems,
+        )
+
+    def test_check_names_an_empty_connections_page(self):
+        """When: no connection names `visitors` but a stream does. Then: check names the
+        connections page and the command that fills it."""
+        problems = demo_inventory.check(
+            [], [stream("demo-pegelonline", viewers=["visitors"])], [], {}, []
+        )
+        self.assertIn(
+            "no connection is visible to visitors: the visitors' connections page is empty"
+            " — run make demo-connection YES=1",
+            problems,
+        )
+
+    def test_check_without_connections_keeps_the_old_behaviour(self):
+        """When: a caller does not pass the connection list. Then: check stays silent — the
+        page rule is not suddenly failing for it."""
+        self.assertEqual(demo_inventory.check([], [], [], {}), [])
 
 
 if __name__ == "__main__":
