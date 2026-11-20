@@ -65,6 +65,10 @@ pub const LAYERS: [&str; 3] = ["bronze", "silver", "gold"];
 /// sensitive: the value is the same string this API answers for everyone.
 pub const LAYER_LABEL: &str = "stardelt.io/layer";
 
+/// The `Catalog` label that marks a production catalog (`#103`). Only `production` is
+/// meaningful today; anything else is no marker, so a typo can never read as production.
+pub const ENVIRONMENT_LABEL: &str = "stardelt.io/environment";
+
 /// How long a catalog's layer is trusted before the `Catalog` objects are listed again.
 /// A label added or removed with `kubectl` shows up within a minute.
 const LAYERS_TTL: Duration = Duration::from_secs(60);
@@ -150,6 +154,10 @@ pub struct CatalogInfo {
     /// every other catalog.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<String>,
+    /// `production` when the catalog's `Catalog` resource carries `stardelt.io/environment:
+    /// production`; absent otherwise (the default is development, #103).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     /// Whether the caller may write to this catalog (has write/create/manage grant).
     #[serde(rename = "canWrite")]
     pub can_write: bool,
@@ -319,6 +327,17 @@ pub fn layer_of_object(object: &serde_json::Value) -> Option<String> {
     label
         .and_then(layer_value)
         .or_else(|| name.and_then(layer_from_name))
+}
+
+/// The environment a `Catalog` object declares: `production` when `stardelt.io/environment`
+/// is exactly that, else `None`.
+pub fn environment_of_object(object: &serde_json::Value) -> Option<String> {
+    let label = object
+        .get("metadata")
+        .and_then(|metadata| metadata.get("labels"))
+        .and_then(|labels| labels.get(ENVIRONMENT_LABEL))
+        .and_then(serde_json::Value::as_str)?;
+    (label == "production").then(|| "production".to_string())
 }
 
 /// One catalog's layer: the label from [`catalog_layers`] when the resource carries one,
@@ -780,7 +799,7 @@ pub async fn first_writable_catalog(
     operation_id = "catalogs_list",
     path = "/api/catalog/catalogs",
     tag = "public",
-    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise; `environment` is `production` when the resource carries `stardelt.io/environment: production`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
     responses(
         (status = 200, description = "The browsable catalogs and the default one", body = CatalogsResponse),
         (status = 502, description = "The query engine or the catalog is not reachable", body = crate::openapi::ErrorResponse),
@@ -847,6 +866,7 @@ pub async fn list_catalogs(
             name,
             id,
             layer,
+            environment: entry.and_then(|row| row.environment.clone()),
             can_write,
             owner,
             description,
@@ -2111,6 +2131,22 @@ mod tests {
             layer_of_object(&catalog_object("silver", Some("platinum"))).as_deref(),
             Some("silver")
         );
+    }
+
+    #[test]
+    fn environment_of_object_accepts_only_production() {
+        assert_eq!(ENVIRONMENT_LABEL, "stardelt.io/environment");
+        let with = |value: Option<&str>| {
+            let mut object = catalog_object("finance", None);
+            if let Some(value) = value {
+                object["metadata"]["labels"] = json!({ ENVIRONMENT_LABEL: value });
+            }
+            environment_of_object(&object)
+        };
+        assert_eq!(with(Some("production")), Some("production".to_string()));
+        assert_eq!(with(Some("Production")), None);
+        assert_eq!(with(Some("prod")), None);
+        assert_eq!(with(None), None);
     }
 
     #[tokio::test]

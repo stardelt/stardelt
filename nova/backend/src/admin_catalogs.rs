@@ -60,6 +60,10 @@ pub struct AdminCatalog {
     /// or the catalog's own name; absent for every other catalog (stardelt-nova#109).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<String>,
+    /// `production` when the catalog's `Catalog` resource carries `stardelt.io/environment:
+    /// production`; absent otherwise (the default is development, #103).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     /// `spec.displayName`, or `null`.
     pub display_name: Option<String>,
     /// `spec.description`, or `null`.
@@ -199,7 +203,7 @@ pub struct NewTeamResponse {
     operation_id = "admin_catalogs_list",
     path = "/api/admin/catalogs",
     tag = "internal",
-    description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
+    description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name; `environment`: `production` when the resource carries `stardelt.io/environment: production`, absent otherwise): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per catalog, medallion layers first, then by name", body = [AdminCatalog]),
         (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
@@ -921,6 +925,7 @@ pub(crate) fn row_from_object(object: &Value) -> AdminCatalog {
     AdminCatalog {
         name: text(metadata.get("name")).unwrap_or_default(),
         layer: crate::catalog::layer_of_object(object),
+        environment: crate::catalog::environment_of_object(object),
         display_name: text(spec.get("displayName")),
         description: text(spec.get("description")),
         owner: text(spec.get("owner")),
@@ -1062,6 +1067,7 @@ fn demo_row() -> AdminCatalog {
         name: "warehouse".to_string(),
         // The demo catalog is `warehouse`: not one of the three layer names.
         layer: None,
+        environment: None,
         display_name: None,
         description: None,
         owner: Some("stardelt-admins".to_string()),
@@ -1182,6 +1188,30 @@ mod tests {
     }
 
     #[test]
+    fn row_carries_only_a_production_environment() {
+        let mut object = catalog_object("finance", Some("Ready"));
+        object["metadata"]["labels"] = json!({ crate::catalog::ENVIRONMENT_LABEL: "production" });
+        let mapped = row_from_object(&object);
+        assert_eq!(mapped.environment.as_deref(), Some("production"));
+        assert_eq!(
+            serde_json::to_value(&mapped).unwrap()["environment"],
+            "production"
+        );
+
+        let mut other = catalog_object("finance", Some("Ready"));
+        other["metadata"]["labels"] =
+            json!({ crate::catalog::ENVIRONMENT_LABEL: "production-ish" });
+        let mapped = row_from_object(&other);
+        assert_eq!(mapped.environment, None);
+        assert!(
+            serde_json::to_value(&mapped)
+                .unwrap()
+                .get("environment")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn maps_a_catalog_object_to_a_row() {
         let mapped = row_from_object(&catalog_object("finance", Some("Ready")));
         assert_eq!(
@@ -1189,6 +1219,7 @@ mod tests {
             AdminCatalog {
                 name: "finance".into(),
                 layer: None,
+                environment: None,
                 display_name: Some("Finance".into()),
                 description: Some("Contracted revenue, orders and billing.".into()),
                 owner: Some("stardelt-finops".into()),

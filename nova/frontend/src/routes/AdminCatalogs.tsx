@@ -9,6 +9,7 @@ import {
   type AdminCatalogGrant,
 } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import EnvironmentBadge from '../components/EnvironmentBadge'
 import LayerBadge from '../components/LayerBadge'
 
 // Administrator view of every catalog and its grants (stardelt-nova#251), and the one
@@ -373,6 +374,7 @@ function ByCatalog({
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono font-medium break-words">{catalog.name}</span>
                     <LayerBadge layer={catalog.layer} />
+                    <EnvironmentBadge environment={catalog.environment} />
                   </div>
                   {catalog.displayName && (
                     <div className="text-xs text-text-mute break-words">{catalog.displayName}</div>
