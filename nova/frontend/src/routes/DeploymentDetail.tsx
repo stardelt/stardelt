@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { api } from '../api'
+import { api, type DeploymentRecord } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { SkeletonTable } from '../components/Skeleton'
 import { shortRevision } from '../format'
@@ -24,6 +24,55 @@ function documentLabel(document: unknown): string {
   return `${kind} ${namespace}/${name}`
 }
 
+export type PeerPromotion = {
+  target: string
+  id: number
+  createdAt: string
+  /** Files whose bytes differ in the peer (or that the peer does not have). */
+  changed: string[]
+  /** Files the peer has that this deploy does not. */
+  added: string[]
+}
+
+/** Newest first: the RFC 3339 timestamp, then the id (two deploys can share a second). */
+function newestFirst(a: DeploymentRecord, b: DeploymentRecord): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1
+  return b.id - a.id
+}
+
+/** For one deploy, the newest applied deploy of the same bundle in every other stage, and the
+ * files whose digests differ. `[]` when the bundle reached no other stage. */
+export function promotions(here: DeploymentRecord, all: DeploymentRecord[]): PeerPromotion[] {
+  const mine = new Map((Array.isArray(here.files) ? here.files : []).map((file) => [file.path, file.sha256]))
+  const newest = new Map<string, DeploymentRecord>()
+  for (const other of Array.isArray(all) ? all : []) {
+    if (other.id === here.id || other.target === here.target) continue
+    if (other.bundle !== here.bundle || other.status !== 'applied') continue
+    const kept = newest.get(other.target)
+    if (!kept || newestFirst(kept, other) > 0) newest.set(other.target, other)
+  }
+  return [...newest.values()]
+    .sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0))
+    .map((peer) => {
+      const changed: string[] = []
+      const added: string[] = []
+      const theirs = new Map((Array.isArray(peer.files) ? peer.files : []).map((file) => [file.path, file.sha256]))
+      for (const [path, sha256] of mine) {
+        if (theirs.get(path) !== sha256) changed.push(path)
+      }
+      for (const path of theirs.keys()) {
+        if (!mine.has(path)) added.push(path)
+      }
+      return {
+        target: peer.target,
+        id: peer.id,
+        createdAt: peer.createdAt,
+        changed: changed.sort(),
+        added: added.sort(),
+      }
+    })
+}
+
 export default function DeploymentDetail() {
   const { id = '' } = useParams()
   const deploymentId = Number(id)
@@ -34,6 +83,14 @@ export default function DeploymentDetail() {
     queryKey: ['deployment', deploymentId],
     queryFn: () => api.deployment(deploymentId, keep401),
     retry: false,
+  })
+
+  const records = useQuery({
+    queryKey: ['deployment-records', keep401],
+    queryFn: () => api.deploymentRecords(keep401),
+    retry: false,
+    staleTime: 30_000,
+    enabled: Boolean(detail.data),
   })
 
   if (detail.isLoading) {
@@ -67,6 +124,7 @@ export default function DeploymentDetail() {
   const when = formatWhen(row.createdAt)
   const resources = Array.isArray(row.resources) ? row.resources : []
   const files = Array.isArray(row.files) ? row.files : []
+  const peers = detail.data && Array.isArray(records.data) ? promotions(detail.data, records.data) : []
 
   return (
     <div className="max-w-4xl space-y-5">
@@ -197,6 +255,60 @@ export default function DeploymentDetail() {
           </div>
         )}
       </section>
+
+      {row.status === 'applied' && (
+        <section aria-labelledby="deployment-promotion" className="space-y-2">
+          <h2 id="deployment-promotion" className="text-lg font-semibold">Promotion</h2>
+          {peers.length === 0 ? (
+            <p className="text-sm text-text-mute">No deploy of this bundle reached another stage.</p>
+          ) : (
+            <ul className="space-y-2">
+              {peers.map((peer) => {
+                const differing = [...peer.changed, ...peer.added]
+                return (
+                  <li key={peer.target} className="card px-5 py-3 text-sm">
+                    {differing.length === 0 ? (
+                      <p className="text-text-dim">
+                        The same bundle files reached {peer.target} (
+                        <Link to={`/deployments/${peer.id}`} className="underline">
+                          #{peer.id}
+                        </Link>
+                        )
+                      </p>
+                    ) : (
+                      <div className="space-y-1">
+                        <p className="text-text-dim">
+                          Changed since {peer.target} (
+                          <Link to={`/deployments/${peer.id}`} className="underline">
+                            #{peer.id}
+                          </Link>
+                          ):
+                        </p>
+                        <p className="text-text-dim">
+                          {peer.changed.length > 0 &&
+                            (peer.changed.length === 1
+                              ? `1 file: ${peer.changed[0]}`
+                              : `${peer.changed.length} files`)}
+                          {peer.changed.length > 0 && peer.added.length > 0 && ' · '}
+                          {peer.added.length > 0 && `${peer.added.length} more that only that stage has`}
+                        </p>
+                        <ul className="text-xs font-mono break-words">
+                          {differing.slice(0, 5).map((path) => (
+                            <li key={path}>{path}</li>
+                          ))}
+                        </ul>
+                        {differing.length > 5 && (
+                          <p className="text-xs text-text-mute">and {differing.length - 5} more</p>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
+      )}
 
       <p className="text-sm text-text-dim">
         Roll back with <code className="font-mono text-xs">{`stardelt bundle rollback --deployment ${row.id}`}</code>{' '}
