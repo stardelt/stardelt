@@ -10,7 +10,8 @@ import { formatWhen } from './Pipelines'
  * One recorded bundle deploy (stardelt#102, slice 4): what it put on the stage, which pipelines
  * it wrote or removed, who deployed it, and the rendered documents a rollback replays. The rows
  * of the list page carry only a count, so this page is where a person reads the documents before
- * `stardelt bundle rollback --deployment <id>`.
+ * `stardelt bundle rollback --deployment <id>`. It also lists the bundle files and their digests,
+ * so a person can compare a deploy with the commit it names.
  */
 
 /** Kind and name of a rendered document; a document without them still shows up, labelled. */
@@ -64,6 +65,7 @@ export default function DeploymentDetail() {
 
   const when = formatWhen(row.createdAt)
   const resources = Array.isArray(row.resources) ? row.resources : []
+  const files = Array.isArray(row.files) ? row.files : []
 
   return (
     <div className="max-w-4xl space-y-5">
@@ -151,6 +153,36 @@ export default function DeploymentDetail() {
                 <pre className="text-xs overflow-x-auto">{JSON.stringify(document, null, 2)}</pre>
               </details>
             ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="deployment-files" className="space-y-2">
+        <h2 id="deployment-files" className="text-lg font-semibold">Files</h2>
+        <p className="text-sm text-text-mute">
+          {files.length === 1 ? '1 bundle file' : `${files.length} bundle files`}
+        </p>
+        {files.length === 0 ? (
+          <div className="card px-5 py-3 text-sm text-text-mute">This deploy recorded no bundle files</div>
+        ) : (
+          <div className="card relative overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">The bundle files this deploy read, with their sha256.</caption>
+              <thead className="bg-bg-soft/50">
+                <tr>
+                  <th scope="col" className="th px-5 py-2.5">Path</th>
+                  <th scope="col" className="th px-3 py-2.5">sha256</th>
+                </tr>
+              </thead>
+              <tbody>
+                {files.map((file) => (
+                  <tr key={file.path} className="border-t border-border/70">
+                    <td className="td px-5 font-mono text-xs break-words">{file.path}</td>
+                    <td className="td px-3 font-mono text-xs" title={file.sha256}>{file.sha256.slice(0, 12)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
