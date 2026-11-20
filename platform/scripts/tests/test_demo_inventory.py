@@ -110,6 +110,126 @@ class RenderTest(unittest.TestCase):
         self.assertIn("| solo | maddin | — | Running |", text)
         self.assertNotIn("None", text)
 
+    def test_last_run_comes_from_nova_not_the_crd(self):
+        """When: the CRD's `status.runs` is empty and Nova's row says success. Then: the
+        Nova run is the `last run` cell, not `never`."""
+        obj = pipeline("shop-dbt", schedule={"cron": "0 4 * * *", "timezone": "Europe/Berlin"})
+        text = demo_inventory.render(
+            [obj],
+            [],
+            [],
+            {"shop-dbt": {"state": "success", "startedAt": "2026-11-19T20:18:00Z"}},
+        )
+        self.assertIn(
+            "| shop-dbt | demo | 0 4 * * * Europe/Berlin | — | success 2026-11-19T20:18:00Z | sql |",
+            text,
+        )
+
+
+class CheckTest(unittest.TestCase):
+    def test_check_names_a_legacy_pipeline(self):
+        """When: `shop-01-bronze` survived the bundle deploy. Then: check names it and the fix."""
+        problems = demo_inventory.check(
+            [pipeline("shop-01-bronze", schedule=None)], [], [], {}
+        )
+        self.assertIn(
+            "the legacy pipeline shop-01-bronze is still there — run make demo-shop YES=1",
+            problems,
+        )
+
+    def test_check_names_a_demo_object_without_visitors(self):
+        """When: a demo-owned pipeline, stream and cluster lack `visitors`. Then: one message
+        each, with the kind word and the command that converges it."""
+        problems = demo_inventory.check(
+            [pipeline("shop-1-bronze", schedule={"cron": "0 2 * * *"}, viewers=["analysts"])],
+            [stream("demo-pegelonline", viewers=[])],
+            [cluster("demo-lab", viewers=["analysts"])],
+            {"shop-1-bronze": {"state": "success", "startedAt": "2026-11-19T20:18:00Z"}},
+        )
+        self.assertIn(
+            "pipeline shop-1-bronze does not name visitors in its viewers — run make demo-shop YES=1",
+            problems,
+        )
+        self.assertIn(
+            "stream demo-pegelonline does not name visitors in its viewers — run make demo-stream YES=1",
+            problems,
+        )
+        self.assertIn(
+            "cluster demo-lab does not name visitors in its viewers — run make demo-cluster YES=1",
+            problems,
+        )
+
+    def test_check_names_an_on_demand_demo_pipeline(self):
+        """When: a demo-owned pipeline carries no schedule. Then: check names it."""
+        problems = demo_inventory.check(
+            [pipeline("shop-ontap", schedule=None, viewers=["visitors"])], [], [], {}
+        )
+        self.assertIn(
+            "pipeline shop-ontap is on demand; a visitor cannot see a next run", problems
+        )
+
+    def test_check_names_a_pipeline_that_never_ran(self):
+        """When: a scheduled demo pipeline has no last run in Nova. Then: check names `never`."""
+        problems = demo_inventory.check(
+            [
+                pipeline(
+                    "shop-dbt",
+                    schedule={"cron": "0 4 * * *"},
+                    viewers=["visitors"],
+                )
+            ],
+            [],
+            [],
+            {"shop-dbt": None},
+        )
+        self.assertIn("pipeline shop-dbt's last run is never", problems)
+
+    def test_check_names_a_failed_last_run(self):
+        """When: Nova's last run of a scheduled demo pipeline failed. Then: check names it."""
+        problems = demo_inventory.check(
+            [pipeline("shop-dbt", schedule={"cron": "0 4 * * *"}, viewers=["visitors"])],
+            [],
+            [],
+            {"shop-dbt": {"state": "failed", "startedAt": "2026-11-19T20:18:00Z"}},
+        )
+        self.assertIn("pipeline shop-dbt's last run is failed", problems)
+
+    def test_check_names_a_stream_without_visitors(self):
+        """When: the demo's stream names no viewers. Then: check names it with `demo-stream`."""
+        problems = demo_inventory.check([], [stream("demo-pegelonline", viewers=None)], [], {})
+        self.assertIn(
+            "stream demo-pegelonline does not name visitors in its viewers"
+            " — run make demo-stream YES=1",
+            problems,
+        )
+
+    def test_check_ignores_another_group(self):
+        """When: another group owns the objects. Then: check is silent — it asserts only demo."""
+        problems = demo_inventory.check(
+            [pipeline("retail-medallion", owner_group="retail-analytics", schedule=None)],
+            [stream("mobility", owner_group="mobility-analytics")],
+            [cluster("other", group="retail-analytics")],
+            {},
+        )
+        self.assertEqual(problems, [])
+
+    def test_check_accepts_a_green_converged_state(self):
+        """When: the bundle's three scheduled, visible pipelines ran green in Nova. Then: []."""
+        schedules = {
+            "shop-1-bronze": {"cron": "0 2 * * *", "timezone": "Europe/Berlin"},
+            "shop-2-silver": {"cron": "30 2 * * *", "timezone": "Europe/Berlin"},
+            "shop-3-gold": {"cron": "0 3 * * *", "timezone": "Europe/Berlin"},
+        }
+        pipelines = [
+            pipeline(name, schedule=schedule, viewers=["visitors"])
+            for name, schedule in schedules.items()
+        ]
+        runs = {
+            name: {"state": "success", "startedAt": "2026-11-19T20:18:00Z"}
+            for name in schedules
+        }
+        self.assertEqual(demo_inventory.check(pipelines, [], [], runs), [])
+
 
 if __name__ == "__main__":
     unittest.main()

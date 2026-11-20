@@ -45,7 +45,9 @@
 # `make demo-dbt-grant YES=1`. Row 23 is the public-database pipeline (#79 point 2), fixed by
 # `make demo-public-db YES=1`. Row 24 is the demo's stream (#79 point 3), fixed by
 # `make demo-stream YES=1`. Row 25 is the three visitor catalogs' vended credentials, fixed by
-# `make demo-sts-visitors YES=1` (#201 slice a).
+# `make demo-sts-visitors YES=1` (#201 slice a). Row 26 is the demo inventory's convergence —
+# no legacy pipeline, viewers, a schedule and a green last run (#79 slice 2), fixed by
+# `make demo-shop YES=1 && make demo-stream YES=1`.
 #
 # Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
 # shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
@@ -198,6 +200,7 @@ if [ "$mode" = check ]; then
       23) check_23 || rc=1 ;;
       24) check_24 || rc=1 ;;
       25) check_25 || rc=1 ;;
+      26) check_26 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -826,6 +829,21 @@ PY
     fi
   }
 
+  # 26. The demo inventory converged (#79, slice 2): no legacy shop pipeline, every demo object
+  # names visitors, every demo pipeline has a schedule, and Nova's last run is green. The failure
+  # line is the inventory's own `✗ …`.
+  check_26() {
+    local out
+    if out="$(python3 scripts/demo_inventory.py --check 2>&1)"; then
+      check_msg="the demo inventory converged (no legacy pipelines, viewers, schedule, green last run)"
+    else
+      check_msg="$(printf '%s\n' "$out" | grep -m1 '^✗ ' || true)"
+      [ -n "$check_msg" ] || check_msg="demo_inventory.py --check did not answer: $(printf '%s\n' "$out" | head -n1)"
+      check_fix="make demo-shop YES=1 && make demo-stream YES=1"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -856,6 +874,7 @@ PY
   render 23
   render 24
   render 25
+  render 26
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then
