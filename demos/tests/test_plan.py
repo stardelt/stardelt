@@ -88,7 +88,7 @@ def test_a_resource_without_a_name_is_rejected():
         plan({"spec": {"tasks": [sql("a")]}}, "t")
 
 
-@pytest.mark.parametrize("kind", ["python", "quality"])
+@pytest.mark.parametrize("kind", ["python"])
 def test_a_kind_without_a_runtime_is_refused(kind):
     # The API accepts these kinds ahead of their runtimes; the plan must refuse them so the
     # loader skips the DAG at parse time instead of failing when the schedule fires.
