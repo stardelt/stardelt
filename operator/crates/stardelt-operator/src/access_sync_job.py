@@ -654,13 +654,19 @@ def workload_identities():
     `kubernetes~<uid>` in Lakekeeper (#538), so that principal has to be an
     assignee of its owner group's role or the workload reads nothing. An install
     whose Role predates this read answers 403, and one without the CRD answers 404:
-    the tick then goes on without workload identities, as it did before. An identity
-    is a principal id and is never printed.
+    a 403 returns None because the tick cannot tell a removed principal from an
+    unreadable list (#693), and a 404 returns {} because with no CRD no workload
+    identity can exist. An identity is a principal id and is never printed.
     """
     status, listing = k8s_request("GET", SERVICEPRINCIPAL_PATH)
-    if status in (403, 404):
+    if status == 403:
         print(
-            "access-sync: no ServicePrincipal read (HTTP %s); workload identities skipped" % status
+            "access-sync: no ServicePrincipal read (HTTP 403); workload identities kept as they are"
+        )
+        return None
+    if status == 404:
+        print(
+            "access-sync: no ServicePrincipal CRD (HTTP 404); no workload identities"
         )
         return {}
     if status != 200 or listing is None:
@@ -905,13 +911,16 @@ def ensure_role(group, roles=None):
     return role_id
 
 
-def sync_assignees(role_id, subs, workloads=frozenset()):
+def sync_assignees(role_id, subs, workloads=frozenset(), keep_workloads=False):
     """Make the role's assignees exactly `subs` plus `workloads`; returns `(written, removed)`.
 
     Only `assignee` entries are touched — the role's `ownership` (its creator) and any
     other relation stay as they are. Nothing is written when the sets already match,
     which is what makes a converged tick a no-op. `workloads` are full principal ids
     (`kubernetes~<uid>`) and are not prefixed, unlike `subs`, which become `oidc~<sub>`.
+    `keep_workloads` is for a tick whose ServicePrincipal read answered 403: a
+    `kubernetes~` assignee is kept, because this tick cannot tell a removed principal
+    from an unreadable list (#693).
     """
     status, body = lk("GET", "/management/v1/permissions/role/%s/assignments" % role_id)
     if status != 200 or body is None:
@@ -924,6 +933,8 @@ def sync_assignees(role_id, subs, workloads=frozenset()):
     desired = {"oidc~" + sub for sub in subs} | set(workloads)
     writes = sorted(desired - current)
     deletes = sorted(current - desired)
+    if keep_workloads:
+        deletes = [user for user in deletes if not user.startswith("kubernetes~")]
     if not writes and not deletes:
         return 0, 0
     # A removal must not be answered from a table that still lists the person: drop
@@ -1855,6 +1866,8 @@ def main():
     warehouses = warehouse_pairs(list_warehouses())
     static = static_assignees()
     workloads = workload_identities()
+    workloads_read = workloads is not None
+    workloads = workloads or {}
     groups = managed_groups(catalogs) | warehouse_groups(warehouses)
 
     # 1. Keycloak, read-only, before any write: a realm that refuses this client
@@ -1889,7 +1902,10 @@ def main():
         assignees = members[group] | static.get(group, set())
         try:
             written, removed = sync_assignees(
-                role_id, assignees, workloads.get(group, set())
+                role_id,
+                assignees,
+                workloads.get(group, set()),
+                keep_workloads=not workloads_read,
             )
         except SyncProblem as problem:
             problems[group] = problem

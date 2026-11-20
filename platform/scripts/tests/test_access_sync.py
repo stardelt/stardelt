@@ -1492,7 +1492,21 @@ class MainTest(JobTestCase):
         users_role = self.fake.roles["stardelt-users"]["id"]
         self.assertEqual(self.fake.assignees(users_role), {"oidc~sub-1", "oidc~sub-2"})
 
-    def test_a_converged_workload_assignee_is_a_no_op(self):
+    def test_a_forbidden_principal_read_keeps_the_workload_assignee(self):
+        self.kubernetes = self.use_catalogs(
+            json.loads(json.dumps(CATALOG)), principals=[PRINCIPAL]
+        )
+        self.assertEqual(access_sync.main(), 0)
+        self.kubernetes.principals_forbidden = True
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-1"},
+            "a tick that cannot read the principals must not remove the workload identity",
+        )
+
+
         self.use_catalogs(json.loads(json.dumps(CATALOG)), principals=[PRINCIPAL])
         self.assertEqual(access_sync.main(), 0)
         seen = len(self.fake.requests)
