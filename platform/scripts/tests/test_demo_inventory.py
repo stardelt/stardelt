@@ -155,7 +155,7 @@ class CheckTest(unittest.TestCase):
             problems,
         )
         self.assertIn(
-            "cluster demo-lab does not name visitors in its viewers — run make demo-cluster YES=1",
+            "cluster demo-lab does not name visitors in its viewers — run make install-spark-demo YES=1",
             problems,
         )
 

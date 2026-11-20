@@ -32,8 +32,11 @@ LEGACY = (
     "shop-07-stg-cust", "shop-08-stg-prod", "shop-09-stg-lines", "shop-10-revenue", "shop-11-ltv", "shop-12-mix",
 )
 
-# The command that converges one kind of demo object (a cluster's fix is named as #79 records it).
-FIX = {"pipeline": "demo-shop", "stream": "demo-stream", "cluster": "demo-cluster"}
+# The command that converges one kind of demo object. A demo-owned cluster today is the
+# sandbox `make install-spark-demo` applies (`manifests/spark-demo-sandbox.yaml`); a
+# `demo-cluster` target is only added with the first demo-owned SparkCluster in the
+# stardelt namespace (#79).
+FIX = {"pipeline": "demo-shop", "stream": "demo-stream", "cluster": "install-spark-demo"}
 
 
 def kubectl(kind, namespace):
