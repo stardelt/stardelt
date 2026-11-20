@@ -126,6 +126,24 @@ class RenderTest(unittest.TestCase):
         )
 
 
+class RunsFromPayloadTest(unittest.TestCase):
+    def test_runs_only_from_the_named_namespace(self):
+        """When: Nova lists a run pipeline, one with `lastRun: null` and one in another
+        namespace. Then: the dictionary has the two named rows (the second mapped to `None`)
+        and nothing from the other namespace."""
+        payload = {
+            "pipelines": [
+                {"name": "shop-dbt", "namespace": "stardelt", "lastRun": {"state": "success"}},
+                {"name": "shop-1-bronze", "namespace": "stardelt", "lastRun": None},
+                {"name": "retail-medallion", "namespace": "retail-analytics", "lastRun": {"state": "success"}},
+            ]
+        }
+        self.assertEqual(
+            demo_inventory.runs_from_payload(payload, "stardelt"),
+            {"shop-dbt": {"state": "success"}, "shop-1-bronze": None},
+        )
+
+
 class CheckTest(unittest.TestCase):
     def test_check_names_a_legacy_pipeline(self):
         """When: `shop-01-bronze` survived the bundle deploy. Then: check names it and the fix."""

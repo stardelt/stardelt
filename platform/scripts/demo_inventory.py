@@ -6,10 +6,20 @@ schedule, viewers and last run of every object in one namespace. It only reads: 
 `kubectl get -o json` calls, no Secret, no applied change. The removal decision for the
 demo bundle is taken from this table, so the output is not edited by hand.
 
-The `last run` column comes from Nova — the source a visitor's Pipelines page reads — through
-a signed-in `stardelt` CLI (`--runs nova`, the default); the CRD's `status.runs` is never
-written, so `--runs crd` is a fallback that always answers `never`. `--check` turns the
-tables into the convergence list of stardelt#79 and exits 1 on a violation.
+The `last run` column comes from Nova — the source a visitor's Pipelines page reads — in one of
+three ways (`--runs`):
+
+  nova (default)  a signed-in `stardelt` CLI; when there is no login, the public demo person's
+                  token answers instead (the same way `scripts/verify-demo-visitor.sh` reads it).
+  demo            only the public demo person's token: no CLI and no login needed, which is what
+                  the build plane can run. The password `demo` is PUBLIC ON PURPOSE
+                  (`scripts/public-demo.sh` creates that person and prints it), so nothing here
+                  prints the token and the two temp files it uses are mode 0600 and removed on
+                  every path.
+  crd             the CRD's `status.runs`, which nothing writes, so every row answers `never`.
+
+`--check` turns the tables into the convergence list of stardelt#79 and exits 1 on a violation,
+including a last-run source that could not answer at all.
 """
 from __future__ import annotations
 
@@ -19,10 +29,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
 from pathlib import Path
 
 DASH = "—"
 NOVA_DEFAULT = "https://alpha.dev.stardelt.io"
+# The realm `verify-demo-visitor.sh` signs `demo` into; `ISSUER` overrides it, as there.
+ISSUER_DEFAULT = "https://id.alpha.dev.stardelt.io/realms/stardelt"
 GROUP = "visitors"
 
 # The twelve one-statement pipelines the shop bundle replaced, verbatim from
@@ -91,6 +105,73 @@ def nova_last_runs(cli, host, namespace):
         for row in rows
         if row.get("namespace") == namespace
     }
+
+
+def demo_token(issuer):
+    """The public demo person's token, or `None` when the sign-in fails.
+
+    `scripts/mint-user-token.py` reads the password from a file, never argv, and never prints the
+    token; the password here is `demo`, public on purpose (`scripts/public-demo.sh`). Both temp
+    files are mode 0600 and removed on every path.
+    """
+    password_file = token_file = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, mode="w") as handle:
+            password_file = handle.name
+            handle.write("demo\n")
+        os.chmod(password_file, 0o600)
+        fd, token_file = tempfile.mkstemp()
+        os.close(fd)
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("mint-user-token.py"))],
+            env={
+                **os.environ,
+                "ISSUER": issuer,
+                "USER": "demo",
+                "PASSWORD_FILE": password_file,
+                "TOKEN_FILE": token_file,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            first = next((line for line in result.stderr.strip().splitlines() if line), "")
+            print(f"demo-inventory: cannot mint the demo token ({first})", file=sys.stderr)
+            return None
+        return Path(token_file).read_text().strip()
+    finally:
+        for path in (password_file, token_file):
+            if path and os.path.exists(path):
+                os.unlink(path)
+
+
+def runs_from_payload(payload, namespace):
+    """`{pipeline name: lastRun}` of one namespace from a `PipelineListResponse`; pure."""
+    return {
+        row["name"]: row.get("lastRun")
+        for row in payload.get("pipelines") or []
+        if row.get("namespace") == namespace
+    }
+
+
+def nova_runs_from_demo(nova, namespace, issuer):
+    """`{pipeline name: lastRun}` read as the public demo person; `None` on any failure."""
+    token = demo_token(issuer)
+    if token is None:
+        return None
+    # The token is written and never read back: it stays out of every line this prints.
+    request = urllib.request.Request(
+        f"{nova}/api/pipelines", headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return runs_from_payload(payload, namespace)
+    except Exception as err:  # noqa: BLE001 — any failure is one line, like the CLI path
+        first = next((line for line in str(err).strip().splitlines() if line), "")
+        print(f"demo-inventory: cannot read Nova's pipelines as demo ({first})", file=sys.stderr)
+        return None
 
 
 def _cell(value):
@@ -256,9 +337,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--runs",
-        choices=("nova", "crd"),
+        choices=("nova", "crd", "demo"),
         default="nova",
-        help="where the last run comes from (default: nova, the source the visitor's page reads)",
+        help=(
+            "where the last run comes from: nova (the signed-in CLI, the visitor's source), "
+            "demo (the public demo person's token; needs no CLI login) or crd; default: nova"
+        ),
     )
     parser.add_argument(
         "--check",
@@ -268,6 +352,8 @@ def main() -> int:
     args = parser.parse_args()
 
     runs = None
+    if args.runs in ("nova", "demo"):
+        issuer = os.environ.get("ISSUER", ISSUER_DEFAULT)
     if args.runs == "nova":
         cli = cli_path()
         if cli is None:
@@ -275,12 +361,24 @@ def main() -> int:
                 "demo-inventory: the stardelt CLI is not installed — see make public-demo-check 0b",
                 file=sys.stderr,
             )
-            if args.check:
-                return 1
         else:
             runs = nova_last_runs(cli, args.nova, args.namespace)
-            if runs is None and args.check:
-                return 1
+        if runs is None:
+            # The build plane has no login: the public demo person's token answers the same
+            # question, from the same Nova endpoint the visitor's page reads.
+            fallback = nova_runs_from_demo(args.nova, args.namespace, issuer)
+            if fallback is not None:
+                print(
+                    "! no CLI sign-in; the last-run column comes from the public demo person",
+                    file=sys.stderr,
+                )
+                runs = fallback
+        if runs is None and args.check:
+            return 1
+    elif args.runs == "demo":
+        runs = nova_runs_from_demo(args.nova, args.namespace, issuer)
+        if runs is None and args.check:
+            return 1
 
     pipelines = kubectl("pipelines.stardelt.io", args.namespace)
     streams = kubectl("streamapps.stardelt.io", args.namespace)
