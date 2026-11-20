@@ -48,6 +48,17 @@ Usage: include "stardelt.appHost" (list $ "trino" "trino")
 {{- end -}}
 {{- end -}}
 
+{{/* JWKS URL a component without discovery reads: in-cluster Keycloak for `platform`, the
+provider's `jwksUri` for `external`. */}}
+{{- define "stardelt.jwksUri" -}}
+{{- $mode := include "stardelt.identityMode" . -}}
+{{- if eq $mode "platform" -}}
+{{- printf "http://keycloak.%s.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs" .Release.Namespace -}}
+{{- else -}}
+{{- .Values.identity.jwksUri | default "" -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Value of an existing Secret key (kept across `helm upgrade`), else a fresh
 random one. Usage: include "stardelt.secretValue" (list $ "secret-name" "key")

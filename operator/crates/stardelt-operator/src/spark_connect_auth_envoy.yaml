@@ -37,26 +37,26 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
                       providers:
                         keycloak:
-                          issuer: https://id.__BASE_DOMAIN__/realms/stardelt
-                          audiences: ["spark-connect"]
+                          issuer: __ISSUER_URL__
+                          audiences: ["__AUDIENCE__"]
                           # Hand the verified JWT on: the upstream is where an identity would
                           # have to be read from (the Connect server reads none today, #208).
                           forward: true
-                          # The RBAC filter below matches on the verified payload's `groups`.
+                          # The RBAC filter below matches on the verified payload's group claim.
                           payload_in_metadata: jwt_payload
                           remote_jwks:
                             http_uri:
-                              uri: http://keycloak.__NAMESPACE__.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs
-                              cluster: keycloak
+                              uri: __JWKS_URI__
+                              cluster: __JWKS_CLUSTER__
                               timeout: 5s
                             cache_duration: 300s
                       rules:
                         - match: { prefix: "/" }
                           requires: { provider_name: keycloak }
-                  # A verified token is not yet a member: the RBAC filter is the gate. The
-                  # realm's `groups` claim carries short names (`full.path: false`), so the
-                  # two entries are exactly the groups `stardelt-users` and `stardelt-admins`.
-                  # `visitors` — the public demo's group — is in neither and gets
+                  # A verified token is not yet a member: the RBAC filter is the gate. It reads
+                  # the instance's group claim (short names: the platform realm sets
+                  # `full.path: false`) and admits exactly the members group and the instance's
+                  # admin group. `visitors` — the public demo's group — is in neither and gets
                   # PERMISSION_DENIED (Envoy answers 403, gRPC maps it).
                   - name: envoy.filters.http.rbac
                     typed_config:
@@ -69,18 +69,18 @@ static_resources:
                             principals:
                               - metadata:
                                   filter: envoy.filters.http.jwt_authn
-                                  path: [{ key: jwt_payload }, { key: groups }]
+                                  path: [{ key: jwt_payload }, { key: __GROUP_CLAIM__ }]
                                   value:
                                     list_match:
                                       one_of:
                                         string_match: { exact: "stardelt-users" }
                               - metadata:
                                   filter: envoy.filters.http.jwt_authn
-                                  path: [{ key: jwt_payload }, { key: groups }]
+                                  path: [{ key: jwt_payload }, { key: __GROUP_CLAIM__ }]
                                   value:
                                     list_match:
                                       one_of:
-                                        string_match: { exact: "stardelt-admins" }
+                                        string_match: { exact: "__ADMIN_GROUP__" }
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -113,3 +113,21 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: keycloak.__NAMESPACE__.svc.cluster.local, port_value: 8080 }
+    # The customer's JWKS host for `identity.mode: external`; unused in platform mode, where
+    # `__JWKS_CLUSTER__` is `keycloak` and this cluster goes unused.
+    - name: jwks
+      connect_timeout: 5s
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: __JWKS_TLS_HOST__
+      load_assignment:
+        cluster_name: jwks
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: __JWKS_TLS_HOST__, port_value: 443 }

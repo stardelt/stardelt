@@ -865,60 +865,80 @@ pub async fn ensure_spark(
     }
     // The token-checking front (stardelt/stardelt#231, D44 twin): the platform path applies it
     // whenever the platform IdP exists (`platform/Makefile:703-712`); the operator does the same
-    // when it runs the IdP itself. `identity.mode: external` is out of scope (a customer's
-    // provider, and its JWKS URL is not the operator's to know).
+    // for both sign-in modes. The issuer, JWKS URL, audience and group claim come from the
+    // instance's identity contract, so an external provider's tokens are checked against its own
+    // keys and claim (`stardelt#507`).
     let instance = crate::principal_keycloak::platform_instance_for_namespace(ctx, namespace)
         .await
         .ok()
         .flatten();
     if let Some(instance) = instance
-        && instance.spec.identity.mode == IdentityMode::Platform
+        && instance.spec.identity.mode != IdentityMode::None
     {
-        let base_domain = instance.spec.base_domain.clone().unwrap_or_default();
-        if let Err(e) = apply::<ConfigMap>(
-            client,
-            namespace,
-            &spark_auth::config_map(namespace, &base_domain),
-            dry_run,
-        )
-        .await
-        {
-            return Some(status(NAME, false, e.to_string()));
-        }
-        if let Err(e) = apply::<Deployment>(
-            client,
-            namespace,
-            &spark_auth::deployment(namespace),
-            dry_run,
-        )
-        .await
-        {
-            return Some(status(NAME, false, e.to_string()));
-        }
-        if let Err(e) =
-            apply::<Service>(client, namespace, &spark_auth::service(namespace), dry_run).await
-        {
-            return Some(status(NAME, false, e.to_string()));
-        }
-        if let Err(e) = apply::<NetworkPolicy>(
-            client,
-            namespace,
-            &spark_auth::network_policy(namespace),
-            dry_run,
-        )
-        .await
-        {
-            return Some(status(NAME, false, e.to_string()));
-        }
-        // The public name comes from the instance's ingress settings; `ingress::spark`
-        // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`.
-        if let Some(route) = ingress::spark(&instance.spec)
-            && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
-        {
-            return Some(status(NAME, false, e.to_string()));
-        }
-        if let Err(e) = crate::principal_keycloak::ensure_spark_audience(ctx, namespace).await {
-            return Some(status(NAME, false, e.to_string()));
+        let issuer = crate::identity::issuer_url(&instance.spec).ok().flatten();
+        let jwks = crate::identity::jwks_uri(&instance.spec).ok().flatten();
+        let audience = if instance.spec.identity.mode == IdentityMode::External {
+            instance.spec.identity.api_audience.clone().unwrap_or_default()
+        } else {
+            "spark-connect".to_string()
+        };
+        if let (Some(issuer), Some(jwks)) = (issuer, jwks) {
+            if let Err(e) = apply::<ConfigMap>(
+                client,
+                namespace,
+                &spark_auth::config_map(
+                    namespace,
+                    &issuer,
+                    &jwks,
+                    &audience,
+                    instance.spec.identity.effective_group_claim(),
+                    &instance.spec.identity.admin_group,
+                ),
+                dry_run,
+            )
+            .await
+            {
+                return Some(status(NAME, false, e.to_string()));
+            }
+            if let Err(e) = apply::<Deployment>(
+                client,
+                namespace,
+                &spark_auth::deployment(namespace),
+                dry_run,
+            )
+            .await
+            {
+                return Some(status(NAME, false, e.to_string()));
+            }
+            if let Err(e) =
+                apply::<Service>(client, namespace, &spark_auth::service(namespace), dry_run).await
+            {
+                return Some(status(NAME, false, e.to_string()));
+            }
+            if let Err(e) = apply::<NetworkPolicy>(
+                client,
+                namespace,
+                &spark_auth::network_policy(namespace),
+                dry_run,
+            )
+            .await
+            {
+                return Some(status(NAME, false, e.to_string()));
+            }
+            // The public name comes from the instance's ingress settings; `ingress::spark`
+            // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`.
+            if let Some(route) = ingress::spark(&instance.spec)
+                && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
+            {
+                return Some(status(NAME, false, e.to_string()));
+            }
+            // Only the platform's own realm has an audience to create; an external provider's
+            // is the customer's to register.
+            if instance.spec.identity.mode == IdentityMode::Platform
+                && let Err(e) = crate::principal_keycloak::ensure_spark_audience(ctx, namespace).await
+            {
+                return Some(status(NAME, false, e.to_string()));
+            }
         }
     }
     if let Err(e) = apply_cluster(client, &spark::pod_guard_policy(), dry_run).await {

@@ -217,7 +217,7 @@ pub struct IdentityClient {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[schemars(extend("x-kubernetes-validations" = [
     {
-        "rule": "self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && (!has(self.clients) || size(self.clients) == 0))",
+        "rule": "self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && !has(self.jwksUri) && (!has(self.clients) || size(self.clients) == 0))",
         "message": "platform mode creates its own clients: leave provider, apiAudience and clients out"
     },
     {
@@ -227,6 +227,10 @@ pub struct IdentityClient {
     {
         "rule": "self.mode != 'external' || has(self.tokenEndpoint)",
         "message": "external mode needs tokenEndpoint"
+    },
+    {
+        "rule": "self.mode != 'external' || has(self.jwksUri)",
+        "message": "external mode needs jwksUri"
     },
     {
         "rule": "self.mode != 'external' || has(self.apiAudience)",
@@ -263,6 +267,17 @@ pub struct IdentitySpec {
     )]
     #[schemars(length(min = 1, max = 512), regex(pattern = r"^https://\S+$"))]
     pub token_endpoint: Option<String>,
+    /// `external` only: the provider's JWKS URL — `jwks_uri` in
+    /// `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: Envoy cannot
+    /// discover it, and the operator does not fetch a customer's discovery document.
+    /// A `platform` instance derives it from the Keycloak it deploys and must leave it out.
+    #[serde(
+        default,
+        rename = "jwksUri",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(min = 1, max = 512), regex(pattern = r"^https://\S+$"))]
+    pub jwks_uri: Option<String>,
     /// `external` only: which kind of provider this instance talks to.
     #[serde(default)]
     pub provider: IdentityProvider,
@@ -306,6 +321,7 @@ impl Default for IdentitySpec {
             mode: IdentityMode::None,
             issuer_url: None,
             token_endpoint: None,
+            jwks_uri: None,
             provider: IdentityProvider::Oidc,
             api_audience: None,
             clients: BTreeMap::new(),

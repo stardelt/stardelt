@@ -62,6 +62,11 @@ pub fn validate(spec: &PlatformInstanceSpec) -> Result<(), IdentityError> {
                     .into(),
             ));
         }
+        if identity.jwks_uri.is_some() {
+            return Err(IdentityError(
+                "platform mode derives the JWKS URL; leave identity.jwksUri out".into(),
+            ));
+        }
         return Ok(());
     }
     let url = identity
@@ -80,6 +85,15 @@ pub fn validate(spec: &PlatformInstanceSpec) -> Result<(), IdentityError> {
     if !endpoint.starts_with("https://") {
         return Err(IdentityError(
             "identity.tokenEndpoint must be an https:// URL".into(),
+        ));
+    }
+    let jwks = identity
+        .jwks_uri
+        .as_deref()
+        .ok_or_else(|| IdentityError("external mode needs jwksUri".into()))?;
+    if !jwks.starts_with("https://") {
+        return Err(IdentityError(
+            "identity.jwksUri must be an https:// URL".into(),
         ));
     }
     if identity.api_audience.is_none() {
@@ -162,6 +176,29 @@ pub fn token_endpoint(spec: &PlatformInstanceSpec) -> Result<Option<String>, Ide
     Ok(Some(endpoint))
 }
 
+/// The JWKS URL a component without discovery reads: derived in-cluster for `platform`,
+/// given for `external`.
+pub fn jwks_uri(spec: &PlatformInstanceSpec) -> Result<Option<String>, IdentityError> {
+    match spec.identity.mode {
+        IdentityMode::None => Ok(None),
+        IdentityMode::Platform => Ok(Some(format!(
+            "http://keycloak.{}.svc.cluster.local:8080/realms/{}/protocol/openid-connect/certs",
+            spec.namespace, PLATFORM_REALM
+        ))),
+        IdentityMode::External => {
+            let url = spec.identity.jwks_uri.as_deref().ok_or_else(|| {
+                IdentityError("identity.mode external needs identity.jwksUri".into())
+            })?;
+            if !url.starts_with("https://") {
+                return Err(IdentityError(
+                    "identity.jwksUri must be an https:// URL".into(),
+                ));
+            }
+            Ok(Some(url.trim_end_matches('/').to_string()))
+        }
+    }
+}
+
 /// The base domain of the instance, or the reason it cannot be used. `keycloak.rs` renders the
 /// realm hosts and `KC_HOSTNAME` from the same value.
 pub(crate) fn base_domain(spec: &PlatformInstanceSpec) -> Result<&str, IdentityError> {
@@ -218,10 +255,14 @@ pub fn contract(
     let Some(endpoint) = token_endpoint(spec)? else {
         return Ok(None);
     };
+    let Some(jwks) = jwks_uri(spec)? else {
+        return Ok(None);
+    };
     let domain = base_domain(spec)?;
     let mut data = BTreeMap::from([
         ("issuerUrl".to_string(), issuer),
         ("tokenEndpoint".to_string(), endpoint),
+        ("jwksUri".to_string(), jwks),
         (
             "groupClaim".to_string(),
             spec.identity.effective_group_claim().to_string(),
@@ -326,6 +367,7 @@ mod tests {
             mode: IdentityMode::External,
             issuer_url: Some(url.into()),
             token_endpoint: Some(format!("{}/token", url.trim_end_matches('/'))),
+            jwks_uri: Some("https://idp.example.com/keys".into()),
             api_audience: Some("api://stardelt".into()),
             clients: BTreeMap::from([(
                 "nova".to_string(),
@@ -654,6 +696,58 @@ mod tests {
     }
 
     #[test]
+    fn contract_publishes_the_jwks_url_for_both_modes() {
+        let platform = spec(
+            IdentitySpec {
+                mode: IdentityMode::Platform,
+                ..IdentitySpec::default()
+            },
+            Some("data.example.com"),
+        );
+        let data = contract(&platform).unwrap().unwrap();
+        assert_eq!(
+            data["jwksUri"],
+            "http://keycloak.stardelt.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs"
+        );
+
+        let external_instance = spec(
+            external("https://idp.example.com"),
+            Some("data.example.com"),
+        );
+        let data = contract(&external_instance).unwrap().unwrap();
+        assert_eq!(data["jwksUri"], "https://idp.example.com/keys");
+    }
+
+    #[test]
+    fn external_mode_needs_a_jwks_uri() {
+        let mut no_jwks = external("https://idp.example.com");
+        no_jwks.jwks_uri = None;
+        assert_eq!(
+            err(&spec(no_jwks, Some("d.example.com"))),
+            "external mode needs jwksUri"
+        );
+        let mut http = external("https://idp.example.com");
+        http.jwks_uri = Some("http://idp.example.com/keys".into());
+        assert_eq!(
+            err(&spec(http, Some("d.example.com"))),
+            "identity.jwksUri must be an https:// URL"
+        );
+    }
+
+    #[test]
+    fn platform_mode_leaves_the_jwks_uri_out() {
+        let platform = IdentitySpec {
+            mode: IdentityMode::Platform,
+            jwks_uri: Some("https://elsewhere.example.com/keys".into()),
+            ..IdentitySpec::default()
+        };
+        assert_eq!(
+            err(&spec(platform, Some("d.example.com"))),
+            "platform mode derives the JWKS URL; leave identity.jwksUri out"
+        );
+    }
+
+    #[test]
     fn a_platform_instance_must_not_write_the_token_endpoint() {
         let mut platform = IdentitySpec {
             mode: IdentityMode::Platform,
@@ -721,6 +815,7 @@ mod tests {
         for message in [
             "platform mode creates its own clients: leave provider, apiAudience and clients out",
             "external mode needs issuerUrl",
+            "external mode needs jwksUri",
             "external mode needs apiAudience",
             "external mode needs a nova client",
             "client names are nova, trino, lakekeeper, superset, airflow, jupyterhub and trino-group-sync",

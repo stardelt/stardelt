@@ -115,6 +115,17 @@ spec:
                       from `baseDomain` and must be left out.
                     nullable: true
                     type: string
+                  jwksUri:
+                    description: |-
+                      `external` only: the provider's JWKS URL — `jwks_uri` in
+                      `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: Envoy cannot
+                      discover it, and the operator does not fetch a customer's discovery document.
+                      A `platform` instance derives it from the Keycloak it deploys and must leave it out.
+                    maxLength: 512
+                    minLength: 1
+                    nullable: true
+                    pattern: ^https://\S+$
+                    type: string
                   mode:
                     default: none
                     description: |-
@@ -148,11 +159,13 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: 'platform mode creates its own clients: leave provider, apiAudience and clients out'
-                  rule: self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && (!has(self.clients) || size(self.clients) == 0))
+                  rule: self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && !has(self.jwksUri) && (!has(self.clients) || size(self.clients) == 0))
                 - message: external mode needs issuerUrl
                   rule: self.mode != 'external' || has(self.issuerUrl)
                 - message: external mode needs tokenEndpoint
                   rule: self.mode != 'external' || has(self.tokenEndpoint)
+                - message: external mode needs jwksUri
+                  rule: self.mode != 'external' || has(self.jwksUri)
                 - message: external mode needs apiAudience
                   rule: self.mode != 'external' || has(self.apiAudience)
                 - message: external mode needs a nova client

@@ -18,6 +18,10 @@ chart/Chart.lock
 # Python bytecode (notebook helper tests run locally too)
 __pycache__/
 
+# The identity ConfigMap `make install-spark` renders the Spark front from (public
+# endpoints and claim names, no secret).
+.spark-identity.json
+
 # Rendered catalog properties for the extra Catalogs (scripts/render-catalogs.sh);
 # they are built per release from the live Catalog objects.
 .build/
