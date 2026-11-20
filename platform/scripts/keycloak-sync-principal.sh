@@ -403,7 +403,8 @@ secret.setdefault("metadata", {})["labels"] = {
 }
 json.dump(secret, open(sys.argv[2], "w"))
 PY
-  kubectl -n "$NAMESPACE" apply -f "$tmp/secret-final.json" >/dev/null \
+  kubectl -n "$NAMESPACE" apply --server-side --field-manager=stardelt-sync-principal --force-conflicts \
+    -f "$tmp/secret-final.json" >/dev/null \
     || fail "client $CLIENT_ID was converged but Secret $NAMESPACE/$SECRET_NAME could not be written"
   if [ -z "$secret_present" ]; then
     echo "› secret $NAMESPACE/$SECRET_NAME: created"
@@ -411,6 +412,10 @@ PY
     echo "› secret $NAMESPACE/$SECRET_NAME: rotated"
   fi
 fi
+# An older run wrote the whole object — the secret bytes included — into this annotation
+# (client-side `kubectl apply`, stardelt/stardelt#544). It is removed on every run.
+kubectl -n "$NAMESPACE" annotate secret "$SECRET_NAME" \
+  kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true
 if [ -n "$token_url_updated" ]; then
   echo "› secret $NAMESPACE/$SECRET_NAME: token-url converged"
 fi
