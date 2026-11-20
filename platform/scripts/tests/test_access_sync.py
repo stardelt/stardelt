@@ -395,14 +395,25 @@ class FakeKeycloak:
 
 
 class FakeKubernetes:
-    """One in-memory Catalog: GET returns it, PATCH /status merges into it."""
+    """One in-memory Catalog: GET returns it, PATCH /status merges into it.
 
-    def __init__(self, catalog):
+    `principals` is what `GET .../serviceprincipals` answers (`{"items": [...]}`) and
+    `principals_forbidden` makes that read answer 403 — the Role of an install that
+    predates the workload identity read (#684).
+    """
+
+    def __init__(self, catalog, principals=(), principals_forbidden=False):
         self.catalog = catalog
+        self.principals = list(principals)
+        self.principals_forbidden = principals_forbidden
         self.calls = []
 
     def request(self, method, path, body=None):
         self.calls.append((method, path, body))
+        if method == "GET" and path.endswith("/serviceprincipals"):
+            if self.principals_forbidden:
+                return 403, None
+            return 200, {"items": self.principals}
         if method == "GET":
             return 200, self.catalog
         if method == "PATCH" and path.endswith("/status"):
@@ -594,10 +605,14 @@ class JobTestCase(unittest.TestCase):
         access_sync.keycloak_token = lambda: "keycloak-token"
         return fake
 
-    def use_catalogs(self, *catalogs):
+    def use_catalogs(self, *catalogs, principals=(), principals_forbidden=False):
         """Wire main() to in-memory Catalogs and return the fake Kubernetes API."""
         catalogs = list(catalogs)
-        kubernetes = FakeKubernetes(catalogs[0])
+        kubernetes = FakeKubernetes(
+            catalogs[0],
+            principals=principals,
+            principals_forbidden=principals_forbidden,
+        )
         access_sync.k8s_request = kubernetes.request
         access_sync.list_catalogs = lambda: catalogs
         return kubernetes
@@ -1377,6 +1392,14 @@ CATALOG = {
     },
 }
 
+# A ServicePrincipal carrying the workload identity #650 writes (#492): the
+# ServiceAccount token of the workload signs in to Lakekeeper as `kubernetes~<uid>`.
+PRINCIPAL = {
+    "metadata": {"name": "etl"},
+    "spec": {"ownerGroup": "stardelt-users"},
+    "status": {"workloadIdentity": "kubernetes~uid-1"},
+}
+
 
 class MainTest(JobTestCase):
     """`main()` end to end against both fakes and an in-memory Catalog."""
@@ -1432,6 +1455,61 @@ class MainTest(JobTestCase):
         self.assertEqual(
             self.fake.assignees(users_role),
             {"oidc~sub-1", "oidc~sub-2", "oidc~superset"},
+        )
+
+    def test_a_workload_identity_joins_its_owner_groups_role(self):
+        self.use_catalogs(json.loads(json.dumps(CATALOG)), principals=[PRINCIPAL])
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-1"},
+        )
+
+    def test_a_principal_without_a_workload_identity_adds_nothing(self):
+        principal = json.loads(json.dumps(PRINCIPAL))
+        del principal["status"]
+        self.use_catalogs(json.loads(json.dumps(CATALOG)), principals=[principal])
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(self.fake.assignees(users_role), {"oidc~sub-1", "oidc~sub-2"})
+
+    def test_a_foreign_identity_form_is_ignored(self):
+        principal = json.loads(json.dumps(PRINCIPAL))
+        principal["status"]["workloadIdentity"] = "oidc~x"
+        self.use_catalogs(json.loads(json.dumps(CATALOG)), principals=[principal])
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(self.fake.assignees(users_role), {"oidc~sub-1", "oidc~sub-2"})
+
+    def test_a_forbidden_principal_list_is_not_a_failed_run(self):
+        self.use_catalogs(
+            json.loads(json.dumps(CATALOG)),
+            principals=[PRINCIPAL],
+            principals_forbidden=True,
+        )
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(self.fake.assignees(users_role), {"oidc~sub-1", "oidc~sub-2"})
+
+    def test_a_converged_workload_assignee_is_a_no_op(self):
+        self.use_catalogs(json.loads(json.dumps(CATALOG)), principals=[PRINCIPAL])
+        self.assertEqual(access_sync.main(), 0)
+        seen = len(self.fake.requests)
+        self.assertEqual(access_sync.main(), 0)
+        self.assertEqual(
+            [
+                request
+                for request in self.fake.requests[seen:]
+                if request[0] == "POST" and request[1].endswith("/assignments")
+            ],
+            [],
+            "the second tick must not rewrite a converged workload assignee",
+        )
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-1"},
         )
 
     def test_a_keycloak_403_fails_the_run_without_a_partial_write(self):
