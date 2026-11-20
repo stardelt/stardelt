@@ -71,10 +71,17 @@ def test_one_row_per_pipeline_of_this_bundle_target_in_name_order_with_what_nova
     code, out, err, session = run(["bundle", "summary", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=LISTING))
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"name": "bare"},
-        {"name": "load", "revision": "0123abc-dirty", "deployedBy": "ada", "deployedAt": "2026-11-01T08:00:01Z"},
+        {"name": "bare", "kind": "Pipeline"},
+        {
+            "name": "load",
+            "kind": "Pipeline",
+            "revision": "0123abc-dirty",
+            "deployedBy": "ada",
+            "deployedAt": "2026-11-01T08:00:01Z",
+        },
         {
             "name": "nightly",
+            "kind": "Pipeline",
             "revision": "0123abc",
             "deployedBy": "ada",
             "deployedAt": "2026-11-01T08:00:00Z",
@@ -107,8 +114,14 @@ def test_a_stream_the_deploy_left_is_listed_with_its_kind_beside_the_pipelines(t
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"name": "bare"},
-        {"name": "load", "revision": "0123abc-dirty", "deployedBy": "ada", "deployedAt": "2026-11-01T08:00:01Z"},
+        {"name": "bare", "kind": "Pipeline"},
+        {
+            "name": "load",
+            "kind": "Pipeline",
+            "revision": "0123abc-dirty",
+            "deployedBy": "ada",
+            "deployedAt": "2026-11-01T08:00:01Z",
+        },
         {
             "name": "measurements",
             "kind": "StreamApp",
@@ -119,6 +132,7 @@ def test_a_stream_the_deploy_left_is_listed_with_its_kind_beside_the_pipelines(t
         },
         {
             "name": "nightly",
+            "kind": "Pipeline",
             "revision": "0123abc",
             "deployedBy": "ada",
             "deployedAt": "2026-11-01T08:00:00Z",

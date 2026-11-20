@@ -1182,7 +1182,7 @@ def summary(nova, directory, target):
     The rows are the objects ``destroy`` would list (stamped with this bundle's name and this target; in a
     ``development`` target only the caller's own). Each row has the ``name`` and, when Nova knows them, the
     ``revision`` (Git commit) it was deployed from, ``deployedBy``, ``deployedAt`` and ``modified`` (true when someone changed
-    the object after the deploy). A pipeline row is ``{"name": ...}``; a stream row carries ``"kind": "StreamApp"``.
+    the object after the deploy). Every row carries its ``kind``: ``"Pipeline"`` or ``"StreamApp"``.
     Nothing is written.
     """
     problems, _, resolved = validate(directory, target)
@@ -1195,7 +1195,7 @@ def summary(nova, directory, target):
     rows = []
     for pipeline in sorted(_deployed(nova, provenance(directory, target)["bundle"], target, mode, user), key=lambda p: p["name"]):
         stamp = pipeline["deployment"]
-        row = {"name": pipeline["name"]}
+        row = {"name": pipeline["name"], "kind": "Pipeline"}
         for key in ("revision", "deployedBy", "deployedAt", "modified"):
             if stamp.get(key) is not None:
                 row[key] = stamp[key]
@@ -1278,13 +1278,13 @@ def destroy(nova, directory, target, confirm=False):
     ]
     if not confirm:
         return [], [
-            *({"action": "would-delete", "name": name} for _, name in found),
+            *({"action": "would-delete", "name": name, "kind": "Pipeline"} for _, name in found),
             *({"action": "would-delete", "name": name, "kind": "StreamApp"} for _, name in found_streams),
         ]
     done = []
     for namespace, name in found:
         nova.call("pipelines_delete", path={"namespace": namespace, "name": name})
-        done.append({"action": "deleted", "name": name})
+        done.append({"action": "deleted", "name": name, "kind": "Pipeline"})
     for namespace, name in found_streams:
         nova.call("streams_delete", path={"namespace": namespace, "name": name})
         done.append({"action": "deleted", "name": name, "kind": "StreamApp"})

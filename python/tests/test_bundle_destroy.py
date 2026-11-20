@@ -46,8 +46,8 @@ def test_without_yes_it_only_lists_what_this_bundle_target_deployed(tmp_path):
     )
     assert (code, err) == (0, WARNING)
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-delete", "name": "load"},
-        {"action": "would-delete", "name": "nightly"},
+        {"action": "would-delete", "name": "load", "kind": "Pipeline"},
+        {"action": "would-delete", "name": "nightly", "kind": "Pipeline"},
     ]
     assert calls(session) == [("GET", "/api/me"), ("GET", "/api/pipelines"), ("GET", "/api/streams")], "nothing is deleted without --yes"
 
@@ -60,8 +60,8 @@ def test_with_yes_each_listed_pipeline_is_deleted_and_nothing_else(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "deleted", "name": "load"},
-        {"action": "deleted", "name": "nightly"},
+        {"action": "deleted", "name": "load", "kind": "Pipeline"},
+        {"action": "deleted", "name": "nightly", "kind": "Pipeline"},
     ]
     assert [(m, u) for m, u in calls(session) if m == "DELETE"] == [
         ("DELETE", "/api/pipelines/stardelt/load"),
@@ -110,8 +110,8 @@ def test_without_yes_it_lists_this_bundles_streams_too(tmp_path):
     code, out, err, session = run(["bundle", "destroy", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=LISTING), streams)
     assert (code, err) == (0, WARNING)
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-delete", "name": "load"},
-        {"action": "would-delete", "name": "nightly"},
+        {"action": "would-delete", "name": "load", "kind": "Pipeline"},
+        {"action": "would-delete", "name": "nightly", "kind": "Pipeline"},
         {"action": "would-delete", "name": "measurements", "kind": "StreamApp"},
     ]
     assert not [call for call in calls(session) if call[0] == "DELETE"], "nothing is deleted without --yes"
@@ -133,8 +133,8 @@ def test_with_yes_each_listed_stream_is_deleted(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "deleted", "name": "load"},
-        {"action": "deleted", "name": "nightly"},
+        {"action": "deleted", "name": "load", "kind": "Pipeline"},
+        {"action": "deleted", "name": "nightly", "kind": "Pipeline"},
         {"action": "deleted", "name": "measurements", "kind": "StreamApp"},
     ]
     assert calls(session)[-1] == ("DELETE", "/api/streams/stardelt/measurements")
