@@ -3,6 +3,7 @@
 # generate releases/v<version>/ from its pins. Changes nothing but that folder.
 #   bash scripts/release/cut.sh 0.0.N [commit]            # commit defaults to HEAD
 #   NO_STAMP_CHECK=1 bash scripts/release/cut.sh 0.0.N    # only to test this script before a stamp
+#   NO_FRESH_NODE_CHECK=1 bash scripts/release/cut.sh 0.0.N   # only to test this script
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
@@ -22,6 +23,11 @@ echo "› every pin equals what its tag resolves to; the operator's goldens agre
 (cd platform && OPERATOR_DIR=../operator bash scripts/check-operator-pins.sh)
 (cd platform && OPERATOR_DIR=../operator python3 scripts/check_golden_image.py)
 (cd operator && bash scripts/check-cli-image.sh)
+
+echo "› a fresh node passed at this commit (#2)"
+if [[ "${NO_FRESH_NODE_CHECK:-0}" != 1 ]]; then
+  python3 scripts/release/check_fresh_node.py "$(git rev-parse HEAD)"
+fi
 
 echo "› generate releases/v$version/"
 python3 scripts/release/generate.py "$version" --commit "$(git rev-parse HEAD)"
