@@ -220,7 +220,7 @@ class PinImageTest(unittest.TestCase):
         catalogue = self.work / "chart" / "files" / "spark-runtimes.json"
         catalogue.parent.mkdir(parents=True, exist_ok=True)
         catalogue.write_text(
-            '{"spark-4.1-py3.11": {"image": "ghcr.io/stardelt/spark:dev@sha256:'
+            '{"spark-4.1-py3.13": {"image": "ghcr.io/stardelt/spark:dev@sha256:'
             + zero
             + '"}}\n'
         )
@@ -252,7 +252,7 @@ class PinImageTest(unittest.TestCase):
         self.assertEqual(document["kind"], "ConfigMap")
         self.assertEqual(document["metadata"]["name"], "stardelt-spark-runtimes")
         self.assertTrue(
-            json.loads(document["data"]["spark-4.1-py3.11"])["image"].endswith(
+            json.loads(document["data"]["spark-4.1-py3.13"])["image"].endswith(
                 "@" + DIGEST
             )
         )

@@ -24,7 +24,7 @@ const NAME_SENTENCE =
   'use lower-case letters, digits and dashes, e.g. mobility (a letter first, at most 40, no dash at the end)'
 const GROUP_SENTENCE = 'a group of your sign-in provider, e.g. mobility'
 const USER_SENTENCE = 'a user name: letters, digits, dots, dashes, underscores or @'
-const RUNTIME_SENTENCE = 'like spark-4.1-py3.11'
+const RUNTIME_SENTENCE = 'like spark-4.1-py3.13'
 const MEMORY_SENTENCE = 'like 512Mi or 4Gi'
 const ENV_SENTENCE = 'upper-case letters, digits and underscores, starting with a letter or underscore'
 const CORES_SENTENCE = '1 to 16 cores'
@@ -104,7 +104,7 @@ export default function ComputeDialog({
   const [maxExecutors, setMaxExecutors] = useState(
     cluster?.maxExecutors != null ? String(cluster.maxExecutors) : '',
   )
-  const [runtime, setRuntime] = useState(cluster?.runtime ?? 'spark-4.1-py3.11')
+  const [runtime, setRuntime] = useState(cluster?.runtime ?? 'spark-4.1-py3.13')
   const [image, setImage] = useState(cluster?.image ?? '')
   const [idle, setIdle] = useState(String(cluster?.idleStopMinutes ?? 60))
   const [env, setEnv] = useState<Row[]>(() => (cluster?.env ?? []).map((v) => ({ ...v })))
@@ -492,7 +492,7 @@ export default function ComputeDialog({
               onChange={(event) => setRuntime(event.target.value)}
             />
             <p id={`${runtimeId}-hint`} className={runtimeProblem ? problemClass : hintClass}>
-              {runtimeProblem ?? 'spark-<version>-py3.<minor>; the platform\u2019s catalogue ships spark-4.1-py3.11'}
+              {runtimeProblem ?? 'spark-<version>-py3.<minor>; the platform\u2019s catalogue ships spark-4.1-py3.13'}
             </p>
           </div>
 
