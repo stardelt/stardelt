@@ -378,6 +378,19 @@ fn notify_of(spec: &Value) -> Option<PipelineNotify> {
     serde_json::from_value(spec.get("notify")?.clone()).ok()
 }
 
+/// `spec.viewers` as the list the document and the bundle carry: empty when absent.
+fn viewers_of(spec: &Value) -> Vec<String> {
+    spec.get("viewers")
+        .and_then(Value::as_array)
+        .map(|viewers| {
+            viewers
+                .iter()
+                .filter_map(|group| group.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Pure rules
 // ---------------------------------------------------------------------------
@@ -1886,6 +1899,7 @@ fn pipeline_resource(
     options: &PipelineOptionsView,
     created_by: &str,
     notify: Option<&PipelineNotify>,
+    viewers: &[String],
 ) -> Value {
     let tasks = match statement {
         Statement::Sql(sql) => json!([{ "name": "run", "kind": "sql", "sql": sql }]),
@@ -1928,6 +1942,9 @@ fn pipeline_resource(
     if let Some(notify) = notify.filter(|notify| !notify.is_empty()) {
         spec["notify"] = serde_json::to_value(notify).unwrap_or(Value::Null);
     }
+    if !viewers.is_empty() {
+        spec["viewers"] = json!(viewers);
+    }
     let mut labels = serde_json::Map::new();
     labels.insert(MANAGED_BY_LABEL.to_string(), json!(MANAGED_BY_NOVA));
     labels.insert("stardelt.io/owner-group".to_string(), json!(group));
@@ -1955,6 +1972,7 @@ fn updated_resource(
     params: &BTreeMap<String, String>,
     schedule: Option<&(String, String)>,
     notify: Option<&PipelineNotify>,
+    viewers: Option<&[String]>,
 ) -> Value {
     let mut updated = resource.clone();
     match statement {
@@ -2017,6 +2035,17 @@ fn updated_resource(
         Some(_) => {
             if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
                 spec.remove("notify");
+            }
+        }
+        None => {}
+    }
+    // `None` keeps what the resource carries, like `notify`: a form save must not wipe the
+    // viewers a bundle deployed. All empty removes the key.
+    match viewers {
+        Some(viewers) if !viewers.is_empty() => updated["spec"]["viewers"] = json!(viewers),
+        Some(_) => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("viewers");
             }
         }
         None => {}
@@ -2304,6 +2333,10 @@ pub struct CreatePipelineRequest {
     /// destination of `ownerGroup`.
     #[serde(default)]
     pub notify: Option<PipelineNotify>,
+    /// Groups that may read the pipeline without being members (`spec.viewers`). At most 16,
+    /// each a group name; omitted writes none. A bundle's pipeline file carries it (#79).
+    #[serde(default)]
+    pub viewers: Option<Vec<String>>,
 }
 
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
@@ -2348,6 +2381,9 @@ pub struct UpdatePipelineRequest {
     /// notification a bundle deployed until the form edits it.
     #[serde(default)]
     pub notify: Option<PipelineNotify>,
+    /// Omitted keeps the stored viewers; an empty list removes them.
+    #[serde(default)]
+    pub viewers: Option<Vec<String>>,
 }
 
 /// Where a pipeline came from when `stardelt bundle deploy` published it. It names things and
@@ -2490,6 +2526,9 @@ pub struct PipelineDocument {
     /// Who is told when a run ends; left out when the resource has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<PipelineNotify>,
+    /// Groups that may read the pipeline without being members; left out when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -3768,6 +3807,7 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
             params: params_of(spec),
             options: options_of(spec),
             notify: notify_of(spec),
+            viewers: viewers_of(spec),
         },
         resource_version: resource
             .get("metadata")
@@ -4717,6 +4757,23 @@ async fn check_notify(
     Ok(())
 }
 
+/// `spec.viewers` of a create or update body: at most 16 group names, the CRD's rule.
+fn check_viewers(viewers: Option<&[String]>) -> Result<(), String> {
+    let Some(viewers) = viewers else {
+        return Ok(());
+    };
+    if viewers.len() > 16 {
+        return Err("viewers holds at most 16 groups".to_string());
+    }
+    match viewers
+        .iter()
+        .find(|group| !crate::notebooks::valid_group(group))
+    {
+        Some(bad) => Err(format!("viewers holds `{bad}`, which is not a group name")),
+        None => Ok(()),
+    }
+}
+
 /// What a create writes once every rule has passed: the statement or notebook, the schedule, the options.
 struct Planned {
     statement: Statement,
@@ -4736,6 +4793,11 @@ async fn plan_pipeline(
     // 1. The name the CRD (and the loader) accepts.
     validate_name(&body.name).map_err(|message| {
         ActionError::refused("name", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
+    // 1b. The viewers are group names the CRD accepts (#79).
+    check_viewers(body.viewers.as_deref()).map_err(|message| {
+        ActionError::refused("viewers", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
     // 2. One of the caller's own groups — an administrator schedules for their groups too.
@@ -5019,6 +5081,7 @@ async fn create_pipeline_inner(
         &options,
         &who.display_name,
         body.notify.as_ref(),
+        body.viewers.as_deref().unwrap_or_default(),
     );
     if let Some(provenance) = &body.provenance {
         stamp_provenance(&mut resource, provenance, &who.display_name);
@@ -5169,6 +5232,7 @@ async fn validate_pipeline(
                 &body.params,
                 planned.schedule.as_ref(),
                 body.notify.as_ref(),
+                body.viewers.as_deref(),
             );
             if let Some(provenance) = &body.provenance {
                 stamp_provenance(&mut updated, provenance, &who.display_name);
@@ -5323,6 +5387,11 @@ async fn update_pipeline_inner(
         }
     }
 
+    // The viewers are group names the CRD accepts (#79).
+    check_viewers(body.viewers.as_deref()).map_err(|message| {
+        ActionError::refused("viewers", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
     // The pipeline's group: both the refusal sentence and the notebook's object key.
     let group = spec_of(&resource)
         .get("ownerGroup")
@@ -5417,6 +5486,7 @@ async fn update_pipeline_inner(
         &body.params,
         schedule.as_ref(),
         body.notify.as_ref(),
+        body.viewers.as_deref(),
     );
     if let Some(provenance) = &body.provenance {
         stamp_provenance(&mut updated, provenance, &who.display_name);
@@ -10790,6 +10860,7 @@ mod tests {
             options: None,
             provenance: None,
             notify: None,
+            viewers: None,
         }
     }
 
@@ -10804,6 +10875,7 @@ mod tests {
             resource_version: None,
             provenance: None,
             notify: None,
+            viewers: None,
         }
     }
 
@@ -10851,6 +10923,7 @@ mod tests {
             &default_options(),
             "sub-ada",
             None,
+            &[],
         );
         resource["metadata"]["resourceVersion"] = json!("7");
         resource
@@ -11541,6 +11614,7 @@ mod tests {
             resource_version: None,
             provenance: None,
             notify: None,
+            viewers: None,
         };
         let view = update_pipeline(
             Some(&resources),
@@ -11606,6 +11680,7 @@ mod tests {
                 resource_version: None,
                 provenance: None,
                 notify: None,
+                viewers: None,
             },
         )
         .await
@@ -14118,6 +14193,7 @@ mod tests {
             }),
             provenance: None,
             notify: None,
+            viewers: None,
         };
         let verdict = validate_pipeline(Some(&resources), None, None, &ada, body)
             .await
@@ -14269,6 +14345,7 @@ mod tests {
                 &default_options(),
                 "ann",
                 None,
+                &[],
             )
         };
         let resources = vec![
@@ -14612,6 +14689,7 @@ mod tests {
             options: None,
             provenance: None,
             notify: None,
+            viewers: None,
         }
     }
 
@@ -14631,6 +14709,7 @@ mod tests {
             resource_version: None,
             provenance: None,
             notify: None,
+            viewers: None,
         }
     }
 
@@ -14650,6 +14729,7 @@ mod tests {
             &default_options(),
             "sub-ada",
             None,
+            &[],
         );
         resource["metadata"]["resourceVersion"] = json!("7");
         resource
@@ -15450,6 +15530,7 @@ mod tests {
             &default_options(),
             "sub-ada",
             Some(&notify),
+            &[],
         );
         assert_eq!(spec_of(&resource)["notify"]["onFailure"], json!(["pager"]));
 
@@ -15538,6 +15619,7 @@ mod tests {
                 on_failure: vec!["pager".into()],
                 ..PipelineNotify::default()
             }),
+            &[],
         );
         let statement = Statement::Sql("select 2".into());
 
@@ -15546,6 +15628,7 @@ mod tests {
             &statement,
             &default_options(),
             &BTreeMap::new(),
+            None,
             None,
             None,
         );
@@ -15563,6 +15646,7 @@ mod tests {
             &BTreeMap::new(),
             None,
             Some(&PipelineNotify::default()),
+            None,
         );
         assert!(
             spec_of(&removed).get("notify").is_none(),
@@ -15580,10 +15664,194 @@ mod tests {
                 on_success: vec!["digest".into()],
                 ..PipelineNotify::default()
             }),
+            None,
         );
         assert_eq!(
             spec_of(&replaced)["notify"],
             json!({ "onSuccess": ["digest"], "onFailure": [], "onRecovered": [] })
+        );
+    }
+
+    /// A create body's `viewers` is written as `spec.viewers`; an absent or empty list writes no
+    /// key (#79 point 6).
+    #[test]
+    fn a_create_body_with_viewers_writes_them() {
+        let statement = Statement::Sql("select 1".into());
+        let write = |viewers: &[String]| {
+            pipeline_resource(
+                "daily-trips",
+                "analytics",
+                &statement,
+                None,
+                &BTreeMap::new(),
+                &default_options(),
+                "sub-ada",
+                None,
+                viewers,
+            )
+        };
+
+        let with = write(&["visitors".to_string()]);
+        assert_eq!(spec_of(&with)["viewers"], json!(["visitors"]));
+
+        let without = write(&[]);
+        assert!(
+            spec_of(&without).get("viewers").is_none(),
+            "an empty list writes no key: {without}"
+        );
+    }
+
+    /// `None` leaves the stored viewers alone, an empty `Some` removes them, a filled `Some`
+    /// replaces them — a form save must not wipe what a bundle deployed (#79 point 6).
+    #[test]
+    fn an_update_writes_viewers_only_when_given() {
+        let stored = pipeline_resource(
+            "daily-trips",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+            &["visitors".to_string()],
+        );
+        let statement = Statement::Sql("select 2".into());
+        let update = |viewers: Option<&[String]>| {
+            updated_resource(
+                &stored,
+                &statement,
+                &default_options(),
+                &BTreeMap::new(),
+                None,
+                None,
+                viewers,
+            )
+        };
+
+        assert_eq!(
+            spec_of(&update(Some(&["readers".to_string()])))["viewers"],
+            json!(["readers"]),
+            "the body's list replaces the stored one"
+        );
+        assert!(
+            spec_of(&update(None)).get("viewers").is_some(),
+            "an omitted list keeps the stored viewers"
+        );
+        assert_eq!(spec_of(&update(None))["viewers"], json!(["visitors"]));
+        assert!(
+            spec_of(&update(Some(&[]))).get("viewers").is_none(),
+            "an empty list removes the key"
+        );
+    }
+
+    /// The spec document carries `spec.viewers`, so `stardelt apply --export` re-applies them.
+    #[test]
+    fn a_spec_document_carries_the_viewers() {
+        let with = with_viewers(
+            resource("smoke", Some("analytics")),
+            &["visitors", "readers"],
+        );
+        assert_eq!(
+            spec_response(&with).document.viewers,
+            vec!["visitors".to_string(), "readers".to_string()]
+        );
+
+        let without = spec_response(&resource("smoke", Some("analytics")));
+        assert!(
+            without.document.viewers.is_empty(),
+            "a resource without viewers answers an empty list"
+        );
+    }
+
+    /// A viewer that is not a group name, and more than 16 of them, are refused with the CRD's
+    /// own rule (#79 point 6).
+    #[test]
+    fn a_viewer_that_is_not_a_group_name_is_refused() {
+        assert_eq!(check_viewers(None), Ok(()));
+        assert_eq!(check_viewers(Some(&[])), Ok(()));
+        assert_eq!(
+            check_viewers(Some(&["visitors".to_string()])),
+            Ok(()),
+            "a group name passes"
+        );
+        assert_eq!(
+            check_viewers(Some(&["visitors".to_string(), "not a group".to_string()])),
+            Err("viewers holds `not a group`, which is not a group name".to_string())
+        );
+
+        let seventeen: Vec<String> = (0..17).map(|n| format!("group-{n}")).collect();
+        assert_eq!(
+            check_viewers(Some(&seventeen)),
+            Err("viewers holds at most 16 groups".to_string())
+        );
+        let sixteen = &seventeen[..16];
+        assert_eq!(check_viewers(Some(sixteen)), Ok(()));
+    }
+
+    /// A pipeline created with `viewers` is in the list of a person of that group (#79 point 6).
+    #[tokio::test]
+    async fn a_created_pipeline_with_viewers_is_visible_to_one() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let kube = fake_kube::start_with(
+            vec![],
+            vec![service_principal(
+                "pipeline-analytics",
+                "analytics",
+                Some(true),
+            )],
+        )
+        .await;
+        let state = test_state(Some(kube), airflow, store);
+        let creator = router()
+            .with_state(Arc::clone(&state))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))));
+        let visitor = router().with_state(state).layer(Extension(principal(who(
+            "sub-visitor",
+            &["visitors"],
+            false,
+        ))));
+
+        let response = creator
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipelines")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "daily-trips",
+                            "ownerGroup": "analytics",
+                            "sql": "select 1",
+                            "schedule": { "cron": "0 3 * * *", "timezone": "UTC" },
+                            "viewers": ["visitors"],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = visitor
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["pipelines"][0]["name"], "daily-trips",
+            "a viewer of the pipeline sees it in the list: {body}"
         );
     }
 

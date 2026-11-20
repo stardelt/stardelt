@@ -365,6 +365,15 @@ def validate(directory, target=None):
                 )
             if doc.get("ownerGroup", owner) != owner:
                 problems.append((f"{relative} ({tname})", f"ownerGroup {doc['ownerGroup']!r} is not the bundle's group {owner!r}"))
+            if "viewers" in doc:
+                viewers = doc["viewers"]
+                if (
+                    not isinstance(viewers, list)
+                    or len(viewers) > 8
+                    or not all(isinstance(v, str) and GROUP.match(v) for v in viewers)
+                ):
+                    problems.append((f"{relative} ({tname})",
+                                     "viewers must be a list of at most 8 group names (a published notebook's X-Stardelt-Viewers header holds 8)"))
             if "dbt" in doc:
                 problems.append((f"{relative} ({tname})", "a dbt run is a task: put it under tasks: with a name"))
             if "tasks" in doc:
@@ -712,6 +721,9 @@ def _publish(nova, directory, spec, dry_run):
         raise apply.ApplyError(f"{spec['name']}: {file} is not a notebook: {err}") from err
     source = source_of(Path(directory) / file)
     headers = {"X-Stardelt-Source": json.dumps(source)} if source is not None else None
+    viewers = spec.get("viewers") or []
+    if viewers:
+        headers = {**(headers or {}), "X-Stardelt-Viewers": json.dumps(viewers)}
     try:
         return nova.call(
             "notebooks_publish",
