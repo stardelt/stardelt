@@ -1100,10 +1100,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"orders-job","namespace":"data"}}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
@@ -1167,10 +1167,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"orders-job","namespace":"data"}}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
@@ -1768,10 +1768,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(true)), ctx)
             .await
             .expect("reconcile");
@@ -1795,10 +1795,10 @@ mod tests {
                 r#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let mut app = stream_app(true);
         app.status = Some(
             serde_json::from_value(json!({
@@ -1857,10 +1857,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
@@ -1923,10 +1923,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
@@ -1995,10 +1995,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(app), ctx)
             .await
             .expect("reconcile");
@@ -2107,10 +2107,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
@@ -2162,10 +2162,10 @@ mod tests {
                 r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.into(),
             )
         });
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ));
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");

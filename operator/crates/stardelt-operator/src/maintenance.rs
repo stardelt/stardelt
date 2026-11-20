@@ -674,10 +674,10 @@ mod tests {
     }
 
     fn ctx(client: Client) -> Arc<Context> {
-        Arc::new(Context {
+        Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        })
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ))
     }
 
     /// A `Catalog` with its pipeline principal applies `maint-<catalog>` and writes
