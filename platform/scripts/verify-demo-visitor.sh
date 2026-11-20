@@ -3,6 +3,7 @@
 # (stardelt/stardelt#527 — the acceptance of #79 as one command).
 #
 #   make verify-demo-visitor      (STARDELT_NOVA_URL=…, ISSUER=… to override)
+#   bash scripts/verify-demo-visitor.sh --only streams,destinations   # one or more rows
 #
 # #79 was verified by hand, one page at a time. This is the same measurement, read-only:
 #
@@ -10,11 +11,14 @@
 #   groups       the minted token        `preferred_username: demo`, `groups: [visitors]` exactly
 #   pipelines    GET /api/pipelines      at least one row, every `ownerGroup` `demo`
 #   dbt          GET /api/pipelines/stardelt/shop-dbt  200, a task of kind `dbt`
-#   streams      GET /api/streams        every `owner_group` `demo`
+#   streams      GET /api/streams        at least one row, every `owner_group` `demo`; empty fails
+#                                        (make demo-stream YES=1)
 #   connections  GET /api/connections    every `usableBy` names `visitors`, no secret-looking config key
-#   destinations GET /api/destinations   every `owner_group` `demo`
+#   destinations GET /api/destinations   at least one row, every `owner_group` `demo`; empty fails
+#                                        (make demo-shop YES=1)
 #   compute      GET /api/compute        a `Running` cluster owned by `visitors` (the sandbox)
-#   notebooks    GET /api/notebooks      every `group` `demo`; empty only prints a note
+#   notebooks    GET /api/notebooks      at least one row, every `group` `demo`; empty fails
+#                                        (make demo-notebook YES=1)
 #   lineage      GET /api/lineage/read-tables   a non-empty `tables`
 #
 # The password is `demo` and it is PUBLIC ON PURPOSE: scripts/public-demo.sh creates that person
@@ -54,6 +58,14 @@ for tool in curl python3; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
 done
 
+ONLY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --only) ONLY="$2"; shift 2 ;;
+    *) echo "usage: verify-demo-visitor.sh [--only id[,id…]]" >&2; exit 2 ;;
+  esac
+done
+
 # Sign in: the visitor's own token through the device grant on the public client `stardelt-dev`.
 if ! out="$(ISSUER="$ISSUER" USER=demo PASSWORD_FILE="$PASSWORD_FILE" TOKEN_FILE="$TOKEN_FILE" \
       python3 scripts/mint-user-token.py 2>&1)"; then
@@ -75,6 +87,9 @@ api() { # api <path>
 rows=0
 names=""
 check() {
+  if [ -n "$ONLY" ]; then
+    case ",$ONLY," in *",$1,"*) : ;; *) return ;; esac
+  fi
   CURRENT_ROW="$1"
   local out verdict notes
   out="$("$2")"
@@ -177,6 +192,9 @@ check_streams() {
 import json, sys
 
 streams = json.load(open(sys.argv[1])).get("streams") or []
+if not streams:
+    print("FAIL no stream is visible to the visitor — the Streams page is empty (run `make demo-stream YES=1`)")
+    raise SystemExit
 for row in streams:
     owner = row.get("owner_group")
     if owner != "demo":
@@ -216,6 +234,9 @@ check_destinations() {
 import json, sys
 
 rows = json.load(open(sys.argv[1])) or []
+if not rows:
+    print("FAIL no destination is visible to the visitor — the Destinations page is empty (run `make demo-shop YES=1`)")
+    raise SystemExit
 for row in rows:
     owner = row.get("owner_group")
     if owner != "demo":
@@ -252,6 +273,9 @@ check_notebooks() {
 import json, sys
 
 rows = json.load(open(sys.argv[1])) or []
+if not rows:
+    print("FAIL no notebook is published to visitors — the Notebooks page is empty (run `make demo-notebook YES=1`)")
+    raise SystemExit
 for row in rows:
     group = row.get("group")
     if group != "demo":
@@ -259,12 +283,7 @@ for row in rows:
               % (row.get("name"), group))
         break
 else:
-    # The demo's publish is a later slice: an empty list is correct today, not a failure.
-    if rows:
-        print("OK %d notebook(s), all in group demo" % len(rows))
-    else:
-        print("OK 0 notebook(s), none published yet")
-        print("note: no notebook is published yet")
+    print("OK %d notebook(s), all in group demo" % len(rows))
 PY
 }
 
