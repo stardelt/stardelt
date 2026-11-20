@@ -451,3 +451,42 @@ def test_a_notebook_connection_must_be_a_connection_name(tmp_path):
         resources = {"load.yaml": f"name: load\nnotebook: {{file: notebooks/explore.ipynb, connection: {connection}}}\n"}
         problems = bundle.validate(make(tmp_path, resources=resources, files=dict(files)))[0]
         assert any("notebook.connection is a Connection name" in message for _, message in problems), problems
+
+
+def test_a_password_in_a_bundle_file_is_a_warning_and_not_a_problem(tmp_path):
+    make(tmp_path, files={
+        "sql/load.sql": "select 1",  # created by the test (new)
+        "notebooks/explore.ipynb": "{}",  # created by the test (new)
+        "sql/leak.sql": "select * from x where password = 'hunter2hunter2'",  # created by the test (new)
+    })
+    problems, warnings, _ = bundle.validate(tmp_path)
+    assert problems == []
+    assert warnings == [
+        "sql/leak.sql: looks like it holds password; a bundle file is delivered to every stage, so keep it in a Connection",
+        "variable 'unused' is declared but no pipeline file uses it",
+    ]
+
+
+def test_a_private_key_in_a_notebook_is_a_warning(tmp_path):
+    make(tmp_path, files={
+        "sql/load.sql": "select 1",  # created by the test (new)
+        "notebooks/explore.ipynb": '{"cells": [{"source": "-----BEGIN RSA PRIVATE KEY-----"}]}',  # created by the test (new)
+    })
+    problems, warnings, _ = bundle.validate(tmp_path)
+    assert problems == []
+    assert warnings == [
+        "notebooks/explore.ipynb: looks like it holds a private key; a bundle file is delivered to every stage, so keep it in a Connection",
+        "variable 'unused' is declared but no pipeline file uses it",
+    ]
+
+
+def test_the_command_prints_the_credential_warning_and_exits_zero(tmp_path):
+    make(tmp_path, files={
+        "sql/load.sql": "select 1",  # created by the test (new)
+        "notebooks/explore.ipynb": "{}",  # created by the test (new)
+        "sql/leak.sql": "api_key = 'abcdefgh1234'",  # created by the test (new)
+    })
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.main(["bundle", "validate", str(tmp_path)], environ={}, stdout=out, stderr=err)
+    assert code == 0
+    assert "stardelt: warning: sql/leak.sql: looks like it holds api_key" in err.getvalue()
