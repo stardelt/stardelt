@@ -121,3 +121,20 @@ def test_every_dbt_batch_tag_selects_a_resource_and_the_seeds_come_first():
 def test_the_dbt_pipeline_is_readable_by_visitors():
     pipeline = yaml.safe_load((SHOP / "pipeline-dbt.yaml").read_text())
     assert pipeline["spec"]["viewers"] == ["visitors"]
+
+
+def test_the_dbt_pipeline_retries_a_transient_catalog_denial():
+    """#572: the 2026-11-20T03:00Z run died on a 3–15 s window; two retries a minute apart cover it."""
+    from stardelt_pipelines.plan import plan as build_plan
+
+    pipeline = yaml.safe_load((SHOP / "pipeline-dbt.yaml").read_text())
+    principals = {
+        "pipeline-demo": {
+            "metadata": {"name": "pipeline-demo"},
+            "spec": {"ownerGroup": "demo"},
+            "status": {"ready": True, "secretName": "sp-pipeline-demo"},
+        }
+    }
+    built = build_plan(pipeline, "stardelt", principals)
+    assert built.retries >= 2, "one attempt loses the whole nightly run to a 15 s window"
+    assert built.retry_delay_s >= 60

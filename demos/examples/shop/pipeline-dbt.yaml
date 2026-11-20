@@ -2,6 +2,8 @@
 # notebook example writes. The schedule is the demo's nightly slot (04:00 Berlin); trigger it by
 # hand with `kubectl -n stardelt exec deploy/airflow-scheduler -- airflow dags trigger
 # stardelt__shop-dbt`.
+# A transient catalog-authorization window can answer `Cannot access catalog silver` for a
+# few seconds (#538 measured 3–15 s); two retries a minute apart cover it without a re-run.
 #
 # The dbt image ships the project at /opt/dbt/projects/shop, and the pod mints a fresh engine
 # token from the ServicePrincipal `pipeline-demo` (group `demo`) on every invocation.
@@ -13,6 +15,9 @@ metadata:
 spec:
   ownerGroup: demo
   runAs: pipeline-demo
+  retries:
+    attempts: 2
+    backoff: 1m
   viewers: [visitors]
   schedule:
     cron: "0 4 * * *"
