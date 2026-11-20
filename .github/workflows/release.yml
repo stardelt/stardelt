@@ -4,6 +4,8 @@ name: "release / Cut"
 # releases/v<version>/ from its pins and open the release PR. Builds nothing.
 # dry_run (the default) uploads the files as an artifact instead: the fresh-node run (#48)
 # installs that install.yaml before the real cut.
+# The fresh-node gate inside cut.sh needs a report a hosted runner never has, so this workflow
+# passes NO_FRESH_NODE_CHECK=1; the gate runs where the run happened (stardelt/stardelt#623).
 on:
   workflow_dispatch:
     inputs:
@@ -60,6 +62,12 @@ jobs:
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
 
       - name: Check the commit and generate releases/v${{ inputs.version }}/
+        env:
+          # The fresh-node report is written on the machine that ran the run (#48), never on a
+          # hosted runner: `check_fresh_node.py` would find no report and cut.sh would abort.
+          # cut.sh keeps the gate for every local cut; this step generates the files a run then
+          # installs (dry run) or the release PR (real cut), and a local cut is what proves the run.
+          NO_FRESH_NODE_CHECK: "1"
         run: bash scripts/release/cut.sh "$VERSION" "${{ steps.m.outputs.sha }}"
 
       - name: Upload the files (dry run)
