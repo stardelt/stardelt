@@ -3,10 +3,10 @@ name: "platform / CI"
 on:
   push:
     branches: ["main"]
-    paths: ["platform/**", ".github/workflows/platform-ci.yml", "operator/**"]
+    paths: ["platform/**", ".github/workflows/platform-ci.yml", "operator/**", "scripts/release/**"]
   pull_request:
     branches: ["main"]
-    paths: ["platform/**", ".github/workflows/platform-ci.yml", "operator/**"]
+    paths: ["platform/**", ".github/workflows/platform-ci.yml", "operator/**", "scripts/release/**"]
 
 permissions:
   contents: read
@@ -496,4 +496,21 @@ jobs:
         run: python3 -m unittest scripts.tests.test_pipeline_notebook_egress -v
       - name: Superset and Airflow cannot both be enabled (platform#1645)
         run: python3 -m unittest scripts.tests.test_chart_heavy_toggle -v
+
+  # ---------------------------------------------------------------------------
+  # The release scripts' tests (generate, release_notes, stamp-version)
+  # ---------------------------------------------------------------------------
+  release-scripts:
+    name: Release scripts (unittest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts/release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Run the release-script tests
+        run: python3 -m unittest discover -s tests -v
 
