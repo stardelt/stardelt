@@ -52,6 +52,8 @@ pub struct StreamView {
     pub sink_table: String,
     pub sink_mode: String,
     pub run_as: Option<String>,
+    /// The groups that may read the stream without being members (`spec.viewers`).
+    pub viewers: Vec<String>,
     /// What a bundle deploy stamped on the stream: bundle, target, revision, repository,
     /// who and when. Absent when no bundle wrote it. `modified` is true when the spec was
     /// changed after the last deploy.
@@ -91,6 +93,10 @@ pub struct StreamWrite {
     /// Omitted leaves what the stream already carries untouched.
     #[serde(default)]
     pub provenance: Option<Provenance>,
+    /// Groups that may read this stream without being members (`spec.viewers`), read-only.
+    /// At most 16, each a group name; empty writes none.
+    #[serde(default)]
+    pub viewers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -182,6 +188,7 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
             .get("runAs")
             .and_then(Value::as_str)
             .map(str::to_string),
+        viewers: crate::pipelines::viewers_of(spec),
         deployment: deployment_of_with(app, stream_spec_digest),
     }
 }
@@ -367,6 +374,9 @@ fn check_write(name: &str, body: &StreamWrite, who: &Identity) -> Result<Planned
         return Err("restartPolicy is always or on-failure".to_string());
     }
 
+    // 12. The groups that may read it: the same rule a pipeline's viewers run.
+    crate::pipelines::check_viewers(Some(&body.viewers))?;
+
     let mut source = json!({ "topic": body.source.topic });
     if let Some(reference) = &body.source.connection_ref {
         source["connectionRef"] = json!(reference);
@@ -380,18 +390,22 @@ fn check_write(name: &str, body: &StreamWrite, who: &Identity) -> Result<Planned
     if let Some(prefix) = &body.sink.checkpoint_prefix {
         sink["checkpointPrefix"] = json!(prefix);
     }
+    let mut spec = json!({
+        "ownerGroup": body.owner_group.clone(),
+        "runAs": format!("pipeline-{}", body.owner_group),
+        "source": source,
+        "sink": sink,
+        "restartPolicy": restart,
+    });
+    if !body.viewers.is_empty() {
+        spec["viewers"] = json!(body.viewers);
+    }
     Ok(PlannedStream {
         group: body.owner_group.clone(),
         // `runAs` is server-set: the stream runs as the group's principal (D42 decision 6).
         // `stopped` is never part of a write: it defaults to `false` on create and an update
         // leaves the stored value alone.
-        spec: json!({
-            "ownerGroup": body.owner_group,
-            "runAs": format!("pipeline-{}", body.owner_group),
-            "source": source,
-            "sink": sink,
-            "restartPolicy": restart,
-        }),
+        spec,
     })
 }
 
@@ -404,6 +418,7 @@ fn stream_spec_digest(resource: &Value) -> String {
         spec.get("sink"),
         spec.get("engine"),
         spec.get("restartPolicy"),
+        spec.get("viewers"),
     ]);
     Sha256::digest(canonical(&decided).as_bytes())
         .iter()
@@ -1084,6 +1099,7 @@ mod tests {
             },
             restart_policy: None,
             provenance: None,
+            viewers: Vec::new(),
         }
     }
 
@@ -1142,6 +1158,59 @@ mod tests {
             planned.spec.pointer("/sink/mode"),
             Some(&json!("append")),
             "the body's mode is written"
+        );
+    }
+
+    #[test]
+    fn a_write_carries_the_viewers_it_is_given() {
+        let caller = who("u", &["sales"], false);
+        let mut body = body_named("a");
+        body.viewers = vec!["visitors".to_string(), "analytics".to_string()];
+        let planned = check_write("a", &body, &caller).expect("two groups are accepted");
+        assert_eq!(
+            planned.spec.get("viewers"),
+            Some(&json!(["visitors", "analytics"]))
+        );
+        let mut none = body_named("b");
+        none.viewers = Vec::new();
+        let planned = check_write("b", &none, &caller).expect("no viewers is accepted");
+        assert!(
+            planned.spec.get("viewers").is_none(),
+            "an empty list writes no key"
+        );
+    }
+
+    #[test]
+    fn a_write_refuses_more_than_sixteen_viewers() {
+        let caller = who("u", &["sales"], false);
+        let mut body = body_named("a");
+        body.viewers = (0..17).map(|i| format!("group{i}")).collect();
+        let error = check_write("a", &body, &caller).expect_err("seventeen is refused");
+        assert_eq!(error, "viewers holds at most 16 groups");
+    }
+
+    #[test]
+    fn a_write_refuses_a_viewer_that_is_not_a_group() {
+        let caller = who("u", &["sales"], false);
+        let mut body = body_named("a");
+        body.viewers = vec!["not a group".to_string()];
+        let error = check_write("a", &body, &caller).expect_err("a bad group is refused");
+        assert!(error.contains("which is not a group name"), "{error}");
+    }
+
+    #[test]
+    fn a_stream_view_answers_its_viewers_and_a_changed_list_is_drift() {
+        let caller = who("u", &["sales"], false);
+        let mut app = app("a", "sales");
+        app["spec"]["viewers"] = json!(["visitors"]);
+        let view = stream_view(&app, &caller);
+        assert_eq!(view.viewers, vec!["visitors".to_string()]);
+        let before = stream_spec_digest(&app);
+        app["spec"]["viewers"] = json!(["analytics"]);
+        assert_ne!(
+            before,
+            stream_spec_digest(&app),
+            "the viewers are part of the spec digest"
         );
     }
 

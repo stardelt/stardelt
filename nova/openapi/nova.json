@@ -15395,7 +15395,8 @@
           "source_topic",
           "sink_catalog",
           "sink_table",
-          "sink_mode"
+          "sink_mode",
+          "viewers"
         ],
         "properties": {
           "attempts": {
@@ -15478,6 +15479,13 @@
           },
           "stopped": {
             "type": "boolean"
+          },
+          "viewers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The groups that may read the stream without being members (`spec.viewers`)."
           }
         }
       },
@@ -15522,6 +15530,13 @@
           },
           "source": {
             "$ref": "#/components/schemas/StreamSourceBody"
+          },
+          "viewers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups that may read this stream without being members (`spec.viewers`), read-only.\nAt most 16, each a group name; empty writes none."
           }
         }
       },
