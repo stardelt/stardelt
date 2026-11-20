@@ -8,6 +8,7 @@
     stardelt apply -f pipelines/               # every .json, .yaml and .yml file of a directory, in name order
     stardelt export NAMESPACE NAME > p.yaml    # a pipeline made in the interface, as a file `apply` accepts
     stardelt bundle deploy DIR -t prod         # check a bundle target with Nova (`bundle plan`), then create or update its pipelines
+    stardelt bundle rollback --deployment 12 --yes   # replay exactly what deployment 12 applied
 
 Results go to stdout; messages and errors go to stderr. The exit code is 0 for success,
 1 for an error, 2 for wrong usage and 3 when authentication is needed. A token is never
@@ -154,6 +155,11 @@ def _parser():
     remove.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
     remove.add_argument("-t", "--target", required=True, help="the target to empty (a name under targets in bundle.yaml)")
     remove.add_argument("--yes", action="store_true", help="really remove the pipelines (without it: only list them)")
+    replay = package_commands.add_parser(
+        "rollback", help="replay the documents one recorded deployment applied; lists it first, writes only with --yes"
+    )
+    replay.add_argument("--deployment", type=int, required=True, help="the deployment id to replay (from `stardelt deployments` or the Deployments page)")
+    replay.add_argument("--yes", action="store_true", help="really create and update the pipelines (without it: only check every stored document and list what would change)")
     adopt = package_commands.add_parser(
         "generate", help="write a pipeline that was made in the interface into the bundle: its file and its SQL file"
     )
@@ -513,6 +519,15 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 stderr.write(f"stardelt: {where}: {message}\n")
             if not problems and not args.yes:
                 stderr.write("stardelt: nothing was removed; add --yes to remove what is listed\n" if results else "stardelt: nothing to remove\n")
+            return USAGE if problems else OK
+        if args.command == "bundle" and args.bundle_command == "rollback":
+            problems, results = bundle.rollback(nova, args.deployment, dry_run=not args.yes)
+            for result in results:
+                stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            if not problems and not args.yes:
+                stderr.write(f"stardelt: nothing was written; add --yes to replay deployment {args.deployment}\n")
             return USAGE if problems else OK
         if args.command == "bundle" and args.bundle_command == "generate":
             try:

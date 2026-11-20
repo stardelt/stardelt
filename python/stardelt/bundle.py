@@ -755,8 +755,8 @@ def _blocked(target, names):
     ]
 
 
-def _record(nova, stamp, directory, target, status, touched, resources=()):
-    """Record one deploy (``deployments_record``): the row on success, or a ``not-recorded`` row.
+def _record_at(nova, owner, stamp, target, status, touched, resources=()):
+    """Record one deploy (``deployments_record``) for ``owner``: the row on success, or a ``not-recorded`` row.
 
     ``resources`` is the rendered list of Pipeline documents the deploy applied, empty for a
     failed deploy; the record keeps them so a rollback can replay them.
@@ -764,7 +764,6 @@ def _record(nova, stamp, directory, target, status, touched, resources=()):
     A record that cannot be written never fails the deploy: the caller prints the reason and keeps
     the exit code it already has.
     """
-    owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
     try:
         answer = nova.call("deployments_record", body={
             "bundle": stamp["bundle"],
@@ -779,6 +778,12 @@ def _record(nova, stamp, directory, target, status, touched, resources=()):
     except api.StardeltApiError as err:
         return {"action": "not-recorded", "reason": str(err)}
     return {"action": "recorded", "id": answer["id"]}
+
+
+def _record(nova, stamp, directory, target, status, touched, resources=()):
+    """Record one deploy of the bundle in ``directory``: the owner group comes from its ``bundle.yaml``."""
+    owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
+    return _record_at(nova, owner, stamp, target, status, touched, resources)
 
 
 def _touched(nova, specs, done, stale):
@@ -1110,6 +1115,55 @@ def destroy(nova, directory, target, confirm=False):
         nova.call("streams_delete", path={"namespace": namespace, "name": name})
         done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
     return [], done
+
+
+def _rollback_failed(nova, row, stamp, err, results):
+    """The answer of a rollback that stopped at ``err``: the problem, and the attempt recorded as ``failed``."""
+    touched = _touched(nova, row["resources"], results, [])
+    return [("rollback", str(err))], [*results, _record_at(nova, row["ownerGroup"], stamp, row["target"], "failed", touched, row["resources"])]
+
+
+def rollback(nova, deployment_id, dry_run=False):
+    """Replay one recorded deployment: ``(problems, results)``.
+
+    Reads ``deployments_get`` for the row, checks every stored document through ``pipelines_validate``
+    (``would-create``/``would-update``, nothing written) and, unless ``dry_run``, creates or updates the
+    pipelines exactly as the recorded deploy did, then records the replay as a new deployment of the same
+    bundle, target, owner group and revision. A refusal stops at the first document and records the
+    attempt as ``failed``. Pipelines the recorded deploy deleted are not recreated: they have no stored
+    document.
+    """
+    try:
+        row = nova.call("deployments_get", path={"id": deployment_id})
+    except api.StardeltApiError as err:
+        return [("rollback", f"deployment {deployment_id}: {err}")], []
+    if row["status"] != "applied":
+        return [("rollback", f"deployment {deployment_id} is {row['status']}: there is nothing to roll back to")], []
+    documents = row.get("resources") or []
+    if not documents:
+        return [("rollback", f"deployment {deployment_id} recorded no rendered resources (recorded before migration 0027): deploy it again and roll that back")], []
+    if dry_run:
+        results = []
+        for document in documents:
+            try:
+                results.append(apply.apply(nova, document, dry_run=True))
+            except apply.ApplyError as err:
+                return [("rollback", str(err))], results
+        return [], results
+    stamp = {"bundle": row["bundle"], "revision": row.get("revision"), "repository": row.get("repository")}
+    for document in documents:
+        try:
+            apply.apply(nova, document, dry_run=True)
+        except apply.ApplyError as err:
+            return _rollback_failed(nova, row, stamp, err, [])
+    results = []
+    for document in documents:
+        try:
+            results.append(apply.apply(nova, document))
+        except apply.ApplyError as err:
+            return _rollback_failed(nova, row, stamp, err, results)
+    results.append(_record_at(nova, row["ownerGroup"], stamp, row["target"], "applied", _touched(nova, documents, results, []), documents))
+    return [], results
 
 
 MANIFEST = """bundle:
