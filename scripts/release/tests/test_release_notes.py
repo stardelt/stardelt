@@ -45,5 +45,22 @@ class SectionTest(unittest.TestCase):
         self.assertIn("releases/download/v0.0.9/platform-minimal.yaml", text)
 
 
+class RepositoryChangelogTest(unittest.TestCase):
+    def test_the_root_changelog_carries_the_0_0_4_section(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        text = (root / "CHANGELOG.md").read_text()
+        self.assertTrue(text.startswith("# Changelog"))
+        self.assertNotIn(release_notes.FALLBACK, release_notes.notes("0.0.4", text))
+        section = release_notes.section(text, "0.0.4")
+        for heading in ("### Breaking", "### Highlights", "### Upgrade"):
+            self.assertIn(heading, section)
+        self.assertIn("spark-4.1-py3.13", section)
+
+    def test_no_older_release_section_is_invented(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        text = (root / "CHANGELOG.md").read_text()
+        self.assertNotIn("## v0.0.3", text, "there is no v0.0.3 release; do not invent one")
+
+
 if __name__ == "__main__":
     unittest.main()
