@@ -43,7 +43,8 @@ esac
 """
 
 
-def pod(name, owner, owner_kind="ReplicaSet", ready=True, restarts=0, terminated=None):
+def pod(name, owner, owner_kind="ReplicaSet", ready=True, restarts=0, terminated=None,
+        phase=None, deleting=False):
     status = {
         "conditions": [
             {"type": "Ready", "status": "True" if ready else "False"},
@@ -54,18 +55,23 @@ def pod(name, owner, owner_kind="ReplicaSet", ready=True, restarts=0, terminated
              "state": {"running": {}}, "lastState": {}},
         ],
     }
+    if phase:
+        status["phase"] = phase
     if terminated:
         status["containerStatuses"][0]["lastState"] = {"terminated": terminated}
+    metadata = {
+        "name": name,
+        "namespace": "stardelt",
+        "ownerReferences": [
+            {"apiVersion": "apps/v1", "kind": owner_kind, "name": owner, "uid": "uid-" + owner},
+        ],
+    }
+    if deleting:
+        metadata["deletionTimestamp"] = "2026-11-20T14:32:10Z"
     return {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {
-            "name": name,
-            "namespace": "stardelt",
-            "ownerReferences": [
-                {"apiVersion": "apps/v1", "kind": owner_kind, "name": owner, "uid": "uid-" + owner},
-            ],
-        },
+        "metadata": metadata,
         "status": status,
     }
 
@@ -128,6 +134,45 @@ class VerifyRestarts(unittest.TestCase):
         self.assertTrue(line.startswith("✗"), line)
         self.assertIn("0 of 1 pod(s) ready", line)
         self.assertIn("verify-restarts: FAIL (1 Deployment(s) with a not-Ready pod)", done.stdout)
+
+    def test_a_pod_the_node_evicted_is_not_a_missing_replica(self):
+        # The disk-pressure eviction of 2026-11-20T14:32Z: the node ended the old pods, the
+        # ReplicaSet replaced them, and the evicted objects stayed in the list. Every Deployment was
+        # at its desired count while 13 rows read `✗`.
+        done = self.run_script(
+            deployment_pods("nova", replicas=1)
+            + [pod("nova-6df9c8d5b-old", "nova-6df9c8d5b", ready=False, phase="Failed",
+                   terminated={"reason": "Evicted", "exitCode": 137,
+                               "finishedAt": seconds_ago(60)})],
+            ROWS="nova",
+        )
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertIn("✓ nova", done.stdout)
+        self.assertIn("1 pod(s) ready", done.stdout)
+        self.assertIn("verify-restarts: PASS (1 Deployment(s)", done.stdout)
+        self.assertNotIn("✗", done.stdout)
+
+    def test_a_pod_on_its_way_out_is_not_a_missing_replica(self):
+        # A rolling update terminates the old pod first; while it is not Ready it is still counted
+        # today, which fails the check for the length of the rollout.
+        done = self.run_script(
+            deployment_pods("nova", replicas=1)
+            + [pod("nova-6df9c8d5b-old", "nova-6df9c8d5b", ready=False, deleting=True)],
+            ROWS="nova",
+        )
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertIn("✓ nova", done.stdout)
+        self.assertIn("1 pod(s) ready", done.stdout)
+
+    def test_a_deployment_whose_only_pods_are_gone_fails(self):
+        done = self.run_script(
+            [pod("nova-6df9c8d5b-a", "nova-6df9c8d5b", ready=False, phase="Failed")],
+            ROWS="nova",
+        )
+        self.assertEqual(done.returncode, 1)
+        line = [ln for ln in done.stdout.splitlines() if "nova" in ln][0]
+        self.assertTrue(line.startswith("✗"), line)
+        self.assertIn("1 pod(s), none running", line)
 
     def test_an_empty_pod_list_is_unverified(self):
         done = self.run_script([], ROWS="nova")
