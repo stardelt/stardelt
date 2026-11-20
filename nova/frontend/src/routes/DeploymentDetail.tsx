@@ -1,5 +1,6 @@
-import { useQuery } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
+import { useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, type DeploymentRecord } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { SkeletonTable } from '../components/Skeleton'
@@ -72,6 +73,12 @@ export default function DeploymentDetail() {
   const deploymentId = Number(id)
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const keep401 = me.data ? me.data.auth_mode !== 'oidc' : false
+  const navigate = useNavigate()
+  const [confirming, setConfirming] = useState(false)
+  const rollback = useMutation({
+    mutationFn: () => api.deploymentRollback(deploymentId),
+    onSuccess: (created) => navigate(`/deployments/${created.id}`),
+  })
 
   const detail = useQuery({
     queryKey: ['deployment', deploymentId],
@@ -119,6 +126,9 @@ export default function DeploymentDetail() {
   const resources = Array.isArray(row.resources) ? row.resources : []
   const files = Array.isArray(row.files) ? row.files : []
   const peers = detail.data && Array.isArray(records.data) ? promotions(detail.data, records.data) : []
+  const mayAct =
+    me.data?.is_admin === true || (me.data?.groups ?? []).includes(row.ownerGroup)
+  const canRollBack = row.status === 'applied' && resources.length > 0 && mayAct
 
   return (
     <div className="max-w-4xl space-y-5">
@@ -307,10 +317,59 @@ export default function DeploymentDetail() {
         </section>
       )}
 
-      <p className="text-sm text-text-dim">
-        Roll back with <code className="font-mono text-xs">{`stardelt bundle rollback --deployment ${row.id}`}</code>{' '}
-        (it replays these documents; #616).
-      </p>
+      <section aria-labelledby="deployment-rollback" className="space-y-2">
+        <h2 id="deployment-rollback" className="text-lg font-semibold">Roll back</h2>
+        {row.status !== 'applied' ? (
+          <p className="text-sm text-text-mute">A failed deploy has nothing to replay.</p>
+        ) : resources.length === 0 ? (
+          <p className="text-sm text-text-mute">
+            This deploy recorded no rendered documents, so there is nothing to replay.
+          </p>
+        ) : !mayAct ? (
+          <p className="text-sm text-text-mute">
+            Only the owner group's members ({row.ownerGroup}) and administrators may roll back.
+          </p>
+        ) : (
+          <p className="text-sm text-text-dim">
+            A rollback replays the {resources.length === 1 ? 'document' : `${resources.length} documents`} stored
+            above, exactly as they ran, as you; it records a new deployment and deletes nothing.
+          </p>
+        )}
+        {canRollBack && !confirming && (
+          <button
+            type="button"
+            className="btn-primary w-fit"
+            onClick={() => {
+              rollback.reset()
+              setConfirming(true)
+            }}
+          >
+            Roll back
+          </button>
+        )}
+        {canRollBack && confirming && (
+          <div className="card space-y-3 border-amber-500/40 p-5" role="dialog" aria-label="Confirm rollback">
+            <p className="text-sm font-semibold">
+              Roll back {row.bundle} · {row.target} to deployment #{row.id}?
+            </p>
+            <p className="text-sm text-text-dim">
+              The stored documents are replayed as you and recorded as a new deployment.
+            </p>
+            {rollback.isError && <ErrorBox error={rollback.error} onRetry={() => rollback.mutate()} />}
+            <div className="flex gap-2">
+              <button type="button" className="btn-primary" disabled={rollback.isPending} onClick={() => rollback.mutate()}>
+                Confirm roll back
+              </button>
+              <button type="button" className="btn-ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        <p className="text-sm text-text-mute">
+          From a terminal: <code className="font-mono text-xs">{`stardelt bundle rollback --deployment ${row.id}`}</code>
+        </p>
+      </section>
     </div>
   )
 }
