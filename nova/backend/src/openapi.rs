@@ -368,6 +368,18 @@ pub fn document() -> utoipa::openapi::OpenApi {
         SecurityRequirement::new("bearer", Vec::<String>::new()),
         SecurityRequirement::new("session", Vec::<String>::new()),
     ]);
+    // Three routes deliberately answer without a session or token (see their annotations).
+    // OpenAPI's empty list overrides the document's global requirement, so a generated client
+    // does not attach a credential to them.
+    for id in ["openapi_document", "health", "auth_config"] {
+        for item in doc.paths.paths.values_mut() {
+            if let Some(op) = item.get.as_mut()
+                && op.operation_id.as_deref() == Some(id)
+            {
+                op.security = Some(Vec::new());
+            }
+        }
+    }
     doc
 }
 
@@ -705,6 +717,74 @@ mod tests {
 
     /// The document endpoint answers without a session and carries no data:
     /// no tokens, no cookies, no secrets — only paths, schemas and prose.
+    /// A non-2xx answer a generated client cannot type is an answer it cannot
+    /// handle. Every one names a body: `ErrorResponse`, except
+    /// `post /api/migrations/apply` `409`, which answers an `ApplyAnswer` with
+    /// the `errors` list of a changed or reordered migration file (the CLI
+    /// reads it, `stardelt migrations apply`).
+    #[test]
+    fn every_error_response_names_a_body() {
+        const METHODS: &[&str] = &["get", "put", "post", "delete", "patch", "head", "options"];
+        const APPLY_409: (&str, &str) = ("/api/migrations/apply", "post");
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            for method in METHODS {
+                let Some(op) = item.get(method) else {
+                    continue;
+                };
+                for (code, response) in op["responses"].as_object().expect("responses") {
+                    if code.starts_with('2') {
+                        continue;
+                    }
+                    let schema = &response["content"]["application/json"]["schema"]["$ref"];
+                    let expected = if (path.as_str(), *method) == APPLY_409 && code == "409" {
+                        "#/components/schemas/ApplyAnswer"
+                    } else {
+                        "#/components/schemas/ErrorResponse"
+                    };
+                    if schema != expected {
+                        bad.push(format!("{method} {path} {code}: {schema}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "a non-2xx answer must name its body: {bad:#?}"
+        );
+    }
+
+    /// The document's `security` is global, so a route that answers without a
+    /// credential says so with the empty list. Those are the document itself,
+    /// the readiness probe and the sign-in configuration; `me` inherits the
+    /// global bearer-or-session requirement and must not carry an empty one.
+    #[test]
+    fn the_credential_free_routes_say_so() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut ops = std::collections::BTreeMap::new();
+        for item in value["paths"].as_object().expect("paths").values() {
+            for op in item.as_object().expect("a path item is an object").values() {
+                if let Some(id) = op["operationId"].as_str() {
+                    ops.insert(id.to_string(), op);
+                }
+            }
+        }
+        for id in ["openapi_document", "health", "auth_config"] {
+            let op = ops.get(id).unwrap_or_else(|| panic!("{id} is documented"));
+            assert_eq!(
+                op.get("security"),
+                Some(&serde_json::json!([])),
+                "{id} answers without a credential"
+            );
+        }
+        let me = ops.get("me").expect("me is documented");
+        assert!(
+            me.get("security").is_none(),
+            "me inherits the global requirement"
+        );
+    }
+
     #[test]
     fn document_carries_no_secrets() {
         let json = document_json();

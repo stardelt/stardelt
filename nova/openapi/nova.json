@@ -929,7 +929,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/api/catalog/catalogs": {
@@ -4164,7 +4165,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/api/ingest/upload": {
@@ -4339,7 +4341,14 @@
             }
           },
           "403": {
-            "description": "Not visible"
+            "description": "Not visible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4401,10 +4410,24 @@
             }
           },
           "400": {
-            "description": "catalog/schema/table required"
+            "description": "catalog/schema/table required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "403": {
-            "description": "Not visible"
+            "description": "Not visible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4449,7 +4472,14 @@
             }
           },
           "503": {
-            "description": "No state store"
+            "description": "No state store",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4476,7 +4506,14 @@
             "description": "Run detail"
           },
           "404": {
-            "description": "Not found"
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -5571,7 +5608,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/api/pipelines": {
