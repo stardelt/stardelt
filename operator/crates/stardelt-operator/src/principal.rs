@@ -388,7 +388,10 @@ async fn patch_principal_status(
         "reconciled"
     );
     Ok(Action::requeue(Duration::from_secs(if state.ready {
-        60
+        // The Secret is watched (`stardelt.io/principal`) and the client is reconciled on the
+        // resource; 300 s is the safety resync, not a poll (#274 rule 4). 30 s stays: it is a
+        // transition, not a steady state.
+        300
     } else {
         30
     })))
@@ -903,7 +906,8 @@ mod tests {
         let action = reconcile_principal(Arc::new(principal), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        // The ready state is a 300 s resync, not a poll (#274 rule 4): the Secret is watched.
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
 
         let requests = requests.lock().expect("requests poisoned");
         assert!(
