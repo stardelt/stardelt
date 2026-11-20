@@ -44,6 +44,7 @@ DEFAULT_TOOLS = (
     "query_log_profile",
     "saved_queries_list",
     "deployments_list",
+    "deployments_get",
     "pipelines_list",
     "pipelines_get",
     "pipelines_run_get",
