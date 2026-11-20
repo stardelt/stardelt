@@ -188,6 +188,13 @@ fn may_act(who: &Identity, name: &str, owner: &ComputeOwner) -> bool {
                 || owner.user.as_deref() == Some(who.display_name.as_str())))
 }
 
+/// Whether the cluster's Connect endpoint belongs to the caller: an administrator, the owner's
+/// group, the owner themselves, or everyone for `shared`. A group in `spec.viewers` may see the
+/// cluster but not run code on it: the server acts with its owner group's rights (#493, #75).
+fn may_connect(who: &Identity, name: &str, owner: &ComputeOwner) -> bool {
+    may_act(who, name, owner) || name == "shared"
+}
+
 /// The phase the page shows: the operator's `status.phase` once it has reported, otherwise
 /// what the request implies (`Starting` for a requested `Running`, `Stopped` for everything
 /// else).
@@ -245,6 +252,7 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
     if !may_use(who, &name, &owner, &viewers) {
         return None;
     }
+    let connect = may_connect(who, &name, &owner);
     let status = object.get("status").unwrap_or(&Value::Null);
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
     let resources = |pointer: &str| {
@@ -280,14 +288,18 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             .unwrap_or_default(),
         phase: phase_of(object),
         message: message_of(object),
-        endpoint: text(status.get("endpoint")),
+        endpoint: if connect {
+            text(status.get("endpoint"))
+        } else {
+            None
+        },
         started_at: text(status.get("startedAt")),
         last_activity_at: text(status.get("lastActivityAt")),
         idle_stop_minutes: spec
             .get("idleStopMinutes")
             .and_then(Value::as_i64)
             .unwrap_or(60),
-        can_use: true,
+        can_use: connect,
         kind: "cluster".to_string(),
         mode: None,
         limits: None,
@@ -677,7 +689,7 @@ async fn set_state(
     operation_id = "compute_list",
     path = "/api/compute",
     tag = "public",
-    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs, `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
+    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs (`endpoint` is absent when the caller reaches the cluster only through `spec.viewers`: such a server acts with its owner group's rights, so Nova issues a viewer no channel — #493), `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's clusters, sorted by name", body = ComputeResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -1129,7 +1141,7 @@ mod tests {
 
     use super::{
         may_act, may_use, message_of, owner_of, phase_of, platform_view, spark_defaults,
-        validate_spec, viewers_of, visible_clusters, visible_to,
+        validate_spec, view, viewers_of, visible_clusters, visible_to,
     };
     use crate::auth::Identity;
 
@@ -2140,5 +2152,30 @@ mod tests {
             "only the shared cluster may run without an idle stop"
         );
         assert!(shared.lock().unwrap().created.is_empty());
+    }
+
+    #[test]
+    fn a_viewer_sees_no_endpoint_and_may_not_use_the_cluster() {
+        let mut object = cluster(
+            "team",
+            json!({"owner": {"group": "analytics"}, "viewers": ["visitors"]}),
+        );
+        object["status"] = json!({"endpoint": "sc://team:15002"});
+
+        let viewer = view(&object, &who("demo", &["visitors"], false))
+            .expect("a viewer still sees the cluster");
+        assert!(viewer.endpoint.is_none());
+        assert!(!viewer.can_use);
+
+        let owner = view(&object, &who("bob", &["analytics"], false)).expect("the owner sees it");
+        assert_eq!(owner.endpoint.as_deref(), Some("sc://team:15002"));
+        assert!(owner.can_use);
+
+        let mut shared = cluster("shared", json!({"owner": {"group": "stardelt-users"}}));
+        shared["status"] = json!({"endpoint": "sc://shared:15002"});
+        let anyone =
+            view(&shared, &who("carol", &[], false)).expect("everyone sees the shared one");
+        assert_eq!(anyone.endpoint.as_deref(), Some("sc://shared:15002"));
+        assert!(anyone.can_use);
     }
 }
