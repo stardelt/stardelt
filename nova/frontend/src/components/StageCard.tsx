@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { Me } from '../api'
-import { useYourWarehouse, warehouseHint, warehouseText } from './WarehouseNote'
 
 /**
  * The top-left card answers "where am I working?": the stage this Nova is (one
- * `PlatformInstance`), the SQL class this person's queries run on, and a way to the sibling
- * stages. The default *catalog* that used to sit here (`me.warehouse`) stays on the SQL editor's
+ * `PlatformInstance`) and a way to the sibling stages. What a person's SQL runs on is on
+ * Compute → SQL. The default *catalog* that used to sit here (`me.warehouse`) stays on the SQL editor's
  * picker and on Platform settings — it is not compute and it cannot be chosen.
  */
 
@@ -20,7 +19,6 @@ function hostOf(url: string): string {
 }
 
 export default function StageCard({ me, collapsed }: { me?: Me | null; collapsed: boolean }) {
-  const warehouse = useYourWarehouse()
   const [open, setOpen] = useState(false)
   const wrapper = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
@@ -77,12 +75,6 @@ export default function StageCard({ me, collapsed }: { me?: Me | null; collapsed
           {me?.stage_name ? 'Stage' : 'Platform'}
         </div>
         <div className="text-sm font-medium truncate" title={name}>{name}</div>
-        <div
-          className="text-xs text-text-mute truncate"
-          title={warehouse ? warehouseHint(warehouse) : undefined}
-        >
-          {warehouse ? `SQL: ${warehouseText(warehouse)}` : 'SQL: —'}
-        </div>
       </div>
       {me?.demo && (
         <span

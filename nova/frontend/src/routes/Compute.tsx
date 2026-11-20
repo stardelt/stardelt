@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, errorMessage, type ComputeCluster } from '../api'
 import ComputeDialog from '../components/ComputeDialog'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
+import SqlCompute from '../components/SqlCompute'
 import { isAdmin } from '../roles'
 import { formatWhen } from './Pipelines'
 
@@ -61,6 +63,9 @@ function rank(c: ComputeCluster): number {
 }
 
 export default function Compute() {
+  // The tab is the URL's `?tab=`: `/compute` still opens Spark, so every existing link works.
+  const [params, setParams] = useSearchParams()
+  const tab = params.get('tab') === 'sql' ? 'sql' : 'spark'
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const admin = isAdmin(me.data)
@@ -85,26 +90,52 @@ export default function Compute() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Compute</h1>
           <p className="text-sm text-text-dim">
-            Spark clusters a team starts when it needs them; the shared cluster is always on.
+            {tab === 'sql'
+              ? 'The SQL engine and the classes your queries run in.'
+              : 'Spark clusters a team starts when it needs them; the shared cluster is always on.'}
           </p>
         </div>
-        {admin && me.data?.demo !== true && (
+        {tab === 'spark' && admin && me.data?.demo !== true && (
           <button type="button" className="btn-primary" onClick={() => setEditing({ cluster: null })}>
             New cluster
           </button>
         )}
       </div>
 
-      {clusters.isError && <ErrorBox error={clusters.error} onRetry={() => clusters.refetch()} />}
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Compute kinds">
+        {([
+          ['spark', 'Spark'],
+          ['sql', 'SQL'],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            role="tab"
+            onClick={() => setParams(key === 'spark' ? {} : { tab: 'sql' })}
+            aria-selected={tab === key}
+            className={[
+              'px-3 py-1.5 rounded-[8px] text-sm border',
+              tab === key
+                ? 'bg-accent/15 border-accent/30 text-text'
+                : 'border-border text-text-dim hover:text-text',
+            ].join(' ')}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-      {clusters.data && clusters.data.clusters.length === 0 && (
+      {tab === 'sql' && <SqlCompute />}
+
+      {tab === 'spark' && clusters.isError && <ErrorBox error={clusters.error} onRetry={() => clusters.refetch()} />}
+
+      {tab === 'spark' && clusters.data && clusters.data.clusters.length === 0 && (
         <EmptyState icon="spark" title="No compute clusters">
           A cluster is created as a <span className="font-mono">SparkCluster</span> resource; ask an administrator to
           create one.
         </EmptyState>
       )}
 
-      {clusters.data && clusters.data.clusters.length > 0 && (
+      {tab === 'spark' && clusters.data && clusters.data.clusters.length > 0 && (
         <>
           {(start.isError || stop.isError) && (
             <p role="alert" className="text-sm text-bad">
@@ -211,7 +242,7 @@ export default function Compute() {
         </>
       )}
 
-      {editing && (
+      {tab === 'spark' && editing && (
         <ComputeDialog
           cluster={editing.cluster}
           onClose={() => setEditing(null)}
