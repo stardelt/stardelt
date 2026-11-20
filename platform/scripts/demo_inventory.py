@@ -2,7 +2,7 @@
 """Read-only inventory of what a visitor sees on the public demo (stardelt#79 point 2).
 
 Prints three Markdown tables — Pipelines, Stream apps and Spark clusters — with the owner,
-schedule, viewers and last run of every object in one namespace. It only reads: three
+schedule, viewers and last run of every object in one namespace. It only reads: four
 `kubectl get -o json` calls, no Secret, no applied change. The removal decision for the
 demo bundle is taken from this table, so the output is not edited by hand.
 
@@ -19,7 +19,8 @@ three ways (`--runs`):
   crd             the CRD's `status.runs`, which nothing writes, so every row answers `never`.
 
 `--check` turns the tables into the convergence list of stardelt#79 and exits 1 on a violation,
-including a last-run source that could not answer at all.
+including a last-run source that could not answer at all and an empty page — no stream or no
+connection that `visitors` can open.
 """
 from __future__ import annotations
 
@@ -51,6 +52,13 @@ LEGACY = (
 # `demo-cluster` target is only added with the first demo-owned SparkCluster in the
 # stardelt namespace (#79).
 FIX = {"pipeline": "demo-shop", "stream": "demo-stream", "cluster": "install-spark-demo"}
+
+# A page a visitor opens first; #79 says none of them may be empty. The value is the command
+# that fills it (`FIX` names the object's own command; this names the page's).
+COVERAGE_FIX = {
+    "stream": "demo-stream",
+    "connection": "demo-connection",
+}
 
 
 def kubectl(kind, namespace):
@@ -291,7 +299,7 @@ def _demo_objects(pipelines, streams, clusters):
     ]
 
 
-def check(pipelines, streams, clusters, runs) -> list[str]:
+def check(pipelines, streams, clusters, runs, connections=None) -> list[str]:
     """The convergence list of stardelt#79; pure. `runs` is `None` for `--runs crd`."""
     problems = []
     names = {_name(obj) for obj in pipelines}
@@ -320,6 +328,13 @@ def check(pipelines, streams, clusters, runs) -> list[str]:
             state = (last or {}).get("state")
             if state != "success":
                 problems.append(f"pipeline {_name(obj)}'s last run is {state or 'never'}")
+    if connections is not None:
+        for kind, objects in (("stream", streams), ("connection", connections)):
+            if not any(GROUP in (_spec(obj).get("viewers") or []) for obj in objects):
+                problems.append(
+                    f"no {kind} is visible to {GROUP}: the visitors' {kind}s page is empty"
+                    f" — run make {COVERAGE_FIX[kind]} YES=1"
+                )
     return problems
 
 
@@ -383,11 +398,15 @@ def main() -> int:
     pipelines = kubectl("pipelines.stardelt.io", args.namespace)
     streams = kubectl("streamapps.stardelt.io", args.namespace)
     clusters = kubectl("sparkclusters.stardelt.io", args.namespace)
+    connections = kubectl("connections.stardelt.io", args.namespace)
     print(render(pipelines, streams, clusters, runs))
+    print(f"Coverage: {sum(1 for obj in streams if GROUP in (_spec(obj).get('viewers') or []))} stream(s) "
+          f"and {sum(1 for obj in connections if GROUP in (_spec(obj).get('viewers') or []))} connection(s) "
+          f"visible to {GROUP}.")
     if not args.check:
         return 0
 
-    problems = check(pipelines, streams, clusters, runs)
+    problems = check(pipelines, streams, clusters, runs, connections)
     for problem in problems:
         print(f"✗ {problem}")
     if problems:
