@@ -101,6 +101,7 @@ pub struct ErrorResponse {
         crate::deployments::record,
         crate::deployments::list,
         crate::deployments::detail,
+        crate::deployments::rollback,
         crate::pipelines::list_runs,
         crate::pipelines::notebook_usage,
         crate::streams::list,

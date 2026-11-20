@@ -6805,6 +6805,62 @@ pub(crate) async fn retry(
     )
 }
 
+/// Apply one document a recorded deployment stored, as `who`: the same create or update the
+/// bundle deploy made, so `POST /api/deployments/{id}/rollback` replays exactly what ran.
+///
+/// The inner functions are used on purpose: the "in production a notebook comes from Git"
+/// rule is a handler rule, and the recorded deploy was accepted when it was made. A create
+/// takes the same ten-per-hour slot as a hand create; a bundle with more pipelines than that
+/// is recorded `failed` and can be replayed after the window.
+pub(crate) async fn apply_document(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks: Option<&NotebookStore>,
+    airflow: Option<&AirflowClient>,
+    limiter: &CreateLimiter,
+    who: &Identity,
+    document: &serde_json::Value,
+) -> Result<&'static str, Fail> {
+    let create: CreatePipelineRequest = serde_json::from_value(document.clone()).map_err(|e| {
+        Fail::new(
+            StatusCode::BAD_REQUEST,
+            format!("the recorded document no longer fits a pipeline: {e}"),
+        )
+    })?;
+    let Some(resources) = resources else {
+        return Err(no_cluster());
+    };
+    match resources.get(&create.name).await {
+        Ok(None) => create_pipeline_inner(Some(resources), db, notebooks, limiter, who, create)
+            .await
+            .map(|_| "created")
+            .map_err(|e| e.fail),
+        Ok(Some(_)) => {
+            let update: UpdatePipelineRequest =
+                serde_json::from_value(document.clone()).map_err(|e| {
+                    Fail::new(
+                        StatusCode::BAD_REQUEST,
+                        format!("the recorded document no longer fits a pipeline: {e}"),
+                    )
+                })?;
+            update_pipeline_inner(
+                Some(resources),
+                db,
+                notebooks,
+                airflow,
+                who,
+                &crate::cluster::namespace(),
+                &create.name,
+                update,
+            )
+            .await
+            .map(|_| "updated")
+            .map_err(|e| e.fail)
+        }
+        Err(e) => Err(resource_fail(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -16007,6 +16063,50 @@ mod tests {
             !redacted[0].sql.contains("'a'"),
             "the literal is redacted: {}",
             redacted[0].sql
+        );
+    }
+
+    /// A rollback replays a stored document: the first pass creates, a second pass of the same
+    /// document updates, and the store still holds one pipeline.
+    #[tokio::test]
+    async fn apply_document_creates_and_then_updates() {
+        // `analytics_ready()` is `memory(&[])` plus the group's ready principal: a create refuses
+        // a group whose `pipeline-<group>` principal is missing (409), so the fixture needs it.
+        let resources = analytics_ready();
+        let limiter = create_limiter();
+        let ada = who("sub-ada", &["analytics"], false);
+        let document = json!({"name": "daily", "ownerGroup": "analytics", "sql": "select 1"});
+
+        let action = apply_document(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &limiter,
+            &ada,
+            &document,
+        )
+        .await
+        .expect("the first pass creates the pipeline");
+        assert_eq!(action, "created");
+
+        let action = apply_document(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &limiter,
+            &ada,
+            &document,
+        )
+        .await
+        .expect("the second pass updates it");
+        assert_eq!(action, "updated");
+
+        assert_eq!(
+            resources.list().await.expect("memory list").len(),
+            1,
+            "one pipeline, not two"
         );
     }
 }
