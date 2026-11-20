@@ -1408,6 +1408,26 @@ def _signature(condition):
     )
 
 
+def _status_body(current, phase, warehouse_id, generation, desired, resource_version):
+    """The merge-patch body: the job's conditions + the foreign ones, with the live
+    resourceVersion so a concurrent writer gets 409 instead of losing a condition."""
+    foreign = [
+        condition
+        for condition in current.get("conditions") or []
+        if condition.get("type") not in OWNED_CONDITIONS
+    ]
+    body = {
+        "metadata": {"resourceVersion": resource_version},
+        "status": {
+            "phase": phase,
+            "warehouseId": warehouse_id,
+            "observedGeneration": generation,
+            "conditions": desired + foreign,
+        },
+    }
+    return body, foreign
+
+
 def patch_status(name, phase, warehouse_id, reason, message, grants=None):
     """Write the Catalog status as a merge-patch, only when it differs from the live one.
 
@@ -1417,6 +1437,10 @@ def patch_status(name, phase, warehouse_id, reason, message, grants=None):
     status and the object's `resourceVersion` alone (the ticket's idempotence check).
     `warehouseId: null` clears a stale id when a Catalog turns Invalid. Conditions
     this job does not own are preserved as they are.
+
+    The patch carries the live `resourceVersion`, so a concurrent writer (the operator
+    owns `MaintenanceReady`) gets a 409 instead of losing a condition: the GET, the
+    merge and the PATCH run again, three attempts at most.
     """
     path = "%s/%s" % (CATALOG_PATH, name)
     status, live = k8s_request("GET", path)
@@ -1462,48 +1486,48 @@ def patch_status(name, phase, warehouse_id, reason, message, grants=None):
                 )
             )
 
-    live_owned = [
-        condition
-        for condition in current.get("conditions") or []
-        if condition.get("type") in OWNED_CONDITIONS
-    ]
-    foreign = [
-        condition
-        for condition in current.get("conditions") or []
-        if condition.get("type") not in OWNED_CONDITIONS
-    ]
-    unchanged = (
-        current.get("phase") == phase
-        and current.get("warehouseId") == warehouse_id
-        and current.get("observedGeneration") == generation
-        and [_signature(condition) for condition in live_owned]
-        == [_signature(condition) for condition in desired]
-    )
-    if unchanged:
-        return False
-
-    written = []
-    for condition in desired:
-        condition = dict(condition)
-        condition["lastTransitionTime"] = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
+    for attempt in range(3):
+        if attempt:
+            status, live = k8s_request("GET", path)
+            if status != 200 or not live:
+                fail("cannot read Catalog %s (HTTP %s)" % (name, status))
+            current = live.get("status") or {}
+        live_owned = [
+            condition
+            for condition in current.get("conditions") or []
+            if condition.get("type") in OWNED_CONDITIONS
+        ]
+        unchanged = (
+            current.get("phase") == phase
+            and current.get("warehouseId") == warehouse_id
+            and current.get("observedGeneration") == generation
+            and [_signature(condition) for condition in live_owned]
+            == [_signature(condition) for condition in desired]
         )
-        written.append(condition)
-    status, _ = k8s_request(
-        "PATCH",
-        path + "/status",
-        {
-            "status": {
-                "phase": phase,
-                "warehouseId": warehouse_id,
-                "observedGeneration": generation,
-                "conditions": written + foreign,
-            }
-        },
-    )
-    if status not in (200, 201):
-        fail("cannot write Catalog %s status (HTTP %s)" % (name, status))
-    return True
+        if unchanged:
+            return False
+
+        written = []
+        for condition in desired:
+            condition = dict(condition)
+            condition["lastTransitionTime"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+            written.append(condition)
+        body, _ = _status_body(
+            current,
+            phase,
+            warehouse_id,
+            generation,
+            written,
+            (live.get("metadata") or {}).get("resourceVersion"),
+        )
+        status, _ = k8s_request("PATCH", path + "/status", body)
+        if status in (200, 201):
+            return True
+        if status != 409:
+            fail("cannot write Catalog %s status (HTTP %s)" % (name, status))
+    fail("cannot write Catalog %s status: three consecutive conflicts" % (name))
 
 
 def patch_warehouse_status(name, phase, rendered_group, engine, reason, message):

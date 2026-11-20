@@ -723,7 +723,7 @@ class EnsureWarehouseTest(JobTestCase):
 
 class PatchStatusTest(JobTestCase):
     LIVE = {
-        "metadata": {"generation": 3},
+        "metadata": {"generation": 3, "resourceVersion": "42"},
         "status": {
             "phase": "Ready",
             "warehouseId": "warehouse-1",
@@ -838,6 +838,74 @@ class PatchStatusTest(JobTestCase):
         )
         self.assertFalse(changed)
         self.assertEqual([call[0] for call in calls], ["GET"])
+
+    def test_the_patch_carries_the_resource_version(self):
+        live = json.loads(json.dumps(self.LIVE))
+        live["status"].update({"phase": "Invalid", "warehouseId": None})
+        calls = self._stub_k8s(live)
+        changed = access_sync.patch_status(
+            "finance", "Ready", "warehouse-1", "Ready", "Lakekeeper warehouse warehouse-1"
+        )
+        self.assertTrue(changed)
+        body = [call for call in calls if call[0] == "PATCH"][0][2]
+        self.assertEqual(set(body), {"metadata", "status"})
+        self.assertEqual(body["metadata"], {"resourceVersion": "42"})
+        self.assertEqual(body["status"]["phase"], "Ready")
+
+    def test_a_conflict_re_reads_and_retries(self):
+        live = json.loads(json.dumps(self.LIVE))
+        live["status"].update({"phase": "Invalid", "warehouseId": None})
+        calls = []
+        patches = []
+
+        def request(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                if patches:
+                    retried = json.loads(json.dumps(live))
+                    retried["metadata"]["resourceVersion"] = "43"
+                    return 200, retried
+                return 200, live
+            patches.append(body)
+            return (409, None) if len(patches) == 1 else (200, {})
+
+        saved = access_sync.k8s_request
+        access_sync.k8s_request = request
+        self.addCleanup(setattr, access_sync, "k8s_request", saved)
+        changed = access_sync.patch_status(
+            "finance", "Ready", "warehouse-1", "Ready", "Lakekeeper warehouse warehouse-1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET", "PATCH"])
+        self.assertEqual(len(patches), 2, "a 409 must be retried once")
+        self.assertEqual(patches[0]["metadata"]["resourceVersion"], "42")
+        self.assertEqual(patches[1]["metadata"]["resourceVersion"], "43")
+        self.assertEqual(patches[1]["status"]["phase"], "Ready")
+
+    def test_three_conflicts_fail_the_tick(self):
+        live = json.loads(json.dumps(self.LIVE))
+        live["status"].update({"phase": "Invalid", "warehouseId": None})
+        calls = []
+
+        def request(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                return 200, live
+            return 409, None
+
+        saved = access_sync.k8s_request
+        access_sync.k8s_request = request
+        self.addCleanup(setattr, access_sync, "k8s_request", saved)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                access_sync.patch_status(
+                    "finance", "Ready", "warehouse-1", "Ready", "Lakekeeper warehouse warehouse-1"
+                )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(len([call for call in calls if call[0] == "PATCH"]), 3)
+        self.assertIn("Catalog finance", stderr.getvalue())
+        self.assertIn("three consecutive conflicts", stderr.getvalue())
 
 
 class DesiredRelationsTest(JobTestCase):
