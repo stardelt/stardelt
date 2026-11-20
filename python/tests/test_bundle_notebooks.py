@@ -25,7 +25,7 @@ def test_plan_of_an_unchanged_notebook_checks_the_pipeline_against_the_version_i
     make(tmp_path, resources=RESOURCES, files=FILES)
     code, out, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update("notebook")))
     assert code == 0
-    assert [json.loads(line) for line in out.splitlines()] == [{"action": "would-update", "name": "explore", "changes": ["notebook"]}]
+    assert [json.loads(line) for line in out.splitlines()] == [{"action": "would-update", "name": "explore", "changes": ["notebook"], "kind": "Pipeline"}]
     assert urls(session)[1] == ("PUT", "/api/notebooks/sales/explore.ipynb")
     _, _, check = session.calls[1]
     assert check["params"] == {"dryRun": "true"} and check["json"] == NOTEBOOK
@@ -37,7 +37,7 @@ def test_plan_of_a_changed_notebook_says_would_publish_and_asks_nothing_more(tmp
     make(tmp_path, resources=RESOURCES, files=FILES)
     code, out, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], ME, NEW)
     assert code == 0
-    assert [json.loads(line) for line in out.splitlines()] == [{"action": "would-publish", "name": "explore", "notebook": "sales/explore.ipynb"}]
+    assert [json.loads(line) for line in out.splitlines()] == [{"action": "would-publish", "name": "explore", "notebook": "sales/explore.ipynb", "kind": "Pipeline"}]
     assert len(session.calls) == 2, "no pipeline check: there is no version to pin yet"
 
 
@@ -51,8 +51,8 @@ def test_deploy_publishes_the_notebook_first_and_pins_the_version(tmp_path):
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8"},
-        {"action": "created", "name": "explore"},
+        {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8", "kind": "Pipeline"},
+        {"action": "created", "name": "explore", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert [method for method, _ in urls(session)] == ["GET", "PUT", "PUT", "POST", "GET", "POST", "GET", "POST"]
@@ -84,7 +84,7 @@ def test_deploy_of_an_unchanged_notebook_publishes_nothing(tmp_path):
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "updated", "name": "explore"},
+        {"action": "updated", "name": "explore", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert sum(1 for method, url in urls(session) if (method, url) == ("PUT", "/api/notebooks/sales/explore.ipynb")) == 1
@@ -117,7 +117,7 @@ def test_a_refusal_after_the_publish_still_lists_what_was_published(tmp_path):
     )
     assert code == 2
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8"},
+        {"action": "published", "name": "explore", "notebook": "sales/explore.ipynb", "objectVersion": "v8", "kind": "Pipeline"},
         {"action": "recorded", "id": 3},
     ]
     assert "explore: no such schedule" in err

@@ -44,8 +44,8 @@ def test_plan_warns_once_for_each_pipeline_changed_by_hand_and_writes_nothing(tm
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "would-update", "name": "load", "changes": ["statement"]},
-        {"action": "would-update", "name": "nightly", "changes": ["statement"], "modified": True},
+        {"action": "would-update", "name": "load", "changes": ["statement"], "kind": "Pipeline"},
+        {"action": "would-update", "name": "nightly", "changes": ["statement"], "modified": True, "kind": "Pipeline"},
     ]
     assert err == WARNING
     assert [method for method, _ in calls(session)] == ["GET", "POST", "POST"], "a plan writes nothing"
@@ -63,8 +63,8 @@ def test_deploy_still_overwrites_and_keeps_the_fact_in_its_answer(tmp_path):
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "updated", "name": "load"},
-        {"action": "updated", "name": "nightly", "modified": True},
+        {"action": "updated", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "modified": True, "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert err == WARNING

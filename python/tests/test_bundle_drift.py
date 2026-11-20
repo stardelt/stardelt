@@ -82,8 +82,8 @@ def test_a_blocking_deploy_writes_nothing_and_with_accept_drift_it_writes(tmp_pa
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "updated", "name": "load"},
-        {"action": "updated", "name": "nightly", "modified": True},
+        {"action": "updated", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "modified": True, "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert methods(session).count("PUT") == 2

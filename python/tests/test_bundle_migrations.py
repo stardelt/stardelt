@@ -95,9 +95,9 @@ def test_plan_lists_migrations_before_pipelines_and_writes_nothing(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "migration-in-ledger", "name": "001_init.sql"},
-        {"action": "would-apply-migration", "name": "002_add.sql", "class": "additive"},
-        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"]},
+        {"action": "migration-in-ledger", "name": "001_init.sql", "kind": "Migration"},
+        {"action": "would-apply-migration", "name": "002_add.sql", "class": "additive", "kind": "Migration"},
+        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"], "kind": "Pipeline"},
     ]
     assert calls(session) == [("GET", "/api/me"), ("POST", "/api/migrations/plan"), ("POST", "/api/pipelines/validate")]
     assert session.calls[1][2]["json"]["files"] == [
@@ -117,9 +117,9 @@ def test_deploy_applies_migrations_before_the_pipelines(tmp_path):
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "migration-in-ledger", "name": "001_init.sql"},
-        {"action": "migration-applied", "name": "002_add.sql"},
-        {"action": "created", "name": "load"},
+        {"action": "migration-in-ledger", "name": "001_init.sql", "kind": "Migration"},
+        {"action": "migration-applied", "name": "002_add.sql", "kind": "Migration"},
+        {"action": "created", "name": "load", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "POST", "GET", "POST", "GET", "POST"]
@@ -231,10 +231,10 @@ def test_a_breaking_migration_names_the_table_and_its_downstream_count(tmp_path)
     )
     assert (code, err) == (0, "")
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "migration-in-ledger", "name": "001_init.sql"},
-        {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking",
+        {"action": "migration-in-ledger", "name": "001_init.sql", "kind": "Migration"},
+        {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking", "kind": "Migration",
          "impact": {"table": "warehouse.sales.trips", "downstream": 3, "downstreamJobs": 2}},
-        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"]},
+        {"action": "would-create", "name": "load", "nextRuns": ["2026-11-02T03:00:00+01:00"], "kind": "Pipeline"},
     ]
     assert calls(session) == [
         ("GET", "/api/me"),
@@ -256,7 +256,7 @@ def test_a_breaking_file_without_a_table_draws_no_impact_line_and_makes_no_extra
     )
     assert (code, err) == (0, "")
     rows = [json.loads(line) for line in out.splitlines()]
-    assert rows[1] == {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking"}
+    assert rows[1] == {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking", "kind": "Migration"}
     assert calls(session) == [("GET", "/api/me"), ("POST", "/api/migrations/plan"), ("POST", "/api/pipelines/validate")]
 
 
@@ -269,5 +269,5 @@ def test_an_unavailable_lineage_answer_leaves_the_plan_intact(tmp_path):
     )
     assert (code, err) == (0, "")
     rows = [json.loads(line) for line in out.splitlines()]
-    assert rows[1] == {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking"}
+    assert rows[1] == {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking", "kind": "Migration"}
     assert calls(session)[2] == ("GET", "/api/lineage")

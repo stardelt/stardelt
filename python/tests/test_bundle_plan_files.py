@@ -82,5 +82,15 @@ def test_the_markdown_carries_a_files_table(tmp_path):
     load = next(f for f in files if f["path"] == "sql/load.sql")
     assert f"| sql/load.sql | {load['sha256'][:12]} | new |" in text
     assert bundle.plan_markdown("prod", []) == (
-        "### Bundle plan · `prod`\n\n| Action | Pipeline | Notes |\n|---|---|---|\n"
+        "### Bundle plan · `prod`\n\n| Action | Kind | Name | Notes |\n|---|---|---|---|\n"
     )
+
+
+def test_a_stream_and_a_migration_carry_their_kind():
+    text = bundle.plan_markdown("prod", [
+        {"action": "would-create", "name": "load", "kind": "Pipeline"},
+        {"action": "would-create", "name": "feed", "kind": "StreamApp"},
+        {"action": "would-apply-migration", "name": "001_init.sql", "class": "additive", "kind": "Migration"},
+    ])
+    assert "| would-create | StreamApp | feed | — |" in text
+    assert "| would-apply-migration | Migration | 001_init.sql | — |" in text
