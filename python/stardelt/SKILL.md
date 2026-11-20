@@ -59,6 +59,8 @@ until a command needs the platform.
   would change.
 - `stardelt bundle summary . -t <target>` says what the last deploy left on the stage, and
   `stardelt bundle run . -t <target>` starts those pipelines and waits.
+- `deployments_list` lists the recorded deploys; `deployments_get` opens one and shows the rendered
+  documents and the bundle files (path and sha256) it read. Both are read tools.
 
 ## Writes
 

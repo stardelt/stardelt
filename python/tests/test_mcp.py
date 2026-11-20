@@ -93,6 +93,17 @@ def test_the_deployment_history_is_offered_by_default():
     assert deployments["annotations"]["readOnlyHint"] is True
 
 
+def test_one_recorded_deploy_is_offered_by_default():
+    # The list says a stage was deployed; the row says what it applied (#110).
+    srv, _ = server()
+    tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
+    one = tools["deployments_get"]
+    assert one["description"] == "GET /api/deployments/{id}: the Stardelt API operation deployments_get"
+    assert one["inputSchema"]["required"] == ["id"]
+    assert one["inputSchema"]["additionalProperties"] is False
+    assert one["annotations"]["readOnlyHint"] is True
+
+
 def test_allow_adds_one_operation_and_a_write_is_marked_destructive():
     srv, _ = server(allowed=list(mcp.DEFAULT_TOOLS) + ["query_run"])
     tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
