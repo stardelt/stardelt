@@ -368,6 +368,18 @@ pub fn document() -> utoipa::openapi::OpenApi {
         SecurityRequirement::new("bearer", Vec::<String>::new()),
         SecurityRequirement::new("session", Vec::<String>::new()),
     ]);
+    // Three routes deliberately answer without a session or token (see their annotations).
+    // OpenAPI's empty list overrides the document's global requirement, so a generated client
+    // does not attach a credential to them.
+    for id in ["openapi_document", "health", "auth_config"] {
+        for item in doc.paths.paths.values_mut() {
+            if let Some(op) = item.get.as_mut()
+                && op.operation_id.as_deref() == Some(id)
+            {
+                op.security = Some(Vec::new());
+            }
+        }
+    }
     doc
 }
 
@@ -701,6 +713,78 @@ mod tests {
         let cell =
             &value["components"]["schemas"]["QueryResult"]["properties"]["rows"]["items"]["items"];
         assert!(cell.get("type").is_none(), "a result cell is typed: {cell}");
+    }
+
+    /// Every non-2xx answer names the error envelope, so a generated client has a
+    /// type for it. The one deliberate exception is `post /api/migrations/apply`
+    /// `409`: the handler answers an `ApplyAnswer` whose `errors` list names the
+    /// changed or reordered migration file, and the CLI reads it.
+    #[test]
+    fn every_error_response_names_a_body() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let Some(responses) = op["responses"].as_object() else {
+                    continue;
+                };
+                for (code, response) in responses {
+                    if code.starts_with('2') {
+                        continue;
+                    }
+                    let schema = &response["content"]["application/json"]["schema"];
+                    let expected =
+                        if method == "post" && path == "/api/migrations/apply" && code == "409" {
+                            // A changed or reordered migration file: the CLI reads `errors`.
+                            "#/components/schemas/ApplyAnswer"
+                        } else {
+                            "#/components/schemas/ErrorResponse"
+                        };
+                    if schema["$ref"] != expected {
+                        bad.push(format!("{method} {path} {code}: {}", schema["$ref"]));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "non-2xx answers must name {expected_help}: {bad:#?}",
+            expected_help = "ErrorResponse (except post /api/migrations/apply 409)"
+        );
+    }
+
+    /// Three operations answer without a credential on purpose. OpenAPI's empty
+    /// `security` list overrides the document's global bearer-or-session
+    /// requirement, so a generated client does not send a token to them.
+    #[test]
+    fn the_credential_free_routes_say_so() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut by_id: std::collections::BTreeMap<&str, &serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for (_, item) in value["paths"].as_object().expect("paths is an object") {
+            for (_, op) in item.as_object().expect("a path item is an object") {
+                if let Some(id) = op["operationId"].as_str() {
+                    by_id.insert(id, op);
+                }
+            }
+        }
+        for id in ["openapi_document", "health", "auth_config"] {
+            let op = by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("operation {id} is in the document"));
+            assert_eq!(
+                op["security"],
+                serde_json::json!([]),
+                "{id} answers without a credential, so its security list is empty"
+            );
+        }
+        // `me` inherits the global bearer-or-session requirement: it has no list of its own.
+        let me = by_id.get("me").expect("operation me is in the document");
+        assert!(
+            me.get("security").is_none() || me["security"].is_null(),
+            "me inherits the global requirement, it does not override it: {}",
+            me["security"]
+        );
     }
 
     /// The document endpoint answers without a session and carries no data:
