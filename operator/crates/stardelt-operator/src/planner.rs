@@ -290,6 +290,9 @@ mod tests {
             config: BTreeMap::new(),
             writes: Vec::new(),
             checks: Vec::new(),
+            project: None,
+            refresh: None,
+            full_refresh: Vec::new(),
         }
     }
 
