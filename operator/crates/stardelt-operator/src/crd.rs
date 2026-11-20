@@ -271,11 +271,7 @@ pub struct IdentitySpec {
     /// `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: Envoy cannot
     /// discover it, and the operator does not fetch a customer's discovery document.
     /// A `platform` instance derives it from the Keycloak it deploys and must leave it out.
-    #[serde(
-        default,
-        rename = "jwksUri",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "jwksUri", skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 512), regex(pattern = r"^https://\S+$"))]
     pub jwks_uri: Option<String>,
     /// `external` only: which kind of provider this instance talks to.

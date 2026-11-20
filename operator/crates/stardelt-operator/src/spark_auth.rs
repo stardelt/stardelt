@@ -129,7 +129,14 @@ pub fn config_map(
         metadata: meta(NAME, namespace),
         data: Some(BTreeMap::from([(
             "envoy.yaml".to_string(),
-            envoy_config(namespace, issuer, jwks_uri, audience, group_claim, admin_group),
+            envoy_config(
+                namespace,
+                issuer,
+                jwks_uri,
+                audience,
+                group_claim,
+                admin_group,
+            ),
         )])),
         ..ConfigMap::default()
     }

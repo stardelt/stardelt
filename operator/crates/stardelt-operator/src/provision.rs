@@ -878,7 +878,12 @@ pub async fn ensure_spark(
         let issuer = crate::identity::issuer_url(&instance.spec).ok().flatten();
         let jwks = crate::identity::jwks_uri(&instance.spec).ok().flatten();
         let audience = if instance.spec.identity.mode == IdentityMode::External {
-            instance.spec.identity.api_audience.clone().unwrap_or_default()
+            instance
+                .spec
+                .identity
+                .api_audience
+                .clone()
+                .unwrap_or_default()
         } else {
             "spark-connect".to_string()
         };
@@ -935,7 +940,8 @@ pub async fn ensure_spark(
             // Only the platform's own realm has an audience to create; an external provider's
             // is the customer's to register.
             if instance.spec.identity.mode == IdentityMode::Platform
-                && let Err(e) = crate::principal_keycloak::ensure_spark_audience(ctx, namespace).await
+                && let Err(e) =
+                    crate::principal_keycloak::ensure_spark_audience(ctx, namespace).await
             {
                 return Some(status(NAME, false, e.to_string()));
             }
