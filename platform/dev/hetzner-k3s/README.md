@@ -114,6 +114,18 @@ Leftovers `dev-down` does not touch (safe to keep or remove):
 If a browser still resolves the old hostname after teardown, it is the local resolver
 cache, not DNS: `sudo resolvectl flush-caches`.
 
+## One run, end to end
+
+```console
+FRESH_DOMAIN=fresh.example.com YES=1 make e2e-fresh-node
+make e2e-cleanup
+```
+
+One `cpx42` exists for the run and is deleted at the end, on failure too (unless
+`KEEP_ON_FAILURE=1`). The report is printed and written to
+`~/.cache/stardelt-e2e/<run>/report.txt`, with the pod, event, CR and operator logs next to
+it. The run itself is a person's: it needs the Hetzner and Cloudflare credentials.
+
 ## Notes
 
 - Single node, no HA — a development environment, not production.

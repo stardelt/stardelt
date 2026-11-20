@@ -70,7 +70,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -305,6 +305,14 @@ verify-fresh-node: _context ## The operator install is up: instance Ready, Pod S
 .PHONY: verify-fresh-node-product
 verify-fresh-node-product: _context ## The readiness checks plus Airflow, Superset, Lakekeeper and Nova's sign-in page (run directly after a fresh node: it needs the port-forwards)
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-fresh-node.sh product
+
+.PHONY: e2e-fresh-node e2e-cleanup
+e2e-fresh-node: _context ## One throwaway Hetzner server: fresh node, operator install, verify, deleted again (needs YES=1, FRESH_DOMAIN=<domain>)
+	@if [ '$(YES)' != 1 ] && [ '$(DRY_RUN)' != 1 ]; then echo "would create one throwaway Hetzner server (cpx42), verify it and delete it — re-run with YES=1 FRESH_DOMAIN=<domain>"; exit 1; fi
+	@YES=1 FRESH_DOMAIN='$(FRESH_DOMAIN)' DRY_RUN='$(DRY_RUN)' FRESH_NODE_TYPE='$(FRESH_NODE_TYPE)' bash scripts/e2e-fresh-node.sh up
+
+e2e-cleanup: ## Delete every stardelt-fresh-* server this checkout started (safe to re-run)
+	@bash scripts/e2e-fresh-node.sh down
 
 .PHONY: check-spark-runtimes-live
 check-spark-runtimes-live: _context ## The live Spark runtime catalogue matches chart/files/spark-runtimes.json
