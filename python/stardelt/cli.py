@@ -173,6 +173,10 @@ def _parser():
     check = package_commands.add_parser("validate", help="check a bundle offline (no host, no sign-in)")
     check.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
     check.add_argument("-t", "--target", help="check this target only")
+    check.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="text: sentences and one line per target (default); json: one object for machines",
+    )
     history = commands.add_parser("deployments", help="read the deployment record: what each bundle deploy put on a stage")
     history_commands = history.add_subparsers(dest="deployments_command", required=True)
     listed = history_commands.add_parser("list", help="the newest recorded deploys you may see, newest first")
@@ -286,6 +290,19 @@ def _render(result, fmt, max_rows):
     return _table(columns, rows)
 
 
+def _validate_json(problems, warnings, resolved):
+    """The `bundle validate --format json` answer: one object, nothing on stderr (see cli's validate branch)."""
+    return json.dumps({
+        "ok": not problems,
+        "problems": [{"path": where, "message": message} for where, message in problems],
+        "warnings": list(warnings),
+        "targets": [
+            {"name": name, "mode": mode, "pipelines": list(pipelines)}
+            for name, (mode, pipelines) in resolved.items()
+        ],
+    }, ensure_ascii=False) + "\n"
+
+
 def _login(args, environ, stderr, session):
     http = session or requests.Session()
     host = (args.host or environ.get("STARDELT_NOVA_URL", "")).strip()
@@ -357,6 +374,9 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
 
     if args.command == "bundle" and args.bundle_command == "validate":
         problems, warnings, resolved = bundle.validate(args.directory, args.target)
+        if args.format == "json":
+            stdout.write(_validate_json(problems, warnings, resolved))
+            return USAGE if problems else OK
         for warning in warnings:
             stderr.write(f"stardelt: warning: {warning}\n")
         for where, message in problems:
