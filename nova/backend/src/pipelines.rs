@@ -2540,7 +2540,8 @@ pub struct PipelineSpecResponse {
     /// `nova` when Nova wrote the pipeline, `other` for one made with kubectl or by GitOps.
     pub managed_by: String,
     /// True when Nova may change it: Nova wrote it and it has the shape the form edits (one
-    /// `run` task, a statement or a notebook). A pipeline that is not editable is still shown.
+    /// `run` task, a statement or a notebook) or a task list (every task `sql`, `notebook` or
+    /// `dbt`), which an update replaces whole. A pipeline that is not editable is still shown.
     pub editable: bool,
 }
 
@@ -3815,7 +3816,7 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
             .and_then(Value::as_str)
             .map(str::to_string),
         managed_by: if managed { "nova" } else { "other" }.to_string(),
-        editable: managed && kind.is_some(),
+        editable: managed && (kind.is_some() || is_task_list(resource)),
     }
 }
 
@@ -6356,7 +6357,7 @@ pub(crate) async fn remove(
     operation_id = "pipelines_spec",
     path = "/api/pipelines/{namespace}/{name}/spec",
     tag = "public",
-    description = "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
+    description = "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`, or a task list whose every task is `sql`, `notebook` or `dbt`; an update replaces a task list whole. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -14284,7 +14285,10 @@ mod tests {
             .await
             .expect("visible to its group");
 
-        assert!(!answer.editable, "a task list is not edited by the dialog");
+        assert!(
+            answer.editable,
+            "a Nova-written task list is edited whole by the form"
+        );
         assert_eq!(
             serde_json::to_value(&answer.document).unwrap()["tasks"],
             json!([
@@ -14300,6 +14304,46 @@ mod tests {
                     "dependsOn": ["load"]
                 }
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_marks_a_nova_task_list_editable() {
+        let mut stored = nova_pipeline("daily-loads", "analytics");
+        stored["spec"]["tasks"] = json!([
+            { "name": "load", "kind": "sql", "sql": "select 1" },
+            { "name": "report", "kind": "sql", "sql": "select 2", "dependsOn": ["load"] }
+        ]);
+        let mut outside = stored.clone();
+        outside["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let resources = memory_with(
+            &[("daily-loads", stored), ("outside", outside)],
+            &analytics_principal(),
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let answer = pipeline_spec(Some(&resources), &ada, &namespace, "daily-loads")
+            .await
+            .expect("visible to its group");
+        assert!(answer.editable, "a Nova-written task list is edited whole");
+        assert_eq!(
+            serde_json::to_value(&answer.document).unwrap()["tasks"],
+            json!([
+                { "name": "load", "sql": "select 1" },
+                { "name": "report", "sql": "select 2", "dependsOn": ["load"] }
+            ])
+        );
+
+        let not_nova = pipeline_spec(Some(&resources), &ada, &namespace, "outside")
+            .await
+            .expect("visible to its group");
+        assert!(
+            !not_nova.editable,
+            "a task list kubectl or GitOps wrote stays read-only"
         );
     }
 
@@ -14356,13 +14400,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove(MANAGED_BY_LABEL);
-        let mut two_tasks = nova_pipeline("two-tasks", "analytics");
-        two_tasks["spec"]["tasks"] = json!([
+        let mut odd_shape = nova_pipeline("odd", "analytics");
+        odd_shape["spec"]["tasks"] = json!([
             { "name": "run", "kind": "sql", "sql": "select 1" },
-            { "name": "check", "kind": "sql", "sql": "select 2" }
+            { "name": "check", "kind": "python", "config": { "script": "print(1)" } }
         ]);
         let resources = memory_with(
-            &[("legacy", legacy), ("two-tasks", two_tasks)],
+            &[("legacy", legacy), ("odd", odd_shape)],
             &analytics_principal(),
         );
         let ada = who("sub-ada", &["analytics"], false);
@@ -14375,13 +14419,16 @@ mod tests {
         assert!(!outside.editable, "Nova did not write it");
         assert_eq!(outside.document.sql.as_deref(), Some("select 1"));
 
-        let odd = pipeline_spec(Some(&resources), &ada, &namespace, "two-tasks")
+        let odd = pipeline_spec(Some(&resources), &ada, &namespace, "odd")
             .await
             .expect("readable");
         assert_eq!(odd.managed_by, "nova");
-        assert!(!odd.editable, "the form edits exactly one run task");
+        assert!(
+            !odd.editable,
+            "the form cannot show a task kind it never writes"
+        );
         assert_eq!(odd.document.sql, None, "no statement is claimed for it");
-        assert_eq!(odd.document.name, "two-tasks");
+        assert_eq!(odd.document.name, "odd");
     }
 
     #[tokio::test]

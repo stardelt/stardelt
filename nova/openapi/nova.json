@@ -7245,7 +7245,7 @@
         "tags": [
           "public"
         ],
-        "description": "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
+        "description": "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`, or a task list whose every task is `sql`, `notebook` or `dbt`; an update replaces a task list whole. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_spec",
         "parameters": [
           {
@@ -13537,7 +13537,7 @@
           },
           "editable": {
             "type": "boolean",
-            "description": "True when Nova may change it: Nova wrote it and it has the shape the form edits (one\n`run` task, a statement or a notebook). A pipeline that is not editable is still shown."
+            "description": "True when Nova may change it: Nova wrote it and it has the shape the form edits (one\n`run` task, a statement or a notebook) or a task list (every task `sql`, `notebook` or\n`dbt`), which an update replaces whole. A pipeline that is not editable is still shown."
           },
           "managedBy": {
             "type": "string",

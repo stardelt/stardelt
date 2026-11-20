@@ -9,7 +9,7 @@ import type { CreatePipelineRequest, PipelineDocument, PipelineOptions, UpdatePi
  */
 
 /** The top-level keys of a pipeline document, the body of `POST /api/pipelines`. */
-export const DEFINITION_KEYS = ['name', 'ownerGroup', 'sql', 'notebook', 'schedule', 'params', 'options'] as const
+export const DEFINITION_KEYS = ['name', 'ownerGroup', 'sql', 'notebook', 'tasks', 'schedule', 'params', 'options'] as const
 
 /** A definition far larger than any statement Nova accepts is refused without being parsed. */
 export const MAX_DEFINITION_BYTES = 64 * 1024
@@ -18,9 +18,11 @@ export const MAX_DEFINITION_BYTES = 64 * 1024
 export const CHANGE_WORDS: Record<string, string> = {
   statement: 'the statement',
   notebook: 'the notebook',
+  tasks: 'the tasks',
   schedule: 'the schedule',
   params: 'the parameters',
   options: 'the options',
+  deployment: 'the deployment',
 }
 
 export type Parsed =
@@ -83,6 +85,7 @@ export function toValidateRequest(document: PipelineDocument): CreatePipelineReq
     ownerGroup: document.ownerGroup ?? '',
     sql: document.sql,
     notebook: document.notebook,
+    ...(document.tasks ? { tasks: document.tasks } : {}),
     schedule: document.schedule ?? null,
     params: document.params,
     options: document.options as PipelineOptions | undefined,
@@ -94,6 +97,7 @@ export function toUpdateRequest(document: PipelineDocument, resourceVersion: str
   return {
     sql: document.sql,
     notebook: document.notebook,
+    ...(document.tasks ? { tasks: document.tasks } : {}),
     schedule: document.schedule ?? null,
     params: document.params ?? {},
     options: document.options as PipelineOptions | undefined,

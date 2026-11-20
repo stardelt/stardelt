@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { MAX_DEFINITION_BYTES, editorRule, parseDefinition, toUpdateRequest, toValidateRequest } from '../src/definition'
+import { toYaml } from '../src/yaml'
 import type { PipelineDocument } from '../src/api'
 
 // The rules behind the definition editor (stardelt-nova#351). Pure functions, no browser: what
@@ -59,7 +60,7 @@ test.describe('parseDefinition', () => {
   test('a key that is not part of a pipeline is named, with its line, before Nova silently ignores it', () => {
     expect(parseDefinition('name: a\nshedule:\n  cron: x\n')).toEqual({
       ok: false,
-      message: 'Unknown key "shedule"; the keys are name, ownerGroup, sql, notebook, schedule, params, options.',
+      message: 'Unknown key "shedule"; the keys are name, ownerGroup, sql, notebook, tasks, schedule, params, options.',
       line: 2,
     })
   })
@@ -89,6 +90,27 @@ test.describe('editorRule and the requests', () => {
     expect(toUpdateRequest(bare, null)).toEqual({ sql: 'select 1', schedule: null, params: {}, options: OPTIONS })
     expect(toValidateRequest(bare)).toEqual({
       name: 'daily', ownerGroup: 'etl', sql: 'select 1', schedule: null, options: OPTIONS,
+    })
+  })
+
+  test('a task list is read and carried into both requests', () => {
+    const document: PipelineDocument = {
+      name: 'daily',
+      ownerGroup: 'etl',
+      tasks: [
+        { name: 'load', sql: 'select 1' },
+        { name: 'report', sql: 'select 2', dependsOn: ['load'] },
+      ],
+      options: OPTIONS,
+    }
+    expect(parseDefinition(toYaml(document))).toEqual({ ok: true, document })
+    expect(toValidateRequest(document).tasks).toEqual(document.tasks)
+    expect(toUpdateRequest(document, '7')).toEqual({
+      tasks: document.tasks,
+      schedule: null,
+      params: {},
+      options: OPTIONS,
+      resourceVersion: '7',
     })
   })
 })
