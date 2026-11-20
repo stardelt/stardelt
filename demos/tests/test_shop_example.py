@@ -88,11 +88,11 @@ def test_the_staging_views_run_as_the_querying_identity():
     )
 
 
-def test_the_incremental_temp_relation_is_a_table_and_the_units_test_is_a_marts_test():
+def test_the_incremental_temp_relation_keeps_dbts_default_and_the_units_test_is_a_marts_test():
     project = yaml.safe_load((SHOP / "dbt_project.yml").read_text())
-    assert project["models"]["+views_enabled"] is False, (
-        "dbt builds the incremental temp relation as a view by default, and Lakekeeper refuses "
-        "a SECURITY DEFINER view's trino.run-as-owner without a trusted engine (stardelt#393)"
+    assert "+views_enabled" not in project["models"], (
+        "dbt's documented default is a view for the incremental temp relation; Trino is the "
+        "catalog's trusted engine now (stardelt#393, #486, #487), so the #441 workaround is gone"
     )
     test = (SHOP / "tests" / "units_reconcile.sql").read_text()
     assert "ref('order_lines_enriched')" in test, (
