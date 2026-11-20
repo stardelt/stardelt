@@ -435,6 +435,24 @@ fn principal_not_ready_detail(principal: &str, sp: &ServicePrincipal) -> String 
     }
 }
 
+/// The status merge-patch, with the live `resourceVersion` so a concurrent writer
+/// (the access-sync job owns `CatalogReady`/`GrantsReady`/`Drift`) gets 409 instead of
+/// losing a condition.
+fn status_patch_body(
+    status: &serde_json::Value,
+    resource_version: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "status": status });
+    if let Some(version) = resource_version {
+        body["metadata"] = serde_json::json!({ "resourceVersion": version });
+    }
+    body
+}
+
+fn is_conflict(error: &kube::Error) -> bool {
+    matches!(error, kube::Error::Api(response) if response.code == 409)
+}
+
 /// One `Catalog` -> one `maint-<catalog>` CronJob. On a missing `pipeline-<owner>` principal the
 /// condition says so and nothing is applied (the principal controller creates it).
 pub async fn reconcile_catalog(
@@ -509,7 +527,7 @@ pub async fn reconcile_catalog(
         .as_ref()
         .map(|s| s.conditions.clone())
         .unwrap_or_default();
-    let conditions = merge_condition(&existing, condition);
+    let conditions = merge_condition(&existing, condition.clone());
     let observed = catalog.metadata.generation;
     let api: Api<Catalog> = Api::namespaced(ctx.client.clone(), &namespace);
     let mut status = serde_json::json!({
@@ -531,12 +549,40 @@ pub async fn reconcile_catalog(
         );
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
-    api.patch_status(
-        &name,
-        &kube::api::PatchParams::default(),
-        &kube::api::Patch::Merge(serde_json::json!({ "status": status })),
-    )
-    .await?;
+    let body = status_patch_body(&status, catalog.metadata.resource_version.as_deref());
+    let patch = api
+        .patch_status(
+            &name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(body),
+        )
+        .await;
+    match patch {
+        Ok(_) => {}
+        Err(error) if is_conflict(&error) => {
+            // The access-sync job wrote a condition between our GET and our PATCH: re-read,
+            // merge our condition into the fresh list and carry the fresh `resourceVersion`.
+            let fresh: Catalog = api.get(&name).await?;
+            let fresh_existing = fresh
+                .status
+                .as_ref()
+                .map(|status| status.conditions.clone())
+                .unwrap_or_default();
+            let mut fresh_status = status.clone();
+            fresh_status["conditions"] =
+                serde_json::json!(merge_condition(&fresh_existing, condition));
+            api.patch_status(
+                &name,
+                &kube::api::PatchParams::default(),
+                &kube::api::Patch::Merge(status_patch_body(
+                    &fresh_status,
+                    fresh.metadata.resource_version.as_deref(),
+                )),
+            )
+            .await?;
+        }
+        Err(error) => return Err(error),
+    }
     tracing::info!(catalog = %name, %namespace, "reconciled maintenance job");
     Ok(Action::requeue(Duration::from_secs(300)))
 }
@@ -825,6 +871,41 @@ mod tests {
         assert!(status.contains("\"RunnerNotReady\""), "{status}");
         assert!(status.contains("ClientNotSetUp"), "{status}");
         assert!(!status.contains("\"Scheduled\""), "{status}");
+    }
+
+    #[test]
+    fn the_status_patch_carries_the_resource_version() {
+        let with_version = status_patch_body(&serde_json::json!({"conditions": []}), Some("42"));
+        assert_eq!(
+            with_version,
+            serde_json::json!({
+                "status": {"conditions": []},
+                "metadata": {"resourceVersion": "42"},
+            })
+        );
+        let without_version = status_patch_body(&serde_json::json!({"conditions": []}), None);
+        assert_eq!(
+            without_version,
+            serde_json::json!({"status": {"conditions": []}})
+        );
+    }
+
+    #[test]
+    fn a_409_is_a_conflict() {
+        // kube 5.1 carries the API status as `Box<Status>` (the ticket's `ErrorResponse`
+        // field list is kube 4; the compile error named `details`, `metadata` and `Box`).
+        let api_error = |code: u16| {
+            kube::Error::Api(
+                kube::core::Status {
+                    code,
+                    message: "conflict".into(),
+                    ..Default::default()
+                }
+                .boxed(),
+            )
+        };
+        assert!(is_conflict(&api_error(409)));
+        assert!(!is_conflict(&api_error(422)));
     }
 
     #[test]
