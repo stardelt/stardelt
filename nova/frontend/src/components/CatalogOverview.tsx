@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ApiError, api, type Catalog } from '../api'
 import ErrorBox from './ErrorBox'
+import EnvironmentBadge from './EnvironmentBadge'
 import LayerBadge from './LayerBadge'
 import ObjectIcon from './ObjectIcon'
 import { relativeTime } from '../format'
@@ -65,6 +66,7 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
           <ObjectIcon kind="catalog" />
           <span className="font-mono break-words">{catalog.name}</span>
           <LayerBadge layer={catalog.layer} />
+          <EnvironmentBadge environment={catalog.environment} />
         </h1>
         {description ? (
           <p className="text-text-dim break-words">{description}</p>

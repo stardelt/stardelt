@@ -132,6 +132,8 @@ export type Catalog = {
   name: string
   id: string
   layer?: string | null
+  /** `production` when the Catalog carries stardelt.io/environment: production (#103). */
+  environment?: string | null
   canWrite?: boolean
   owner?: string | null
   description?: string | null
@@ -458,6 +460,8 @@ export type AdminCatalog = {
   name: string
   /** The medallion layer (stardelt-nova#109), from the label or the name; absent otherwise. */
   layer?: string | null
+  /** `production` when the Catalog carries stardelt.io/environment: production (#103). */
+  environment?: string | null
   displayName: string | null
   description: string | null
   /** The one owning group; ownership means `manage`, not `select`. */
