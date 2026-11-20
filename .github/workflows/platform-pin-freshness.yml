@@ -11,7 +11,7 @@ defaults:
 
 jobs:
   pins:
-    name: The checked-in pins and the operator's two golden-value checks
+    name: The checked-in pins and the operator's golden-value checks
     runs-on: ubuntu-latest
     steps:
       # The operator is ../operator in this checkout; full history so check_golden_image.py can
@@ -37,8 +37,13 @@ jobs:
           # behind (stardelt-operator#545).
           OPERATOR_DIR=../operator python3 scripts/check_golden_image.py >> "$RUNNER_TEMP/pins.txt" 2>&1
           golden=$?
+          # A rollup that moves Airflow or Jupyter writes the operator's golden values and pins a
+          # build of the PREVIOUS commit: until the next rollup pins this commit's build, the
+          # operator renders the old values, and every other check agrees (#330, #516).
+          OPERATOR_DIR=../operator python3 scripts/check_golden_values.py >> "$RUNNER_TEMP/pins.txt" 2>&1
+          golden_values=$?
           cat "$RUNNER_TEMP/pins.txt"
-          if [ "$freshness" -ne 0 ] || [ "$operator" -ne 0 ] || [ "$golden" -ne 0 ]; then
+          if [ "$freshness" -ne 0 ] || [ "$operator" -ne 0 ] || [ "$golden" -ne 0 ] || [ "$golden_values" -ne 0 ]; then
             echo "code=1" >> "$GITHUB_OUTPUT"
           else
             echo "code=0" >> "$GITHUB_OUTPUT"
@@ -59,7 +64,7 @@ jobs:
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
               --label bug --label P2 --label ops --label area/platform --milestone "$milestone" --body-file "$RUNNER_TEMP/pins.txt"
           fi
-      - name: Close the issue when all three checks pass
+      - name: Close the issue when all four checks pass
         if: steps.check.outputs.code == '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,5 +75,5 @@ jobs:
             echo "no open pin issue"
             exit 0
           fi
-          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "All three checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\`, \`check-operator-pins.sh\` and \`check_golden_image.py\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
+          gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "All four checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\`, \`check-operator-pins.sh\`, \`check_golden_image.py\` and \`check_golden_values.py\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
           gh issue close "$number" --repo "$GITHUB_REPOSITORY"
