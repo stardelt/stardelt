@@ -70,7 +70,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -301,6 +301,10 @@ verify-restarts: _context ## Restart counts of the restart-prone Deployments (re
 .PHONY: verify-fresh-node
 verify-fresh-node: _context ## The operator install is up: instance Ready, Pod Security floor, Deployments, ports (the upgrade/delete phases are run directly)
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-fresh-node.sh
+
+.PHONY: verify-fresh-node-product
+verify-fresh-node-product: _context ## The readiness checks plus Airflow, Superset, Lakekeeper and Nova's sign-in page (run directly after a fresh node: it needs the port-forwards)
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-fresh-node.sh product
 
 .PHONY: check-spark-runtimes-live
 check-spark-runtimes-live: _context ## The live Spark runtime catalogue matches chart/files/spark-runtimes.json

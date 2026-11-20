@@ -118,11 +118,18 @@ exit 1
 """
 
 CURL_STUB = """#!/usr/bin/env bash
-# Fake curl: the last argument is the URL; print the fixture that belongs to it.
+# Fake curl: the last argument is the URL; print the fixture that belongs to it. A `-w` call and
+# a body read both print the same fixture: the code fixtures (`lakekeeper_management_code`,
+# `nova_page_code`) carry exactly what `%{http_code}`/`%{content_type}` would print.
 set -u
 url="${!#}"
 case "$url" in
   */api/health) cat "$FAKE_DIR/health" ;;
+  */api/v2/monitor/health) cat "$FAKE_DIR/airflow_health" ;;
+  *:18083/health) cat "$FAKE_DIR/superset_health" ;;
+  *:18084/health) cat "$FAKE_DIR/lakekeeper_health" ;;
+  *:18084/management/v1/warehouse) cat "$FAKE_DIR/lakekeeper_management_code" ;;
+  http://127.0.0.1:18080/) cat "$FAKE_DIR/nova_page_code" ;;
   */v1/info) cat "$FAKE_DIR/trino_info" ;;
   */.well-known/openid-configuration) cat "$FAKE_DIR/oidc" ;;
   *) exit 1 ;;
@@ -145,6 +152,12 @@ GOOD_FILES = {
     "health": '{"status":"ok","db":"up"}',
     "trino_info": '{"nodeId":"trino-0","state":"ACTIVE","starting":false,"coordinator":true}',
     "oidc": '{"issuer":"https://id.dev.stardelt.io/realms/stardelt"}',
+    # the product phase (#614): the four Services the operator renders
+    "airflow_health": '{"metadatabase":{"status":"healthy"},"scheduler":{"status":"healthy"}}',
+    "superset_health": "OK",
+    "lakekeeper_health": '{"health":"ok","services":{}}',
+    "lakekeeper_management_code": "401",
+    "nova_page_code": "200 text/html",
     # lifecycle fixtures (#1019): the instance exists until `delete` removes the marker, the
     # operator owns three Deployments and the data is two PVCs plus the two Secrets.
     "instance_present": "",
@@ -356,6 +369,47 @@ class FreshNodeTest(unittest.TestCase):
         result = self.run_script_full(args=["delete"])
         self.assertEqual(result.code, 0, result.out)
         self.assertIn("✓ delete workloads removed, secrets and PVCs retained", result.out)
+
+    # -- the product phase (#614): the four Services #48's acceptance names -------------------
+    def test_product_phase_reports_the_four_services(self):
+        result = self.run_script_full(args=["product"])
+        self.assertEqual(result.code, 0, result.out)
+        self.assertIn("✓ airflow healthy (metadatabase, scheduler)", result.out)
+        self.assertIn("✓ superset answers OK", result.out)
+        self.assertIn(
+            "✓ lakekeeper healthy, and the management API refuses a request without a token (401)",
+            result.out,
+        )
+        self.assertIn("✓ signin Nova's page is served (200, text/html)", result.out)
+        self.assertIn("verify-fresh-node: PASS", result.out)
+
+    def test_a_failed_superset_is_a_failure(self):
+        result = self.run_script_full(
+            args=["product"], overrides={"superset_health": "Internal Server Error"}
+        )
+        self.assertEqual(result.code, 1, result.out)
+        self.assertIn("✗ superset", result.out)
+        self.assertIn("✓ airflow healthy", result.out)
+        self.assertIn("✓ lakekeeper healthy", result.out)
+        self.assertIn("✓ signin Nova's page is served", result.out)
+
+    def test_lakekeeper_that_answers_without_a_token_is_a_failure(self):
+        result = self.run_script_full(
+            args=["product"], overrides={"lakekeeper_management_code": "200"}
+        )
+        self.assertEqual(result.code, 1, result.out)
+        self.assertIn("the management API answers without a token", result.out)
+
+    def test_an_unhealthy_airflow_is_a_failure(self):
+        result = self.run_script_full(
+            args=["product"],
+            overrides={
+                "airflow_health": '{"metadatabase":{"status":"healthy"},'
+                '"scheduler":{"status":"unhealthy"}}'
+            },
+        )
+        self.assertEqual(result.code, 1, result.out)
+        self.assertIn("✗ airflow", result.out)
 
 
 if __name__ == "__main__":

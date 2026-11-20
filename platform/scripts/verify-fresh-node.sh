@@ -6,11 +6,14 @@
 # and Nova, Trino and the identity provider answer on their real ports.
 #
 #   scripts/verify-fresh-node.sh            # the readiness checks
+#   scripts/verify-fresh-node.sh product    # the readiness checks, then Airflow, Superset, Lakekeeper and Nova's sign-in page answer
 #   scripts/verify-fresh-node.sh upgrade    # …then upgrade the operator image and check it converges
 #   scripts/verify-fresh-node.sh delete     # …then delete the PlatformInstance and check D18
 #
 # `upgrade` and `delete` run the readiness checks first and stop when one of them fails: a
-# lifecycle phase proves nothing about a platform that is not up.
+# lifecycle phase proves nothing about a platform that is not up. `product` keeps going when a
+# readiness check could not be made (UNVERIFIED), because its checks read the Services, not the
+# PlatformInstance.
 #
 # The lab installed with `make install` has no PlatformInstance, so there every phase answers
 # `? instance` and UNVERIFIED (exit 3) — that is the correct negative case, not a FAIL.
@@ -48,6 +51,8 @@ unknown() {
 note() { printf '? %s %s\n' "$1" "$2"; }
 
 instance_ref="platforminstance/${PLATFORM_INSTANCE}"
+# set by readiness() once it holds the forward on local port 18080, so `product` reuses it.
+nova_forwarded=0
 
 # --- port-forwards: one helper, one trap that kills everything the script started ----------
 forward_pids=()
@@ -90,7 +95,8 @@ forward_result() { # <label> <service> <rc>
 # The checks of platform#1017. Prints one line per check and returns 0 (all good), 1 (a check
 # failed) or 3 (a check could not be made). `upgrade` and `delete` call this again after their
 # step, so there is one definition of "the platform is up".
-readiness() {
+readiness() { # <soft>: return 3 on a doubt instead of exiting (the `product` phase keeps going)
+  local soft="${1:-0}"
   status=0
 
   # 1. tools and context
@@ -118,6 +124,10 @@ readiness() {
   if ! kubectl -n "$NAMESPACE" get platforminstance "$PLATFORM_INSTANCE" >/dev/null 2>&1; then
     unknown instance "\"${instance_ref} is not readable in ${NAMESPACE}\""
     echo "verify-fresh-node: UNVERIFIED (no PlatformInstance on this cluster)" >&2
+    # `product` reads the Services, not the PlatformInstance, so it keeps going (UNVERIFIED).
+    if [ "$soft" = "1" ]; then
+      return 3
+    fi
     exit 3
   fi
 
@@ -239,6 +249,7 @@ readiness() {
   nova_url="http://127.0.0.1:18080/api/health"
   rc=0
   forward nova 18080 8080 -fsS --max-time 5 "$nova_url" || rc=$?
+  nova_forwarded=1
   if [ "$rc" -ne 0 ]; then
     forward_result nova nova "$rc"
   else
@@ -303,6 +314,86 @@ the fresh-node run still needs a person (not checked here):
   3. a second group is refused a table it has no grant for
   4. a scheduled pipeline runs and its log shows in Nova; a notebook publishes
 EOF
+}
+
+# --- phase `product` ----------------------------------------------------------------------
+# The four product checks #48's acceptance names that the readiness checks do not make (#614):
+# Airflow, Superset and Lakekeeper answer, Lakekeeper's management API refuses a request without
+# a token, and Nova serves its sign-in page. They read the Services the operator rendered, so
+# they still prove something while the PlatformInstance is unreadable (UNVERIFIED, not FAIL).
+phase_product() {
+  local rc body code url
+  status=0
+
+  # 1. Airflow's monitor endpoint reports the metadatabase and the scheduler healthy
+  url="http://127.0.0.1:18082/api/v2/monitor/health"
+  rc=0
+  forward airflow-api-server 18082 8080 -fsS --max-time 5 "$url" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    forward_result airflow airflow-api-server "$rc"
+  else
+    body="$(curl -fsS --max-time 5 "$url" 2>/dev/null || true)"
+    # The real body carries more keys after "healthy" (`latest_scheduler_heartbeat`, `triggerer`),
+    # so the status is matched as a prefix; the two must appear in this order.
+    if printf '%s' "$body" | grep -q '"metadatabase":{"status":"healthy"' &&
+      printf '%s' "$body" | grep -q '"scheduler":{"status":"healthy"'; then
+      ok airflow "healthy (metadatabase, scheduler)"
+    else
+      bad airflow "\"$(printf '%s' "$body" | head -c 160)\""
+    fi
+  fi
+
+  # 2. Superset's health endpoint answers exactly `OK`
+  url="http://127.0.0.1:18083/health"
+  rc=0
+  forward superset 18083 8088 -fsS --max-time 5 "$url" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    forward_result superset superset "$rc"
+  else
+    body="$(curl -fsS --max-time 5 "$url" 2>/dev/null || true)"
+    if [ "$body" = "OK" ]; then
+      ok superset "answers OK"
+    else
+      bad superset "\"health answers ${body:-nothing}\""
+    fi
+  fi
+
+  # 3. Lakekeeper is healthy and its management API refuses a request without a token
+  url="http://127.0.0.1:18084/health"
+  rc=0
+  forward lakekeeper 18084 8181 -fsS --max-time 5 "$url" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    forward_result lakekeeper lakekeeper "$rc"
+  else
+    body="$(curl -fsS --max-time 5 "$url" 2>/dev/null || true)"
+    if ! printf '%s' "$body" | grep -q '"health":"ok"'; then
+      bad lakekeeper "\"health answers ${body:-nothing}\""
+    else
+      code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+        http://127.0.0.1:18084/management/v1/warehouse || true)"
+      case "$code" in
+        401) ok lakekeeper "healthy, and the management API refuses a request without a token (401)" ;;
+        200) bad lakekeeper '"the management API answers without a token"' ;;
+        *) bad lakekeeper "\"the management API answered ${code:-nothing} without a token\"" ;;
+      esac
+    fi
+  fi
+
+  # 4. Nova serves its sign-in page. readiness() already holds the forward on 18080 when it got
+  # as far as its Nova check; when it stopped before that (UNVERIFIED), open one here — never a
+  # second forward on the same port. The probe below decides; the forward's own result is only
+  # reported when readiness made the positive check.
+  if [ "$nova_forwarded" -eq 0 ]; then
+    forward nova 18080 8080 -fsS --max-time 5 http://127.0.0.1:18080/ || true
+  fi
+  body="$(curl -sS -o /dev/null -w '%{http_code} %{content_type}' --max-time 5 \
+    http://127.0.0.1:18080/ 2>/dev/null || true)"
+  case "$body" in
+    "200 text/html"*) ok signin "Nova's page is served (200, text/html)" ;;
+    *) bad signin "\"Nova's page answers ${body:-nothing}\"" ;;
+  esac
+
+  return "$status"
 }
 
 # --- phase `upgrade` ----------------------------------------------------------------------
@@ -482,9 +573,14 @@ phase_delete() {
 
 usage() {
   cat <<'EOF'
-usage: verify-fresh-node.sh [ready|upgrade|delete]
+usage: verify-fresh-node.sh [ready|product|upgrade|delete]
 
   ready    the readiness checks of stardelt-platform#1017 (default)
+  product  the readiness checks, then Airflow, Superset, Lakekeeper and Nova's sign-in page answer
+           airflow    api/v2/monitor/health reports the metadatabase and scheduler healthy
+           superset   /health answers OK
+           lakekeeper /health is healthy and the management API refuses a token (401)
+           signin     Nova's page is served (200, text/html)
   upgrade  the readiness checks, then upgrade the operator image and check it converges
            needs OPERATOR_CHART (path to stardelt-operator/chart) and OPERATOR_IMAGE
            (ghcr.io/stardelt/stardelt-operator@sha256:<digest>); OPERATOR_RELEASE, UPGRADE_WAIT
@@ -495,13 +591,13 @@ EOF
 main() {
   local phase="${1:-ready}" rc=0
   case "$phase" in
-    ready | upgrade | delete) ;;
+    ready | product | upgrade | delete) ;;
     -h | --help | help)
       usage
       exit 0
       ;;
     *)
-      echo "verify-fresh-node: unknown phase '${phase}' (ready, upgrade, delete)" >&2
+      echo "verify-fresh-node: unknown phase '${phase}' (ready, product, upgrade, delete)" >&2
       usage >&2
       exit 2
       ;;
@@ -517,7 +613,11 @@ main() {
       ;;
   esac
 
-  readiness || rc=$?
+  local soft=0
+  if [ "$phase" = "product" ]; then
+    soft=1
+  fi
+  readiness "$soft" || rc=$?
 
   if [ "$phase" = "ready" ]; then
     person_notes
@@ -528,6 +628,33 @@ main() {
       *) echo "verify-fresh-node: UNVERIFIED (a check could not be made)" >&2 ;;
     esac
     exit "$rc"
+  fi
+
+  if [ "$phase" = "product" ]; then
+    # A readiness check that could not be made (3) does not hide the product checks, which read
+    # the Services; a failed readiness check (1) stops the run as the lifecycle phases do.
+    if [ "$rc" -eq 1 ]; then
+      echo "verify-fresh-node: stopping — the readiness checks did not pass" >&2
+      exit 1
+    fi
+    local product_rc=0 combined
+    phase_product || product_rc=$?
+    # 1 beats 3: a failure is never hidden by a check that could not be made.
+    if [ "$rc" -eq 1 ] || [ "$product_rc" -eq 1 ]; then
+      combined=1
+    elif [ "$rc" -eq 3 ] || [ "$product_rc" -eq 3 ]; then
+      combined=3
+    else
+      combined=0
+    fi
+    person_notes
+    echo
+    case "$combined" in
+      0) echo "verify-fresh-node: PASS (the operator path is up in ${NAMESPACE})" ;;
+      1) echo "verify-fresh-node: FAIL (a check above is short)" >&2 ;;
+      *) echo "verify-fresh-node: UNVERIFIED (a check could not be made)" >&2 ;;
+    esac
+    exit "$combined"
   fi
 
   if [ "$rc" -ne 0 ]; then
