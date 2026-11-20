@@ -459,3 +459,49 @@ def test_a_deploy_that_cannot_be_recorded_still_succeeds_and_says_so(tmp_path):
         "action": "not-recorded",
         "reason": "this needs Nova's database, and this installation has none; ask your administrator (HTTP 503)",
     }
+
+
+def test_validate_rejects_nine_viewers(tmp_path):
+    nine = ", ".join(f"g{n}" for n in range(9))
+    wide = f"name: wide\nviewers: [{nine}]\nsql: select 1\n"
+    problems = bundle.validate(make(tmp_path, resources={"wide.yaml": wide}), "prod")[0]
+    assert "viewers must be a list of at most 8 group names" in " | ".join(message for _, message in problems)
+
+
+def test_validate_rejects_a_viewer_that_is_not_a_group_name(tmp_path):
+    bad = "name: bad\nviewers: [visitors, 'not a group']\nsql: select 1\n"
+    problems = bundle.validate(make(tmp_path, resources={"bad.yaml": bad}), "prod")[0]
+    assert "viewers must be a list of at most 8 group names" in " | ".join(message for _, message in problems)
+
+
+def test_a_pipeline_with_viewers_is_sent_to_create(tmp_path):
+    viewers = "name: shared\nviewers: [visitors]\nsql: select 1\nschedule: {cron: '0 3 * * *', timezone: Europe/Berlin}\n"
+    make(tmp_path, resources={"shared.yaml": viewers},
+         files={"sql/load.sql": "select 1", "notebooks/explore.ipynb": "{}"})
+    code, _, _, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}),
+        FakeResponse(201, {"name": "shared"}),
+        FakeResponse(payload={"pipelines": [{"name": "shared", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert code == 0
+    create = next(call for call in session.calls if call[0] == "POST" and call[1].endswith("/api/pipelines"))
+    assert create[2]["json"]["viewers"] == ["visitors"], "the deploy sends the file's viewers to create"
+
+
+def test_a_pipeline_with_viewers_publishes_the_notebook_with_them(tmp_path):
+    explore = "name: explore\nviewers: [visitors]\nnotebook: {file: notebooks/explore.ipynb}\n"
+    make(tmp_path, resources={"explore.yaml": explore},
+         files={"sql/load.sql": "select 1", "notebooks/explore.ipynb": json.dumps({"nbformat": 4, "cells": []})})
+    new = FakeResponse(payload={"name": "explore.ipynb", "group": "sales", "objectVersion": "", "unchanged": False})
+    stored = FakeResponse(payload={"name": "explore.ipynb", "group": "sales", "objectVersion": "v8", "unchanged": False})
+    code, _, _, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, new, stored, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
+        FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert code == 0
+    publish = [call for call in session.calls if call[0] == "PUT" and "/api/notebooks/" in call[1]][-1]
+    assert publish[2]["headers"]["X-Stardelt-Viewers"] == '["visitors"]'

@@ -11089,6 +11089,16 @@
               "$ref": "#/components/schemas/PipelineTaskRequest"
             },
             "description": "A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement, a\npinned notebook or a dbt run, with dependencies. Exclusive with `sql` and `notebook`."
+          },
+          "viewers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups that may read the pipeline without being members (`spec.viewers`). At most 16,\neach a group name; omitted writes none. A bundle's pipeline file carries it (#79)."
           }
         }
       },
@@ -13097,6 +13107,13 @@
               "$ref": "#/components/schemas/PipelineTaskRequest"
             },
             "description": "The tasks of a task-list pipeline (`sql`, `notebook` and `dbt` tasks), in the shape\n`pipelines_validate` accepts; left out for a single-task pipeline."
+          },
+          "viewers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups that may read the pipeline without being members; left out when there are none."
           }
         }
       },
@@ -15700,6 +15717,16 @@
               "$ref": "#/components/schemas/PipelineTaskRequest"
             },
             "description": "A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement, a\npinned notebook or a dbt run, with dependencies. Exclusive with `sql` and `notebook`."
+          },
+          "viewers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Omitted keeps the stored viewers; an empty list removes them."
           }
         }
       },

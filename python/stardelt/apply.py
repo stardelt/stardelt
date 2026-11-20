@@ -2,10 +2,11 @@
 
 The file is a JSON or YAML object shaped like the body of ``POST /api/pipelines`` (operation ``pipelines_create``):
 ``name`` and ``ownerGroup``, one of ``sql``, ``sqlFile`` or ``notebook``, or a ``tasks`` list of
-``{name, sql|sqlFile|notebook, dependsOn}`` objects, and optionally ``schedule``, ``params`` and ``options``.
-``stardelt apply -f`` passes ``tasks`` through unchanged; the server checks the dependency graph and the per-task
-rules. Applying the same file twice changes nothing the second time. An update replaces what the file says:
-``params`` and ``options`` left out of the file go back to their defaults.
+``{name, sql|sqlFile|notebook, dependsOn}`` objects, and optionally ``schedule``, ``params``, ``options`` and ``viewers``
+(the groups that may read the pipeline without being members). ``stardelt apply -f`` passes ``tasks`` through unchanged;
+the server checks the dependency graph and the per-task rules. Applying the same file twice changes nothing the second
+time. An update replaces what the file says: ``params`` and ``options`` left out of the file go back to their defaults.
+An update replaces ``viewers`` only when the file names them.
 """
 
 import json
