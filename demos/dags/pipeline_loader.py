@@ -44,7 +44,7 @@ from airflow.timetables.trigger import CronTriggerTimetable
 # The support package sits next to this file. Airflow does not put the DAGs folder on the
 # import path in every process (dag-processor, task pod, tests), so do it here.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stardelt_pipelines import trino  # noqa: E402
+from stardelt_pipelines import quality, trino  # noqa: E402
 from stardelt_pipelines.access import dag_access  # noqa: E402
 from stardelt_pipelines.dbt import DbtPodOperator  # noqa: E402
 from stardelt_pipelines.expand import expand, run_values  # noqa: E402
@@ -161,6 +161,57 @@ def _run_task(task: dict, params: dict, **context) -> None:
     )
 
 
+def _run_quality(checks: list[dict], params: dict, **context) -> None:
+    """Executes inside the task pod. Runs each check as the service principal, never logging it."""
+    dag_run = context["dag_run"]
+    fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
+    run_date, overrides = run_values(dag_run.conf, fallback)
+    tags = trino.lineage_tags(context["dag"].dag_id, context["ti"].task_id, dag_run.run_id)
+
+    ca_file = os.environ.get("PIPELINE_TRINO_CA_FILE")
+    with trino.identity_client() as identity, httpx.Client(
+        verify=ca_file or True, timeout=60.0
+    ) as http:
+        token = trino.client_credentials_token(
+            os.environ["PIPELINE_TOKEN_URL"],
+            os.environ.get("PIPELINE_CLIENT_ID", DEFAULT_PRINCIPAL),
+            os.environ["PIPELINE_CLIENT_SECRET"],
+            client=identity,
+        )
+
+        def run_one(sql: str) -> int:
+            statement = expand(
+                sql,
+                run_date=run_date,
+                run_id=dag_run.run_id,
+                params={**params, **overrides},
+            )
+            outcome = trino.run_statement(
+                statement,
+                base_url=os.environ["PIPELINE_TRINO_URL"],
+                token=token,
+                client=http,
+                source=TRINO_SOURCE,
+                tags=tags,
+            )
+            return outcome.rows
+
+        failed = quality.evaluate([quality.Check(**raw) for raw in checks], run_one)
+    if failed:
+        # One run tells the person everything the checks found, never only the first failure.
+        raise RuntimeError(_quality_failure_sentence(failed))
+    log.info("quality gate passed: %d checks", len(checks))
+
+
+def _quality_failure_sentence(failed: list[tuple[str, int]]) -> str:
+    """`2 quality checks failed: no_null_ids (3 rows), unique_ids (1 row)`."""
+    count = len(failed)
+    named = ", ".join(
+        f"{name} ({rows} row{'' if rows == 1 else 's'})" for name, rows in failed
+    )
+    return f"{count} quality check{'s' if count != 1 else ''} failed: {named}"
+
+
 def _build_dag(p) -> DAG:
     access = dag_access(p.owner_group)
     dag = DAG(
@@ -222,6 +273,21 @@ def _build_dag(p) -> DAG:
                 vars_text=t.dbt_vars,
                 principal_secret=p.principal.secret_name,
                 namespace=namespace,
+                dag=dag,
+            )
+            continue
+        if t.kind == "quality":
+            operators[t.name] = PythonOperator(
+                task_id=t.name,
+                python_callable=_run_quality,
+                op_kwargs={
+                    "checks": [
+                        {"name": c.name, "sql": c.sql, "severity": c.severity}
+                        for c in t.checks
+                    ],
+                    "params": p.params,
+                },
+                executor_config=executor_config,
                 dag=dag,
             )
             continue

@@ -22,6 +22,8 @@ import json
 import re
 from dataclasses import dataclass, replace
 
+from stardelt_pipelines.quality import SEVERITIES, Check
+
 _DURATION = re.compile(r"^(\d+)([smhd])$")
 _SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 # `Replace` has no Airflow equivalent; it is treated like `Forbid` (one run at a time).
@@ -79,6 +81,36 @@ MAX_DBT_BATCHES = 8
 MAX_DBT_THREADS = 16
 # A project is one directory name under the tool image's /opt/dbt/projects.
 _DBT_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
+# A `quality` task's checks: SQL assertions that pass when they return no rows. The bounds are
+# the operator's `QualityCheck` schema; this module repeats them because the API server cannot see
+# a duplicate name or a placeholder the runtime has no branch for.
+CHECK_KEYS = ("name", "sql", "severity")
+MAX_CHECKS = 50
+MAX_CHECK_SQL = 20000
+_CHECK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
+QUALITY_NEEDS_CHECKS = (
+    "quality task '{task}' needs checks (a list of 1 to 50 SQL assertions)"
+)
+QUALITY_CHECK_ONLY_KEYS = (
+    "check '{check}' in quality task '{task}' accepts only name, sql and severity "
+    "(found `{key}`)"
+)
+QUALITY_CHECK_NEEDS_NAME = (
+    "check {index} in quality task '{task}' needs a name (1 to 63 letters, digits, dashes or "
+    "underscores, starting with a letter or a digit)"
+)
+QUALITY_CHECK_NAME_TWICE = "check name '{check}' is used twice in quality task '{task}'"
+QUALITY_CHECK_NEEDS_SQL = (
+    "check '{check}' in quality task '{task}': sql must be a non-empty string of at most 20000 "
+    "characters"
+)
+QUALITY_CHECK_BAD_SEVERITY = (
+    "check '{check}' in quality task '{task}': severity must be error or warn (found `{severity}`)"
+)
+QUALITY_CHECK_AUDIT_TABLE = (
+    "check '{check}' in quality task '{task}' uses ${{table}}: that placeholder is the audit "
+    "branch (publish: wap), which has no runtime yet"
+)
 
 
 class PlanError(ValueError):
@@ -114,6 +146,9 @@ class TaskPlan:
     dbt_select: tuple[str, ...] = ()
     dbt_threads: str = "4"
     dbt_vars: str | None = None
+    # `quality` tasks only: the SQL assertions the run is gated on. Defaults keep every other kind
+    # unchanged.
+    checks: tuple[Check, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -180,10 +215,10 @@ def plan(
             raise PlanError(f"task name `{task_name}` is used twice")
         seen.add(task_name)
         kind = raw.get("kind")
-        if kind not in ("sql", "notebook", "dbt"):
+        if kind not in ("sql", "notebook", "dbt", "quality"):
             raise PlanError(
                 f"task `{task_name}` has kind `{kind}`, which has no runtime yet "
-                "(only sql, notebook and dbt run today)"
+                "(only sql, notebook, dbt and quality run today)"
             )
         if kind == "sql" and not raw.get("sql"):
             raise PlanError(f"sql task `{task_name}` needs a sql statement")
@@ -201,6 +236,9 @@ def plan(
             if not (spec.get("ownerGroup") and spec.get("runAs")):
                 raise PlanError(DBT_NEEDS_PRINCIPAL)
             dbt_project, dbt_select, dbt_threads, dbt_vars = _dbt_config(raw.get("config"))
+        checks: tuple[Check, ...] = ()
+        if kind == "quality":
+            checks = _quality_checks(task_name, raw.get("checks"))
         connection = raw.get("connection")
         connection_keys: tuple[str, ...] = ()
         if connection is not None:
@@ -209,10 +247,10 @@ def plan(
                     f"task `{task_name}` names a connection that is not a connection name "
                     "(1 to 40 lower-case letters, digits and dashes, starting with a letter)"
                 )
-            if kind == "sql":
+            if kind in ("sql", "quality"):
                 raise PlanError(
-                    f"sql task `{task_name}` cannot name a connection: it runs inside the engine. "
-                    "A connection is used by a notebook task."
+                    f"{kind} task `{task_name}` cannot name a connection: it runs inside the "
+                    "engine. A connection is used by a notebook task."
                 )
             found = (connections or {}).get(connection)
             if found is None:
@@ -243,6 +281,7 @@ def plan(
                         dbt_select=(dbt_select[index],),
                         dbt_threads=dbt_threads,
                         dbt_vars=dbt_vars,
+                        checks=(),
                     )
                 )
             last_batch[task_name] = names[-1]
@@ -263,6 +302,7 @@ def plan(
                 dbt_select=dbt_select,
                 dbt_threads=dbt_threads,
                 dbt_vars=dbt_vars,
+                checks=checks,
             )
         )
     for index, task in enumerate(tasks):
@@ -358,6 +398,49 @@ def _dbt_config(config: dict | None) -> tuple[str, tuple[str, ...], str, str | N
     if vars_text is not None:
         _dbt_vars(vars_text)
     return project, selectors, threads, vars_text
+
+
+def _quality_checks(task_name: str, raw) -> tuple[Check, ...]:
+    """The SQL assertions of a `quality` task, or a `PlanError`.
+
+    One to 50 mappings, each only `name`, `sql` and `severity` (absent is `error`); a name is
+    unique within the task, the statement non-empty, and `${table}` is refused: it is the audit
+    branch of WAP, which has no runtime yet.
+    """
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_CHECKS:
+        raise PlanError(QUALITY_NEEDS_CHECKS.format(task=task_name))
+    checks: list[Check] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise PlanError(
+                QUALITY_CHECK_NEEDS_NAME.format(index=index, task=task_name)
+            )
+        name = item.get("name")
+        if not isinstance(name, str) or not _CHECK_NAME.match(name):
+            raise PlanError(
+                QUALITY_CHECK_NEEDS_NAME.format(index=index, task=task_name)
+            )
+        for key in item:
+            if key not in CHECK_KEYS:
+                raise PlanError(
+                    QUALITY_CHECK_ONLY_KEYS.format(check=name, task=task_name, key=key)
+                )
+        if any(check.name == name for check in checks):
+            raise PlanError(QUALITY_CHECK_NAME_TWICE.format(check=name, task=task_name))
+        sql = item.get("sql")
+        if not isinstance(sql, str) or not sql or len(sql) > MAX_CHECK_SQL:
+            raise PlanError(QUALITY_CHECK_NEEDS_SQL.format(check=name, task=task_name))
+        if "${table}" in sql:
+            raise PlanError(QUALITY_CHECK_AUDIT_TABLE.format(check=name, task=task_name))
+        severity = item.get("severity", "error")
+        if severity not in SEVERITIES:
+            raise PlanError(
+                QUALITY_CHECK_BAD_SEVERITY.format(
+                    check=name, task=task_name, severity=severity
+                )
+            )
+        checks.append(Check(name=name, sql=sql, severity=severity))
+    return tuple(checks)
 
 
 def _dbt_batches(raw) -> tuple[str, ...]:
