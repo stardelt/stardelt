@@ -11,7 +11,7 @@ import requests
 
 import stardelt
 
-from stardelt import cli
+from stardelt import bundle, cli
 from tests.test_api import CANARY, RESULT, FakeResponse, FakeSession
 
 ENV = {"STARDELT_NOVA_URL": "https://nova.example", "STARDELT_TOKEN": CANARY}
@@ -264,3 +264,35 @@ def test_setup_vscode_prints_the_kernelspec_path(tmp_path):
     assert (code, err.getvalue()) == (0, "")
     assert out.getvalue().endswith("kernels/stardelt-alpha-dev-stardelt-io/kernel.json\n")
     assert Path(out.getvalue().strip()).exists()
+
+
+def test_bundle_validate_json_prints_one_object(tmp_path):
+    bundle.init(tmp_path, "shop-etl", "shop")
+    code, out, err, _ = run(["bundle", "validate", str(tmp_path), "--format", "json"])
+    assert (code, err) == (0, "")
+    assert json.loads(out) == {
+        "ok": True,
+        "problems": [],
+        "warnings": [],
+        "targets": [
+            {"name": "dev", "mode": "development", "pipelines": ["daily"]},
+            {"name": "prod", "mode": "production", "pipelines": ["daily"]},
+        ],
+    }
+
+
+def test_bundle_validate_json_keeps_the_exit_code(tmp_path):
+    bundle.init(tmp_path, "shop-etl", "shop")
+    (tmp_path / "bundle.yaml").write_text("targts:\n  dev:\n    mode: development\n", encoding="utf-8")
+    code, out, err, _ = run(["bundle", "validate", str(tmp_path), "--format", "json"])
+    assert (code, err) == (2, "")
+    answer = json.loads(out)
+    assert answer["ok"] is False
+    assert answer["problems"][0]["path"] == "bundle.yaml"
+    assert answer["problems"][0]["message"].startswith("unknown key")
+
+
+def test_bundle_validate_text_is_unchanged(tmp_path):
+    bundle.init(tmp_path, "shop-etl", "shop")
+    code, out, err, _ = run(["bundle", "validate", str(tmp_path)])
+    assert (code, out, err) == (0, "dev (development): daily\nprod (production): daily\n", "")
