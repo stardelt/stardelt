@@ -827,14 +827,46 @@ export type ServicePrincipal = {
   message: string | null
 }
 
+/** A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the three. */
+export type DbtRequest = {
+  /** A directory name under `/opt/dbt/projects` in the tool image. */
+  project: string
+  /** One selector, run as it is. */
+  select?: string
+  /** 1 to 8 selectors, run in order. */
+  batches?: string[]
+  /** 1 to 16; the server reads 4 when it is absent. */
+  threads?: number
+  vars?: Record<string, string>
+}
+
+/**
+ * One task of a task-list pipeline (`#905`): the name the engine uses, exactly one of a
+ * statement, a notebook and a dbt run, and the tasks that must succeed first.
+ */
+export type PipelineTaskRequest = {
+  /** Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}`. */
+  name: string
+  sql?: string
+  notebook?: NotebookRequest
+  dbt?: DbtRequest
+  /** Names of the tasks that must succeed first; at most 8, each a task of the list. */
+  dependsOn?: string[]
+}
+
 /** `POST /api/pipelines` (`Schedule`, stardelt-nova#210, options stardelt-nova#223). */
 export type CreatePipelineRequest = {
   name: string
   ownerGroup: string
-  /** A statement; exactly one of this and `notebook` (stardelt-nova#237). */
+  /** A statement; exactly one of this, `notebook` and `tasks` (stardelt-nova#237, #905). */
   sql?: string
   /** A published notebook version to run instead of a statement. */
   notebook?: NotebookRequest
+  /**
+   * The whole task list of a task-list pipeline; exactly one of `sql`, `notebook` and this.
+   * An update replaces the list whole.
+   */
+  tasks?: PipelineTaskRequest[]
   schedule: ScheduleSpec | null
   /** Values for `${params.<name>}` in the statement; at most 16. */
   params?: Record<string, string>
@@ -848,14 +880,17 @@ export type CreatePipelineRequest = {
 }
 
 /**
- * `PUT /api/pipelines/{namespace}/{name}`: the statement or the notebook, the schedule, the
- * parameters and the options. The body is the whole editable state — an omitted `schedule` or
- * `params` removes it and an omitted option keeps its default — so the dialog sends all four.
- * A pipeline never changes kind: exactly one of `sql` and `notebook` is given (#237).
+ * `PUT /api/pipelines/{namespace}/{name}`: the statement, the notebook or the task list, the
+ * schedule, the parameters and the options. The body is the whole editable state — an omitted
+ * `schedule` or `params` removes it and an omitted option keeps its default — so the dialog sends
+ * all four. A pipeline never changes kind: exactly one of `sql`, `notebook` and `tasks` is given
+ * (#237, #905).
  */
 export type UpdatePipelineRequest = {
   sql?: string
   notebook?: NotebookRequest
+  /** The whole task list; an update replaces it whole. */
+  tasks?: PipelineTaskRequest[]
   schedule: ScheduleSpec | null
   params?: Record<string, string>
   options?: PipelineOptions
@@ -1173,6 +1208,11 @@ export type PipelineDocument = {
   ownerGroup?: string
   sql?: string
   notebook?: NotebookRequest
+  /**
+   * The whole task list of a task-list pipeline (stardelt-nova#905); absent for a single-task
+   * pipeline. An update replaces the list whole.
+   */
+  tasks?: PipelineTaskRequest[]
   schedule?: ScheduleSpec
   params?: Record<string, string>
   options: PipelineOptionsView
