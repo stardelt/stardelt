@@ -1007,6 +1007,33 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     return [], done
 
 
+def plan_markdown(target, results):
+    """The plan as a Markdown table for a pull request comment (#99, #110).
+
+    One row per result: the action, the pipeline's name, and its notes (what an update changes,
+    the first next run, the published notebook, that it changed since deploy, or why the row was
+    not recorded). `|` and line breaks inside a cell are escaped, so one name cannot break the table.
+    """
+    def cell(value):
+        return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+    lines = [f"### Bundle plan · `{cell(target)}`", "", "| Action | Pipeline | Notes |", "|---|---|---|"]
+    for result in results:
+        notes = []
+        if result.get("changes"):
+            notes.append(", ".join(str(change) for change in result["changes"]))
+        if result.get("nextRuns"):
+            notes.append(f"next: {result['nextRuns'][0]}")
+        if result.get("notebook"):
+            notes.append(f"notebook: {result['notebook']}")
+        if result.get("modified"):
+            notes.append("changed since deploy")
+        if result.get("reason"):
+            notes.append(str(result["reason"]))
+        lines.append(f"| {cell(result['action'])} | {cell(result['name'])} | {cell('; '.join(notes) or '—')} |")
+    return "\n".join(lines) + "\n"
+
+
 def approve(nova, plan_id):
     """Approve one migration plan that a production deploy needs a second person for: the API answer.
 

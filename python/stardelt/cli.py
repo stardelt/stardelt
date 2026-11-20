@@ -124,6 +124,10 @@ def _parser():
     plan.add_argument("--accept-drift", action="store_true", help="overwrite a pipeline changed after its last deploy even when the target says drift: block")
     plan.add_argument("--diff", action="store_true", help="also show, on standard error, what each update would change (the deployed value against the bundle's)")
     plan.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
+    plan.add_argument(
+        "--format", choices=["json", "markdown"], default="json",
+        help="json: one object per line (default); markdown: a table for a pull request comment",
+    )
     ship = package_commands.add_parser("deploy", help="deploy one target: Nova checks every pipeline first, then they are created or updated")
     ship.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
     ship.add_argument("-t", "--target", required=True, help="the target to deploy (a name under targets in bundle.yaml)")
@@ -592,14 +596,20 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 accept_drift=args.accept_drift, diff=args.diff, allow_breaking=args.allow_breaking,
             )
             shown = []
+            plan_rows = []
             for result in results:
                 text = result.pop("diff", None)
-                stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
                 _warn_if_modified(result, stderr)
                 if text:
                     shown.append(text)
+                plan_rows.append(result)
             for text in shown:
                 stderr.write(text + "\n")
+            if args.bundle_command == "plan" and args.format == "markdown":
+                stdout.write(bundle.plan_markdown(args.target, plan_rows))
+            else:
+                for result in plan_rows:
+                    stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
             for where, message in problems:
                 stderr.write(f"stardelt: {where}: {message}\n")
             return USAGE if problems else OK
