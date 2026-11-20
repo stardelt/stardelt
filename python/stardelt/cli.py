@@ -616,7 +616,10 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             for text in shown:
                 stderr.write(text + "\n")
             if args.bundle_command == "plan" and args.format == "markdown":
-                stdout.write(bundle.plan_markdown(args.target, plan_rows))
+                files, note = bundle.plan_files(nova, args.directory, args.target)
+                if note:
+                    stderr.write(f"stardelt: note: {note}\n")
+                stdout.write(bundle.plan_markdown(args.target, plan_rows, files))
             else:
                 for result in plan_rows:
                     stdout.write(json.dumps(result, ensure_ascii=False) + "\n")

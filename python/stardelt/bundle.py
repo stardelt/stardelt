@@ -767,6 +767,40 @@ def _digests(directory):
             for relative in paths]
 
 
+def plan_files(nova, directory, target):
+    """The bundle's files, their sha256, and how each compares with the newest applied deployment of this bundle and
+    target (stardelt/stardelt#104): ``(files, note)``.
+
+    Each file is ``{"path", "sha256", "state"}`` with ``state`` one of ``new`` (the record does not name it),
+    ``changed`` (the record names another sha256) or ``unchanged``. No applied record means every file is ``new``.
+    When the record cannot be read, no file carries a ``state`` and ``note`` is the sentence to print. Writes
+    nothing.
+    """
+    files = _digests(directory)
+    root = Path(directory)
+    manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    name = manifest["bundle"]["name"]
+    try:
+        rows = nova.call("deployments_list", query={"bundle": name, "target": target}) or []
+    except api.StardeltApiError as err:
+        return files, f"could not read the deployment record, so no file is compared: {err}"
+    recorded = next((row for row in rows if row.get("status") == "applied"), None)
+    if recorded is None:
+        return [{**file, "state": "new"} for file in files], ""
+    before = {entry.get("path"): entry.get("sha256") for entry in recorded.get("files") or []}
+    return [
+        {
+            **file,
+            "state": (
+                "unchanged" if before.get(file["path"]) == file["sha256"]
+                else "changed" if file["path"] in before
+                else "new"
+            ),
+        }
+        for file in files
+    ], ""
+
+
 def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=()):
     """Record one deploy (``deployments_record``) for ``owner``: the row on success, or a ``not-recorded`` row.
 
@@ -1007,12 +1041,13 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     return [], done
 
 
-def plan_markdown(target, results):
+def plan_markdown(target, results, files=()):
     """The plan as a Markdown table for a pull request comment (#99, #110).
 
     One row per result: the action, the pipeline's name, and its notes (what an update changes,
     the first next run, the published notebook, that it changed since deploy, or why the row was
     not recorded). `|` and line breaks inside a cell are escaped, so one name cannot break the table.
+    ``files`` is the answer of :func:`plan_files`; when it is not empty a second table lists each file, its sha256 and its state.
     """
     def cell(value):
         return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
@@ -1031,6 +1066,11 @@ def plan_markdown(target, results):
         if result.get("reason"):
             notes.append(str(result["reason"]))
         lines.append(f"| {cell(result['action'])} | {cell(result['name'])} | {cell('; '.join(notes) or '—')} |")
+    if files:
+        lines += ["", f"### Bundle files · `{cell(target)}`", ""]
+        lines += ["| File | sha256 | State |", "|---|---|---|"]
+        for file in files:
+            lines.append(f"| {cell(file['path'])} | {file['sha256'][:12]} | {cell(file.get('state', '—'))} |")
     return "\n".join(lines) + "\n"
 
 
