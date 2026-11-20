@@ -177,6 +177,16 @@ def test_init_writes_a_bundle_that_validates(tmp_path):
     assert "timezone: UTC" in (tmp_path / "shop" / "resources" / "daily.yaml").read_text(), "Nova needs both fields"
 
 
+def test_an_unknown_target_key_is_refused(tmp_path):
+    manifest = MANIFEST.replace(
+        "prod: {mode: production, variables: {catalog: sales}, runAs: pipeline-sales}",
+        'prod: {mode: production, variables: {catalog: sales}, runAs: pipeline-sales, schedual: "0 3 * * *"}',
+    )
+    problems, _, _ = bundle.validate(make(tmp_path, manifest=manifest))
+    assert [where for where, _ in problems] == ["targets.prod"]
+    assert problems[0][1].startswith("unknown key 'schedual'")
+
+
 def test_a_schedule_needs_both_cron_and_timezone_because_nova_refuses_it_otherwise(tmp_path):
     sentence = "schedule needs both cron and timezone (an IANA zone such as Europe/Berlin)"
     for schedule in ("{cron: '0 3 * * *'}", "{timezone: UTC}", "{cron: '', timezone: UTC}", "'0 3 * * *'", "{cron: 3, timezone: UTC}"):

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stardelt.io/schemas/bundle.schema.json",
+  "title": "stardelt bundle.yaml",
+  "description": "The shape of a stardelt bundle.yaml, for editors. Structural only: stardelt bundle validate checks more (that the files exist, that every ${var.x} resolves, that a production target gives runAs), so a file this schema accepts can still be refused by validate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bundle", "include", "targets"],
+  "properties": {
+    "bundle": {
+      "type": "object",
+      "required": ["name", "ownerGroup"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$",
+          "minLength": 3,
+          "maxLength": 40,
+          "description": "the bundle's name: 3 to 40 characters, lower-case letters, digits and dashes"
+        },
+        "ownerGroup": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "maxLength": 64,
+          "description": "the group that owns every pipeline of the bundle"
+        }
+      }
+    },
+    "variables": {
+      "type": "object",
+      "description": "each variable by name, with an optional default and description",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]{0,39}$"
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "default": {
+                "description": "the value a target uses when it sets none"
+              },
+              "description": {
+                "type": "string",
+                "description": "one sentence on what the variable is"
+              }
+            }
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "include": {
+      "type": "array",
+      "description": "patterns of the resource files: one pipeline or one stream app per file",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "patterns of the files the pipelines read, relative to the bundle directory",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "description": "the catalog and the SQL files that change tables, run once per target",
+      "required": ["catalog", "files"],
+      "properties": {
+        "catalog": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+          "description": "the catalog the migration ledger lives in"
+        },
+        "files": {
+          "type": "array",
+          "description": "patterns of the migration files, each named NNN_<words>.sql",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "description": "what the stage must have before the bundle deploys",
+      "properties": {
+        "connections": {
+          "type": "array",
+          "description": "names of the connections the stage must have (names only, never values)",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+          }
+        }
+      }
+    },
+    "targets": {
+      "type": "object",
+      "description": "one entry per stage: dev, test, prod or any name you choose",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": ["development", "production"],
+            "description": "development deploys dev-<sign-in>-<name> without a schedule; production deploys the file's name with its schedule"
+          },
+          "variables": {
+            "type": "object",
+            "description": "a value for each variable you want to set for this stage"
+          },
+          "runAs": {
+            "type": "string",
+            "description": "the pipeline identity a production target runs as: pipeline-<ownerGroup>, or that name with a suffix"
+          },
+          "drift": {
+            "enum": ["warn", "block"],
+            "description": "what to do with a pipeline someone changed after its last deploy"
+          }
+        }
+      }
+    }
+  }
+}
