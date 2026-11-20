@@ -20,14 +20,19 @@ use futures::StreamExt;
 // put it in that block and it does not resolve there.
 use k8s_openapi::api::{
     apps::v1::{Deployment, StatefulSet},
+    batch::v1::Job,
     core::v1::{ConfigMap, PersistentVolumeClaim, Secret},
 };
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::{
-    Api, Client, ResourceExt,
+    Api,
+    Client,
+    ResourceExt,
     api::{DeleteParams, ListParams, Patch, PatchParams},
     core::DynamicObject,
-    runtime::{Controller, controller::Action, watcher},
+    // `ObjectRef` is `kube::runtime::reflector::ObjectRef` in kube 5.1; the rest of the
+    // ticket's step 1 is as written.
+    runtime::{Controller, controller::Action, reflector::ObjectRef, watcher},
 };
 use serde_json::json;
 
@@ -141,6 +146,14 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         Api::<ServicePrincipal>::all(client.clone()),
         watcher::Config::default(),
     )
+    // The credentials Secret is written by the platform's Keycloak sync
+    // (`platform/scripts/keycloak-sync-principal.sh`), not owned by the principal, so a label
+    // maps it back (#274 rule 4).
+    .watches(
+        Api::<Secret>::all(client.clone()),
+        watcher::Config::default().labels("stardelt.io/principal"),
+        |secret: Secret| principal_of_secret(&secret),
+    )
     .run(
         |obj, ctx| crate::metrics::timed("principal", reconcile_principal(obj, ctx)),
         error_policy,
@@ -194,6 +207,13 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         Api::<Catalog>::all(client.clone()),
         watcher::Config::default(),
     )
+    // The maintenance Job is owned by the CronJob, not by the `Catalog`; the label the operator
+    // puts on the job template maps it back (#274 rule 4).
+    .watches(
+        Api::<Job>::all(client.clone()),
+        watcher::Config::default().labels("stardelt.io/catalog"),
+        |job: Job| catalog_of_job(&job),
+    )
     .run(
         |obj, ctx| {
             crate::metrics::timed("catalog", crate::maintenance::reconcile_catalog(obj, ctx))
@@ -225,6 +245,21 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
             _ = catalogs.next() => {}
         }
     }
+}
+
+/// The `Catalog` a maintenance Job belongs to. By label, not by owner reference: the Job is
+/// owned by the CronJob (`maintenance::cron_job`), and `Controller::owns` follows owner
+/// references only (kube-runtime 5.1).
+fn catalog_of_job(job: &Job) -> Option<ObjectRef<Catalog>> {
+    let catalog = job.labels().get("stardelt.io/catalog")?;
+    Some(ObjectRef::new(catalog).within(job.namespace().as_deref()?))
+}
+
+/// The `ServicePrincipal` a credentials Secret belongs to: `stardelt.io/principal`, written by
+/// `platform/scripts/keycloak-sync-principal.sh` (and by `platform/Makefile` `sync-principal`).
+fn principal_of_secret(secret: &Secret) -> Option<ObjectRef<ServicePrincipal>> {
+    let principal = secret.labels().get("stardelt.io/principal")?;
+    Some(ObjectRef::new(principal).within(secret.namespace().as_deref()?))
 }
 
 /// Apply every CRD this operator serves, server-side, before the controllers watch them
@@ -4649,5 +4684,59 @@ metadata:
             }),
             "the record is removed: {recorded_patches:?}"
         );
+    }
+
+    #[test]
+    fn a_job_without_the_label_maps_to_no_catalog() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": { "name": "maint-gold-123", "namespace": "stardelt" }
+        }))
+        .expect("deserialize Job");
+        assert_eq!(catalog_of_job(&job), None);
+    }
+
+    #[test]
+    fn a_job_maps_to_its_catalog_and_namespace() {
+        let job: Job = serde_json::from_value(json!({
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": "maint-gold-123",
+                "namespace": "stardelt",
+                "labels": { "stardelt.io/catalog": "gold" }
+            }
+        }))
+        .expect("deserialize Job");
+        let mapped = catalog_of_job(&job).expect("a label maps the job to its catalog");
+        assert_eq!(mapped.name, "gold");
+        assert_eq!(mapped.namespace.as_deref(), Some("stardelt"));
+    }
+
+    #[test]
+    fn a_secret_maps_to_its_principal() {
+        let secret: Secret = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "sp-pipeline-demo",
+                "namespace": "stardelt",
+                "labels": { "stardelt.io/principal": "pipeline-demo" }
+            }
+        }))
+        .expect("deserialize Secret");
+        let mapped =
+            principal_of_secret(&secret).expect("a label maps the secret to its principal");
+        assert_eq!(mapped.name, "pipeline-demo");
+        assert_eq!(mapped.namespace.as_deref(), Some("stardelt"));
+
+        let unlabelled: Secret = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "unrelated", "namespace": "stardelt" }
+        }))
+        .expect("deserialize Secret");
+        assert_eq!(principal_of_secret(&unlabelled), None);
     }
 }

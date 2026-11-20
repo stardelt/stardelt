@@ -547,6 +547,8 @@ pub async fn reconcile_catalog(
             %namespace,
             "maintenance status unchanged; no status patch"
         );
+        // The Job is watched by label (controller::catalog_of_job), so a finished run reconciles
+        // at once; this requeue is the safety resync.
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
     let body = status_patch_body(&status, catalog.metadata.resource_version.as_deref());
@@ -584,6 +586,8 @@ pub async fn reconcile_catalog(
         Err(error) => return Err(error),
     }
     tracing::info!(catalog = %name, %namespace, "reconciled maintenance job");
+    // The Job is watched by label (controller::catalog_of_job), so a finished run reconciles at
+    // once; this requeue is the safety resync.
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
