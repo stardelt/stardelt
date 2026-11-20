@@ -3616,7 +3616,53 @@
                   "items": {
                     "$ref": "#/components/schemas/Deployment"
                   }
-                }
+                },
+                "example": [
+                  {
+                    "actor": "sub-ada",
+                    "actorName": "ada",
+                    "bundle": "shop",
+                    "createdAt": "2026-11-20T09:12:04Z",
+                    "files": [
+                      {
+                        "path": "shop-marts.yaml",
+                        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                      }
+                    ],
+                    "id": 41,
+                    "ownerGroup": "shop",
+                    "pipelines": [
+                      {
+                        "action": "updated",
+                        "name": "shop-marts",
+                        "namespace": "stardelt"
+                      }
+                    ],
+                    "previousDeploymentId": null,
+                    "repository": "https://github.com/acme/shop",
+                    "resources": [
+                      {
+                        "apiVersion": "stardelt.io/v1alpha1",
+                        "kind": "Pipeline",
+                        "metadata": {
+                          "name": "shop-marts"
+                        },
+                        "spec": {
+                          "tasks": [
+                            {
+                              "kind": "sql",
+                              "name": "run",
+                              "sql": "select 1"
+                            }
+                          ]
+                        }
+                      }
+                    ],
+                    "revision": "4f3c2a1",
+                    "status": "applied",
+                    "target": "production"
+                  }
+                ]
               }
             }
           },
@@ -3654,6 +3700,27 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/NewDeployment"
+              },
+              "example": {
+                "bundle": "shop",
+                "files": [
+                  {
+                    "path": "shop-marts.yaml",
+                    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                  }
+                ],
+                "ownerGroup": "shop",
+                "pipelines": [
+                  {
+                    "action": "updated",
+                    "name": "shop-marts",
+                    "namespace": "stardelt"
+                  }
+                ],
+                "repository": "https://github.com/acme/shop",
+                "revision": "4f3c2a1",
+                "status": "applied",
+                "target": "production"
               }
             }
           },
@@ -3666,6 +3733,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Deployment"
+                },
+                "example": {
+                  "actor": "sub-ada",
+                  "actorName": "ada",
+                  "bundle": "shop",
+                  "createdAt": "2026-11-20T09:12:04Z",
+                  "files": [
+                    {
+                      "path": "shop-marts.yaml",
+                      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    }
+                  ],
+                  "id": 41,
+                  "ownerGroup": "shop",
+                  "pipelines": [
+                    {
+                      "action": "updated",
+                      "name": "shop-marts",
+                      "namespace": "stardelt"
+                    }
+                  ],
+                  "previousDeploymentId": null,
+                  "repository": "https://github.com/acme/shop",
+                  "resources": [
+                    {
+                      "apiVersion": "stardelt.io/v1alpha1",
+                      "kind": "Pipeline",
+                      "metadata": {
+                        "name": "shop-marts"
+                      },
+                      "spec": {
+                        "tasks": [
+                          {
+                            "kind": "sql",
+                            "name": "run",
+                            "sql": "select 1"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "revision": "4f3c2a1",
+                  "status": "applied",
+                  "target": "production"
                 }
               }
             }
@@ -3740,6 +3851,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Deployment"
+                },
+                "example": {
+                  "actor": "sub-ada",
+                  "actorName": "ada",
+                  "bundle": "shop",
+                  "createdAt": "2026-11-20T09:12:04Z",
+                  "files": [
+                    {
+                      "path": "shop-marts.yaml",
+                      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    }
+                  ],
+                  "id": 41,
+                  "ownerGroup": "shop",
+                  "pipelines": [
+                    {
+                      "action": "updated",
+                      "name": "shop-marts",
+                      "namespace": "stardelt"
+                    }
+                  ],
+                  "previousDeploymentId": null,
+                  "repository": "https://github.com/acme/shop",
+                  "resources": [
+                    {
+                      "apiVersion": "stardelt.io/v1alpha1",
+                      "kind": "Pipeline",
+                      "metadata": {
+                        "name": "shop-marts"
+                      },
+                      "spec": {
+                        "tasks": [
+                          {
+                            "kind": "sql",
+                            "name": "run",
+                            "sql": "select 1"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "revision": "4f3c2a1",
+                  "status": "applied",
+                  "target": "production"
                 }
               }
             }
@@ -3804,6 +3959,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Deployment"
+                },
+                "example": {
+                  "actor": "sub-ada",
+                  "actorName": "ada",
+                  "bundle": "shop",
+                  "createdAt": "2026-11-20T09:12:04Z",
+                  "files": [
+                    {
+                      "path": "shop-marts.yaml",
+                      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    }
+                  ],
+                  "id": 41,
+                  "ownerGroup": "shop",
+                  "pipelines": [
+                    {
+                      "action": "updated",
+                      "name": "shop-marts",
+                      "namespace": "stardelt"
+                    }
+                  ],
+                  "previousDeploymentId": 40,
+                  "repository": "https://github.com/acme/shop",
+                  "resources": [
+                    {
+                      "apiVersion": "stardelt.io/v1alpha1",
+                      "kind": "Pipeline",
+                      "metadata": {
+                        "name": "shop-marts"
+                      },
+                      "spec": {
+                        "tasks": [
+                          {
+                            "kind": "sql",
+                            "name": "run",
+                            "sql": "select 1"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "revision": "4f3c2a1",
+                  "status": "applied",
+                  "target": "production"
                 }
               }
             }
@@ -5679,6 +5878,20 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreatePipelineRequest"
+              },
+              "example": {
+                "name": "shop-marts",
+                "ownerGroup": "shop",
+                "schedule": {
+                  "cron": "0 3 * * *",
+                  "timezone": "UTC"
+                },
+                "tasks": [
+                  {
+                    "name": "run",
+                    "sql": "select count(*) from gold.shop.orders"
+                  }
+                ]
               }
             }
           },
@@ -5691,6 +5904,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PipelineView"
+                },
+                "example": {
+                  "canEdit": true,
+                  "canRun": true,
+                  "concurrency": "Forbid",
+                  "createdAt": "2026-11-20T09:12:04Z",
+                  "loaded": false,
+                  "name": "shop-marts",
+                  "namespace": "stardelt",
+                  "ownerGroup": "shop",
+                  "paused": false,
+                  "schedule": "0 3 * * *",
+                  "state": "loading",
+                  "tasks": [
+                    {
+                      "kind": "sql",
+                      "name": "run",
+                      "sql": "select count(*) from gold.shop.orders"
+                    }
+                  ]
                 }
               }
             }
@@ -5943,6 +6176,20 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreatePipelineRequest"
+              },
+              "example": {
+                "name": "shop-marts",
+                "ownerGroup": "shop",
+                "schedule": {
+                  "cron": "0 3 * * *",
+                  "timezone": "UTC"
+                },
+                "tasks": [
+                  {
+                    "name": "run",
+                    "sql": "select count(*) from gold.shop.orders"
+                  }
+                ]
               }
             }
           },
@@ -5955,6 +6202,19 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ValidatePipelineResponse"
+                },
+                "example": {
+                  "action": "create",
+                  "changes": [],
+                  "errors": [],
+                  "nextRuns": [
+                    "2026-11-21T03:00:00Z",
+                    "2026-11-22T03:00:00Z",
+                    "2026-11-23T03:00:00Z",
+                    "2026-11-24T03:00:00Z",
+                    "2026-11-25T03:00:00Z"
+                  ],
+                  "ok": true
                 }
               }
             }
@@ -7274,6 +7534,31 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PipelineSpecResponse"
+                },
+                "example": {
+                  "document": {
+                    "name": "shop-marts",
+                    "options": {
+                      "backoffMinutes": 5,
+                      "concurrency": "Forbid",
+                      "retries": 1,
+                      "timeoutMinutes": 120
+                    },
+                    "ownerGroup": "shop",
+                    "schedule": {
+                      "cron": "0 3 * * *",
+                      "timezone": "UTC"
+                    },
+                    "tasks": [
+                      {
+                        "name": "run",
+                        "sql": "select count(*) from gold.shop.orders"
+                      }
+                    ]
+                  },
+                  "editable": true,
+                  "managedBy": "nova",
+                  "resourceVersion": "184931"
                 }
               }
             }

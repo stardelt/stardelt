@@ -569,6 +569,130 @@ mod tests {
         );
     }
 
+    /// The operations a bundle deploy and a reviewer use (#761): path, method, the 2xx status
+    /// whose body carries an example, and whether the operation also takes a request body.
+    const PUBLISHING: &[(&str, &str, &str, bool)] = &[
+        ("/api/deployments", "get", "200", false),
+        ("/api/deployments", "post", "201", true),
+        ("/api/deployments/{id}", "get", "200", false),
+        ("/api/deployments/{id}/rollback", "post", "201", false),
+        ("/api/pipelines", "post", "201", true),
+        ("/api/pipelines/validate", "post", "200", true),
+        (
+            "/api/pipelines/{namespace}/{name}/spec",
+            "get",
+            "200",
+            false,
+        ),
+    ];
+
+    /// Every publishing operation answers with an example of its 2xx body, and the three that
+    /// take a body carry one too — the document is what a client generator and the MCP server
+    /// read, so a caller never has to infer a field from prose (#95 item 5, #761).
+    #[test]
+    fn the_publishing_operations_carry_examples() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        for (path, method, status, has_body) in PUBLISHING {
+            let operation = &value["paths"][path][method];
+            assert!(operation.is_object(), "{method} {path} is in the document");
+            if *has_body {
+                assert!(
+                    !operation["requestBody"]["content"]["application/json"]["example"].is_null(),
+                    "{method} {path} carries a request example"
+                );
+            }
+            assert!(
+                !operation["responses"][status]["content"]["application/json"]["example"].is_null(),
+                "{method} {path} {status} carries a response example"
+            );
+        }
+    }
+
+    /// The two request examples deserialize into their types: a renamed, removed or newly
+    /// required field fails here rather than in a client's hands (#761).
+    #[test]
+    fn the_request_examples_parse() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let record = value["paths"]["/api/deployments"]["post"]["requestBody"]["content"]
+            ["application/json"]["example"]
+            .clone();
+        serde_json::from_value::<crate::deployments::NewDeployment>(record)
+            .expect("the deployments request example is a NewDeployment");
+        let create =
+            value["paths"]["/api/pipelines"]["post"]["requestBody"]["content"]["application/json"]
+                ["example"]
+                .clone();
+        serde_json::from_value::<crate::pipelines::CreatePipelineRequest>(create)
+            .expect("the pipelines request example is a CreatePipelineRequest");
+    }
+
+    /// The `properties` of the schema a media type points at, following a `$ref` into
+    /// `components.schemas` and the `items` of an array.
+    fn schema_properties<'a>(
+        document: &'a serde_json::Value,
+        media: &'a serde_json::Value,
+    ) -> &'a serde_json::Map<String, serde_json::Value> {
+        fn resolve<'a>(
+            document: &'a serde_json::Value,
+            schema: &'a serde_json::Value,
+        ) -> &'a serde_json::Value {
+            match schema["$ref"].as_str() {
+                Some(reference) => {
+                    let name = reference.rsplit('/').next().expect("a $ref names a schema");
+                    &document["components"]["schemas"][name]
+                }
+                None => schema,
+            }
+        }
+        let mut schema = resolve(document, &media["schema"]);
+        if schema["type"] == "array" {
+            schema = resolve(document, &schema["items"]);
+        }
+        schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("the example's schema carries properties: {schema}"))
+    }
+
+    /// Every key of every publishing example is a property of its schema: a field removed from
+    /// a struct cannot stay in the example, and an example cannot invent one (#761). Nested
+    /// values are not walked — the shapes they name are the caller's data.
+    #[test]
+    fn an_example_names_only_schema_properties() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        for (path, method, status, has_body) in PUBLISHING {
+            let operation = &value["paths"][path][method];
+            let mut media = Vec::new();
+            if *has_body {
+                media.push((
+                    &operation["requestBody"]["content"]["application/json"],
+                    format!("{method} {path} (request)"),
+                ));
+            }
+            media.push((
+                &operation["responses"][status]["content"]["application/json"],
+                format!("{method} {path} {status}"),
+            ));
+            for (media, what) in media {
+                let example = &media["example"];
+                let object = match example.as_array() {
+                    Some(array) => array.first().cloned().unwrap_or_default(),
+                    None => example.clone(),
+                };
+                let Some(object) = object.as_object() else {
+                    continue;
+                };
+                let properties = schema_properties(&value, media);
+                for key in object.keys() {
+                    assert!(
+                        properties.contains_key(key),
+                        "{what}: `{key}` is no property of the schema (properties: {:?})",
+                        properties.keys().collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+
     /// A generated client names its methods after the `operationId`, so two
     /// operations may not share one. A handler whose function name is generic
     /// (`list`, `create`, `update`, `remove`) sets `operation_id = "<resource>_<verb>"`
