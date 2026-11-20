@@ -711,10 +711,13 @@ install-spark: deps _context ## Install the Spark Connect endpoint (Iceberg on t
 	@# one logical line and the sub-make another, because a logical line carrying $(MAKE) is
 	@# executed whole under `make -n` (test_make_dry_run).
 	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
-	  echo "› Spark Connect front: Envoy jwt_authn at spark.$(BASE_DOMAIN) (audience spark-connect)"; \
+	  echo "› Spark Connect front: Envoy jwt_authn at spark.$(BASE_DOMAIN) (issuer, audience and claim from stardelt-identity)"; \
 	  old=$$(kubectl -n $(NAMESPACE) get configmap spark-connect-auth \
 	    -o jsonpath='{.data.envoy\.yaml}' 2>/dev/null | sha256sum | cut -d' ' -f1 || true); \
-	  sed -e "s|__BASE_DOMAIN__|$(BASE_DOMAIN)|g" manifests/spark-connect-auth.yaml | kubectl apply -f -; \
+	  kubectl -n $(NAMESPACE) get configmap stardelt-identity -o json > .spark-identity.json && \
+	  python3 scripts/render_spark_auth.py --identity .spark-identity.json \
+	    --namespace $(NAMESPACE) --base-domain $(BASE_DOMAIN) \
+	    --manifest manifests/spark-connect-auth.yaml | kubectl apply -f -; \
 	  new=$$(kubectl -n $(NAMESPACE) get configmap spark-connect-auth \
 	    -o jsonpath='{.data.envoy\.yaml}' | sha256sum | cut -d' ' -f1); \
 	  if [ "$$old" != "$$new" ]; then \

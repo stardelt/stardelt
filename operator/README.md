@@ -64,6 +64,7 @@ spec:
     provider: oidc                  # external only: oidc (default) | entra
     issuerUrl: https://login.microsoftonline.com/<tenant-id>/v2.0   # external only, https
     tokenEndpoint: https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token  # external only, https
+    jwksUri: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys  # external only, https
     apiAudience: <api-app-client-id> # external only: the audience engine and catalog accept
     clients:                        # external only: app registrations the customer made
       nova: { clientId: <id>, clientSecretRef: { name: idp-nova } }
@@ -132,12 +133,17 @@ enterprise's, so the operator installs nothing else.
 A complete Entra instance is in
 [`examples/platforminstance-external-entra.yaml`](examples/platforminstance-external-entra.yaml):
 all ids are fake, and nothing in it is a secret value — `clientSecretRef` names a Secret in the
-platform namespace. For `external`, `issuerUrl`, `tokenEndpoint`, `apiAudience` and a `nova` client are required;
-client names are limited to the platform's known clients, and every client except the public
-`lakekeeper` one needs a `clientSecretRef`.
+platform namespace. For `external`, `issuerUrl`, `tokenEndpoint`, `jwksUri`, `apiAudience` and a `nova` client are
+required; client names are limited to the platform's known clients, and every client except the public
+`lakekeeper` one needs a `clientSecretRef`. `jwksUri` is the provider's `jwks_uri` from
+`<issuerUrl>/.well-known/openid-configuration`: the Spark Connect front's Envoy reads it directly,
+because neither the operator nor Helm fetches a customer's discovery document.
 
 `identity` and `baseDomain` are validated by the API server (an `external` provider needs an
-`https://` issuer, `platform` derives it and refuses one, both need `baseDomain`). `contract()`
+`https://` issuer and JWKS URL, `platform` derives both and refuses them, both need `baseDomain`).
+The Spark Connect front is applied in both sign-in modes: its issuer, JWKS URL, audience and group
+claim come from the same contract, so an external provider's tokens are checked against its own
+keys. `contract()`
 in `src/identity.rs` turns them into the data of the ConfigMap `stardelt-identity` that every
 component reads; publishing that ConfigMap from the controller is the next wave step. Until then
 `make install-identity` in `platform/` writes it.

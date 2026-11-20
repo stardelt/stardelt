@@ -12,6 +12,15 @@
 {{- if not (hasPrefix "https://" .Values.identity.tokenEndpoint) }}
 {{- fail "identity.tokenEndpoint must be an https:// URL" }}
 {{- end }}
+{{- if not .Values.identity.jwksUri }}
+{{- fail "identity.mode=external needs identity.jwksUri (the jwks_uri of <issuerUrl>/.well-known/openid-configuration)" }}
+{{- end }}
+{{- if not (hasPrefix "https://" .Values.identity.jwksUri) }}
+{{- fail "identity.jwksUri must be an https:// URL" }}
+{{- end }}
+{{- if not .Values.identity.apiAudience }}
+{{- fail "identity.mode=external needs identity.apiAudience (the aud of a token for the platform's APIs)" }}
+{{- end }}
 {{- end }}
 {{- if eq $mode "platform" }}
 {{- if not .Values.platform.baseDomain }}
@@ -32,6 +41,10 @@ metadata:
 data:
   issuerUrl: {{ include "stardelt.issuerUrl" . | quote }}
   tokenEndpoint: {{ include "stardelt.tokenEndpoint" . | quote }}
+  jwksUri: {{ include "stardelt.jwksUri" . | quote }}
+  {{- if eq $mode "external" }}
+  apiAudience: {{ .Values.identity.apiAudience | quote }}
+  {{- end }}
   groupClaim: {{ .Values.identity.groupClaim | quote }}
   adminGroup: {{ .Values.identity.adminGroup | quote }}
   # Nova reads these two to switch sign-in on; the chart sets Nova's env directly, so

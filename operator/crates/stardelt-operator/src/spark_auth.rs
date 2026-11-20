@@ -56,11 +56,43 @@ pub fn envoy_image() -> String {
     golden().envoy_image
 }
 
-/// The rendered document: the two namespace-qualified addresses and the issuer's domain.
-pub fn envoy_config(namespace: &str, base_domain: &str) -> String {
+/// The rendered document: the two namespace-qualified addresses and the identity values the
+/// instance's mode produced (issuer, JWKS URL and host, audience, group claim, admin group).
+pub fn envoy_config(
+    namespace: &str,
+    issuer: &str,
+    jwks_uri: &str,
+    audience: &str,
+    group_claim: &str,
+    admin_group: &str,
+) -> String {
+    // A public JWKS is served over TLS at the provider; the platform's own is the in-cluster
+    // Keycloak Service the front already has a cluster for.
+    let jwks_cluster = if jwks_uri.starts_with("https://") {
+        "jwks"
+    } else {
+        "keycloak"
+    };
     ENVOY_CONFIG
         .replace("__NAMESPACE__", namespace)
-        .replace("__BASE_DOMAIN__", base_domain)
+        .replace("__ISSUER_URL__", issuer)
+        .replace("__AUDIENCE__", audience)
+        .replace("__JWKS_URI__", jwks_uri)
+        .replace("__JWKS_CLUSTER__", jwks_cluster)
+        .replace("__JWKS_TLS_HOST__", host(issuer))
+        .replace("__GROUP_CLAIM__", group_claim)
+        .replace("__ADMIN_GROUP__", admin_group)
+}
+
+/// The host of a URL, without its scheme and path (`https://login.example.com/x` →
+/// `login.example.com`). The `jwks` cluster's TLS SNI and address.
+fn host(url: &str) -> &str {
+    url.split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
 }
 
 fn name_labels() -> BTreeMap<String, String> {
@@ -85,12 +117,26 @@ fn meta(name: &str, namespace: &str) -> ObjectMeta {
     }
 }
 
-pub fn config_map(namespace: &str, base_domain: &str) -> ConfigMap {
+pub fn config_map(
+    namespace: &str,
+    issuer: &str,
+    jwks_uri: &str,
+    audience: &str,
+    group_claim: &str,
+    admin_group: &str,
+) -> ConfigMap {
     ConfigMap {
         metadata: meta(NAME, namespace),
         data: Some(BTreeMap::from([(
             "envoy.yaml".to_string(),
-            envoy_config(namespace, base_domain),
+            envoy_config(
+                namespace,
+                issuer,
+                jwks_uri,
+                audience,
+                group_claim,
+                admin_group,
+            ),
         )])),
         ..ConfigMap::default()
     }
@@ -287,7 +333,14 @@ mod tests {
 
     #[test]
     fn the_envoy_config_follows_the_namespace_and_the_base_domain() {
-        let config = envoy_config("data", "lab.example.org");
+        let config = envoy_config(
+            "data",
+            "https://id.lab.example.org/realms/stardelt",
+            "http://keycloak.data.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs",
+            "spark-connect",
+            "groups",
+            "stardelt-admins",
+        );
         assert!(
             config.contains("spark-connect.data.svc.cluster.local"),
             "{config}"
@@ -304,7 +357,45 @@ mod tests {
             config.contains("audiences: [\"spark-connect\"]"),
             "{config}"
         );
-        for absent in ["__NAMESPACE__", "__BASE_DOMAIN__", ".stardelt.svc"] {
+        assert!(config.contains("cluster: keycloak"), "{config}");
+        for absent in [
+            "__NAMESPACE__",
+            "__ISSUER_URL__",
+            "__AUDIENCE__",
+            "__JWKS_URI__",
+            "__JWKS_CLUSTER__",
+            "__JWKS_TLS_HOST__",
+            "__GROUP_CLAIM__",
+            "__ADMIN_GROUP__",
+            ".stardelt.svc",
+        ] {
+            assert!(!config.contains(absent), "{absent} left in the document");
+        }
+    }
+
+    #[test]
+    fn the_envoy_config_carries_an_external_provider() {
+        let config = envoy_config(
+            "data",
+            "https://login.example.com/tenant/v2.0",
+            "https://login.example.com/tenant/v2.0/discovery/v2.0/keys",
+            "api://stardelt",
+            "roles",
+            "platform-admins",
+        );
+        for expected in [
+            "issuer: https://login.example.com/tenant/v2.0",
+            "audiences: [\"api://stardelt\"]",
+            "uri: https://login.example.com/tenant/v2.0/discovery/v2.0/keys",
+            "path: [{ key: jwt_payload }, { key: roles }]",
+            "exact: \"platform-admins\"",
+            "cluster: jwks",
+            "sni: login.example.com",
+            "address: login.example.com, port_value: 443",
+        ] {
+            assert!(config.contains(expected), "{expected} missing:\n{config}");
+        }
+        for absent in ["id.", "realms/stardelt"] {
             assert!(!config.contains(absent), "{absent} left in the document");
         }
     }

@@ -202,6 +202,7 @@ fi
 apply_configmap stardelt-identity \
   --from-literal=issuerUrl="https://id.${BASE_DOMAIN}/realms/stardelt" \
   --from-literal=tokenEndpoint="https://id.${BASE_DOMAIN}/realms/stardelt/protocol/openid-connect/token" \
+  --from-literal=jwksUri="http://keycloak.${NAMESPACE}.svc.cluster.local:8080/realms/stardelt/protocol/openid-connect/certs" \
   --from-literal=groupClaim=groups \
   --from-literal=adminGroup=stardelt-admins \
   --from-literal=authMode=oidc \

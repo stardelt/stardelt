@@ -150,6 +150,11 @@ fn notes(spec: &PlatformInstanceSpec, client: &str, kind: &str, api_audience: &s
                 "emit the claim {} with group names in the ID token and the access token",
                 spec.identity.effective_group_claim()
             )];
+            notes.push(format!(
+                "the platform's Spark front admits the group stardelt-users and {}; emit both in {}",
+                spec.identity.admin_group,
+                spec.identity.effective_group_claim()
+            ));
             if client == "trino" {
                 notes.push(
                     "the operator creates Trino's TLS anchor and its internal Secrets; supply this client's secret in Secret stardelt-oidc-clients under key trino".into(),
@@ -224,6 +229,7 @@ mod tests {
                 "provider": provider,
                 "issuerUrl": "https://idp.example.com",
                 "tokenEndpoint": "https://idp.example.com/token",
+                "jwksUri": "https://idp.example.com/keys",
                 "apiAudience": "api://stardelt",
                 "clients": clients,
             },

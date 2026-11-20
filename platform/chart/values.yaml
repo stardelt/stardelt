@@ -140,6 +140,12 @@ identity:
   # `platform`, which derives it from the Keycloak it deploys. Published as `tokenEndpoint`
   # in ConfigMap `stardelt-identity` so no component builds the realm path itself (#611).
   tokenEndpoint: ""
+  # external only: `jwks_uri` from `<issuerUrl>/.well-known/openid-configuration`.
+  # Required for `external`; a `platform` instance derives the in-cluster Keycloak URL.
+  jwksUri: ""
+  # external only: the `aud` a token for the platform's APIs carries (Entra: `api://<app-id>`).
+  # Published as `apiAudience`, the same key the operator's contract writes (`identity.rs`).
+  apiAudience: ""
   groupClaim: groups
   adminGroup: stardelt-admins
 
