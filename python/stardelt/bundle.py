@@ -901,8 +901,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     refuses, for a plan and a deploy alike, a pipeline someone changed
     after its last deploy (``modified``) unless ``accept_drift``; the default ``warn`` only reports it. With ``diff`` each
     ``would-update`` (and ``updated``) result carries a ``diff`` text: what Nova would change, field by field.
-    ``--prune`` removes pipelines only; stream apps are not pruned yet, although Nova can delete one
-    since the ``streams_delete`` operation exists (``DELETE /api/streams/{namespace}/{name}``).
+    ``--prune`` removes the pipelines and the stream apps of this bundle and target that the bundle no
+    longer names; a refused delete stops the deploy with its sentence.
     """
     user = nova.me().get("user")
     problems, mode, specs = render(directory, target, user)
@@ -946,7 +946,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             if results[-1].get("modified"):
                 changed_by_hand.add(spec["name"])
     stream_rows = []
-    namespace, listed = _listed(nova) if stream_specs else ("", [])
+    namespace, listed = _listed(nova) if (stream_specs or prune) else ("", [])
     existing = {stream["name"]: stream for stream in listed}
     for position, spec in enumerate(stream_specs):
         verdict = nova.call("streams_validate", body=spec)
@@ -966,7 +966,16 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     results = [{**r, "diff": diffs[r["name"]]} if diffs.get(r["name"]) else r for r in results]
     results += [{k: v for k, v in row.items() if k != "position"} for row in stream_rows]
     stale = _stale(nova, stamp["bundle"], target, mode, user, {spec["name"] for spec in specs}) if prune else []
+    stale_streams = []
+    if prune:
+        kept = {spec["name"] for spec in stream_specs}
+        stale_streams = [
+            (namespace, stream["name"])
+            for stream in _deployed_streams(listed, stamp["bundle"], target, mode, user)
+            if stream["name"] not in kept
+        ]
     results += [{"action": "would-delete", "name": name} for _, name in stale]
+    results += [{"action": "would-delete", "name": name, "kind": "StreamApp"} for _, name in stale_streams]
     if refused or dry_run:
         return refused, results
     done = list(migration_rows)
@@ -1070,6 +1079,12 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
                 done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name})
+    for namespace, name in stale_streams:
+        try:
+            nova.call("streams_delete", path={"namespace": namespace, "name": name})
+        except api.StardeltApiError as err:
+            return [(target, f"{name}: {err}")], done
+        done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
     done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), specs))
     return [], done
 

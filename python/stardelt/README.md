@@ -240,7 +240,7 @@ Every pipeline is sent with where it came from (the bundle's name, the target an
 appended when files are uncommitted; no commit outside a Git checkout) and Nova stamps that on it, so a later change can tell
 what a bundle owns.
 `--prune` (on `plan` and `deploy`) also lists as `would-delete`, and with `deploy` removes as `deleted` after everything else
-succeeded, the pipelines an earlier deploy of this bundle target stamped and the bundle no longer names; a pipeline made by hand,
+succeeded, the pipelines and stream apps an earlier deploy of this bundle target stamped and the bundle no longer names; a pipeline made by hand,
 or by another bundle or target, is never touched, and a development target removes only your own `dev-<your name>-` ones.
 A pipeline someone changed after its last deploy (in the interface or with `kubectl`) shows `"modified": true` in its answer line
 of `plan` and `deploy` and one warning on standard error; the deploy still overwrites that change.

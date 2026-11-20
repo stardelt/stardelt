@@ -278,13 +278,14 @@ def test_plan_with_prune_lists_only_what_this_bundle_target_deployed_and_no_long
     make(tmp_path)
     code, out, err, session = run(
         ["bundle", "plan", str(tmp_path), "-t", "prod", "--prune"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=LISTING),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=NO_STREAMS),
+        FakeResponse(payload=LISTING),
     )
     assert (code, err) == (0, "")
     assert [json.loads(line)["action"] + " " + json.loads(line)["name"] for line in out.splitlines()] == [
         "would-create load", "would-update nightly", "would-delete old",
     ]
-    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "GET"], "nothing is deleted by a plan"
+    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "GET", "GET"], "nothing is deleted by a plan"
 
 
 def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path):
@@ -292,7 +293,8 @@ def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=LISTING),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=NO_STREAMS),
+        FakeResponse(payload=LISTING),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(204),
@@ -315,7 +317,8 @@ def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=LISTING),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=NO_STREAMS),
+        FakeResponse(payload=LISTING),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(503, {"error": "the scheduler is not reachable"}),
@@ -372,7 +375,8 @@ def test_a_development_target_prunes_only_the_callers_own_pipelines(tmp_path):
     }
     code, out, _, _ = run(
         ["bundle", "plan", str(tmp_path), "-t", "dev", "--prune"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE), FakeResponse(payload=listing),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE), FakeResponse(payload=NO_STREAMS),
+        FakeResponse(payload=listing),
     )
     assert code == 0
     assert [json.loads(line)["name"] for line in out.splitlines() if "would-delete" in line] == ["dev-alice-old"]
@@ -383,10 +387,11 @@ def test_a_refusal_means_nothing_is_deleted_either(tmp_path):
     refused = {"ok": False, "errors": [{"message": "no"}], "changes": [], "nextRuns": []}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
-        ME, FakeResponse(payload=refused), FakeResponse(payload=UPDATE), FakeResponse(payload=LISTING),
+        ME, FakeResponse(payload=refused), FakeResponse(payload=UPDATE), FakeResponse(payload=NO_STREAMS),
+        FakeResponse(payload=LISTING),
     )
     assert code == 2 and "load: no" in err
-    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "GET"], "no write, no delete"
+    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "GET", "GET"], "no write, no delete"
 
 
 def with_stream(tmp_path, manifest=None):
@@ -476,6 +481,34 @@ def test_deploy_puts_the_stream_with_its_stamp(tmp_path):
     assert (method, path) == ("PUT", "https://nova.example/api/streams/stardelt/measurements")
     assert kwargs["json"]["name"] == "measurements"
     assert kwargs["json"]["provenance"] == {"bundle": "sales-etl", "target": "prod"}, "no commit outside a checkout"
+
+
+def test_a_deploy_with_prune_removes_a_stale_stream_app(tmp_path):
+    with_stream(tmp_path)
+    listed = {"namespace": "stardelt", "streams": [
+        {"name": "measurements", "namespace": "stardelt",
+         "deployment": {"bundle": "sales-etl", "target": "prod"}},
+        {"name": "old-stream", "namespace": "stardelt",
+         "deployment": {"bundle": "sales-etl", "target": "prod"}},
+    ]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=listed), FakeResponse(payload=STREAM_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(payload={"pipelines": []}),
+        FakeResponse(201, {"name": "load"}),
+        FakeResponse(201, {"name": "measurements"}), FakeResponse(204),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 11, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "load"},
+        {"action": "updated", "name": "measurements"},
+        {"action": "deleted", "name": "old-stream", "kind": "StreamApp"},
+        {"action": "recorded", "id": 11},
+    ]
+    assert ("DELETE", "/api/streams/stardelt/old-stream") in calls(session)
+    assert [method for method, _ in calls(session)].count("DELETE") == 1
 
 
 def test_a_hand_changed_stream_is_refused_by_a_drift_block_target_unless_accepted(tmp_path):
