@@ -17,6 +17,7 @@ declare -A recipe=(
   [verify-backups-all]='bash scripts/verify-backups-all.sh'
   [verify-streaming]='bash scripts/verify-streaming.sh'
   [verify-crds]='bash scripts/verify-crds.sh'
+  [verify-access-sync-script]='python3 scripts/check_access_sync_live.py'
   [verify-pins]='bash scripts/verify-pins.sh'
   [verify-spark-config]='bash scripts/verify-spark-config.sh'
   [verify-restarts]='bash scripts/verify-restarts.sh'
@@ -41,7 +42,7 @@ if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
 fi
 
 default_targets="verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming
-verify-crds verify-pins verify-spark-config verify-restarts check-spark-runtimes-live
+verify-crds verify-access-sync-script verify-pins verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
