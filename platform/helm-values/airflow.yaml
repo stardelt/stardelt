@@ -55,7 +55,7 @@ images:
     # would silently redeploy a different DAG image.
     repository: ghcr.io/stardelt/airflow
     tag: demo
-    digest: sha256:564315b2519283b0837b40a56d984a0be50fc12563df827e087046ef03304012
+    digest: sha256:1d7de3a26c88a6da3a41a7ccaa437816c0b07a693763bf6e0250502b35d3a6e5
     pullPolicy: IfNotPresent
 
 # No secrets in this file: scripts/app-secrets.sh generates them per cluster
@@ -320,7 +320,7 @@ env:
   - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_REPOSITORY
     value: ghcr.io/stardelt/airflow
   - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG
-    value: "demo@sha256:564315b2519283b0837b40a56d984a0be50fc12563df827e087046ef03304012"
+    value: "demo@sha256:1d7de3a26c88a6da3a41a7ccaa437816c0b07a693763bf6e0250502b35d3a6e5"
 
 # Secret-backed envs use extraEnv (templated string accepting valueFrom).
 extraEnv: |
@@ -437,7 +437,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:aaa6b81405a71c09debb6b6bc356f94e41877dbdb99010849656b31ebf1f4f29
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:9d2633048b6dbadbb119b4b834507fc29d37246226210a795a63a8f59d0a07b3
   # dbt tasks (#11): the DAG that runs them (demos/dags/stardelt_pipelines/dbt.py) gives a `dbt`
   # task a pod of its own, because the tool image has no Airflow. The image contains the sample
   # project (demos/examples/shop) and must be rebuilt by `demos / CI` on main; this is a moving
