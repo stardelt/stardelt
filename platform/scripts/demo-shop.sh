@@ -18,13 +18,12 @@
 #       viewers=[visitors]), created once — before the bundle, because Nova refuses a
 #       pipeline whose notify names a destination its group does not have;
 #   1.  the shop bundle deployed for the target prod: shop-1-bronze, shop-2-silver and
-#       shop-3-gold, scheduled 02:00 / 02:30 / 03:00 Europe/Berlin;
+#       shop-3-gold, scheduled 02:00 / 02:30 / 03:00 Europe/Berlin (its pipeline files name
+#       `viewers: [visitors]`, so the deploy writes them);
 #   2.  the twelve one-statement legacy pipelines deleted — an explicit list, never a
 #       pattern, and never one that carries .spec.schedule;
 #   3.  the dbt run applied: shop-dbt, 04:00 Europe/Berlin;
-#   4.  viewers=[visitors] on every shop pipeline and on shop-dbt (`stardelt bundle deploy`
-#       rewrites the whole spec, so it drops viewers — rerun this script after a deploy);
-#   5.  one line for the maintainer: how to trigger shop-dbt's first run.
+#   4.  one line for the maintainer: how to trigger shop-dbt's first run.
 #
 # A run with YES != 1 changes nothing: it prints every step as `would:` and exits 1.
 set -euo pipefail
@@ -78,8 +77,8 @@ if [ -n "$feed" ]; then
   echo "› run-feed: exists (${feed%%/stardelt-demo-*}/stardelt-demo-…)"
 elif [ "$YES" = 1 ]; then
   topic="stardelt-demo-$(openssl rand -hex 8)"
-  body="$(jq -n --arg url "https://ntfy.sh/$topic" \
-    '{owner_group: "demo", name: "run-feed", kind: "webhook", config: {url: $url}, viewers: ["visitors"]}')"
+  body="$(jq -n --arg url "https://ntfy.sh/$topic" --arg g "$GROUP" \
+    '{owner_group: "demo", name: "run-feed", kind: "webhook", config: {url: $url}, viewers: [$g]}')"
   "$CLI" --host "$NOVA" api destinations_create --body "$body" >/dev/null \
     || fail "cannot create the destination demo/run-feed"
   echo "› run-feed: created — subscribe at https://ntfy.sh/$topic"
@@ -132,33 +131,7 @@ else
   echo "would: apply $DBT (shop-dbt, 04:00 Europe/Berlin)"
 fi
 
-# 4. The viewers. `stardelt bundle deploy` rewrites the whole spec and drops `viewers`
-# (public-demo.sh step 9), so this runs after the deploy. `kubectl patch` takes one object
-# name — there is no `-l` on it — so patch each pipeline by name; shop-dbt carries no bundle
-# label and is patched by name here.
-if [ "$YES" = 1 ]; then
-  mapfile -t names < <(kubectl -n "$NAMESPACE" get pipelines.stardelt.io -l stardelt.io/bundle=shop \
-    -o json 2>/dev/null | jq -r '.items[]?.metadata.name' 2>/dev/null || true)
-  if kubectl -n "$NAMESPACE" get pipelines.stardelt.io shop-dbt >/dev/null 2>&1; then
-    names+=("shop-dbt")
-  fi
-  if [ "${#names[@]}" -eq 0 ]; then
-    echo "› viewers: no shop pipelines yet"
-  else
-    for name in "${names[@]}"; do
-      kubectl -n "$NAMESPACE" patch pipelines.stardelt.io "$name" --type merge \
-        -p "{\"spec\":{\"viewers\":[\"$GROUP\"]}}" >/dev/null \
-        || fail "cannot add viewers=[$GROUP] to pipeline $name"
-    done
-    echo "› viewers=[$GROUP] on ${#names[@]} pipeline(s)"
-  fi
-else
-  # The cluster still holds the twelve legacy pipelines here: count what the run above
-  # would leave, not what is there now.
-  echo "would: let $GROUP see the bundle's ${#planned[@]} pipeline(s) and shop-dbt (viewers=[$GROUP])"
-fi
-
-# 5. What is left for the maintainer: the dbt run's first history entry.
+# 4. What is left for the maintainer: the dbt run's first history entry.
 echo "shop-dbt's first run: kubectl -n $NAMESPACE exec deploy/airflow-scheduler -- airflow dags trigger stardelt__shop-dbt"
 
 if [ "$YES" != 1 ]; then

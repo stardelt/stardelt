@@ -2,7 +2,7 @@
 # The demo's public-database pipeline (#79 point 2): the bundle that reads RNAcentral's
 # public PostgreSQL through the `rnacentral` Connection and writes bronze.public_db.
 #
-#   make demo-public-db YES=1   # the bundle, the connection's usableBy, viewers=[visitors]
+#   make demo-public-db YES=1   # the bundle (it names viewers=[visitors]) and the connection's usableBy
 #   make demo-public-db         # the plan and the prerequisite checks, exit 1
 #
 # In order, and idempotently:
@@ -11,10 +11,9 @@
 #       repository's bundle, the ServicePrincipal pipeline-demo ready, and a CLI that is
 #       signed in to Nova;
 #   1.  the bundle in demos/examples/public-db deployed for the target prod: public-db-load,
-#       scheduled 05:00 Europe/Berlin, its notebook task naming the Connection `rnacentral`;
-#   2.  viewers=[visitors] on the pipeline (`stardelt bundle deploy` rewrites the whole spec,
-#       so it drops viewers — rerun this script after a deploy);
-#   3.  one line for the maintainer: how to trigger public-db-load's first run.
+#       scheduled 05:00 Europe/Berlin, its notebook task naming the Connection `rnacentral`,
+#       its file naming viewers=[visitors];
+#   2.  one line for the maintainer: how to trigger public-db-load's first run.
 #
 # The Connection itself is `make demo-connection YES=1`: its `usableBy` names `visitors` and
 # `demo`, and the loader refuses any other group (`plan.py`, `_connection_for_pipeline`).
@@ -25,7 +24,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 NAMESPACE="${NAMESPACE:-stardelt}"
 NOVA="${STARDELT_NOVA_URL:-https://alpha.dev.stardelt.io}"
-GROUP="${GROUP:-visitors}"
 YES="${YES:-0}"
 BUNDLE=../demos/examples/public-db
 NAME=public-db-load
@@ -64,13 +62,7 @@ if [ "$YES" = 1 ]; then
     || fail "stardelt bundle deploy $BUNDLE -t prod failed"
   echo "› public-db bundle: deployed ($NAME 05:00 Europe/Berlin, notebook connection rnacentral)"
 
-  # 2. The viewers. `kubectl patch` takes one object name, so patch the pipeline by name.
-  kubectl -n "$NAMESPACE" patch pipelines.stardelt.io "$NAME" --type merge \
-    -p "{\"spec\":{\"viewers\":[\"$GROUP\"]}}" >/dev/null \
-    || fail "cannot add viewers=[$GROUP] to pipeline $NAME"
-  echo "› viewers=[$GROUP] on $NAME"
-
-  # 3. What is left for the maintainer: the pipeline's first history entry.
+  # 2. What is left for the maintainer: the pipeline's first history entry.
   echo "$NAME's first run: kubectl -n $NAMESPACE exec deploy/airflow-scheduler -c scheduler -- airflow dags trigger stardelt__$NAME"
   echo ""
   echo "demo-public-db: OK — $NAME reads RNAcentral through its Connection into bronze.public_db"

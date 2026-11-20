@@ -17,6 +17,11 @@ def test_the_bundle_is_one_pipeline_with_a_notebook_and_the_connection():
     assert pipeline["notebook"]["file"] == "notebooks/load_rnacentral.ipynb"
 
 
+def test_the_pipeline_is_readable_by_visitors():
+    pipeline = yaml.safe_load((PUBLIC_DB / "pipelines" / "public-db-load.yaml").read_text())
+    assert pipeline["viewers"] == ["visitors"]
+
+
 def test_the_notebook_is_nbformat_4_and_reads_the_connection_from_the_environment():
     notebook = json.loads((PUBLIC_DB / "notebooks" / "load_rnacentral.ipynb").read_text())
     assert notebook["nbformat"] == 4

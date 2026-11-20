@@ -49,8 +49,9 @@
 # no legacy pipeline, viewers, a schedule and a green last run (#79 slice 2), fixed by
 # `make demo-shop YES=1 && make demo-stream YES=1`.
 #
-# Step 9 has a footgun: `stardelt bundle deploy` rewrites the whole spec, so a redeploy of the
-# shop drops `viewers`. Run `make public-demo YES=1` (or `make public-demo-check`) after one.
+# Step 9 stays as the convergence for pipelines deployed by another path; a bundle deploy
+# writes `spec.viewers` itself when the pipeline file names them (#534), so a redeploy of
+# the shop keeps the visitors.
 #
 # A second run changes nothing and says so per step, except the password reset of step 2.
 # The kill switch is `make public-demo-off YES=1`: the person is disabled and signed out,

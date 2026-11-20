@@ -1,6 +1,7 @@
 name: public-db-load
 description: "Loads RNAcentral's public database into bronze.public_db every morning, with the Connection's password."
 schedule: {cron: "0 5 * * *", timezone: Europe/Berlin}
+viewers: [visitors]
 notebook:
   file: notebooks/load_rnacentral.ipynb
   connection: rnacentral

@@ -116,3 +116,8 @@ def test_every_dbt_batch_tag_selects_a_resource_and_the_seeds_come_first():
     unknown = [b for b in batches if b.removeprefix("tag:") not in tags]
     assert not unknown, f"batches select tags no resource carries: {unknown}"
     assert set(tags) <= {b.removeprefix("tag:") for b in batches}
+
+
+def test_the_dbt_pipeline_is_readable_by_visitors():
+    pipeline = yaml.safe_load((SHOP / "pipeline-dbt.yaml").read_text())
+    assert pipeline["spec"]["viewers"] == ["visitors"]
