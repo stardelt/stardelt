@@ -914,8 +914,9 @@ pub struct IngestionSourceStatus {
 
 /// What a pipeline task does — the task contract behind `Pipeline`
 /// (master spec §5, plugs 6, 7 and 12). `sql`, `notebook` (scheduled jobs
-/// phases J0 and J1) and `dbt` run today; `python` and `quality` are
-/// accepted so manifests can be written ahead of their runtimes.
+/// phases J0 and J1) and `dbt` run today; `python`, `quality` and
+/// `spark-pipeline` are accepted so manifests can be written ahead of their
+/// runtimes.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskKind {
@@ -932,6 +933,11 @@ pub enum TaskKind {
     /// query returns no rows). Accepted; no runtime yet (#114). dbt tests run
     /// inside a `dbt` task.
     Quality,
+    /// A declared graph run by `spark-pipelines` on the owner group's `SparkCluster`.
+    /// Accepted; no runtime yet (#80). `project` is the bundle directory that holds
+    /// `spark-pipeline.yml` and its sources.
+    #[serde(rename = "spark-pipeline")]
+    SparkPipeline,
 }
 
 /// How a pipeline's writes reach the tables people read (WAP, nova#628).
@@ -989,6 +995,16 @@ fn task_config_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::
     .expect("the schema literal above is valid JSON Schema")
 }
 
+/// How a `spark-pipeline` task refreshes its graph: `incremental` processes only what is new
+/// (`spark-pipelines run`), `full` rebuilds every dataset (`--full-refresh-all`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineRefresh {
+    #[default]
+    Incremental,
+    Full,
+}
+
 /// One task of a `Pipeline`. A task starts when every task in `dependsOn` has succeeded.
 ///
 /// A `notebook` task names its source in `config`: `notebook` is the `.ipynb`
@@ -1024,6 +1040,26 @@ fn task_config_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::
     {
         "rule": "!has(self.checks) || self.kind == 'quality'",
         "message": "only a quality task declares checks"
+    },
+    {
+        "rule": "self.kind != 'spark-pipeline' || (has(self.project) && size(self.project) > 0)",
+        "message": "a spark-pipeline task needs project (the bundle directory with spark-pipeline.yml)"
+    },
+    {
+        "rule": "self.kind == 'spark-pipeline' || !has(self.project)",
+        "message": "only a spark-pipeline task names a project"
+    },
+    {
+        "rule": "!has(self.refresh) || self.kind == 'spark-pipeline'",
+        "message": "only a spark-pipeline task sets refresh"
+    },
+    {
+        "rule": "!has(self.fullRefresh) || self.kind == 'spark-pipeline'",
+        "message": "only a spark-pipeline task sets fullRefresh"
+    },
+    {
+        "rule": "!has(self.refresh) || self.refresh != 'full' || !has(self.fullRefresh)",
+        "message": "a spark-pipeline task sets refresh: full or fullRefresh, not both"
     }
 ]))]
 pub struct PipelineTask {
@@ -1069,6 +1105,21 @@ pub struct PipelineTask {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 50))]
     pub checks: Vec<QualityCheck>,
+    /// The declared graph a `spark-pipeline` task runs: a directory of the bundle that holds
+    /// `spark-pipeline.yml` and its sources. Absent on every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 1, max = 128),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+    )]
+    pub project: Option<String>,
+    /// `incremental` (the default) or `full`; only a `spark-pipeline` task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<PipelineRefresh>,
+    /// Datasets to rebuild from scratch on every run; only a `spark-pipeline` task.
+    #[serde(default, rename = "fullRefresh", skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 32), inner(length(min = 1, max = 128)))]
+    pub full_refresh: Vec<String>,
 }
 
 /// Engine that orchestrates (and for `spark`, executes) the pipeline.
@@ -1361,6 +1412,41 @@ impl PipelineSpec {
             if !task.checks.is_empty() && task.kind != TaskKind::Quality {
                 return Err(format!(
                     "task `{}` is not a quality task: only a quality task declares checks",
+                    task.name
+                ));
+            }
+            if task.kind == TaskKind::SparkPipeline
+                && task.project.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(format!(
+                    "spark-pipeline task `{}` needs project (the bundle directory with spark-pipeline.yml)",
+                    task.name
+                ));
+            }
+            if task.kind != TaskKind::SparkPipeline && task.project.is_some() {
+                return Err(format!(
+                    "task `{}` is not a spark-pipeline task: only a spark-pipeline task names a project",
+                    task.name
+                ));
+            }
+            if task.refresh.is_some() && task.kind != TaskKind::SparkPipeline {
+                return Err(format!(
+                    "task `{}` is not a spark-pipeline task: only a spark-pipeline task sets refresh",
+                    task.name
+                ));
+            }
+            if !task.full_refresh.is_empty() && task.kind != TaskKind::SparkPipeline {
+                return Err(format!(
+                    "task `{}` is not a spark-pipeline task: only a spark-pipeline task sets fullRefresh",
+                    task.name
+                ));
+            }
+            if task.kind == TaskKind::SparkPipeline
+                && task.refresh == Some(PipelineRefresh::Full)
+                && !task.full_refresh.is_empty()
+            {
+                return Err(format!(
+                    "spark-pipeline task `{}` sets refresh: full and fullRefresh: give one of them",
                     task.name
                 ));
             }
@@ -4235,6 +4321,9 @@ mod tests {
             config: BTreeMap::new(),
             writes: Vec::new(),
             checks: Vec::new(),
+            project: None,
+            refresh: None,
+            full_refresh: Vec::new(),
         }
     }
 
@@ -4522,6 +4611,63 @@ mod tests {
         }];
         spec.publish = PipelinePublish::Wap;
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn a_spark_pipeline_task_round_trips() {
+        let p: Pipeline = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": { "name": "shop", "namespace": "stardelt" },
+            "spec": {
+                "tasks": [
+                    { "name": "build", "kind": "spark-pipeline", "project": "pipelines/shop", "refresh": "full" }
+                ]
+            }
+        }))
+        .expect("deserialize Pipeline");
+        let task = &p.spec.tasks[0];
+        assert_eq!(task.kind, TaskKind::SparkPipeline);
+        assert_eq!(task.project.as_deref(), Some("pipelines/shop"));
+        assert_eq!(task.refresh, Some(PipelineRefresh::Full));
+        assert_eq!(p.spec.validate(), Ok(()));
+    }
+
+    #[test]
+    fn spark_pipeline_needs_a_project() {
+        let p: Pipeline = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": { "name": "shop", "namespace": "stardelt" },
+            "spec": {
+                "tasks": [
+                    { "name": "build", "kind": "spark-pipeline" }
+                ]
+            }
+        }))
+        .expect("deserialize Pipeline");
+        assert_eq!(
+            p.spec.validate().unwrap_err(),
+            "spark-pipeline task `build` needs project (the bundle directory with spark-pipeline.yml)"
+        );
+    }
+
+    #[test]
+    fn only_a_spark_pipeline_task_names_a_project() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.tasks[0].project = Some("pipelines/shop".to_string());
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "task `load` is not a spark-pipeline task: only a spark-pipeline task names a project"
+        );
+    }
+
+    #[test]
+    fn spark_pipeline_kind_serialises_with_a_dash() {
+        assert_eq!(
+            serde_json::to_value(TaskKind::SparkPipeline).expect("serialize"),
+            serde_json::json!("spark-pipeline")
+        );
     }
 
     #[test]
