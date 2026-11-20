@@ -43,6 +43,16 @@ DRIFT = ("warn", "block")
 MAX_FILES = 100
 MAX_BYTES = 5 * 1024 * 1024
 
+# What a credential in a bundle file tends to look like: a non-trivial value assigned to a name people use for a
+# secret, or a PEM private key. Deliberately narrow — a warning on every statement teaches people to ignore the
+# channel. A list, not a promise (stardelt/stardelt#104).
+SECRET = re.compile(
+    r"(?i)(?:^|[^A-Za-z0-9_.-])"
+    r"(password|passwd|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|token)"
+    r"""\s*[:=]\s*['"]?[^\s'"]{8,}"""
+)
+PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+
 
 def _linked(root, path):
     """True when ``path`` or a directory between it and ``root`` is a symbolic link."""
@@ -261,6 +271,26 @@ def _task_problems(where, tasks, files):
     return problems
 
 
+def _credential_warnings(root, files):
+    """One warning per file of ``files`` whose bytes look like they hold a credential (stardelt/stardelt#104)."""
+    found = []
+    for relative in files:
+        try:
+            text = (Path(root) / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if PRIVATE_KEY.search(text):
+            found.append((relative, "a private key"))
+            continue
+        match = SECRET.search(text)
+        if match:
+            found.append((relative, match.group(1).lower().replace("-", "_")))
+    return [
+        f"{relative}: looks like it holds {what}; a bundle file is delivered to every stage, so keep it in a Connection"
+        for relative, what in found
+    ]
+
+
 def validate(directory, target=None):
     """Check the bundle in ``directory`` (and only ``target`` when given).
 
@@ -300,6 +330,7 @@ def validate(directory, target=None):
     files = _files(root, manifest.get("files", []), "files", problems) if "files" in manifest else []
     if len(files) > MAX_FILES:
         problems.append(("files", f"more than {MAX_FILES} files"))
+    warnings.extend(_credential_warnings(root, files))
     sources = _files(root, manifest.get("include"), "include", problems) if "include" in manifest else []
     if "include" not in manifest:
         problems.append(("include", "is required: the pipeline files of the bundle"))
