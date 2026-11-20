@@ -32,7 +32,7 @@ use kube::{
     core::DynamicObject,
     // `ObjectRef` is `kube::runtime::reflector::ObjectRef` in kube 5.1; the rest of the
     // ticket's step 1 is as written.
-    runtime::{Controller, controller::Action, reflector::ObjectRef, watcher},
+    runtime::{Controller, controller::Action, reflector::ObjectRef},
 };
 use serde_json::json;
 
@@ -70,6 +70,22 @@ use crate::values::{deep_merge, effective_values, identity_values, parse_values_
 pub struct Context {
     pub client: Client,
     pub helm: Arc<dyn HelmRunner>,
+    /// The cached `PlatformInstance` list (#274 rule 5): every principal reconcile reads it
+    /// instead of a cluster-wide LIST.
+    pub platforms: kube::runtime::reflector::Store<PlatformInstance>,
+}
+
+impl Context {
+    /// A context whose platform store is detached (tests that never ask for a
+    /// `PlatformInstance`): the store answers empty and no watcher runs.
+    pub fn new(client: Client, helm: Arc<dyn HelmRunner>) -> Self {
+        let (platforms, _writer) = kube::runtime::reflector::store();
+        Self {
+            client,
+            helm,
+            platforms,
+        }
+    }
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -108,9 +124,41 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 async fn run_controllers(client: Client) -> anyhow::Result<()> {
+    use kube::runtime::{WatchStreamExt, reflector, watcher};
+
+    // `PlatformInstance` is cluster-scoped and changes only when an administrator edits one, so
+    // one reflector store feeds every reconcile that looks it up (#274 rule 5). `wait_until_ready`
+    // before the first controller starts matters: an empty store would send a cold start down the
+    // external-identity branch in `principal::reconcile_principal`.
+    let (platforms, writer) = reflector::store();
+    let stream = reflector::reflector(
+        writer,
+        watcher(
+            Api::<PlatformInstance>::all(client.clone()),
+            watcher::Config::default(),
+        ),
+    );
+    // Polled here rather than in a detached task: dropping `run_controllers` (a lost lease) must
+    // end this watch with the controllers, not leave a second reflector running.
+    let mut pump = std::pin::pin!(
+        stream
+            .applied_objects()
+            .for_each(|_| futures::future::ready(()))
+    );
+    tokio::select! {
+        _ = &mut pump => {
+            anyhow::bail!("the PlatformInstance store stopped before its first list");
+        }
+        ready = platforms.wait_until_ready() => {
+            ready.map_err(|_| {
+                anyhow::anyhow!("the PlatformInstance store stopped before its first list")
+            })?;
+        }
+    }
     let ctx = Arc::new(Context {
         client: client.clone(),
         helm: Arc::new(CommandHelmRunner),
+        platforms,
     });
 
     let lakehouses = Controller::new(
@@ -236,6 +284,7 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
     );
     loop {
         tokio::select! {
+            _ = &mut pump => anyhow::bail!("the PlatformInstance store stopped"),
             _ = lakehouses.next() => {}
             _ = platforms.next() => {}
             _ = connections.next() => {}
@@ -2407,10 +2456,7 @@ mod tests {
         // The primary (instance) selector finds nothing; the JupyterHub-style
         // `release=` fallback returns the workloads.
         let (client, requests) = mock_client("[]", &deployment_list(0, 2));
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
 
         let outcome = apply_plan(
@@ -2445,10 +2491,7 @@ mod tests {
     async fn a_workload_with_fewer_ready_replicas_than_it_wants_is_not_ready() {
         // One of two replicas is ready: the desired count comes from `spec.replicas`.
         let (client, _requests) = mock_client(&deployment_list(1, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm_stub(),
-        };
+        let ctx = Context::new(client, helm_stub());
         let values = ComponentValues::default();
 
         let outcome = apply_plan(
@@ -2471,10 +2514,7 @@ mod tests {
     async fn ready_workloads_report_ready() {
         let helm = helm_stub();
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
 
         let outcome = apply_plan(
@@ -2503,10 +2543,7 @@ mod tests {
         let helm = helm_stub();
         helm.reply("status", r#"{"info":{"status":"deployed"}}"#);
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let overrides = overrides_context(&values);
 
@@ -2549,10 +2586,7 @@ mod tests {
                 {"revision":3,"status":"pending-upgrade","description":"managed by stardelt-operator"}]"#,
         );
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let overrides = overrides_context(&values);
 
@@ -2607,10 +2641,7 @@ mod tests {
             r#"[{"revision":1,"status":"pending-install","description":"managed by stardelt-operator"}]"#,
         );
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let overrides = overrides_context(&values);
 
@@ -2626,10 +2657,7 @@ mod tests {
         let helm = helm_stub();
         helm.reply("status", r#"{"info":{"status":"deployed"}}"#);
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let overrides = overrides_context(&values);
 
@@ -2642,10 +2670,7 @@ mod tests {
         let helm = helm_stub();
         helm.reply("status", r#"{"info":{"status":"pending-upgrade"}}"#);
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let overrides = overrides_context(&values);
 
@@ -2659,10 +2684,7 @@ mod tests {
     async fn changed_values_reapply() {
         let helm = helm_stub();
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let before = overrides(1);
         let after = overrides(3);
 
@@ -2699,10 +2721,7 @@ mod tests {
         let helm = helm_stub();
         helm.reply("status", r#"{"info":{"status":"deployed"}}"#);
         let (client, _requests) = mock_client(&deployment_list(2, 2), "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let overrides = overrides_context(&values);
 
@@ -2736,10 +2755,7 @@ mod tests {
     async fn dry_runs_always_plan() {
         let helm = helm_stub();
         let (client, _requests) = mock_client("[]", "[]");
-        let ctx = Context {
-            client,
-            helm: helm.clone(),
-        };
+        let ctx = Context::new(client, helm.clone());
         let values = ComponentValues::default();
         let previous = vec![ComponentStatus {
             name: "trino".into(),
@@ -3212,10 +3228,7 @@ mod tests {
         // The single-Lakehouse case: the only sibling is this one.
         let (client, requests) =
             status_mock_client(json!([lakehouse_item("main", "2026-01-01T00:00:00Z")]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3257,10 +3270,7 @@ mod tests {
     async fn lakehouse_status_ends_with_the_discovery_component() {
         let (client, requests) =
             status_mock_client(json!([lakehouse_item("main", "2026-01-01T00:00:00Z")]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3290,10 +3300,7 @@ mod tests {
     async fn lakehouse_status_lists_the_notebooks_bucket_before_the_bootstrap() {
         let (client, requests) =
             status_mock_client(json!([lakehouse_item("main", "2026-01-01T00:00:00Z")]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3363,10 +3370,7 @@ mod tests {
             lakehouse_item("scratch-two", "2026-01-02T00:00:00Z"),
         ]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3412,10 +3416,7 @@ mod tests {
             lakehouse_item("scratch-two", "2026-01-02T00:00:00Z"),
         ]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3440,10 +3441,7 @@ mod tests {
     async fn a_missing_finalizer_is_added_once_before_planning() {
         let (client, requests) =
             status_mock_client(json!([lakehouse_item("main", "2026-01-01T00:00:00Z")]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3467,10 +3465,7 @@ mod tests {
     async fn a_present_finalizer_is_not_patched_again() {
         let (client, requests) =
             status_mock_client(json!([lakehouse_item("main", "2026-01-01T00:00:00Z")]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -3498,10 +3493,7 @@ mod tests {
     async fn retain_deletion_uninstalls_owned_releases_in_reverse_order() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(json!({ "dryRun": false }))),
@@ -3544,10 +3536,7 @@ mod tests {
     async fn dry_run_deletion_makes_no_helm_calls_and_removes_the_finalizer() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         // The default dryRun is true: nothing was ever applied to the cluster.
         let action = reconcile_lakehouse(Arc::new(deleting_lakehouse(json!({}))), ctx)
@@ -3574,10 +3563,7 @@ mod tests {
             "history",
             r#"[{"revision":1,"description":"Install complete"}]"#,
         );
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(json!({ "dryRun": false }))),
@@ -3603,10 +3589,7 @@ mod tests {
         let (client, requests) = status_mock_client(json!([]));
         let helm = owned_helm();
         helm.fail("uninstall", "helm uninstall failed: boom");
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(json!({ "dryRun": false }))),
@@ -3652,10 +3635,7 @@ mod tests {
     async fn platform_deletion_uninstalls_owned_releases_in_reverse_order() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance = deleting_platform(json!({
             "dryRun": false,
             "secrets": { "mode": "platform" },
@@ -3689,10 +3669,7 @@ mod tests {
         let (client, requests) = status_mock_client(json!([]));
         let helm = owned_helm();
         helm.fail("uninstall", "helm uninstall failed: boom");
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance = deleting_platform(json!({
             "dryRun": false,
             "secrets": { "mode": "platform" },
@@ -3723,10 +3700,7 @@ mod tests {
             "history",
             r#"[{"revision":1,"description":"Install complete"}]"#,
         );
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance = deleting_platform(json!({
             "dryRun": false,
             "secrets": { "mode": "platform" },
@@ -3752,10 +3726,7 @@ mod tests {
     async fn dry_run_platform_deletion_makes_no_helm_calls_and_removes_the_finalizer() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         reconcile_platform(Arc::new(deleting_platform(json!({}))), ctx)
             .await
@@ -3775,10 +3746,7 @@ mod tests {
     #[tokio::test]
     async fn a_platform_reconcile_adds_the_deletion_finalizer() {
         let (client, requests) = status_mock_client(json!([]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let instance: PlatformInstance = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "PlatformInstance",
@@ -3812,10 +3780,7 @@ mod tests {
             &[],
         );
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(
@@ -3886,10 +3851,7 @@ mod tests {
     async fn byo_s3_delete_skips_the_volumes_but_deletes_the_catalog() {
         let (client, requests) = deletion_mock_client(&[], &[], &[]);
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(json!({
@@ -3932,10 +3894,7 @@ mod tests {
             &["data-seaweedfs-volume-0"],
         );
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(
@@ -3976,10 +3935,7 @@ mod tests {
             &[],
         );
         let helm = owned_helm();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
 
         let action = reconcile_lakehouse(
             Arc::new(deleting_lakehouse(
@@ -4011,10 +3967,7 @@ mod tests {
     #[tokio::test]
     async fn platform_status_carries_ready_and_observed_generation() {
         let (client, requests) = status_mock_client(json!([]));
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm_stub(),
-        });
+        let ctx = Arc::new(Context::new(client, helm_stub()));
         let instance: PlatformInstance = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "PlatformInstance",
@@ -4055,10 +4008,7 @@ mod tests {
     #[tokio::test]
     async fn the_airflow_values_name_the_bus_only_with_the_streaming_pillar() {
         let (client, _requests) = mock_client("[]", "[]");
-        let ctx = Context {
-            client,
-            helm: helm_stub(),
-        };
+        let ctx = Context::new(client, helm_stub());
         let values = ComponentValues::default();
 
         let mut on = overrides_context(&values);
@@ -4096,10 +4046,7 @@ mod tests {
     #[tokio::test]
     async fn the_trino_release_is_stamped_with_the_warehouse_resource_version() {
         let (client, _requests) = mock_client("[]", "[]");
-        let ctx = Context {
-            client,
-            helm: helm_stub(),
-        };
+        let ctx = Context::new(client, helm_stub());
         let values = ComponentValues::default();
         let mut overrides = overrides_context(&values);
         overrides.identity = true;
@@ -4124,10 +4071,7 @@ mod tests {
     async fn a_paused_lakehouse_writes_paused_and_applies_nothing() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse: Lakehouse = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -4170,10 +4114,7 @@ mod tests {
     async fn a_paused_platform_instance_writes_paused_and_applies_nothing() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance: PlatformInstance = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "PlatformInstance",
@@ -4238,10 +4179,7 @@ mod tests {
     async fn a_stopped_lakehouse_with_nothing_applied_writes_stopped() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse = stopped_lakehouse(
             None,
             json!({ "dryRun": false, "clusterOperation": { "stopped": true } }),
@@ -4281,10 +4219,7 @@ mod tests {
     async fn a_stopped_lakehouse_scales_every_recorded_workload() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse = stopped_lakehouse(
             Some(json!({
                 "stardelt.io/previous-replicas": r#"{"Deployment/lakekeeper":1,"StatefulSet/seaweedfs-master":1}"#
@@ -4348,10 +4283,7 @@ metadata:
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
         helm.reply("get", FIRST_STOP_MANIFEST);
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse = stopped_lakehouse(
             None,
             json!({ "dryRun": false, "clusterOperation": { "stopped": true } }),
@@ -4442,10 +4374,7 @@ metadata:
     async fn an_unstoppped_lakehouse_restores_the_counts_and_removes_the_annotation() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let lakehouse = stopped_lakehouse(
             Some(json!({
                 "stardelt.io/previous-replicas": r#"{"Deployment/lakekeeper":1,"StatefulSet/seaweedfs-master":1}"#
@@ -4537,10 +4466,7 @@ metadata:
     async fn a_stopped_platforminstance_writes_stopped_and_calls_no_upgrade() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance = stopped_platform_instance(
             None,
             json!({
@@ -4591,10 +4517,7 @@ metadata:
     async fn a_stopped_platforminstance_scales_the_platform_releases() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance = stopped_platform_instance(
             Some(json!({
                 "stardelt.io/previous-replicas": r#"{"Deployment/keycloak":1,"Deployment/airflow-scheduler":1}"#
@@ -4643,10 +4566,7 @@ metadata:
     async fn an_unstoppped_platforminstance_restores_the_counts() {
         let (client, requests) = status_mock_client(json!([]));
         let helm = helm_stub();
-        let ctx = Arc::new(Context {
-            client,
-            helm: helm.clone(),
-        });
+        let ctx = Arc::new(Context::new(client, helm.clone()));
         let instance = stopped_platform_instance(
             Some(json!({
                 "stardelt.io/previous-replicas": r#"{"Deployment/keycloak":1,"Deployment/airflow-scheduler":1}"#

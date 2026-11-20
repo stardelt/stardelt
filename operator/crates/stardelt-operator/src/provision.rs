@@ -3456,10 +3456,10 @@ mod tests {
     }
 
     fn context(client: kube::Client) -> Context {
-        Context {
+        Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        }
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        )
     }
 
     fn lakehouse() -> Lakehouse {

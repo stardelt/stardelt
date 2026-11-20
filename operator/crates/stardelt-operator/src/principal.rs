@@ -11,7 +11,7 @@ use std::time::Duration;
 use k8s_openapi::api::core::v1::Secret;
 use kube::{
     Api, ResourceExt,
-    api::{ListParams, Patch, PatchParams},
+    api::{Patch, PatchParams},
     runtime::controller::Action,
 };
 use serde_json::json;
@@ -19,8 +19,8 @@ use serde_json::json;
 use crate::connection::ready_condition;
 use crate::controller::Context;
 use crate::crd::{
-    Condition, IdentityMode, PlatformInstance, ServicePrincipal, ServicePrincipalSpec,
-    ServicePrincipalStatus, principal_client_id,
+    Condition, IdentityMode, ServicePrincipal, ServicePrincipalSpec, ServicePrincipalStatus,
+    principal_client_id,
 };
 use crate::principal_keycloak::{ClientOutcome, delete_principal_client, ensure_principal_client};
 
@@ -202,10 +202,9 @@ pub async fn reconcile_principal(
     let namespace = sp.namespace().unwrap_or_else(|| "default".into());
 
     // Platform mode creates the client; external mode and existingSecretRef do not.
-    let instance = Api::<PlatformInstance>::all(ctx.client.clone())
-        .list(&ListParams::default())
-        .await?
-        .items
+    let instance = ctx
+        .platforms
+        .state()
         .into_iter()
         .find(|pi| pi.spec.namespace == namespace);
     let platform_mode = sp.spec.existing_secret_ref.is_none()
@@ -410,6 +409,8 @@ async fn patch_principal_status(
 mod tests {
     use super::*;
     use k8s_openapi::ByteString;
+
+    use crate::crd::PlatformInstance;
 
     /// A value that must never be readable from a message.
     const CANARY: &str = "canary-7f3a";
@@ -715,6 +716,99 @@ mod tests {
     /// Every request the mock client sees: method, path, body.
     type Recorded = Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
 
+    /// A `Context` whose platform store already holds `instances`, as the reflector would have
+    /// filled it: no watcher runs and no LIST is needed (#274 rule 5).
+    fn context_with_platforms(client: kube::Client, instances: &[PlatformInstance]) -> Context {
+        let (store, mut writer) = kube::runtime::reflector::store();
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Init);
+        for instance in instances {
+            writer.apply_watcher_event(&kube::runtime::watcher::Event::InitApply(instance.clone()));
+        }
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitDone);
+        drop(writer);
+        Context {
+            client,
+            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
+            platforms: store,
+        }
+    }
+
+    /// A `PlatformInstance` owning `namespace`; `mode` is `platform` or `external`.
+    fn platform_instance(namespace: &str, mode: &str) -> PlatformInstance {
+        serde_json::from_value(json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "demo" },
+            "spec": {
+                "namespace": namespace,
+                "identity": {
+                    "mode": mode,
+                    "issuerUrl": "https://id.example.com/realms/stardelt"
+                }
+            }
+        }))
+        .expect("deserialize PlatformInstance")
+    }
+
+    #[tokio::test]
+    async fn platform_instance_for_namespace_answers_without_a_list() {
+        use crate::principal_keycloak::platform_instance_for_namespace;
+
+        // The mock records every request. A LIST would succeed with an empty list, so a regression
+        // fails on the assertion below rather than on a deserialization error; nothing else is
+        // asked for.
+        let paths: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let recorder = paths.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let recorder = recorder.clone();
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            async move {
+                let _ = request.into_body().collect_bytes().await;
+                recorder
+                    .lock()
+                    .expect("paths poisoned")
+                    .push(format!("{method} {path}"));
+                let document = if path.contains("platforminstances") {
+                    json!({
+                        "apiVersion": "stardelt.io/v1alpha1",
+                        "kind": "PlatformInstanceList",
+                        "metadata": {},
+                        "items": []
+                    })
+                } else {
+                    json!({})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(
+                            serde_json::to_vec(&document).expect("mock document"),
+                        ))
+                        .expect("valid mock response"),
+                )
+            }
+        });
+        let ctx = context_with_platforms(
+            kube::Client::new(service, "stardelt"),
+            &[platform_instance("data", "platform")],
+        );
+
+        let instance = platform_instance_for_namespace(&ctx, "data")
+            .await
+            .expect("lookup");
+
+        assert!(instance.is_some(), "the store holds the instance");
+        let paths = paths.lock().expect("paths poisoned");
+        assert!(
+            !paths
+                .iter()
+                .any(|request| request.contains("platforminstances")),
+            "the lookup must not LIST: {paths:?}"
+        );
+    }
+
     /// A kube client whose Secret read answers `403 Forbidden` and whose status patch echoes a
     /// minimal `ServicePrincipal`.
     fn forbidden_mock_client() -> (kube::Client, Recorded) {
@@ -747,16 +841,6 @@ mod tests {
                             "code": 403
                         }),
                     )
-                } else if method == "GET" && path == "/apis/stardelt.io/v1alpha1/platforminstances"
-                {
-                    (
-                        200,
-                        json!({
-                            "apiVersion": "stardelt.io/v1alpha1",
-                            "kind": "PlatformInstanceList",
-                            "items": []
-                        }),
-                    )
                 } else {
                     (
                         200,
@@ -785,10 +869,7 @@ mod tests {
     #[tokio::test]
     async fn a_forbidden_secret_read_is_reported_as_cannot_read_secret() {
         let (client, requests) = forbidden_mock_client();
-        let ctx = Arc::new(Context {
-            client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+        let ctx = Arc::new(context_with_platforms(client, &[]));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
@@ -863,18 +944,7 @@ mod tests {
                     path.clone(),
                     String::from_utf8_lossy(&body).to_string(),
                 ));
-                let document = if method == "GET" && path.contains("/platforminstances") {
-                    json!({
-                        "apiVersion": "stardelt.io/v1alpha1",
-                        "kind": "PlatformInstanceList",
-                        "items": [{
-                            "apiVersion": "stardelt.io/v1alpha1",
-                            "kind": "PlatformInstance",
-                            "metadata": { "name": "demo" },
-                            "spec": { "namespace": "stardelt", "identity": { "mode": "external", "issuerUrl": "https://id.example.com/realms/stardelt" } }
-                        }]
-                    })
-                } else if method == "GET" && path.contains("/secrets/external-app") {
+                let document = if method == "GET" && path.contains("/secrets/external-app") {
                     json!({
                         "apiVersion": "v1", "kind": "Secret",
                         "metadata": { "name": "external-app", "namespace": "stardelt" },
@@ -900,10 +970,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(context_with_platforms(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            &[platform_instance("stardelt", "external")],
+        ));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
@@ -954,19 +1024,11 @@ mod tests {
                     path.clone(),
                     String::from_utf8_lossy(&body).to_string(),
                 ));
-                let document = if method == "GET" && path.contains("/platforminstances") {
-                    json!({
-                        "apiVersion": "stardelt.io/v1alpha1",
-                        "kind": "PlatformInstanceList",
-                        "items": []
-                    })
-                } else {
-                    json!({
-                        "apiVersion": "v1", "kind": "Secret",
-                        "metadata": { "name": "external-app", "namespace": "stardelt" },
-                        "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
-                    })
-                };
+                let document = json!({
+                    "apiVersion": "v1", "kind": "Secret",
+                    "metadata": { "name": "external-app", "namespace": "stardelt" },
+                    "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
+                });
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
                         .status(200)
@@ -979,10 +1041,7 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(Context {
-            client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+        let ctx = Arc::new(context_with_platforms(client, &[]));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
@@ -1059,22 +1118,8 @@ mod tests {
                     String::from_utf8_lossy(&body).to_string(),
                 ));
                 let (status, document) = if method == "GET"
-                    && path == "/apis/stardelt.io/v1alpha1/platforminstances"
+                    && path.contains("/configmaps/keycloak-env")
                 {
-                    (
-                        200,
-                        json!({
-                            "apiVersion": "stardelt.io/v1alpha1",
-                            "kind": "PlatformInstanceList",
-                            "items": [{
-                                "apiVersion": "stardelt.io/v1alpha1",
-                                "kind": "PlatformInstance",
-                                "metadata": { "name": "demo" },
-                                "spec": { "namespace": "stardelt", "identity": { "mode": "platform" } }
-                            }]
-                        }),
-                    )
-                } else if method == "GET" && path.contains("/configmaps/keycloak-env") {
                     (200, cm_env())
                 } else if method == "GET" && path.contains("/secrets/keycloak-admin") {
                     (200, admin_secret())
@@ -1133,10 +1178,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(context_with_platforms(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            &[platform_instance("stardelt", "platform")],
+        ));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
@@ -1199,22 +1244,8 @@ mod tests {
                     String::from_utf8_lossy(&body).to_string(),
                 ));
                 let (status, document) = if method == "GET"
-                    && path == "/apis/stardelt.io/v1alpha1/platforminstances"
+                    && path.contains("/configmaps/keycloak-env")
                 {
-                    (
-                        200,
-                        json!({
-                            "apiVersion": "stardelt.io/v1alpha1",
-                            "kind": "PlatformInstanceList",
-                            "items": [{
-                                "apiVersion": "stardelt.io/v1alpha1",
-                                "kind": "PlatformInstance",
-                                "metadata": { "name": "demo" },
-                                "spec": { "namespace": "stardelt", "identity": { "mode": "platform" } }
-                            }]
-                        }),
-                    )
-                } else if method == "GET" && path.contains("/configmaps/keycloak-env") {
                     (200, cm_env())
                 } else if method == "GET" && path.contains("/secrets/keycloak-admin") {
                     (200, admin_secret())
@@ -1242,10 +1273,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(context_with_platforms(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            &[platform_instance("stardelt", "platform")],
+        ));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
@@ -1297,29 +1328,8 @@ mod tests {
                     path.clone(),
                     String::from_utf8_lossy(&body).to_string(),
                 ));
-                let (status, document) = if method == "GET"
-                    && path == "/apis/stardelt.io/v1alpha1/platforminstances"
-                {
-                    (
-                        200,
-                        json!({
-                            "apiVersion": "stardelt.io/v1alpha1",
-                            "kind": "PlatformInstanceList",
-                            "items": [{
-                                "apiVersion": "stardelt.io/v1alpha1",
-                                "kind": "PlatformInstance",
-                                "metadata": { "name": "demo" },
-                                "spec": {
-                                    "namespace": "stardelt",
-                                    "identity": {
-                                        "mode": "external",
-                                        "issuerUrl": "https://id.example.com/realms/stardelt"
-                                    }
-                                }
-                            }]
-                        }),
-                    )
-                } else if method == "DELETE" && path == "/api/v1/namespaces/stardelt/secrets/sp-etl"
+                let (status, document) = if method == "DELETE"
+                    && path == "/api/v1/namespaces/stardelt/secrets/sp-etl"
                 {
                     (
                         200,
@@ -1359,10 +1369,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(Context {
+        let ctx = Arc::new(context_with_platforms(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        });
+            &[platform_instance("stardelt", "external")],
+        ));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",

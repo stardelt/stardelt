@@ -962,10 +962,10 @@ mod tests {
     }
 
     fn ctx(client: Client) -> Arc<Context> {
-        Arc::new(Context {
+        Arc::new(Context::new(
             client,
-            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
-        })
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ))
     }
 
     /// The driver identities and the two cluster guards always answer with a document of their own

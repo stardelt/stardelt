@@ -15,7 +15,7 @@ use k8s_openapi::{
     ByteString,
     api::core::v1::{ConfigMap, Secret},
 };
-use kube::{Api, api::DeleteParams, api::ListParams};
+use kube::{Api, api::DeleteParams};
 
 use crate::{
     controller::Context,
@@ -382,12 +382,12 @@ pub async fn platform_instance_for_namespace(
     ctx: &Context,
     namespace: &str,
 ) -> Result<Option<PlatformInstance>, kube::Error> {
-    let instances: Api<PlatformInstance> = Api::all(ctx.client.clone());
-    let list = instances.list(&ListParams::default()).await?;
-    Ok(list
-        .items
+    Ok(ctx
+        .platforms
+        .state()
         .into_iter()
-        .find(|pi| pi.spec.namespace == namespace))
+        .find(|pi| pi.spec.namespace == namespace)
+        .map(|pi| (*pi).clone()))
 }
 
 /// Make an existing realm issue the audience the Spark front checks (#263 slice A).
@@ -929,9 +929,29 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
+        // The platform store replaces the LIST `platform_instance_for_namespace` used to make
+        // (#274 rule 5); the instance is the one the old mock answered with.
+        let (platforms, mut writer) = kube::runtime::reflector::store();
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Init);
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitApply(
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "PlatformInstance",
+                "metadata": { "name": "cluster" },
+                "spec": {
+                    "namespace": "stardelt",
+                    "baseDomain": "data.example.com",
+                    "identity": { "mode": "platform" }
+                }
+            }))
+            .expect("deserialize PlatformInstance"),
+        ));
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitDone);
+        drop(writer);
         let ctx = Arc::new(Context {
             client,
             helm: Arc::new(RecordingRunner::default()),
+            platforms,
         });
         (ctx, requests)
     }
