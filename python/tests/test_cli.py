@@ -224,13 +224,27 @@ def test_deployments_show_prints_the_facts_and_the_pipelines():
     row = {"id": 7, "bundle": "sales", "ownerGroup": "analytics", "target": "prod",
            "revision": "0123456789abcdef", "repository": None, "status": "applied",
            "pipelines": [{"namespace": "stardelt", "name": "shop-3-gold", "action": "created"}],
-           "resources": [{"kind": "Pipeline"}], "actor": "sub-1", "actorName": "Ada",
+           "resources": [{"kind": "Pipeline"}], "files": [{"path": "pipelines/shop.yaml", "sha256": "ab" * 32}],
+           "actor": "sub-1", "actorName": "Ada",
            "createdAt": "2026-11-20T10:55:00.000Z"}
     code, out, err, session = run(["deployments", "show", "7"], FakeResponse(payload=row))
     assert code == 0 and err == ""
     assert out.splitlines()[0] == "id          7"
-    assert out.splitlines()[-1] == "  created   stardelt/shop-3-gold"
+    assert "  created   stardelt/shop-3-gold" in out.splitlines()
+    assert out.splitlines()[-1] == "  file      pipelines/shop.yaml  abababababab"
+    assert "files       1" in out
     assert (session.calls[0][0], session.calls[0][1]) == ("GET", "https://nova.example/api/deployments/7")
+
+
+def test_deployments_show_resources_prints_each_rendered_document():
+    row = {"id": 7, "bundle": "sales", "ownerGroup": "analytics", "target": "prod",
+           "revision": None, "repository": None, "status": "applied", "pipelines": [],
+           "resources": [{"kind": "Pipeline", "metadata": {"name": "load"}}], "files": [],
+           "actor": "sub-1", "actorName": "Ada", "createdAt": "2026-11-20T10:55:00.000Z"}
+    code, out, err, _ = run(["deployments", "show", "7", "--resources"], FakeResponse(payload=row))
+    assert (code, err) == (0, "")
+    assert json.loads(out.splitlines()[-1]) == {"kind": "Pipeline", "metadata": {"name": "load"}}
+    assert out.splitlines()[0] == "id          7"
 
 
 def test_version_prints_the_package_version_and_calls_nothing():

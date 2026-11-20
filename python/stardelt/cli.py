@@ -182,6 +182,10 @@ def _parser():
     shown = history_commands.add_parser("show", help="one recorded deploy: its pipelines and the documents it applied")
     shown.add_argument("id", type=int, help="the deployment id, from `stardelt deployments list`")
     shown.add_argument("--format", choices=["table", "json"], default="table")
+    shown.add_argument(
+        "--resources", action="store_true",
+        help="also print each rendered Pipeline document this deploy applied, one JSON object per line",
+    )
     upkeep = commands.add_parser(
         "maintenance", help="run a catalog's table maintenance through Trino (used by the operator's nightly job)"
     )
@@ -584,11 +588,17 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 ("repository", row.get("repository") or ""), ("status", row["status"]),
                 ("by", row.get("actorName") or row["actor"]), ("actor", row["actor"]), ("when", row["createdAt"]),
                 ("pipelines", str(len(row.get("pipelines") or []))), ("resources", str(len(row.get("resources") or []))),
+                ("files", str(len(row.get("files") or []))),
             ]
             for name, value in facts:
                 stdout.write(f"{name.ljust(10)}  {value}\n")
             for pipeline in row.get("pipelines") or []:
                 stdout.write(f"  {pipeline['action'].ljust(9)} {pipeline['namespace']}/{pipeline['name']}\n")
+            for bundle_file in row.get("files") or []:
+                stdout.write(f"  file      {bundle_file['path']}  {bundle_file['sha256'][:12]}\n")
+            if args.resources:
+                for document in row.get("resources") or []:
+                    stdout.write(json.dumps(document, ensure_ascii=False) + "\n")
             return OK
         if args.command == "bundle":  # plan or deploy: they talk to Nova
             problems, results = bundle.deploy(
