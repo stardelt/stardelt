@@ -5,7 +5,7 @@
 //! connection, one request, `GET /metrics` only. Hand-rolled because it is 40 lines and
 //! an HTTP server dependency would be a second one to keep licensed and patched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -31,6 +31,7 @@ struct Series {
 }
 
 static RECONCILES: Mutex<BTreeMap<&'static str, Series>> = Mutex::new(BTreeMap::new());
+static STATUS_WRITES: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
 /// The process start time. Called once, first thing in `run_controller`.
 pub fn init() {
@@ -65,6 +66,15 @@ pub fn record_reconcile(controller: &'static str, ok: bool, took: Duration) {
     }
     series.sum += seconds;
     series.count += 1;
+}
+
+/// One status patch, from the controller that wrote it. Rule 1 of #274: a steady-state
+/// reconcile writes none, so this counter staying flat is what "quiet" means.
+pub fn record_status_write(controller: &'static str) {
+    let mut map = STATUS_WRITES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *map.entry(controller).or_default() += 1;
 }
 
 /// Runs one reconcile and records its result and duration under `controller`.
@@ -145,6 +155,18 @@ pub fn render() -> String {
         out.push_str(&format!(
             "stardelt_operator_reconcile_duration_seconds_count{{controller=\"{controller}\"}} {}\n",
             series.count
+        ));
+    }
+    let status_writes = STATUS_WRITES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut controllers: BTreeSet<&'static str> = reconciles.keys().copied().collect();
+    controllers.extend(status_writes.keys().copied());
+    out.push_str("# HELP stardelt_operator_status_writes_total Status patches written, by controller.\n# TYPE stardelt_operator_status_writes_total counter\n");
+    for controller in controllers {
+        out.push_str(&format!(
+            "stardelt_operator_status_writes_total{{controller=\"{controller}\"}} {}\n",
+            status_writes.get(controller).copied().unwrap_or_default()
         ));
     }
     out
@@ -253,6 +275,33 @@ mod tests {
             ),
             "{}",
             render()
+        );
+    }
+
+    #[test]
+    fn a_status_write_is_counted_by_controller() {
+        record_status_write("test_status_writes");
+        record_status_write("test_status_writes");
+        let text = render();
+        assert!(
+            text.contains(
+                "stardelt_operator_status_writes_total{controller=\"test_status_writes\"} 2"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("# TYPE stardelt_operator_status_writes_total counter"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_controller_with_no_write_reports_zero() {
+        record_reconcile("test_quiet", true, Duration::ZERO);
+        let text = render();
+        assert!(
+            text.contains("stardelt_operator_status_writes_total{controller=\"test_quiet\"} 0"),
+            "{text}"
         );
     }
 

@@ -15,14 +15,17 @@
 #     answers {"app":"stardelt-operator"}), so pods and the Service agree;
 #   - only the leader reconciles (`stardelt_operator_leader` is 1 on one pod and 0 on the
 #     other), so the standby still costs CPU and network: the budget is 50 m for the pair.
-# A status write is detected by an unchanged `metadata.resourceVersion`, not by a counter:
-# `stardelt_operator_status_writes_total` does not exist (rule 6, #408, ships reconciles and
-# duration only) and resourceVersion is what "a write" means.
+# A status write is detected twice, and both rows are required: the counter
+# `stardelt_operator_status_writes_total` (rule 6, operator#571) must not move, and no
+# `metadata.resourceVersion` may change. The counter is the direct signal a customer's
+# Prometheus has too; resourceVersion catches a write the counter does not see (a writing
+# replica that restarted inside the window) and a write that changed the object some other way.
 #
 # Exit codes: 0 PASS (every row inside the budget), 1 FAIL (a row outside it, each changed
 # object named on its own ✗ line), 3 UNVERIFIED (no kubectl, no operator pod, the metrics
-# endpoint answers nothing, kubectl top says the Metrics API is not available, or the kubelet
-# stats summary cannot be read — the check proved nothing and must not be read as PASS).
+# endpoint answers nothing or has no status-write counter, kubectl top says the Metrics API is
+# not available, or the kubelet stats summary cannot be read — the check proved nothing and
+# must not be read as PASS).
 # Needs: kubectl, python3.
 set -euo pipefail
 
@@ -115,15 +118,29 @@ reconcile_sum() {  # -> total reconciles over every operator pod, or UNREACHABLE
   if [ "$scraped" -eq 0 ]; then echo UNREACHABLE; else echo "$total"; fi
 }
 
+status_write_sum() {  # -> total status writes over every operator pod, or UNREACHABLE
+  local pod out url total=0 scraped=0
+  for pod in "${op_pods[@]}"; do
+    url="/api/v1/namespaces/$NS/pods/$pod:8082/proxy/metrics"
+    if ! out="$(kubectl get --raw "$url" 2>&1)"; then continue; fi
+    printf '%s\n' "$out" | grep -q '^stardelt_operator_status_writes_total{' || continue
+    scraped=$((scraped + 1))
+    total=$((total + $(printf '%s\n' "$out" | awk '/^stardelt_operator_status_writes_total\{/ {s += $2} END {print s+0}')))
+  done
+  if [ "$scraped" -eq 0 ]; then echo UNREACHABLE; else echo "$total"; fi
+}
+
 # ---- measurement -----------------------------------------------------------
 
 mkdir -p "$tmp/one" "$tmp/two"
 snap_objects "$tmp/one"
 snap_net "$tmp/net1"
 recon1="$(reconcile_sum)"
+write1="$(status_write_sum)"
 sleep "$WINDOW"
 snap_net "$tmp/net2"
 recon2="$(reconcile_sum)"
+write2="$(status_write_sum)"
 snap_objects "$tmp/two"
 
 problems=0
@@ -185,6 +202,24 @@ if [ "$delta" -lt "$budget" ]; then
   echo "✓ $delta reconciles in $WINDOW s (budget $budget)"
 else
   echo "✗ $delta reconciles in $WINDOW s (budget $budget)"
+  problems=$((problems + 1))
+fi
+
+# ---- status writes: the direct counter, none in the window ------------------
+
+if [ "$write1" = UNREACHABLE ] || [ "$write2" = UNREACHABLE ]; then
+  echo "verify-operator-quiet: UNVERIFIED (the operator metrics endpoint :8082 has no stardelt_operator_status_writes_total)"
+  exit 3
+fi
+wrote=$((write2 - write1))
+if [ "$wrote" -lt 0 ]; then
+  note "the status-write counter went backwards (an operator pod restarted inside the window); delta read as 0"
+  wrote=0
+fi
+if [ "$wrote" -eq 0 ]; then
+  echo "✓ no status write (counter $write1 → $write2)"
+else
+  echo "✗ the operator wrote $wrote status(es) while nothing changed"
   problems=$((problems + 1))
 fi
 

@@ -540,6 +540,7 @@ async fn patch_stream_status(
         &Patch::Merge(json!({ "status": status })),
     )
     .await?;
+    crate::metrics::record_status_write("stream_app");
     Ok(())
 }
 

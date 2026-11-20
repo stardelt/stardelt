@@ -244,6 +244,7 @@ async fn patch_status(
             &Patch::Merge(json!({ "status": status })),
         )
         .await?;
+    crate::metrics::record_status_write("spark_cluster");
     Ok(())
 }
 
