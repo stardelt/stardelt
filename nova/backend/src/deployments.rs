@@ -48,6 +48,8 @@ const MAX_NAME_CHARS: usize = 64;
 const MAX_PIPELINES: usize = 200;
 /// Most rendered resources one deployment may carry.
 const MAX_RESOURCES: usize = 200;
+/// Most file digests one deployment may list (the bundle's own cap is 100).
+const MAX_FILE_DIGESTS: usize = 200;
 /// Rows one list answers, newest first.
 const LIST_LIMIT: usize = 50;
 /// The status a deployment row may carry.
@@ -85,6 +87,18 @@ pub struct NewDeployment {
     /// The rendered Pipeline documents this deploy applied; empty for a failed deploy.
     #[serde(default)]
     pub resources: Vec<serde_json::Value>,
+    /// The files of the bundle this deploy read, at most 200; empty when the caller sent none.
+    #[serde(default)]
+    pub files: Vec<DeploymentFile>,
+}
+
+/// One file of the bundle the deploy read: its path inside the bundle and the sha256 of its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeploymentFile {
+    /// The path relative to the bundle directory, with `/` separators.
+    pub path: String,
+    /// The file's content, lowercase hex sha256 (64 characters).
+    pub sha256: String,
 }
 
 /// One pipeline of a deploy: what changed in it.
@@ -113,6 +127,9 @@ pub struct Deployment {
     /// The rendered Pipeline documents the deploy applied, as the caller sent them.
     #[schema(value_type = Vec<Object>)]
     pub resources: serde_json::Value,
+    /// The files of the bundle the deploy read, as the caller sent them.
+    #[schema(value_type = Vec<DeploymentFile>)]
+    pub files: serde_json::Value,
     /// The `sub` of the person who recorded the deploy.
     pub actor: String,
     /// The name the caller's sign-in provided; `None` for rows recorded before migration 0025.
@@ -130,7 +147,7 @@ pub struct ListParams {
 
 /// The columns [`Deployment`] reads; the timestamp as RFC 3339 in UTC.
 const ROW_COLUMNS: &str = "id, bundle, owner_group, target, revision, repository, status, \
-    pipelines, resources, actor, actor_name, \
+    pipelines, resources, files, actor, actor_name, \
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
 /// Whether `identity` may record a deployment of `owner_group`: an administrator, or a
@@ -176,6 +193,23 @@ pub fn validate(new: &NewDeployment) -> Result<(), String> {
     }
     if serde_json::to_vec(&new.resources).unwrap_or_default().len() > 1024 * 1024 {
         return Err("the rendered resources must be under 1 MiB".into());
+    }
+    if new.files.len() > MAX_FILE_DIGESTS {
+        return Err(format!(
+            "a deployment may list at most {MAX_FILE_DIGESTS} files"
+        ));
+    }
+    for file in &new.files {
+        let inside = !file.path.is_empty()
+            && file.path.chars().count() <= 512
+            && !file.path.starts_with('/')
+            && !file.path.split('/').any(|s| s == "..");
+        let digest = file.sha256.len() == 64 && file.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+        if !inside || !digest {
+            return Err(
+                "every file needs a path inside the bundle and a 64-character hex sha256".into(),
+            );
+        }
     }
     for pipeline in &new.pipelines {
         if pipeline.namespace.is_empty() {
@@ -352,8 +386,8 @@ pub async fn record(
         .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
     let sql = format!(
         "INSERT INTO deployment \
-         (bundle, owner_group, target, revision, repository, status, pipelines, resources, actor, actor_name) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {ROW_COLUMNS}"
+         (bundle, owner_group, target, revision, repository, status, pipelines, resources, files, actor, actor_name) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING {ROW_COLUMNS}"
     );
     match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
         .bind(&new.bundle)
@@ -365,6 +399,10 @@ pub async fn record(
         .bind(&pipelines)
         .bind(
             serde_json::to_value(&new.resources)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        )
+        .bind(
+            serde_json::to_value(&new.files)
                 .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
         )
         .bind(&caller.identity.sub)
@@ -410,6 +448,7 @@ mod tests {
             status: status.into(),
             pipelines: Vec::new(),
             resources: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -492,6 +531,47 @@ mod tests {
             .collect();
         let err = validate(&new).expect_err("201 resources");
         assert!(err.contains("200"), "{err}");
+    }
+
+    #[test]
+    fn files_are_stored_and_limited() {
+        let mut new = deployment("applied");
+        let digest = "a".repeat(64);
+        new.files = vec![
+            DeploymentFile {
+                path: "sql/load.sql".into(),
+                sha256: digest.clone(),
+            },
+            DeploymentFile {
+                path: "resources/load.yaml".into(),
+                sha256: digest,
+            },
+        ];
+        assert!(validate(&new).is_ok(), "two files of the bundle");
+        let stored = serde_json::to_value(&new.files).expect("serialises");
+        assert_eq!(stored[0]["path"], "sql/load.sql");
+        assert_eq!(stored[1]["sha256"].as_str().map(str::len), Some(64));
+        new.files = (0..=MAX_FILE_DIGESTS)
+            .map(|i| DeploymentFile {
+                path: format!("sql/{i}.sql"),
+                sha256: "a".repeat(64),
+            })
+            .collect();
+        let err = validate(&new).expect_err("201 files");
+        assert!(err.contains("200"), "{err}");
+        new.files = vec![DeploymentFile {
+            path: "sql/load.sql".into(),
+            sha256: "abc".into(),
+        }];
+        assert!(validate(&new).is_err(), "a sha256 of `abc` is not a digest");
+        new.files = vec![DeploymentFile {
+            path: "sql/load.sql".into(),
+            sha256: "a".repeat(64),
+        }];
+        assert!(
+            validate(&new).is_ok(),
+            "the digest is back to 64 hex characters"
+        );
     }
 
     #[tokio::test]

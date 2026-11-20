@@ -755,11 +755,24 @@ def _blocked(target, names):
     ]
 
 
-def _record_at(nova, owner, stamp, target, status, touched, resources=()):
+def _digests(directory):
+    """The bundle's own content as ``[{path, sha256}]``: every file under ``include:`` and ``files:``,
+    relative to the bundle directory, sorted by path. A deployment record keeps them so it says which
+    content produced the documents it stored (#102, #104)."""
+    root = Path(directory)
+    manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    paths = sorted(set(_files(root, manifest.get("include") or [], "include", []))
+                   | set(_files(root, manifest.get("files") or [], "files", [])))
+    return [{"path": relative, "sha256": hashlib.sha256((root / relative).read_bytes()).hexdigest()}
+            for relative in paths]
+
+
+def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=()):
     """Record one deploy (``deployments_record``) for ``owner``: the row on success, or a ``not-recorded`` row.
 
     ``resources`` is the rendered list of Pipeline documents the deploy applied, empty for a
-    failed deploy; the record keeps them so a rollback can replay them.
+    failed deploy; the record keeps them so a rollback can replay them. ``files`` is the same for
+    the bundle's own files (``_digests``): which content the documents were built from.
 
     A record that cannot be written never fails the deploy: the caller prints the reason and keeps
     the exit code it already has.
@@ -774,6 +787,7 @@ def _record_at(nova, owner, stamp, target, status, touched, resources=()):
             "status": status,
             "pipelines": touched,
             "resources": list(resources),
+            "files": list(files),
         })
     except api.StardeltApiError as err:
         return {"action": "not-recorded", "reason": str(err)}
@@ -783,7 +797,7 @@ def _record_at(nova, owner, stamp, target, status, touched, resources=()):
 def _record(nova, stamp, directory, target, status, touched, resources=()):
     """Record one deploy of the bundle in ``directory``: the owner group comes from its ``bundle.yaml``."""
     owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
-    return _record_at(nova, owner, stamp, target, status, touched, resources)
+    return _record_at(nova, owner, stamp, target, status, touched, resources, _digests(directory))
 
 
 def _touched(nova, specs, done, stale):

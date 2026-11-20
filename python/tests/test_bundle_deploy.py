@@ -1,5 +1,6 @@
 """``stardelt bundle plan`` and ``deploy`` (stardelt.bundle.render and deploy). No network: a fake session stands in."""
 
+import hashlib
 import io
 import json
 import shutil
@@ -313,10 +314,19 @@ def test_the_record_keeps_the_rendered_pipeline_documents_so_a_rollback_can_repl
     nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
     assert bundle._record(nova, stamp, tmp_path, "prod", "applied", [], specs) == {"action": "recorded", "id": 7}
     assert session.calls[0][2]["json"]["resources"] == specs, "the record keeps exactly what was applied"
+    digests = session.calls[0][2]["json"]["files"]
+    paths = [entry["path"] for entry in digests]
+    assert paths == sorted(paths), "the digests are sorted by path"
+    assert len(paths) == 4
+    assert paths[0].endswith("explore.ipynb") and paths[-1].endswith("load.sql")
+    assert sum(1 for path in paths if path.endswith((".yaml", ".sql"))) == 3
+    assert all(len(entry["sha256"]) == 64 for entry in digests)
+    assert next(entry for entry in digests if entry["path"].endswith("load.sql"))["sha256"] == hashlib.sha256(b"select 1").hexdigest()
     session = FakeSession(FakeResponse(201, {"id": 8}))
     nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
     bundle._record(nova, stamp, tmp_path, "prod", "failed", [])
     assert session.calls[0][2]["json"]["resources"] == [], "a failed deploy keeps no rendered documents"
+    assert [entry["path"] for entry in session.calls[0][2]["json"]["files"]] == paths, "a failed deploy still says which content it read"
 
 
 def test_a_development_target_prunes_only_the_callers_own_pipelines(tmp_path):
