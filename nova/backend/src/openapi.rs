@@ -19,6 +19,14 @@
 //! `serves_the_document_unauthenticated` test pins that (status 200 with no
 //! session, and no secret-shaped word in the JSON).
 //!
+//! The document names one server, the relative URL `/`, so a generated client
+//! resolves every path against the address it fetched it from; and it states
+//! the error convention: every non-2xx answer is an `ErrorResponse`
+//! (`{"error": "<one sentence>"}`) except where an operation documents another
+//! body (`POST /api/migrations/apply`'s 409 `ApplyAnswer`), and a missing or
+//! invalid credential is a 401 `ErrorResponse` on every operation the global
+//! `security` covers.
+//!
 //! Regenerate the checked-in document after changing an annotation or schema:
 //!
 //! ```bash
@@ -43,7 +51,7 @@ pub struct ErrorResponse {
 #[openapi(
     info(
         title = "Nova API",
-        description = "The stardelt Nova gateway: catalog browse, queries and jobs over one identity. In `dev` mode (the default) every route answers without sign-in; in `oidc` mode every described route below requires a session or bearer token except this document itself. Only routes tagged `public` are promised stable."
+        description = "The stardelt Nova gateway: catalog browse, queries and jobs over one identity. In `dev` mode (the default) every route answers without sign-in; in `oidc` mode every described route below requires a session or bearer token except this document itself. Only routes tagged `public` are promised stable. Every non-2xx answer is `{\"error\": \"<one sentence>\"}` (`ErrorResponse`), unless the operation documents another body: `POST /api/migrations/apply` answers 409 with `ApplyAnswer` and the refused migration file. A missing or invalid credential is 401 with an `ErrorResponse` on every operation the global `security` covers; the three routes that answer without a credential (the document itself, health and the sign-in config) carry an empty `security`."
     ),
     paths(
         crate::me,
@@ -342,6 +350,15 @@ pub fn document() -> utoipa::openapi::OpenApi {
     };
     let mut doc = ApiDoc::openapi();
     doc.info.version = env!("CARGO_PKG_VERSION").to_string();
+    // A relative URL: the same document is served by every instance, and a generated client
+    // resolves it against the address it fetched the document from.
+    let mut server = utoipa::openapi::server::Server::new("/");
+    server.description = Some(
+        "This Nova instance. Every path below starts with `/api`; a missing or invalid \
+         credential is answered with 401 and an ErrorResponse."
+            .to_string(),
+    );
+    doc.servers = Some(vec![server]);
     // How a client proves who it is (see auth.rs): either credential works on every
     // route below; generated clients, the CLI and the MCP server read this.
     let components = doc.components.get_or_insert_with(Default::default);
@@ -533,6 +550,23 @@ mod tests {
             .as_array()
             .expect("a global security list");
         assert_eq!(required.len(), 2, "bearer or session");
+    }
+
+    /// A generated client resolves relative path operations against a server, so
+    /// the document names exactly one: this instance, whatever address it was
+    /// fetched from.
+    #[test]
+    fn the_document_names_its_server() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let servers = value["servers"].as_array().expect("servers is an array");
+        assert_eq!(servers.len(), 1, "exactly one server: this instance");
+        assert_eq!(servers[0]["url"], "/");
+        assert!(
+            servers[0]["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
+            "the server carries a non-empty description"
+        );
     }
 
     /// A generated client names its methods after the `operationId`, so two
