@@ -169,6 +169,15 @@ def _parser():
     check = package_commands.add_parser("validate", help="check a bundle offline (no host, no sign-in)")
     check.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
     check.add_argument("-t", "--target", help="check this target only")
+    history = commands.add_parser("deployments", help="read the deployment record: what each bundle deploy put on a stage")
+    history_commands = history.add_subparsers(dest="deployments_command", required=True)
+    listed = history_commands.add_parser("list", help="the newest recorded deploys you may see, newest first")
+    listed.add_argument("--bundle", help="only this bundle")
+    listed.add_argument("--target", help="only this stage (target)")
+    listed.add_argument("--format", choices=["table", "json"], default="table")
+    shown = history_commands.add_parser("show", help="one recorded deploy: its pipelines and the documents it applied")
+    shown.add_argument("id", type=int, help="the deployment id, from `stardelt deployments list`")
+    shown.add_argument("--format", choices=["table", "json"], default="table")
     upkeep = commands.add_parser(
         "maintenance", help="run a catalog's table maintenance through Trino (used by the operator's nightly job)"
     )
@@ -544,6 +553,38 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 stderr.write(f"stardelt: {err}\n")
                 return USAGE
             stdout.write(json.dumps(answer, ensure_ascii=False) + "\n")
+            return OK
+        if args.command == "deployments" and args.deployments_command == "list":
+            query = {name: value for name, value in (("bundle", args.bundle), ("target", args.target)) if value}
+            rows = nova.call("deployments_list", query=query or None) or []
+            if args.format == "json":
+                for row in rows:
+                    stdout.write(json.dumps(row, ensure_ascii=False) + "\n")
+                return OK
+            stdout.write(_table(
+                ["id", "bundle", "target", "commit", "status", "by", "when"],
+                [[str(row["id"]), row["bundle"], row["target"], (row.get("revision") or "—")[:7],
+                  row["status"], row.get("actorName") or row["actor"], row["createdAt"]] for row in rows],
+            ))
+            if not rows:
+                stderr.write("stardelt: no deployment was recorded for you\n")
+            return OK
+        if args.command == "deployments" and args.deployments_command == "show":
+            row = nova.call("deployments_get", path={"id": args.id})
+            if args.format == "json":
+                stdout.write(json.dumps(row, ensure_ascii=False) + "\n")
+                return OK
+            facts = [
+                ("id", str(row["id"])), ("bundle", row["bundle"]), ("ownerGroup", row["ownerGroup"]),
+                ("target", row["target"]), ("commit", (row.get("revision") or "—")[:7]),
+                ("repository", row.get("repository") or ""), ("status", row["status"]),
+                ("by", row.get("actorName") or row["actor"]), ("actor", row["actor"]), ("when", row["createdAt"]),
+                ("pipelines", str(len(row.get("pipelines") or []))), ("resources", str(len(row.get("resources") or []))),
+            ]
+            for name, value in facts:
+                stdout.write(f"{name.ljust(10)}  {value}\n")
+            for pipeline in row.get("pipelines") or []:
+                stdout.write(f"  {pipeline['action'].ljust(9)} {pipeline['namespace']}/{pipeline['name']}\n")
             return OK
         if args.command == "bundle":  # plan or deploy: they talk to Nova
             problems, results = bundle.deploy(

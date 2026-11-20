@@ -207,6 +207,32 @@ def test_catalog_search_passes_the_tag_owner_and_domain_filters():
     assert kwargs["params"] == {"q": "revenue", "tag": "finance", "owner": "team-mobility", "domain": "retail"}
 
 
+def test_deployments_list_prints_a_table_and_passes_the_filters():
+    row = {"id": 7, "bundle": "sales", "ownerGroup": "analytics", "target": "prod",
+           "revision": "0123456789abcdef", "repository": None, "status": "applied",
+           "pipelines": [], "resources": [], "actor": "sub-1", "actorName": "Ada",
+           "createdAt": "2026-11-20T10:55:00.000Z"}
+    code, out, err, session = run(["deployments", "list", "--bundle", "sales"], FakeResponse(payload=[row]))
+    assert code == 0 and err == ""
+    assert out.splitlines()[0].split() == ["id", "bundle", "target", "commit", "status", "by", "when"]
+    assert out.splitlines()[1].split() == ["7", "sales", "prod", "0123456", "applied", "Ada", "2026-11-20T10:55:00.000Z"]
+    assert (session.calls[0][0], session.calls[0][1]) == ("GET", "https://nova.example/api/deployments")
+    assert session.calls[0][2]["params"] == {"bundle": "sales"}
+
+
+def test_deployments_show_prints_the_facts_and_the_pipelines():
+    row = {"id": 7, "bundle": "sales", "ownerGroup": "analytics", "target": "prod",
+           "revision": "0123456789abcdef", "repository": None, "status": "applied",
+           "pipelines": [{"namespace": "stardelt", "name": "shop-3-gold", "action": "created"}],
+           "resources": [{"kind": "Pipeline"}], "actor": "sub-1", "actorName": "Ada",
+           "createdAt": "2026-11-20T10:55:00.000Z"}
+    code, out, err, session = run(["deployments", "show", "7"], FakeResponse(payload=row))
+    assert code == 0 and err == ""
+    assert out.splitlines()[0] == "id          7"
+    assert out.splitlines()[-1] == "  created   stardelt/shop-3-gold"
+    assert (session.calls[0][0], session.calls[0][1]) == ("GET", "https://nova.example/api/deployments/7")
+
+
 def test_version_prints_the_package_version_and_calls_nothing():
     code, out, err, session = run(["--version"])
     assert (code, out, err) == (0, f"stardelt {stardelt.__version__}\n", "")
