@@ -78,7 +78,7 @@ class CanonicalCatalogueTest(unittest.TestCase):
     def setUp(self):
         with open(CATALOGUE, encoding="utf-8") as handle:
             self.catalogue = json.load(handle)
-        self.assertIn("spark-4.1-py3.11", self.catalogue)
+        self.assertIn("spark-4.1-py3.13", self.catalogue)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.pin_image = write_temp(self.directory.name, "pin-image.json",
@@ -88,10 +88,10 @@ class CanonicalCatalogueTest(unittest.TestCase):
 
     def test_the_two_writer_shapes_are_whitespace_different(self):
         data = json.loads(pathlib.Path(self.pin_image).read_text(encoding="utf-8"))["data"]
-        self.assertNotEqual(data["spark-4.1-py3.11"],
-                            compact_values(self.catalogue)["spark-4.1-py3.11"])
-        self.assertEqual(json.loads(data["spark-4.1-py3.11"]),
-                         json.loads(compact_values(self.catalogue)["spark-4.1-py3.11"]))
+        self.assertNotEqual(data["spark-4.1-py3.13"],
+                            compact_values(self.catalogue)["spark-4.1-py3.13"])
+        self.assertEqual(json.loads(data["spark-4.1-py3.13"]),
+                         json.loads(compact_values(self.catalogue)["spark-4.1-py3.13"]))
 
     def test_the_pin_image_shape_matches_the_chart(self):
         self.assertTrue(fixed_comparison(self.pin_image))
@@ -105,7 +105,7 @@ class CanonicalCatalogueTest(unittest.TestCase):
 
     def test_a_changed_digest_still_differs(self):
         changed = json.loads(json.dumps(self.catalogue))
-        entry = changed["spark-4.1-py3.11"]
+        entry = changed["spark-4.1-py3.13"]
         entry["image"] = entry["image"].rsplit(":", 1)[0] + ":" + "0" * 64
         stale = write_temp(self.directory.name, "stale.json",
                            {"data": default_values(changed)})
@@ -113,7 +113,7 @@ class CanonicalCatalogueTest(unittest.TestCase):
 
     def test_a_changed_spark_conf_still_differs(self):
         changed = json.loads(json.dumps(self.catalogue))
-        changed["spark-4.1-py3.11"]["sparkConf"]["spark.sql.shuffle.partitions"] = "1"
+        changed["spark-4.1-py3.13"]["sparkConf"]["spark.sql.shuffle.partitions"] = "1"
         stale = write_temp(self.directory.name, "stale-conf.json",
                            {"data": compact_values(changed)})
         self.assertFalse(fixed_comparison(stale))

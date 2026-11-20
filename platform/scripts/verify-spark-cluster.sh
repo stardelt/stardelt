@@ -17,7 +17,7 @@ NAME=verify-spark-cluster
 NP="spc-${NAME}-ingress"
 POD="spc-${NAME}-server"
 EXEC="verify-spark-cluster-exec"
-RUNTIME=spark-4.1-py3.11
+RUNTIME=spark-4.1-py3.13
 CATALOGUE=stardelt-spark-runtimes
 problems=0
 command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }

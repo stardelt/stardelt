@@ -529,7 +529,7 @@ fn demo_clusters() -> Vec<ComputeCluster> {
             user: None,
         },
         size: "small".to_string(),
-        runtime: "spark-4.1-py3.11".to_string(),
+        runtime: "spark-4.1-py3.13".to_string(),
         driver: None,
         executor: None,
         max_executors: None,
@@ -1270,11 +1270,11 @@ mod tests {
         let mut failed = cluster("trial", json!({"state": "Running"}));
         failed["status"] = json!({
             "phase": "Failed",
-            "message": "unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11"
+            "message": "unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.13"
         });
         assert_eq!(
             message_of(&failed).as_deref(),
-            Some("unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11")
+            Some("unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.13")
         );
 
         // An empty message and a missing one are the same answer: nothing to show.
@@ -1291,7 +1291,7 @@ mod tests {
         let mut failed = cluster("failed-trial", json!({"owner": {"group": "sales"}}));
         failed["status"] = json!({
             "phase": "Failed",
-            "message": "unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11"
+            "message": "unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.13"
         });
         let mut running = cluster("running-trial", json!({"owner": {"group": "sales"}}));
         running["status"] = json!({"phase": "Running"});
@@ -1301,7 +1301,7 @@ mod tests {
         assert_eq!(views[0].phase, "Failed");
         assert_eq!(
             views[0].message.as_deref(),
-            Some("unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.11")
+            Some("unknown runtime spark-9.9-py3.13; known: spark-4.1-py3.13")
         );
         // A cluster the operator reports as Running carries no reason.
         assert_eq!(views[1].phase, "Running");
@@ -1313,7 +1313,7 @@ mod tests {
         let objects = vec![
             cluster(
                 "zzz-trial",
-                json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11"}),
+                json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.13"}),
             ),
             cluster(
                 "shared",
@@ -1346,7 +1346,7 @@ mod tests {
             "trial",
             json!({
                 "owner": {"group": "sales"},
-                "runtime": "spark-4.1-py3.11",
+                "runtime": "spark-4.1-py3.13",
                 "driver": {"cores": 2, "memory": "4Gi"},
                 "executor": {"cores": 4},
                 "maxExecutors": 5,
@@ -1381,7 +1381,7 @@ mod tests {
     fn body() -> super::ComputeSpecBody {
         serde_json::from_value(json!({
             "owner": {"group": "sales"},
-            "runtime": "spark-4.1-py3.11"
+            "runtime": "spark-4.1-py3.13"
         }))
         .expect("a valid body")
     }
@@ -1956,7 +1956,7 @@ mod tests {
     fn trial() -> Value {
         cluster(
             "trial",
-            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11", "state": "Stopped"}),
+            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.13", "state": "Stopped"}),
         )
     }
 
@@ -1966,7 +1966,7 @@ mod tests {
             trial(),
             cluster(
                 "marketing",
-                json!({"owner": {"group": "marketing"}, "runtime": "spark-4.1-py3.11"}),
+                json!({"owner": {"group": "marketing"}, "runtime": "spark-4.1-py3.13"}),
             ),
         ];
         let (app, _) = app_with(items, Some(who("bob", &["sales"], false))).await;
@@ -2018,7 +2018,7 @@ mod tests {
     async fn a_cluster_that_is_starting_gets_409() {
         let mut object = cluster(
             "trial",
-            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11", "state": "Running"}),
+            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.13", "state": "Running"}),
         );
         object["status"] = json!({"phase": "Starting"});
         let (app, shared) = app_with(vec![object], Some(who("bob", &["sales"], false))).await;
@@ -2035,7 +2035,7 @@ mod tests {
             app,
             "PUT",
             "/admin/compute/trial",
-            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11"}),
+            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.13"}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -2060,7 +2060,7 @@ mod tests {
                 "trial",
                 json!({
                     "owner": {"group": "sales"},
-                    "runtime": "spark-4.1-py3.11",
+                    "runtime": "spark-4.1-py3.13",
                     "size": "small",
                     "state": "Running"
                 }),
@@ -2072,7 +2072,7 @@ mod tests {
             app,
             "PUT",
             "/admin/compute/trial",
-            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11", "size": "large"}),
+            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.13", "size": "large"}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -2129,7 +2129,7 @@ mod tests {
             "/admin/compute/trial",
             json!({
                 "owner": {"group": "sales"},
-                "runtime": "spark-4.1-py3.11",
+                "runtime": "spark-4.1-py3.13",
                 "idleStopMinutes": 0
             }),
         )

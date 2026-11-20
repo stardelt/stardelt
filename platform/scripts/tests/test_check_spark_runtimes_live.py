@@ -21,7 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "check-spark-runtimes.sh"
 CATALOGUE = REPO / "chart" / "files" / "spark-runtimes.json"
-RUNTIME = "spark-4.1-py3.11"
+RUNTIME = "spark-4.1-py3.13"
 
 SHIM = """#!/usr/bin/env bash
 set -euo pipefail
@@ -109,7 +109,7 @@ class SparkRuntimesLive(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("live ConfigMap matches the catalogue", result.stdout)
         # The file-vs-file checks still run and keep their OK line.
-        self.assertIn("check-spark-runtimes: OK (spark-4.1-py3.11, Spark 4.1.4, image ", result.stdout)
+        self.assertIn("check-spark-runtimes: OK (spark-4.1-py3.13, Spark 4.1.4, image ", result.stdout)
 
     def test_live_configmap_differs_names_the_changed_key(self):
         self.write_configmap(self.catalogue_object(shuffle_partitions="16"))
