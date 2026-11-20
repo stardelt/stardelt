@@ -260,22 +260,17 @@ pub fn condition(
     if !enabled || crds_present {
         return None;
     }
-    Some(Condition {
-        type_: "MonitoringCRDsMissing".into(),
-        status: "True".into(),
-        reason: Some("CRDsMissing".into()),
-        message: Some(format!(
+    Some(crate::conditions::set_condition(
+        previous.map(std::slice::from_ref).unwrap_or(&[]),
+        "MonitoringCRDsMissing",
+        "True",
+        "CRDsMissing",
+        Some(format!(
             "spec.monitoring.enabled is true but {SERVICE_MONITOR_CRD} is not installed; nothing was rendered"
         )),
-        last_transition_time: Some(match previous {
-            Some(p) if p.status == "True" => p
-                .last_transition_time
-                .clone()
-                .unwrap_or_else(|| now.to_string()),
-            _ => now.to_string(),
-        }),
-        observed_generation: generation,
-    })
+        generation,
+        now,
+    ))
 }
 
 /// `objects::own` is bounded to `DynamicType = ()`, which a `DynamicObject` (whose dynamic
@@ -511,5 +506,14 @@ mod tests {
         };
         let kept = condition(true, false, Some(2), Some(&previous), "t").expect("condition");
         assert_eq!(kept.last_transition_time.as_deref(), Some("earlier"));
+
+        let was_absent = Condition {
+            type_: "MonitoringCRDsMissing".into(),
+            status: "False".into(),
+            last_transition_time: Some("earlier".into()),
+            ..Condition::default()
+        };
+        let moved = condition(true, false, Some(2), Some(&was_absent), "t").expect("condition");
+        assert_eq!(moved.last_transition_time.as_deref(), Some("t"));
     }
 }

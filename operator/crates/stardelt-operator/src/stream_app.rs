@@ -469,18 +469,15 @@ fn ready_condition(
     } else {
         "False"
     };
-    let last_transition_time = match previous {
-        Some(p) if p.status == status => p.last_transition_time.clone(),
-        _ => Some(now.to_string()),
-    };
-    Condition {
-        type_: "Ready".into(),
-        status: status.into(),
-        reason: Some(reason.into()),
-        message: None,
-        last_transition_time,
-        observed_generation: generation,
-    }
+    crate::conditions::set_condition(
+        previous.map(std::slice::from_ref).unwrap_or(&[]),
+        "Ready",
+        status,
+        reason,
+        None,
+        generation,
+        now,
+    )
 }
 
 /// The `status` half of the merge patch. `lastError` and `lastCheckpointAt` are serialized as
@@ -2210,6 +2207,29 @@ mod tests {
 
         let pending = ready_condition("Pending", "Pending", Some(3), None, now);
         assert_eq!(pending.status, "False");
+    }
+
+    #[test]
+    fn ready_condition_keeps_the_time_only_while_the_status_holds() {
+        let previous = Condition {
+            type_: "Ready".into(),
+            status: "True".into(),
+            last_transition_time: Some("t1".into()),
+            ..Condition::default()
+        };
+        let kept = ready_condition("Running", "Running", Some(3), Some(&previous), "t2");
+        assert_eq!(kept.status, "True");
+        assert_eq!(kept.last_transition_time.as_deref(), Some("t1"));
+
+        let flipped = ready_condition(
+            "Running",
+            "ExecutorsUnschedulable",
+            Some(3),
+            Some(&previous),
+            "t2",
+        );
+        assert_eq!(flipped.status, "False");
+        assert_eq!(flipped.last_transition_time.as_deref(), Some("t2"));
     }
 
     #[test]
