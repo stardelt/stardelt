@@ -31,7 +31,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -39,6 +39,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::api_json::ApiJson;
 use crate::auth::{Identity, Principal};
+use crate::connection_routes::Fail;
 use crate::saved_queries::{error, store_failed, unavailable};
 
 /// Most characters a bundle, an owner group or a target may carry (the table's CHECK
@@ -306,6 +307,62 @@ pub async fn list(
     }
 }
 
+/// One row the caller may see, by id: an administrator sees every row, anybody else only a row
+/// of their own groups. A missing id and somebody else's row are both `Ok(None)`, so no route
+/// says which ids exist.
+async fn visible(
+    pool: &sqlx::PgPool,
+    id: i64,
+    who: &Identity,
+) -> Result<Option<Deployment>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {ROW_COLUMNS} FROM deployment \
+         WHERE id = $1 AND ($2 = TRUE OR owner_group = ANY($3))"
+    );
+    sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(who.is_admin)
+        .bind(&who.groups)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The one INSERT behind `record` and `rollback`: a row with the caller as `actor`.
+async fn store(
+    pool: &sqlx::PgPool,
+    new: &NewDeployment,
+    who: &Identity,
+) -> Result<Deployment, sqlx::Error> {
+    let pipelines = serde_json::to_value(&new.pipelines)
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    let sql = format!(
+        "INSERT INTO deployment \
+         (bundle, owner_group, target, revision, repository, status, pipelines, resources, files, actor, actor_name, previous_deployment_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {ROW_COLUMNS}"
+    );
+    sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
+        .bind(&new.bundle)
+        .bind(&new.owner_group)
+        .bind(&new.target)
+        .bind(&new.revision)
+        .bind(&new.repository)
+        .bind(&new.status)
+        .bind(&pipelines)
+        .bind(
+            serde_json::to_value(&new.resources)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        )
+        .bind(
+            serde_json::to_value(&new.files)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        )
+        .bind(&who.sub)
+        .bind(&who.display_name)
+        .bind(new.previous_deployment_id)
+        .fetch_one(pool)
+        .await
+}
+
 /// `GET /api/deployments/{id}` — one row, or 404 when it is not one the caller may see.
 #[utoipa::path(
     get,
@@ -332,17 +389,7 @@ pub async fn detail(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
-    let sql = format!(
-        "SELECT {ROW_COLUMNS} FROM deployment \
-         WHERE id = $1 AND ($2 = TRUE OR owner_group = ANY($3))"
-    );
-    match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
-        .bind(id)
-        .bind(caller.identity.is_admin)
-        .bind(&caller.identity.groups)
-        .fetch_optional(pool)
-        .await
-    {
+    match visible(pool, id, &caller.identity).await {
         Ok(Some(row)) => Json(row).into_response(),
         Ok(None) => error(
             StatusCode::NOT_FOUND,
@@ -388,35 +435,7 @@ pub async fn record(
             "only a member of the pipeline's owner group may record a deployment",
         );
     }
-    let pipelines = serde_json::to_value(&new.pipelines)
-        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
-    let sql = format!(
-        "INSERT INTO deployment \
-         (bundle, owner_group, target, revision, repository, status, pipelines, resources, files, actor, actor_name, previous_deployment_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {ROW_COLUMNS}"
-    );
-    match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
-        .bind(&new.bundle)
-        .bind(&new.owner_group)
-        .bind(&new.target)
-        .bind(&new.revision)
-        .bind(&new.repository)
-        .bind(&new.status)
-        .bind(&pipelines)
-        .bind(
-            serde_json::to_value(&new.resources)
-                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
-        )
-        .bind(
-            serde_json::to_value(&new.files)
-                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
-        )
-        .bind(&caller.identity.sub)
-        .bind(&caller.identity.display_name)
-        .bind(new.previous_deployment_id)
-        .fetch_one(pool)
-        .await
-    {
+    match store(pool, &new, &caller.identity).await {
         Ok(row) => {
             let pruned = prune(pool, &row.owner_group, &row.bundle, &row.target).await;
             tracing::info!(
@@ -434,11 +453,150 @@ pub async fn record(
     }
 }
 
+/// Whether a refusal from replaying one stored document is the platform's rule saying no (the
+/// rollback answers one `409` with that sentence) rather than an upstream failure that keeps its
+/// own status. A `400` (the document no longer fits a pipeline) and a `429` (the create window is
+/// full) stay what they are: the caller sees why, not a conflict.
+fn is_rule_refusal(fail: &Fail) -> bool {
+    matches!(
+        fail.status(),
+        StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+    )
+}
+
+/// `POST /api/deployments/{id}/rollback` — replay a recorded deployment, `201` with the new row.
+#[utoipa::path(
+    post,
+    operation_id = "deployments_rollback",
+    path = "/api/deployments/{id}/rollback",
+    tag = "public",
+    description = "Roll back to what a recorded deployment applied: the stored rendered Pipeline documents of a row of the caller's groups are replayed as the caller — each missing one is created and each existing one updated — and the replay is recorded as a new deployment row whose `previousDeploymentId` points at the source. It needs no Git: it applies exactly what ran. Only a row with status `applied` and at least one stored resource can be replayed. A document the rules refuse stops the replay: the row is still recorded, as `failed`, and the answer is 409 with the sentence (400 when a stored document no longer fits a pipeline, 502/503 when the cluster did not answer).",
+    params(("id" = i64, Path, description = "The deployment's id")),
+    responses(
+        (status = 201, description = "The new row recording the replay", body = Deployment),
+        (status = 400, description = "A stored document no longer fits a pipeline", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such row among the ones the caller may see", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The row is not `applied`, it recorded no rendered resources, or a document was refused", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster or the notebook store did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured, or there is no cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn rollback(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    caller: Option<Extension<Principal>>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
+    };
+    let row = match visible(pool, id, &caller.identity).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                &format!("no deployment {id} among the ones you may see"),
+            );
+        }
+        Err(e) => return store_failed(e),
+    };
+    if row.status != "applied" {
+        return error(
+            StatusCode::CONFLICT,
+            &format!(
+                "deployment {id} is {}: there is nothing to roll back to",
+                row.status
+            ),
+        );
+    }
+    // The rendered documents this deploy applied; `validate` capped them at 200 when it was
+    // recorded.
+    let documents: Vec<serde_json::Value> =
+        serde_json::from_value(row.resources.clone()).unwrap_or_default();
+    if documents.is_empty() {
+        return error(
+            StatusCode::CONFLICT,
+            &format!(
+                "deployment {id} recorded no rendered resources: deploy it again and roll that back"
+            ),
+        );
+    }
+
+    let resources = crate::pipelines::resources(&s);
+    let mut touched: Vec<DeploymentPipeline> = Vec::new();
+    let mut refusal: Option<Fail> = None;
+    for document in &documents {
+        match crate::pipelines::apply_document(
+            resources.as_ref(),
+            s.db.as_ref(),
+            s.notebooks.as_ref(),
+            s.airflow.as_ref(),
+            &s.pipeline_creates,
+            &caller.identity,
+            document,
+        )
+        .await
+        {
+            Ok(action) => touched.push(DeploymentPipeline {
+                namespace: crate::cluster::namespace(),
+                name: document["name"].as_str().unwrap_or_default().to_string(),
+                action: action.to_string(),
+            }),
+            Err(fail) => {
+                refusal = Some(fail);
+                break;
+            }
+        }
+    }
+
+    let replay = NewDeployment {
+        bundle: row.bundle.clone(),
+        owner_group: row.owner_group.clone(),
+        target: row.target.clone(),
+        revision: row.revision.clone(),
+        repository: row.repository.clone(),
+        status: if refusal.is_none() {
+            "applied"
+        } else {
+            "failed"
+        }
+        .into(),
+        pipelines: touched,
+        resources: documents,
+        files: serde_json::from_value(row.files.clone()).unwrap_or_default(),
+        previous_deployment_id: Some(id),
+    };
+    let stored = match store(pool, &replay, &caller.identity).await {
+        Ok(row) => row,
+        Err(e) => return store_failed(e),
+    };
+    let pruned = prune(pool, &stored.owner_group, &stored.bundle, &stored.target).await;
+    tracing::info!(
+        target: "audit",
+        sub = %caller.identity.sub,
+        id,
+        new_id = stored.id,
+        bundle = %stored.bundle,
+        target = %stored.target,
+        pruned,
+        "deployment rolled back",
+    );
+    match refusal {
+        None => (StatusCode::CREATED, Json(stored)).into_response(),
+        Some(fail) if is_rule_refusal(&fail) => error(StatusCode::CONFLICT, fail.message()),
+        Some(fail) => fail.into_response(),
+    }
+}
+
 /// The deployment routes, merged into the API router.
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/deployments", get(list).post(record))
         .route("/deployments/{id}", get(detail))
+        .route("/deployments/{id}/rollback", post(rollback))
 }
 
 #[cfg(test)]
@@ -615,6 +773,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    #[tokio::test]
+    async fn rollback_answers_503_before_401_without_a_state_store() {
+        let response = rollback(
+            State(crate::router_tests::test_state_with_db(None)),
+            Path(1),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     /// One row straight into the store: the route needs a caller, and the test needs a
     /// timestamp it chose, so the order of two rows is not up to the clock.
     async fn insert(pool: &sqlx::PgPool, owner: &str, bundle: &str, target: &str, seconds: f64) {
@@ -673,6 +842,107 @@ mod tests {
         assert_eq!(
             other, 1,
             "another group's rows of the same bundle and target are untouched"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn rollback_answers_404_for_another_groups_row() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        insert(&pool, "analytics", "sales", "prod", 0.0).await;
+        let id: i64 =
+            sqlx::query_scalar("SELECT id FROM deployment WHERE owner_group = 'analytics'")
+                .fetch_one(&pool)
+                .await
+                .expect("the analytics row");
+
+        let response = rollback(
+            State(state),
+            Path(id),
+            Some(Extension(principal("bob", &["shop"]))),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "a row of another group is not one the caller may see"
+        );
+    }
+
+    /// One row with a chosen status and rendered resources; answers its id.
+    async fn insert_row(
+        pool: &sqlx::PgPool,
+        owner: &str,
+        status: &str,
+        resources: serde_json::Value,
+    ) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO deployment \
+             (bundle, owner_group, target, status, pipelines, resources, actor, actor_name) \
+             VALUES ('sales', $1, 'prod', $2, '[]'::jsonb, $3, 'test', 'test') RETURNING id",
+        )
+        .bind(owner)
+        .bind(status)
+        .bind(resources)
+        .fetch_one(pool)
+        .await
+        .expect("insert a deployment")
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn rollback_refuses_a_failed_deployment() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let id = insert_row(
+            &pool,
+            "analytics",
+            "failed",
+            serde_json::json!([{"name": "daily", "ownerGroup": "analytics", "sql": "select 1"}]),
+        )
+        .await;
+
+        let response = rollback(
+            State(state),
+            Path(id),
+            Some(Extension(principal("ada", &["analytics"]))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the refusal is a body");
+        let answer: serde_json::Value = serde_json::from_slice(&body).expect("one error");
+        assert_eq!(
+            answer["error"],
+            format!("deployment {id} is failed: there is nothing to roll back to")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn rollback_refuses_a_row_without_resources() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let id = insert_row(&pool, "analytics", "applied", serde_json::json!([])).await;
+
+        let response = rollback(
+            State(state),
+            Path(id),
+            Some(Extension(principal("ada", &["analytics"]))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the refusal is a body");
+        let answer: serde_json::Value = serde_json::from_slice(&body).expect("one error");
+        assert_eq!(
+            answer["error"],
+            format!(
+                "deployment {id} recorded no rendered resources: deploy it again and roll that back"
+            )
         );
     }
 
