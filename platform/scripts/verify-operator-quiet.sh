@@ -55,9 +55,10 @@ singular() {
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-pods="$(kubectl -n "$NS" get pods -l app=stardelt-operator -o jsonpath='{.items[*].metadata.name}' 2>&1)" || {
+pods="$(kubectl -n "$NS" get pods -l app=stardelt-operator \
+  --field-selector status.phase=Running -o jsonpath='{.items[*].metadata.name}' 2>&1)" || {
   echo "verify-operator-quiet: UNVERIFIED (cannot list the operator pods in $NS: $pods)"; exit 3; }
-read -r -a op_pods <<<"$pods"
+read -r -a op_pods <<<"$(printf '%s\n' "$pods" | sort | tr '\n' ' ')"
 [ "${#op_pods[@]}" -gt 0 ] || { echo "verify-operator-quiet: UNVERIFIED (no pod matches app=stardelt-operator in $NS)"; exit 3; }
 
 # ---- snapshots -------------------------------------------------------------

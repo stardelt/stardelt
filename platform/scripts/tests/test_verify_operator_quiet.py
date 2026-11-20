@@ -141,6 +141,26 @@ class OperatorQuietTest(unittest.TestCase):
         # The stats summary grows 1024 B per call: 4.0 KB/s at WINDOW=0 (an effective 1 s).
         self.assertNotIn("✗", result.stdout)
 
+    def test_the_pod_list_asks_for_running_pods_only(self):
+        # An evicted pod (phase Failed) has no kubelet stats summary, so it is never listed
+        # as an operator pod: only a running pod can be measured (#754).
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = (self.dir / "kubectl_args.log").read_text().splitlines()
+        self.assertTrue(
+            any("get pods" in line and "--field-selector status.phase=Running" in line for line in calls),
+            calls,
+        )
+
+    def test_no_running_pod_is_unverified(self):
+        (self.dir / "pods.txt").write_text("")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(
+            "UNVERIFIED (no pod matches app=stardelt-operator in stardelt)", result.stdout
+        )
+        self.assertNotIn("PASS", result.stdout)
+
     def test_a_status_write_fails_and_names_the_object(self):
         (self.dir / "objects_second.txt").write_text("bronze=1235\n")
         result = self.run_script()
