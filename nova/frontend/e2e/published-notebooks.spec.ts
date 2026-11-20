@@ -335,11 +335,11 @@ test.describe('published notebooks', () => {
     await context.close()
   })
 
-  test('the section says who may schedule a notebook and as whom it runs', async ({ browser }) => {
+  test('the section says who may schedule a notebook and whose viewers see it', async ({ browser }) => {
     const { context, page } = await open(browser)
     const section = page.getByRole('region', { name: 'Published notebooks' })
     await expect(section).toContainText('Every member of the owning group may schedule it.')
-    await expect(section).toContainText("runs as the group's service principal, not as the person who published the notebook")
+    await expect(section).toContainText('the notebooks whose owners list you in their viewers')
     await context.close()
   })
 

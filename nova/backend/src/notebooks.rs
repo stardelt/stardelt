@@ -28,9 +28,11 @@
 //!   run (a string literal without its quotes), never evaluated. The Schedule dialog
 //!   reads them for one pinned version with `GET …/parameters` (#237), so it offers
 //!   exactly the form the bytes it will run declare.
-//! - **Visibility** is owner-group scoped: a person lists and versions the notebooks of
-//!   their own groups; an administrator gets no wider view here, because the platform's
-//!   administrators are not automatically members of a tenant's group.
+//! - **Visibility** is owner-group scoped, plus viewers: a person lists and versions the
+//!   notebooks of their own groups, and reads (never writes) a version of another group whose
+//!   publisher named one of their groups in `X-Stardelt-Viewers`. An administrator gets no
+//!   wider view here, because the platform's administrators are not automatically members of a
+//!   tenant's group.
 //! - **Why presigned URLs.** `rusty-s3` implements SigV4 as presigned URLs; the shared
 //!   `reqwest` client sends them. A signed URL *is* a credential (short-lived, five
 //!   minutes), so no error, log line or response ever contains one: [`StoreError`]'s
@@ -257,11 +259,16 @@ impl NotebookStore {
         uploaded_by: &str,
         sha256: &str,
         source: Option<&NotebookSource>,
+        viewers: &[String],
     ) -> Result<String, StoreError> {
         let uploaded_by = metadata_value(uploaded_by);
         let source = source.map(|source| {
             metadata_value(&serde_json::to_string(source).expect("a source serializes"))
         });
+        // Only a non-empty list is stored: a version published without the header carries no
+        // `x-amz-meta-viewers` at all, exactly as `source` is treated.
+        let viewers = (!viewers.is_empty())
+            .then(|| metadata_value(&serde_json::to_string(viewers).expect("viewers serialize")));
         let mut action = self.bucket.put_object(Some(&self.credentials), key);
         // Signed headers: presigning covers them, so the gateway gets the metadata as
         // part of the same immutable object version.
@@ -279,6 +286,11 @@ impl NotebookStore {
                 .headers_mut()
                 .insert("x-amz-meta-source", source.clone());
         }
+        if let Some(viewers) = viewers.as_ref() {
+            action
+                .headers_mut()
+                .insert("x-amz-meta-viewers", viewers.clone());
+        }
         let url = action.sign(PRESIGN_TTL);
         let mut request = self
             .http
@@ -288,6 +300,9 @@ impl NotebookStore {
             .header("x-amz-meta-sha256", sha256);
         if let Some(source) = source.as_ref() {
             request = request.header("x-amz-meta-source", source.as_str());
+        }
+        if let Some(viewers) = viewers.as_ref() {
+            request = request.header("x-amz-meta-viewers", viewers.as_str());
         }
         let response = self.send(request.body(body)).await?;
         version_id(&response).ok_or(StoreError::Unversioned)
@@ -326,6 +341,9 @@ impl NotebookStore {
                 // A value written by another tool must not break the listing.
                 serde_json::from_str::<NotebookSource>(&metadata_text(&value)).ok()
             }),
+            viewers: text("x-amz-meta-viewers")
+                .and_then(|value| serde_json::from_str::<Vec<String>>(&metadata_text(&value)).ok())
+                .unwrap_or_default(),
         })
     }
 
@@ -486,7 +504,38 @@ impl NotebookStore {
                 size: head.size,
                 uploaded_at: rfc3339_utc(&head.uploaded_at),
                 uploaded_by: head.uploaded_by,
+                viewers: head.viewers,
             });
+        }
+        Ok(rows)
+    }
+
+    /// The notebooks of groups the caller is not in whose newest version names one of
+    /// `viewer_groups` in its viewers. One bucket listing names the groups; each group's rows
+    /// come from the same [`NotebookStore::list_group`] the caller's own groups use.
+    async fn list_shared(
+        &self,
+        viewer_groups: &[String],
+    ) -> Result<Vec<NotebookSummary>, StoreError> {
+        let mut groups: BTreeSet<String> = BTreeSet::new();
+        for key in self.list_objects("").await? {
+            // The bucket holds `<group>/<name>` keys; a deeper key (a run copy) has a
+            // segment that is not a group unless the first one is one.
+            if let Some((group, _)) = key.split_once('/')
+                && valid_group(group)
+                && !viewer_groups.iter().any(|own| own == group)
+            {
+                groups.insert(group.to_string());
+            }
+        }
+        let mut rows = Vec::new();
+        for group in groups {
+            let group_rows = self.list_group(&group).await?;
+            rows.extend(group_rows.into_iter().filter(|row| {
+                row.viewers
+                    .iter()
+                    .any(|viewer| viewer_groups.iter().any(|own| own == viewer))
+            }));
         }
         Ok(rows)
     }
@@ -781,6 +830,7 @@ struct HeadObject {
     uploaded_by: String,
     sha256: String,
     source: Option<NotebookSource>,
+    pub viewers: Vec<String>,
 }
 
 struct ListedVersion {
@@ -886,6 +936,8 @@ pub struct NotebookSummary {
     pub uploaded_at: String,
     /// The `x-amz-meta-uploaded-by` the publisher wrote (their display name).
     pub uploaded_by: String,
+    /// Groups that may read it without being members.
+    pub viewers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -1015,6 +1067,46 @@ fn metadata_text(value: &str) -> String {
 /// The `X-Stardelt-Source` header: a JSON object, at most 1024 bytes, so the object's user
 /// metadata stays under S3's 2 KiB beside `uploaded-by` and `sha256` (stardelt-nova#819).
 const MAX_SOURCE_HEADER_BYTES: usize = 1024;
+
+/// The `X-Stardelt-Viewers` header: a JSON array of group names, at most 8 of them, and at
+/// most 512 bytes of user metadata beside `uploaded-by`, `sha256` and `source`.
+const MAX_VIEWERS_HEADER_BYTES: usize = 512;
+const MAX_VIEWERS: usize = 8;
+
+/// The `X-Stardelt-Viewers` value: groups that may read a version without being members.
+/// Sorted and deduplicated, so the stored JSON is one shape however the caller spelled it.
+fn parse_viewers(raw: &str) -> Result<Vec<String>, String> {
+    let bad_shape = || {
+        format!(
+            "the X-Stardelt-Viewers header must be a JSON array of at most {MAX_VIEWERS} group names"
+        )
+    };
+    let viewers: Vec<String> = serde_json::from_str(raw).map_err(|_| bad_shape())?;
+    if viewers.len() > MAX_VIEWERS {
+        return Err(bad_shape());
+    }
+    let mut sorted: Vec<String> = viewers
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for viewer in &sorted {
+        if !valid_group(viewer) {
+            return Err(
+                "a viewer must be a group name: it must start with a letter or digit and contain only letters, digits, dots, underscores and dashes"
+                    .to_string(),
+            );
+        }
+    }
+    // The metadata value travels percent-encoded, so the bound is on the serialized form.
+    if metadata_value(&serde_json::to_string(&sorted).expect("viewers serialize")).len()
+        > MAX_VIEWERS_HEADER_BYTES
+    {
+        return Err(bad_shape());
+    }
+    sorted.shrink_to_fit();
+    Ok(sorted)
+}
 
 /// `^[0-9a-f]{7,64}$`: the commit shapes a publisher reports.
 fn valid_source_commit(commit: &str) -> bool {
@@ -1261,7 +1353,7 @@ pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     operation_id = "notebooks_publish",
     path = "/api/notebooks/{group}/{name}",
     tag = "public",
-    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing — no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
+    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing — no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server. A version published with an `X-Stardelt-Viewers` header carries up to 8 group names that may read it without being members; the JSON is stored with the version.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1350,6 +1442,33 @@ pub(crate) async fn publish(
         None => None,
     };
 
+    let viewers = match request.headers().get("x-stardelt-viewers") {
+        Some(value) => {
+            // The same 1024-byte guard the source header gets, before any parsing.
+            if value.as_bytes().len() > 1024 {
+                return Fail::new(
+                    StatusCode::BAD_REQUEST,
+                    "the X-Stardelt-Viewers header must be a JSON array of at most 8 group names",
+                )
+                .into_response();
+            }
+            match value.to_str().ok().map(parse_viewers) {
+                Some(Ok(viewers)) => viewers,
+                Some(Err(message)) => {
+                    return Fail::new(StatusCode::BAD_REQUEST, message).into_response();
+                }
+                None => {
+                    return Fail::new(
+                        StatusCode::BAD_REQUEST,
+                        "the X-Stardelt-Viewers header must be a JSON array of at most 8 group names",
+                    )
+                    .into_response();
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+
     let body = match read_body(request).await {
         Ok(body) => body,
         Err(fail) => return fail.into_response(),
@@ -1431,6 +1550,7 @@ pub(crate) async fn publish(
             &principal.identity.display_name,
             &sha256,
             source.as_ref(),
+            &viewers,
         )
         .await
     {
@@ -1460,7 +1580,7 @@ pub(crate) async fn publish(
     operation_id = "notebooks_list",
     path = "/api/notebooks",
     tag = "public",
-    description = "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    description = "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`. The list also carries the newest version of every notebook whose stored viewers name one of the caller's groups.",
     responses(
         (status = 200, description = "One row per notebook", body = [NotebookSummary]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -1486,14 +1606,36 @@ pub(crate) async fn list(
 
     let groups = caller_groups(&principal.identity);
     let mut rows = Vec::new();
-    for group in groups {
-        match store.list_group(&group).await {
+    for group in &groups {
+        match store.list_group(group).await {
             Ok(mut group_rows) => rows.append(&mut group_rows),
             Err(error) => return store_fail(error).into_response(),
         }
     }
+    match store.list_shared(&groups).await {
+        Ok(mut shared) => rows.append(&mut shared),
+        Err(error) => return store_fail(error).into_response(),
+    }
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|row| seen.insert((row.group.clone(), row.name.clone())));
     rows.sort_by(|a, b| b.uploaded_at.cmp(&a.uploaded_at));
     Json(rows).into_response()
+}
+
+/// Whether the caller may read `group/<name>`: a member of `group`, or a person whose
+/// groups the newest version names in its viewers. A store error is `false` — a failed read
+/// must not make a notebook visible.
+async fn may_view(store: &NotebookStore, principal: &Principal, group: &str, name: &str) -> bool {
+    if principal.identity.groups.iter().any(|own| own == group) {
+        return true;
+    }
+    match store.head(&object_key(group, name), None).await {
+        Ok(head) => head
+            .viewers
+            .iter()
+            .any(|viewer| principal.identity.groups.iter().any(|own| own == viewer)),
+        Err(_) => false,
+    }
 }
 
 /// `GET /api/notebooks/{group}/{name}/versions`: the versions of one notebook, newest
@@ -1503,7 +1645,7 @@ pub(crate) async fn list(
     operation_id = "notebooks_versions",
     path = "/api/notebooks/{group}/{name}/versions",
     tag = "public",
-    description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
+    description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}`, or a person whose groups the newest version names in its viewers (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`. A version published with an `X-Stardelt-Source` header carries `source` (`repository`, `commit`, `path`, `clean`); Nova stores it and does not verify it against a Git server.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1528,7 +1670,7 @@ pub(crate) async fn versions(
     let Some(Extension(principal)) = principal else {
         return sign_in_again().into_response();
     };
-    if !principal.identity.groups.iter().any(|g| g == &group) {
+    if !may_view(store, &principal, &group, &name).await {
         return forbidden_group(&group).into_response();
     }
     if !valid_group(&group) {
@@ -1617,7 +1759,7 @@ pub(crate) async fn remove(
     operation_id = "notebooks_parameters",
     path = "/api/notebooks/{group}/{name}/parameters",
     tag = "public",
-    description = "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    description = "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}`, or a person whose groups the newest version names in its viewers (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1645,7 +1787,7 @@ pub(crate) async fn parameters(
     let Some(Extension(principal)) = principal else {
         return sign_in_again().into_response();
     };
-    if !principal.identity.groups.iter().any(|g| g == &group) {
+    if !may_view(store, &principal, &group, &name).await {
         return forbidden_group(&group).into_response();
     }
     if !valid_group(&group) {
@@ -1697,7 +1839,7 @@ pub(crate) async fn parameters(
     operation_id = "notebooks_content",
     path = "/api/notebooks/{group}/{name}/content",
     tag = "public",
-    description = "One published version's stored bytes, answered `application/json` as they are. The bytes are the notebook Nova stored: outputs emptied, `execution_count` null, so a preview of a published version shows source and markdown only. `?version=<id>` names the immutable version; omitted, the latest is read. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    description = "One published version's stored bytes, answered `application/json` as they are. The bytes are the notebook Nova stored: outputs emptied, `execution_count` null, so a preview of a published version shows source and markdown only. `?version=<id>` names the immutable version; omitted, the latest is read. Needs a member of `{group}`, or a person whose groups the newest version names in its viewers (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1725,7 +1867,7 @@ pub(crate) async fn content(
     let Some(Extension(principal)) = principal else {
         return sign_in_again().into_response();
     };
-    if !principal.identity.groups.iter().any(|g| g == &group) {
+    if !may_view(store, &principal, &group, &name).await {
         return forbidden_group(&group).into_response();
     }
     if !valid_group(&group) {
@@ -1832,6 +1974,7 @@ pub(crate) mod fake {
         pub(crate) uploaded_by: String,
         pub(crate) sha256: String,
         pub(crate) source: Option<String>,
+        pub(crate) viewers: Option<String>,
         pub(crate) last_modified: String,
         pub(crate) seq: u64,
     }
@@ -1868,6 +2011,7 @@ pub(crate) mod fake {
                 uploaded_by: uploaded_by.to_string(),
                 sha256: sha256_hex(body),
                 source: None,
+                viewers: None,
                 last_modified: modified(seq),
                 seq,
             });
@@ -1945,6 +2089,7 @@ pub(crate) mod fake {
                 uploaded_by: header_text(&headers, "x-amz-meta-uploaded-by").unwrap_or_default(),
                 sha256: header_text(&headers, "x-amz-meta-sha256").unwrap_or_default(),
                 source: header_text(&headers, "x-amz-meta-source"),
+                viewers: header_text(&headers, "x-amz-meta-viewers"),
                 last_modified: modified(seq),
                 seq,
             });
@@ -1998,6 +2143,12 @@ pub(crate) mod fake {
                 answer.insert(
                     "x-amz-meta-source",
                     HeaderValue::from_str(source).expect("source header"),
+                );
+            }
+            if let Some(viewers) = object.viewers.as_ref() {
+                answer.insert(
+                    "x-amz-meta-viewers",
+                    HeaderValue::from_str(viewers).expect("viewers header"),
                 );
             }
             return (StatusCode::OK, answer).into_response();
@@ -3331,6 +3482,193 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(answer, json!([]));
+    }
+
+    #[tokio::test]
+    async fn viewers_metadata_round_trips() {
+        let s3 = FakeS3::start().await;
+        let store = notebook_store(&s3.base);
+        let state = state(Some(store));
+        let alice = app(
+            Arc::clone(&state),
+            Some(principal("alice", &["analytics"], false)),
+        );
+        let (status, answer) = call(
+            &alice,
+            "PUT",
+            "/notebooks/analytics/shared.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("x-stardelt-viewers", "[\"visitors\",\"analytics\"]")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        // The stored metadata is US-ASCII (percent-encoded by `metadata_value`), and decodes
+        // to sorted, deduplicated JSON.
+        let object = s3.object("analytics/shared.ipynb");
+        let raw = object.viewers.as_deref().expect("stored viewers");
+        assert!(raw.is_ascii(), "{raw}");
+        assert_eq!(metadata_text(raw), "[\"analytics\",\"visitors\"]");
+
+        let (status, rows) = call(&alice, "GET", "/notebooks", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(rows[0]["viewers"], json!(["analytics", "visitors"]));
+
+        // The same list comes back from a head of the newest version, which the versions
+        // route reads.
+        let store = state.notebooks.as_ref().expect("store");
+        let head = store
+            .head("analytics/shared.ipynb", None)
+            .await
+            .expect("head");
+        assert_eq!(
+            head.viewers,
+            vec!["analytics".to_string(), "visitors".to_string()]
+        );
+        let (status, versions) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/shared.ipynb/versions",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{versions}");
+        assert_eq!(versions.as_array().expect("array").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_bad_viewers_header_is_refused() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let alice = app(state, Some(principal("alice", &["analytics"], false)));
+        let good = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+        let nine = r#"["g1","g2","g3","g4","g5","g6","g7","g8","g9"]"#;
+        for bad in [nine, r#"["visitors","bad/group"]"#, "not json"] {
+            let (status, answer) = call(
+                &alice,
+                "PUT",
+                "/notebooks/analytics/bad.ipynb",
+                Some(&good),
+                &[("x-stardelt-viewers", bad)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {answer}");
+        }
+        assert!(s3.is_empty(), "nothing was stored");
+    }
+
+    #[tokio::test]
+    async fn a_viewer_lists_and_reads_but_cannot_publish() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let demo = app(Arc::clone(&state), Some(principal("dee", &["demo"], false)));
+        let (status, answer) = call(
+            &demo,
+            "PUT",
+            "/notebooks/demo/shared.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("x-stardelt-viewers", "[\"visitors\"]")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let visitor = app(
+            Arc::clone(&state),
+            Some(principal("vic", &["visitors"], false)),
+        );
+        let (status, rows) = call(&visitor, "GET", "/notebooks", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        let rows = rows.as_array().expect("array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["group"], "demo");
+        assert_eq!(rows[0]["name"], "shared.ipynb");
+        assert_eq!(rows[0]["viewers"], json!(["visitors"]));
+
+        let (status, answer) = call(
+            &visitor,
+            "GET",
+            "/notebooks/demo/shared.ipynb/content",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["nbformat"], 4);
+
+        // A viewer never writes: the publish route keeps the plain membership check.
+        let (status, answer) = call(
+            &visitor,
+            "PUT",
+            "/notebooks/demo/other.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+        assert_eq!(answer["error"], "you are not a member of the group demo");
+
+        let (status, _) = call(
+            &visitor,
+            "DELETE",
+            "/notebooks/demo/shared.ipynb",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_non_viewer_does_not_see_it() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let demo = app(Arc::clone(&state), Some(principal("dee", &["demo"], false)));
+        let (status, answer) = call(
+            &demo,
+            "PUT",
+            "/notebooks/demo/shared.ipynb",
+            Some(&body(&notebook(vec![code_cell(json!(["x = 1\n"]))]))),
+            &[("x-stardelt-viewers", "[\"visitors\"]")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let other = app(
+            Arc::clone(&state),
+            Some(principal("otto", &["other"], false)),
+        );
+        let (status, rows) = call(&other, "GET", "/notebooks", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(rows, json!([]));
+        let (status, answer) = call(
+            &other,
+            "GET",
+            "/notebooks/demo/shared.ipynb/content",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+        assert_eq!(answer["error"], "you are not a member of the group demo");
+        let (status, answer) = call(
+            &other,
+            "GET",
+            "/notebooks/demo/shared.ipynb/versions",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+        let (status, answer) = call(
+            &other,
+            "GET",
+            "/notebooks/demo/shared.ipynb/parameters",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
     }
 
     #[tokio::test]

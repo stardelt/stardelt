@@ -49,9 +49,8 @@ export default function PublishedNotebooks() {
         <div className="min-w-0">
           <h2 id={`${filterId}-title`} className="text-lg font-semibold tracking-tight">Published notebooks</h2>
           <p className="text-xs text-text-mute">
-            The newest version of every notebook your groups have published. Every member of the owning
-            group may schedule it. A schedule runs as the group&apos;s service principal, not as the person
-            who published the notebook, and reads only what the catalogs grant to that principal.
+            The newest version of every notebook your groups published, and the notebooks whose owners
+            list you in their viewers. Every member of the owning group may schedule it.
           </p>
         </div>
         {rows.length > 0 && (

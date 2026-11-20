@@ -722,6 +722,8 @@ export type PublishedNotebook = {
   size: number
   uploadedAt: string
   uploadedBy: string
+  /** Groups that may read it without being members. */
+  viewers?: string[]
 }
 
 /** Where a published version came from, as the publisher reported it (#819). A claim: Nova
