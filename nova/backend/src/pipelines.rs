@@ -379,7 +379,7 @@ fn notify_of(spec: &Value) -> Option<PipelineNotify> {
 }
 
 /// `spec.viewers` as the list the document and the bundle carry: empty when absent.
-fn viewers_of(spec: &Value) -> Vec<String> {
+pub(crate) fn viewers_of(spec: &Value) -> Vec<String> {
     spec.get("viewers")
         .and_then(Value::as_array)
         .map(|viewers| {
@@ -4758,7 +4758,7 @@ async fn check_notify(
 }
 
 /// `spec.viewers` of a create or update body: at most 16 group names, the CRD's rule.
-fn check_viewers(viewers: Option<&[String]>) -> Result<(), String> {
+pub(crate) fn check_viewers(viewers: Option<&[String]>) -> Result<(), String> {
     let Some(viewers) = viewers else {
         return Ok(());
     };

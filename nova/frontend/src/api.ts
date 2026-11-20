@@ -1055,6 +1055,8 @@ export type StreamView = {
   sink_table: string
   sink_mode: string
   run_as: string | null
+  /** The groups that may read the stream without being members (`spec.viewers`). */
+  viewers: string[]
 }
 
 /** One `SparkCluster`: Spark compute for a team, one person, or everyone (`shared`). */
