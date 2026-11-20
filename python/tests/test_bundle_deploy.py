@@ -79,6 +79,31 @@ def test_plan_asks_nova_about_every_pipeline_and_writes_nothing(tmp_path):
     )
 
 
+def test_plan_format_markdown_is_a_table_a_pull_request_can_carry(tmp_path):
+    make(tmp_path)
+    code, out, err, session = run(
+        ["bundle", "plan", str(tmp_path), "-t", "prod", "--format", "markdown"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+    )
+    assert (code, err) == (0, "")
+    assert out == (
+        "### Bundle plan · `prod`\n\n"
+        "| Action | Pipeline | Notes |\n"
+        "|---|---|---|\n"
+        "| would-create | load | next: 2026-11-02T03:00:00+01:00 |\n"
+        "| would-update | nightly | statement |\n"
+    )
+
+
+def test_plan_markdown_escapes_a_pipe_and_a_line_break_and_has_one_row_per_result():
+    text = bundle.plan_markdown("prod", [
+        {"action": "would-update", "name": "a|b", "changes": ["schedule"], "modified": True},
+        {"action": "not-recorded", "name": "x", "reason": "one\ntwo"},
+    ])
+    assert text.splitlines()[4] == "| would-update | a\\|b | schedule; changed since deploy |"
+    assert text.splitlines()[5] == "| not-recorded | x | one two |"
+
+
 def test_plan_of_a_development_target_sends_the_prefixed_name_and_no_schedule(tmp_path):
     make(tmp_path)
     code, _, _, session = run(
