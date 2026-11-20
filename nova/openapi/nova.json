@@ -11258,6 +11258,7 @@
           "status",
           "pipelines",
           "resources",
+          "files",
           "actor",
           "createdAt"
         ],
@@ -11279,6 +11280,13 @@
           "createdAt": {
             "type": "string",
             "description": "When it was recorded, RFC 3339."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeploymentFile"
+            },
+            "description": "The files of the bundle the deploy read, as the caller sent them."
           },
           "id": {
             "type": "integer",
@@ -11318,6 +11326,24 @@
           },
           "target": {
             "type": "string"
+          }
+        }
+      },
+      "DeploymentFile": {
+        "type": "object",
+        "description": "One file of the bundle the deploy read: its path inside the bundle and the sha256 of its bytes.",
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path relative to the bundle directory, with `/` separators."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The file's content, lowercase hex sha256 (64 characters)."
           }
         }
       },
@@ -12464,6 +12490,13 @@
           "bundle": {
             "type": "string",
             "description": "The bundle that was deployed, 1 to 64 characters, no `/`."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeploymentFile"
+            },
+            "description": "The files of the bundle this deploy read, at most 200; empty when the caller sent none."
           },
           "ownerGroup": {
             "type": "string",
