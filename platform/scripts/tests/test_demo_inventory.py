@@ -16,7 +16,15 @@ _spec.loader.exec_module(demo_inventory)
 HEADER = "| pipeline | owner | schedule | viewers | last run | tasks |"
 
 
-def pipeline(name, owner_group="demo", schedule=None, viewers=None, runs=None, tasks=None):
+def pipeline(
+    name,
+    owner_group="demo",
+    schedule=None,
+    viewers=None,
+    runs=None,
+    tasks=None,
+    description="Loads the demo's seed data.",
+):
     spec = {
         "tasks": tasks if tasks is not None else [{"name": "load", "kind": "sql"}],
     }
@@ -26,6 +34,8 @@ def pipeline(name, owner_group="demo", schedule=None, viewers=None, runs=None, t
         spec["schedule"] = schedule
     if viewers is not None:
         spec["viewers"] = viewers
+    if description is not None:
+        spec["description"] = description
     return {
         "metadata": {"name": name, "namespace": "stardelt"},
         "spec": spec,
@@ -191,6 +201,25 @@ class CheckTest(unittest.TestCase):
         )
         self.assertIn(
             "pipeline shop-ontap is on demand; a visitor cannot see a next run", problems
+        )
+
+    def test_check_names_a_demo_pipeline_without_a_description(self):
+        problems = demo_inventory.check(
+            [
+                pipeline(
+                    "shop-dbt",
+                    schedule={"cron": "0 4 * * *", "timezone": "Europe/Berlin"},
+                    viewers=["visitors"],
+                    description=None,
+                )
+            ],
+            [],
+            [],
+            {"shop-dbt": {"state": "success"}},
+        )
+        self.assertEqual(
+            problems,
+            ["pipeline shop-dbt has no one-line description — run make demo-shop YES=1"],
         )
 
     def test_check_names_a_pipeline_that_never_ran(self):

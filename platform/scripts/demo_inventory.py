@@ -316,6 +316,12 @@ def check(pipelines, streams, clusters, runs, connections=None) -> list[str]:
                 f" — run make {FIX[kind]} YES=1"
             )
     for kind, obj in demo:
+        if kind == "pipeline" and not (_spec(obj).get("description") or "").strip():
+            problems.append(
+                f"pipeline {_name(obj)} has no one-line description"
+                f" — run make {FIX[kind]} YES=1"
+            )
+    for kind, obj in demo:
         if kind == "pipeline" and not _spec(obj).get("schedule"):
             problems.append(
                 f"pipeline {_name(obj)} is on demand; a visitor cannot see a next run"
