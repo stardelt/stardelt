@@ -183,6 +183,11 @@ def _parser():
     pub.add_argument("file", help="the .ipynb file")
     pub.add_argument("--group", help="the owner group (default: your only group)")
     pub.add_argument("--name", help="the name in Nova (default: the file name)")
+    pub.add_argument(
+        "--viewers",
+        metavar="GROUPS",
+        help="comma-separated groups that may read the version without being members (at most 8)",
+    )
     return parser
 
 
@@ -366,7 +371,15 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
         try:
             from stardelt.publish import publish
 
-            publish(args.file, group=args.group, name=args.name)
+            publish(
+                args.file,
+                group=args.group,
+                name=args.name,
+                viewers=[
+                    viewer.strip() for viewer in (args.viewers or "").split(",") if viewer.strip()
+                ]
+                or None,
+            )
         except (OSError, ValueError, RuntimeError) as err:
             stderr.write(f"stardelt: {err}\n")
             return ERROR

@@ -105,15 +105,20 @@ def _choose_group(token, group):
     )
 
 
-def publish(path, group=None, name=None):
+def publish(path, group=None, name=None, viewers=None):
     """Publish the notebook at ``path`` to Nova, return what was stored.
 
     ``group`` defaults to the person's only group from the token and is
     required when the token carries none or several (``ValueError`` lists
-    them). ``name`` defaults to the file's base name. The file is sent as-is:
-    Nova validates it as an nbformat 4 notebook, strips outputs and returns
-    the stored version. Files larger than 5 MiB are refused before sending.
+    them). ``name`` defaults to the file's base name.
 
+    ``viewers`` is a list of group names (at most 8) that may read the stored
+    version without being a member; it is sent as the ``X-Stardelt-Viewers``
+    header, which Nova validates (#523).
+
+    The file is sent as-is: Nova validates it as an nbformat 4 notebook,
+    strips outputs and returns the stored version. Files larger than 5 MiB are
+    refused before sending.
     The returned dict has ``name``, ``group``, ``version`` (the immutable
     object version a schedule pins), ``sha256`` (of the stored bytes) and the
     parsed ``parameters``; it is printed too. Every failure is one line, with
@@ -165,6 +170,8 @@ def publish(path, group=None, name=None):
     }
     if source is not None:
         headers["X-Stardelt-Source"] = json.dumps(source, separators=(",", ":"))
+    if viewers:
+        headers["X-Stardelt-Viewers"] = json.dumps(list(viewers), separators=(",", ":"))
     try:
         response = requests.put(
             url,

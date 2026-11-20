@@ -78,6 +78,7 @@ class FakeNova:
                         "authorization": self.headers.get("Authorization"),
                         "content_type": self.headers.get("Content-Type"),
                         "source": self.headers.get("X-Stardelt-Source"),
+                        "viewers": self.headers.get("X-Stardelt-Viewers"),
                         "body": self.rfile.read(length),
                     }
                 )
@@ -289,3 +290,22 @@ def test_cli_notebook_publish(nova, notebook):
 
     assert cli.main(["notebook", "publish", str(notebook), "--group", "g"]) == 0
     assert nova.requests[0]["path"] == "/api/notebooks/g/demo.ipynb"
+
+
+def test_publish_sends_the_viewers_header(nova, notebook):
+    stardelt.publish(notebook, group="analytics", viewers=["visitors", "analysts"])
+    assert nova.requests[0]["viewers"] == '["visitors","analysts"]'
+
+
+def test_publish_without_viewers_sends_no_header(nova, notebook):
+    stardelt.publish(notebook, group="analytics")
+    assert nova.requests[0]["viewers"] is None
+
+
+def test_cli_notebook_publish_passes_viewers(nova, notebook):
+    from stardelt import cli
+
+    assert cli.main(
+        ["notebook", "publish", str(notebook), "--group", "g", "--viewers", "visitors, analysts"]
+    ) == 0
+    assert nova.requests[0]["viewers"] == '["visitors","analysts"]'
