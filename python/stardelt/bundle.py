@@ -755,8 +755,11 @@ def _blocked(target, names):
     ]
 
 
-def _record(nova, stamp, directory, target, status, touched):
+def _record(nova, stamp, directory, target, status, touched, resources=()):
     """Record one deploy (``deployments_record``): the row on success, or a ``not-recorded`` row.
+
+    ``resources`` is the rendered list of Pipeline documents the deploy applied, empty for a
+    failed deploy; the record keeps them so a rollback can replay them.
 
     A record that cannot be written never fails the deploy: the caller prints the reason and keeps
     the exit code it already has.
@@ -771,6 +774,7 @@ def _record(nova, stamp, directory, target, status, touched):
             "repository": stamp.get("repository"),
             "status": status,
             "pipelines": touched,
+            "resources": list(resources),
         })
     except api.StardeltApiError as err:
         return {"action": "not-recorded", "reason": str(err)}
@@ -980,7 +984,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
                 done.append(_record(nova, stamp, directory, target, "failed", touched))
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name})
-    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale)))
+    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), specs))
     return [], done
 
 

@@ -11193,6 +11193,7 @@
           "target",
           "status",
           "pipelines",
+          "resources",
           "actor",
           "createdAt"
         ],
@@ -11234,6 +11235,13 @@
               "string",
               "null"
             ]
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "The rendered Pipeline documents the deploy applied, as the caller sent them."
           },
           "revision": {
             "type": [
@@ -12410,6 +12418,11 @@
               "null"
             ],
             "description": "The bundle's repository, or absent."
+          },
+          "resources": {
+            "type": "array",
+            "items": {},
+            "description": "The rendered Pipeline documents this deploy applied; empty for a failed deploy."
           },
           "revision": {
             "type": [

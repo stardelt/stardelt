@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from stardelt import bundle, cli
+from stardelt import api, bundle, cli
 from tests.test_api import CANARY, FakeResponse, FakeSession
 from tests.test_bundle import LOAD as LOAD_YAML
 from tests.test_bundle import MANIFEST, STREAM, make
@@ -300,6 +300,23 @@ def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(
     recorded = session.calls[-1][2]["json"]
     assert recorded["status"] == "failed"
     assert recorded["pipelines"] == [{"namespace": "stardelt", "name": "load", "action": "created"}]
+
+
+def test_the_record_keeps_the_rendered_pipeline_documents_so_a_rollback_can_replay_them(tmp_path):
+    make(tmp_path)
+    stamp = {"bundle": "sales-etl", "revision": None, "repository": None}
+    specs = [
+        {"name": "load", "ownerGroup": "sales", "sql": "select 1"},
+        {"name": "nightly", "ownerGroup": "sales", "sql": "select * from sales.demo.trips"},
+    ]
+    session = FakeSession(FakeResponse(201, {"id": 7}))
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    assert bundle._record(nova, stamp, tmp_path, "prod", "applied", [], specs) == {"action": "recorded", "id": 7}
+    assert session.calls[0][2]["json"]["resources"] == specs, "the record keeps exactly what was applied"
+    session = FakeSession(FakeResponse(201, {"id": 8}))
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    bundle._record(nova, stamp, tmp_path, "prod", "failed", [])
+    assert session.calls[0][2]["json"]["resources"] == [], "a failed deploy keeps no rendered documents"
 
 
 def test_a_development_target_prunes_only_the_callers_own_pipelines(tmp_path):
