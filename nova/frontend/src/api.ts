@@ -951,6 +951,8 @@ export type DeploymentRecord = {
   pipelines: { namespace: string; name: string; action: string }[]
   /** The rendered Pipeline documents this deploy applied, as sent (`resources`); a failed deploy sends none. */
   resources: unknown[]
+  /** The files of the bundle this deploy read: its path inside the bundle and the sha256 of its bytes. */
+  files: { path: string; sha256: string }[]
   /** The `sub` of the person who recorded the deploy. */
   actor: string
   /** The name the sign-in provided (stardelt-nova#1094); null for a row recorded before it was stored. */
