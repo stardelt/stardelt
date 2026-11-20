@@ -832,12 +832,13 @@ def plan_files(nova, directory, target):
     ], ""
 
 
-def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=()):
+def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=(), previous_deployment_id=None):
     """Record one deploy (``deployments_record``) for ``owner``: the row on success, or a ``not-recorded`` row.
 
     ``resources`` is the rendered list of Pipeline documents the deploy applied, empty for a
     failed deploy; the record keeps them so a rollback can replay them. ``files`` is the same for
     the bundle's own files (``_digests``): which content the documents were built from.
+    ``previous_deployment_id`` is the deployment a rollback replayed, ``None`` for a deploy that was not one.
 
     A record that cannot be written never fails the deploy: the caller prints the reason and keeps
     the exit code it already has.
@@ -853,6 +854,7 @@ def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=
             "pipelines": touched,
             "resources": list(resources),
             "files": list(files),
+            "previousDeploymentId": previous_deployment_id,
         })
     except api.StardeltApiError as err:
         return {"action": "not-recorded", "reason": str(err)}
@@ -1232,7 +1234,7 @@ def destroy(nova, directory, target, confirm=False):
 def _rollback_failed(nova, row, stamp, err, results):
     """The answer of a rollback that stopped at ``err``: the problem, and the attempt recorded as ``failed``."""
     touched = _touched(nova, row["resources"], results, [])
-    return [("rollback", str(err))], [*results, _record_at(nova, row["ownerGroup"], stamp, row["target"], "failed", touched, row["resources"])]
+    return [("rollback", str(err))], [*results, _record_at(nova, row["ownerGroup"], stamp, row["target"], "failed", touched, row["resources"], previous_deployment_id=row["id"])]
 
 
 def rollback(nova, deployment_id, dry_run=False):
@@ -1274,7 +1276,7 @@ def rollback(nova, deployment_id, dry_run=False):
             results.append(apply.apply(nova, document))
         except apply.ApplyError as err:
             return _rollback_failed(nova, row, stamp, err, results)
-    results.append(_record_at(nova, row["ownerGroup"], stamp, row["target"], "applied", _touched(nova, documents, results, []), documents))
+    results.append(_record_at(nova, row["ownerGroup"], stamp, row["target"], "applied", _touched(nova, documents, results, []), documents, previous_deployment_id=deployment_id))
     return [], results
 
 
