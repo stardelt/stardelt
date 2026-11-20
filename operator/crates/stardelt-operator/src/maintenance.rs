@@ -593,27 +593,12 @@ pub async fn reconcile_catalog(
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
-/// Whether the `Catalog` already carries the status this reconcile would write. `conditions` and
-/// `observedGeneration` compare exactly; a `maintenance: null` in `next` is a change only when the
-/// `Catalog` has a `maintenance` result to remove. An unchanged status must not be patched: the
-/// write moves `metadata.resourceVersion`, the watch delivers an "object updated" event and the
-/// controller reconciles again at once (stardelt#272).
+/// Whether the `Catalog` already carries the status this reconcile would write, under merge-patch
+/// semantics: only the keys `next` names are compared (see `conditions::status_is_current`). An
+/// unchanged status must not be patched: the write moves `metadata.resourceVersion`, the watch
+/// delivers an "object updated" event and the controller reconciles again at once (stardelt#272).
 fn status_is_current(current: Option<&CatalogDomainStatus>, next: &serde_json::Value) -> bool {
-    let Some(current) = current else {
-        return false;
-    };
-    let Ok(current) = serde_json::to_value(current) else {
-        return false;
-    };
-    if current.get("conditions") != next.get("conditions")
-        || current.get("observedGeneration") != next.get("observedGeneration")
-    {
-        return false;
-    }
-    match next.get("maintenance") {
-        None | Some(serde_json::Value::Null) => current.get("maintenance").is_none(),
-        Some(maintenance) => current.get("maintenance") == Some(maintenance),
-    }
+    crate::conditions::status_is_current(current, next)
 }
 
 pub fn error_policy<K>(_object: Arc<K>, error: &kube::Error, _ctx: Arc<Context>) -> Action {

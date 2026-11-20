@@ -372,6 +372,14 @@ async fn patch_principal_status(
         .as_ref()
         .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Ready"));
     let status = status_for(&state, sp.metadata.generation, previous, &now);
+    let next = serde_json::to_value(&status).expect("a ServicePrincipalStatus serialises");
+    if crate::conditions::status_is_current(sp.status.as_ref(), &next) {
+        return Ok(Action::requeue(Duration::from_secs(if state.ready {
+            300
+        } else {
+            30
+        })));
+    }
     let principals: Api<ServicePrincipal> = Api::namespaced(ctx.client.clone(), namespace);
     principals
         .patch_status(
@@ -925,6 +933,93 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&patch.2).expect("patch body is JSON");
         assert_eq!(body["status"]["ready"], true);
         assert_eq!(body["status"]["conditions"][0]["reason"], "Provisioned");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_principal_status_is_not_patched() {
+        let requests: Recorded = Arc::default();
+        let recorder = requests.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let recorder = recorder.clone();
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            async move {
+                let body = request
+                    .into_body()
+                    .collect_bytes()
+                    .await
+                    .expect("mock body");
+                recorder.lock().expect("requests poisoned").push((
+                    method.clone(),
+                    path.clone(),
+                    String::from_utf8_lossy(&body).to_string(),
+                ));
+                let document = if method == "GET" && path.contains("/platforminstances") {
+                    json!({
+                        "apiVersion": "stardelt.io/v1alpha1",
+                        "kind": "PlatformInstanceList",
+                        "items": []
+                    })
+                } else {
+                    json!({
+                        "apiVersion": "v1", "kind": "Secret",
+                        "metadata": { "name": "external-app", "namespace": "stardelt" },
+                        "data": { "client-id": b64("app-registration-id"), "client-secret": b64("secret") }
+                    })
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(
+                            serde_json::to_vec(&document).expect("mock document"),
+                        ))
+                        .expect("valid mock response"),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "stardelt");
+        let ctx = Arc::new(Context {
+            client,
+            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
+        });
+        let principal: ServicePrincipal = serde_json::from_value(json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": {
+                "name": "etl",
+                "namespace": "stardelt",
+                "generation": 1,
+                "finalizers": [PRINCIPAL_FINALIZER]
+            },
+            "spec": { "ownerGroup": "analytics", "existingSecretRef": { "name": "external-app" } },
+            "status": {
+                "ready": true,
+                "secretName": "external-app",
+                "conditions": [{
+                    "type": "Ready",
+                    "status": "True",
+                    "reason": "Provisioned",
+                    "lastTransitionTime": "t0",
+                    "observedGeneration": 1
+                }],
+                "observedGeneration": 1
+            }
+        }))
+        .expect("deserialize ServicePrincipal");
+
+        let action = reconcile_principal(Arc::new(principal), ctx)
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+
+        let requests = requests.lock().expect("requests poisoned");
+        assert!(
+            !requests
+                .iter()
+                .any(|(method, path, _)| method == "PATCH" && path.ends_with("/status")),
+            "an unchanged status must not be patched: {requests:?}"
+        );
     }
 
     fn cm_env() -> serde_json::Value {
