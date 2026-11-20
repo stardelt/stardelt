@@ -90,6 +90,10 @@ pub struct NewDeployment {
     /// The files of the bundle this deploy read, at most 200; empty when the caller sent none.
     #[serde(default)]
     pub files: Vec<DeploymentFile>,
+    /// The deployment a rollback replayed, or absent. It is display metadata: the page links to it, and a row the
+    /// caller may not see answers 404 there.
+    #[serde(default)]
+    pub previous_deployment_id: Option<i64>,
 }
 
 /// One file of the bundle the deploy read: its path inside the bundle and the sha256 of its bytes.
@@ -130,6 +134,8 @@ pub struct Deployment {
     /// The files of the bundle the deploy read, as the caller sent them.
     #[schema(value_type = Vec<DeploymentFile>)]
     pub files: serde_json::Value,
+    /// The deployment this row replayed, when it is a rollback; `None` for a deploy that was not one.
+    pub previous_deployment_id: Option<i64>,
     /// The `sub` of the person who recorded the deploy.
     pub actor: String,
     /// The name the caller's sign-in provided; `None` for rows recorded before migration 0025.
@@ -147,7 +153,7 @@ pub struct ListParams {
 
 /// The columns [`Deployment`] reads; the timestamp as RFC 3339 in UTC.
 const ROW_COLUMNS: &str = "id, bundle, owner_group, target, revision, repository, status, \
-    pipelines, resources, files, actor, actor_name, \
+    pipelines, resources, files, previous_deployment_id, actor, actor_name, \
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
 /// Whether `identity` may record a deployment of `owner_group`: an administrator, or a
@@ -386,8 +392,8 @@ pub async fn record(
         .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
     let sql = format!(
         "INSERT INTO deployment \
-         (bundle, owner_group, target, revision, repository, status, pipelines, resources, files, actor, actor_name) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING {ROW_COLUMNS}"
+         (bundle, owner_group, target, revision, repository, status, pipelines, resources, files, actor, actor_name, previous_deployment_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {ROW_COLUMNS}"
     );
     match sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
         .bind(&new.bundle)
@@ -407,6 +413,7 @@ pub async fn record(
         )
         .bind(&caller.identity.sub)
         .bind(&caller.identity.display_name)
+        .bind(new.previous_deployment_id)
         .fetch_one(pool)
         .await
     {
@@ -449,6 +456,7 @@ mod tests {
             pipelines: Vec::new(),
             resources: Vec::new(),
             files: Vec::new(),
+            previous_deployment_id: None,
         }
     }
 

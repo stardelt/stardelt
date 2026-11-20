@@ -11302,6 +11302,14 @@
             },
             "description": "The pipelines the deploy touched, as the caller sent them."
           },
+          "previousDeploymentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The deployment this row replayed, when it is a rollback; `None` for a deploy that was not one."
+          },
           "repository": {
             "type": [
               "string",
@@ -12508,6 +12516,14 @@
               "$ref": "#/components/schemas/DeploymentPipeline"
             },
             "description": "The pipelines the deploy touched, at most 200."
+          },
+          "previousDeploymentId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The deployment a rollback replayed, or absent. It is display metadata: the page links to it, and a row the\ncaller may not see answers 404 there."
           },
           "repository": {
             "type": [

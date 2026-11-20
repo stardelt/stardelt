@@ -953,6 +953,8 @@ export type DeploymentRecord = {
   resources: unknown[]
   /** The files of the bundle this deploy read: its path inside the bundle and the sha256 of its bytes. */
   files: { path: string; sha256: string }[]
+  /** The deployment this row replayed when it is a rollback; null for a deploy that was not one. */
+  previousDeploymentId: number | null
   /** The `sub` of the person who recorded the deploy. */
   actor: string
   /** The name the sign-in provided (stardelt-nova#1094); null for a row recorded before it was stored. */

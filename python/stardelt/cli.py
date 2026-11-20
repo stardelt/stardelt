@@ -589,6 +589,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 ("by", row.get("actorName") or row["actor"]), ("actor", row["actor"]), ("when", row["createdAt"]),
                 ("pipelines", str(len(row.get("pipelines") or []))), ("resources", str(len(row.get("resources") or []))),
                 ("files", str(len(row.get("files") or []))),
+                ("previous", str(row.get("previousDeploymentId") or "—")),
             ]
             for name, value in facts:
                 stdout.write(f"{name.ljust(10)}  {value}\n")

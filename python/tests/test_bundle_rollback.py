@@ -57,6 +57,7 @@ def test_rollback_replays_the_stored_documents_and_records_itself():
     assert (record["bundle"], record["ownerGroup"], record["target"], record["revision"]) == ("sales-etl", "sales", "prod", "abc1234")
     assert record["status"] == "applied"
     assert record["resources"] == [LOAD]
+    assert record["previousDeploymentId"] == 3
     assert calls(session) == [
         ("GET", "/api/deployments/3"), ("POST", "/api/pipelines/validate"),
         ("GET", "/api/pipelines"), ("POST", "/api/pipelines"),

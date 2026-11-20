@@ -11,7 +11,8 @@ import { formatWhen } from './Pipelines'
  * it wrote or removed, who deployed it, and the rendered documents a rollback replays. The rows
  * of the list page carry only a count, so this page is where a person reads the documents before
  * `stardelt bundle rollback --deployment <id>`. It also lists the bundle files and their digests,
- * so a person can compare a deploy with the commit it names.
+ * so a person can compare a deploy with the commit it names. A rollback's page says which
+ * deployment it restored.
  */
 
 /** Kind and name of a rendered document; a document without them still shows up, labelled. */
@@ -104,6 +105,16 @@ export default function DeploymentDetail() {
           <span title={when.title}>{when.text}</span>
         </p>
       </header>
+
+      {row.previousDeploymentId != null && (
+        <p className="text-sm text-text-mute">
+          This is a rollback of{' '}
+          <Link to={`/deployments/${row.previousDeploymentId}`} className="underline">
+            deployment #{row.previousDeploymentId}
+          </Link>
+          .
+        </p>
+      )}
 
       <section aria-labelledby="deployment-pipelines" className="space-y-2">
         <h2 id="deployment-pipelines" className="text-lg font-semibold">Pipelines</h2>
