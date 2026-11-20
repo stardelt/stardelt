@@ -84,7 +84,11 @@ pub fn role(namespace: &str) -> Role {
             },
             PolicyRule {
                 api_groups: Some(vec!["stardelt.io".into()]),
-                resources: Some(vec!["catalogs".into(), "sqlwarehouses".into()]),
+                resources: Some(vec![
+                    "catalogs".into(),
+                    "sqlwarehouses".into(),
+                    "serviceprincipals".into(),
+                ]),
                 verbs: vec!["get".into(), "list".into()],
                 ..PolicyRule::default()
             },

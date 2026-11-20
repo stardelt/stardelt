@@ -188,6 +188,7 @@ PROJECT_ID = "00000000-0000-0000-0000-000000000000"
 STS_ROLE_ARN = "arn:aws:iam::000000000000:role/stardelt"
 CATALOG_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/catalogs" % NAMESPACE
 SQLWAREHOUSE_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/sqlwarehouses" % NAMESPACE
+SERVICEPRINCIPAL_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/serviceprincipals" % NAMESPACE
 CONFIGMAP_PATH = "/api/v1/namespaces/%s/configmaps" % NAMESPACE
 
 # The two ConfigMaps the warehouse half writes (platform#312). Both are created
@@ -645,6 +646,37 @@ def static_assignees():
     return {group: set(principals) for group, principals in parsed.items()}
 
 
+def workload_identities():
+    """`{"<ownerGroup>": set("kubernetes~<uid>")}` from every ServicePrincipal's
+    `status.workloadIdentity` (#492).
+
+    A workload that signs in with its ServiceAccount token is
+    `kubernetes~<uid>` in Lakekeeper (#538), so that principal has to be an
+    assignee of its owner group's role or the workload reads nothing. An install
+    whose Role predates this read answers 403, and one without the CRD answers 404:
+    the tick then goes on without workload identities, as it did before. An identity
+    is a principal id and is never printed.
+    """
+    status, listing = k8s_request("GET", SERVICEPRINCIPAL_PATH)
+    if status in (403, 404):
+        print(
+            "access-sync: no ServicePrincipal read (HTTP %s); workload identities skipped" % status
+        )
+        return {}
+    if status != 200 or listing is None:
+        fail("cannot list ServicePrincipals (HTTP %s)" % status)
+    index = {}
+    for item in listing.get("items") or []:
+        group = (item.get("spec") or {}).get("ownerGroup")
+        identity = (item.get("status") or {}).get("workloadIdentity")
+        if not isinstance(group, str) or not group:
+            continue
+        if not isinstance(identity, str) or not identity.startswith("kubernetes~"):
+            continue
+        index.setdefault(group, set()).add(identity)
+    return index
+
+
 def group_users(group, members, static):
     """Every Trino user string that is a member of `group`.
 
@@ -873,12 +905,13 @@ def ensure_role(group, roles=None):
     return role_id
 
 
-def sync_assignees(role_id, subs):
-    """Make the role's assignees exactly `subs`; returns `(written, removed)`.
+def sync_assignees(role_id, subs, workloads=frozenset()):
+    """Make the role's assignees exactly `subs` plus `workloads`; returns `(written, removed)`.
 
     Only `assignee` entries are touched — the role's `ownership` (its creator) and any
     other relation stay as they are. Nothing is written when the sets already match,
-    which is what makes a converged tick a no-op.
+    which is what makes a converged tick a no-op. `workloads` are full principal ids
+    (`kubernetes~<uid>`) and are not prefixed, unlike `subs`, which become `oidc~<sub>`.
     """
     status, body = lk("GET", "/management/v1/permissions/role/%s/assignments" % role_id)
     if status != 200 or body is None:
@@ -888,7 +921,7 @@ def sync_assignees(role_id, subs):
         for entry in body.get("assignments") or []
         if entry.get("type") == "assignee" and entry.get("user")
     }
-    desired = {"oidc~" + sub for sub in subs}
+    desired = {"oidc~" + sub for sub in subs} | set(workloads)
     writes = sorted(desired - current)
     deletes = sorted(current - desired)
     if not writes and not deletes:
@@ -1821,6 +1854,7 @@ def main():
     catalogs = list_catalogs()
     warehouses = warehouse_pairs(list_warehouses())
     static = static_assignees()
+    workloads = workload_identities()
     groups = managed_groups(catalogs) | warehouse_groups(warehouses)
 
     # 1. Keycloak, read-only, before any write: a realm that refuses this client
@@ -1854,7 +1888,9 @@ def main():
         role_ids[group] = role_id
         assignees = members[group] | static.get(group, set())
         try:
-            written, removed = sync_assignees(role_id, assignees)
+            written, removed = sync_assignees(
+                role_id, assignees, workloads.get(group, set())
+            )
         except SyncProblem as problem:
             problems[group] = problem
             failures += 1
