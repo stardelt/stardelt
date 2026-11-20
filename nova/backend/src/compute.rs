@@ -110,6 +110,8 @@ pub struct ComputeCluster {
     /// Whether the caller may start, stop or edit the cluster: an administrator, the owner
     /// group of a `SparkCluster`, its `owner.user`, or an administrator on `shared` (#706).
     pub can_act: bool,
+    /// The groups that may see the cluster without being its owner (`spec.viewers`).
+    pub viewers: Vec<String>,
     pub shared: bool,
     /// `cluster` for a `SparkCluster`, `platform` for a Spark server the manifests install.
     pub kind: String,
@@ -305,6 +307,7 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             .unwrap_or(60),
         can_use: connect,
         can_act: act,
+        viewers,
         kind: "cluster".to_string(),
         mode: None,
         limits: None,
@@ -467,6 +470,7 @@ fn platform_view(
         idle_stop_minutes: 0,
         can_use: true,
         can_act: false,
+        viewers: Vec::new(),
         shared: audience.as_deref() == Some("members"),
         kind: "platform".to_string(),
         mode: Some(mode.to_string()),
@@ -562,6 +566,7 @@ fn demo_clusters() -> Vec<ComputeCluster> {
         idle_stop_minutes: 0,
         can_use: true,
         can_act: false,
+        viewers: Vec::new(),
         shared: true,
         kind: "cluster".to_string(),
         mode: None,
@@ -801,6 +806,10 @@ pub struct ComputeSpecBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub owner: ComputeOwner,
+    /// Groups that may see the cluster without being its owner (`spec.viewers`), read-only.
+    /// Absent keeps what the cluster carries; an empty list removes the key. At most 16.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<Vec<String>>,
     #[serde(default = "default_size")]
     pub size: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -923,6 +932,17 @@ fn validate_spec(name: &str, body: &ComputeSpecBody) -> Result<(), String> {
     {
         return Err("owner.user must be a valid user name".to_string());
     }
+    if let Some(viewers) = &body.viewers {
+        if viewers.len() > 16 {
+            return Err("viewers holds at most 16 groups".to_string());
+        }
+        if let Some(bad) = viewers
+            .iter()
+            .find(|group| !crate::notebooks::valid_group(group))
+        {
+            return Err(format!("viewers holds `{bad}`, which is not a group name"));
+        }
+    }
     if let Some(display_name) = &body.display_name
         && display_name.chars().count() > 100
     {
@@ -1009,6 +1029,31 @@ fn validate_spec(name: &str, body: &ComputeSpecBody) -> Result<(), String> {
     Ok(())
 }
 
+/// The `spec.viewers` a replace writes, the pipeline rule: `None` keeps the stored list (a form
+/// save must not wipe what a bundle or kubectl set), `Some([])` removes the key, a list writes it.
+fn write_viewers(
+    spec: &mut serde_json::Value,
+    viewers: Option<&[String]>,
+    stored: Option<&serde_json::Value>,
+) {
+    match viewers {
+        Some(viewers) if !viewers.is_empty() => spec["viewers"] = json!(viewers),
+        Some(_) => {
+            if let Some(map) = spec.as_object_mut() {
+                map.remove("viewers");
+            }
+        }
+        None => {
+            if let Some(stored) = stored
+                .and_then(|object| object.pointer("/spec/viewers"))
+                .cloned()
+            {
+                spec["viewers"] = stored;
+            }
+        }
+    }
+}
+
 /// `PUT /api/admin/compute/{name}`: create the cluster, or replace it as a whole.
 #[utoipa::path(
     put,
@@ -1055,12 +1100,11 @@ pub(crate) async fn upsert(
         .unwrap_or("Stopped")
         .to_string();
     spec["state"] = json!(state_word);
-    if let Some(viewers) = existing
-        .as_ref()
-        .and_then(|object| object.data.pointer("/spec/viewers").cloned())
-    {
-        spec["viewers"] = viewers;
-    }
+    write_viewers(
+        &mut spec,
+        body.viewers.as_deref(),
+        existing.as_ref().map(|object| &object.data),
+    );
     let object = kube::api::DynamicObject {
         types: Some(kube::core::TypeMeta {
             api_version: "stardelt.io/v1alpha1".into(),
@@ -1155,7 +1199,7 @@ mod tests {
 
     use super::{
         may_act, may_use, message_of, owner_of, phase_of, platform_view, spark_defaults,
-        validate_spec, view, viewers_of, visible_clusters, visible_to,
+        validate_spec, view, viewers_of, visible_clusters, visible_to, write_viewers,
     };
     use crate::auth::Identity;
 
@@ -1252,6 +1296,8 @@ mod tests {
         };
         assert_eq!(listed("demo", &["visitors"]), ["team"]);
         assert!(listed("other", &["other"]).is_empty());
+        let view = &visible_clusters(&objects, &who("demo", &["visitors"], false))[0];
+        assert_eq!(view.viewers, vec!["visitors".to_string()]);
     }
 
     #[test]
@@ -1410,6 +1456,45 @@ mod tests {
             "runtime": "spark-4.1-py3.13"
         }))
         .expect("a valid body")
+    }
+
+    #[test]
+    fn viewers_are_validated() {
+        let mut b = body();
+        b.viewers = Some((0..17).map(|i| format!("group{i}")).collect());
+        assert_eq!(
+            validate_spec("demo", &b),
+            Err("viewers holds at most 16 groups".to_string())
+        );
+        let mut b = body();
+        b.viewers = Some(vec!["not a group".to_string()]);
+        assert_eq!(
+            validate_spec("demo", &b),
+            Err("viewers holds `not a group`, which is not a group name".to_string())
+        );
+        let mut b = body();
+        b.viewers = Some(vec!["visitors".to_string()]);
+        assert_eq!(validate_spec("demo", &b), Ok(()));
+    }
+
+    #[test]
+    fn a_replace_writes_keeps_or_clears_the_viewers() {
+        let stored = json!({ "spec": { "viewers": ["visitors"] } });
+        let mut spec = json!({ "owner": { "group": "analytics" } });
+        write_viewers(&mut spec, None, Some(&stored));
+        assert_eq!(
+            spec.get("viewers"),
+            Some(&json!(["visitors"])),
+            "absent keeps"
+        );
+        write_viewers(&mut spec, Some(&["analytics".to_string()]), Some(&stored));
+        assert_eq!(
+            spec.get("viewers"),
+            Some(&json!(["analytics"])),
+            "a list writes"
+        );
+        write_viewers(&mut spec, Some(&[]), Some(&stored));
+        assert!(spec.get("viewers").is_none(), "an empty list clears");
     }
 
     #[test]

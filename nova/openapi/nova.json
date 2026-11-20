@@ -10784,6 +10784,7 @@
           "idleStopMinutes",
           "canUse",
           "canAct",
+          "viewers",
           "shared",
           "kind"
         ],
@@ -10931,6 +10932,13 @@
               "string",
               "null"
             ]
+          },
+          "viewers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The groups that may see the cluster without being its owner (`spec.viewers`)."
           },
           "yours": {
             "type": "boolean",
@@ -11081,6 +11089,16 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "viewers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups that may see the cluster without being its owner (`spec.viewers`), read-only.\nAbsent keeps what the cluster carries; an empty list removes the key. At most 16."
           }
         },
         "additionalProperties": false

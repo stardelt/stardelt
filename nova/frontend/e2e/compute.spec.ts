@@ -35,6 +35,18 @@ test('an administrator opens the new-cluster dialog and it validates a bad name'
   await expect(dialog).toHaveCount(0)
 })
 
+test('the new-cluster dialog validates the viewers field', async ({ page }) => {
+  await page.goto('/compute')
+  await page.getByRole('button', { name: 'New cluster' }).click()
+  const dialog = page.locator('dialog')
+  await dialog.getByLabel('Viewers').fill('not a group')
+  await expect(dialog.getByText(/a group of your sign-in provider/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled()
+  await dialog.getByLabel('Viewers').fill('visitors, analytics')
+  await expect(dialog.getByText(/a group of your sign-in provider/)).toHaveCount(0)
+  await page.keyboard.press('Escape')
+})
+
 test('the shared card is editable but not deletable', async ({ page }) => {
   await page.goto('/compute')
   await page.getByRole('button', { name: 'Edit' }).click()

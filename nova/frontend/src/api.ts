@@ -1085,6 +1085,8 @@ export type ComputeCluster = {
    * group of a `SparkCluster`, its `owner.user`, or an administrator on `shared` (#706).
    */
   canAct: boolean
+  /** The groups that may see the cluster without being its owner (`spec.viewers`). */
+  viewers: string[]
   shared: boolean
   /** `cluster` for a `SparkCluster`; `platform` for a Spark server the platform's manifests install. */
   kind?: 'cluster' | 'platform'
@@ -1117,6 +1119,7 @@ export type WorkspaceView = {
 export type ComputeSpecBody = {
   displayName?: string
   owner: { group: string | null; user: string | null }
+  viewers?: string[]
   size: 'small' | 'medium' | 'large'
   driver?: { cores: number; memory: string } | null
   executor?: { cores: number; memory: string } | null

@@ -66,6 +66,7 @@ export default function ComputeDialog({
   const displayNameId = useId()
   const ownerId = useId()
   const ownerKindId = useId()
+  const viewersId = useId()
   const sizeId = useId()
   const driverCoresId = useId()
   const driverMemoryId = useId()
@@ -90,6 +91,7 @@ export default function ComputeDialog({
   const [ownerValue, setOwnerValue] = useState(
     (cluster?.owner.group ?? cluster?.owner.user ?? '') || '',
   )
+  const [viewers, setViewers] = useState((cluster?.viewers ?? []).join(', '))
   const [size, setSize] = useState<'small' | 'medium' | 'large'>(
     cluster?.size === 'medium' || cluster?.size === 'large' ? cluster.size : 'small',
   )
@@ -153,6 +155,13 @@ export default function ComputeDialog({
       : !RUNTIME_RE.test(runtimeValue)
         ? RUNTIME_SENTENCE
         : null
+  const viewerList = viewers.split(',').map((group) => group.trim()).filter((group) => group !== '')
+  const viewersProblem =
+    viewerList.length > 16
+      ? 'at most 16 groups'
+      : viewerList.find((group) => !GROUP_RE.test(group))
+        ? GROUP_SENTENCE
+        : null
   const imageProblem = imageValue !== '' && !imageValue.includes('@sha256:') ? IMAGE_SENTENCE : null
 
   const driverHalfProblem =
@@ -196,6 +205,7 @@ export default function ComputeDialog({
   const problems = [
     nameProblem,
     ownerProblem,
+    viewersProblem,
     runtimeProblem,
     imageProblem,
     driverHalfProblem,
@@ -226,6 +236,7 @@ export default function ComputeDialog({
         ownerKind === 'group'
           ? { group: ownerValueTrimmed, user: null }
           : { group: null, user: ownerValueTrimmed },
+      viewers: viewerList,
       size,
       ...(driver ? { driver } : {}),
       ...(executor ? { executor } : {}),
@@ -359,6 +370,20 @@ export default function ComputeDialog({
                 (ownerKind === 'group'
                   ? 'who may use this cluster: a group of your sign-in provider'
                   : 'who may use this cluster: one person')}
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor={viewersId} className="label block mb-1.5">Viewers</label>
+            <input
+              id={viewersId}
+              className="input w-full"
+              value={viewers}
+              onChange={(event) => setViewers(event.target.value)}
+              placeholder="groups that may see it, comma-separated"
+            />
+            <p className={viewersProblem ? problemClass : hintClass}>
+              {viewersProblem ?? 'a viewer sees the cluster and its specs; only the owner group and administrators start, stop or edit it'}
             </p>
           </div>
 
