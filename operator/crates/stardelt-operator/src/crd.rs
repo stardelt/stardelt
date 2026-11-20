@@ -1805,7 +1805,9 @@ pub struct ConnectionStatus {
         skip_serializing_if = "Option::is_none"
     )]
     pub secret_name: Option<String>,
-    /// RFC 3339 time of the last successful sync from the store.
+    /// RFC 3339 time since which the credential has been in its current sync state: the `Ready`
+    /// condition's `lastTransitionTime` on the `ExternalSecret`. Stable while the value does not
+    /// change, unlike External Secrets' refresh heartbeat (`status.refreshTime`).
     #[serde(default, rename = "lastSync", skip_serializing_if = "Option::is_none")]
     pub last_sync: Option<String>,
     #[serde(default)]

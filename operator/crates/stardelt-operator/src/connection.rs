@@ -165,7 +165,10 @@ pub fn plan(
 #[derive(Debug, PartialEq, Eq)]
 pub struct SyncState {
     pub ready: bool,
-    /// `status.refreshTime`: the last successful sync.
+    /// `status.conditions[type=Ready].lastTransitionTime`: since when the credential has been in its
+    /// current sync state. Not `status.refreshTime`, which moves on every refresh heartbeat even when
+    /// the synced value did not change (so an idle connection would write its status every interval,
+    /// #591).
     pub last_sync: Option<String>,
     /// Why it is not ready, when External Secrets says.
     pub message: Option<String>,
@@ -189,7 +192,7 @@ pub fn sync_state(external_secret: &Value) -> SyncState {
     SyncState {
         ready,
         last_sync: if ready {
-            text(&status["refreshTime"])
+            ready_condition.and_then(|c| text(&c["lastTransitionTime"]))
         } else {
             None
         },
@@ -524,16 +527,23 @@ mod tests {
     fn the_sync_state_follows_the_ready_condition() {
         let ready = json!({ "status": {
             "refreshTime": "2026-10-19T17:00:00Z",
-            "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced" }]
+            "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced",
+                             "lastTransitionTime": "2026-10-19T16:58:00Z" }]
         }});
         assert_eq!(
             sync_state(&ready),
             SyncState {
                 ready: true,
-                last_sync: Some("2026-10-19T17:00:00Z".into()),
+                last_sync: Some("2026-10-19T16:58:00Z".into()),
                 message: None
             }
         );
+        // A Ready condition without a transition time has no last sync to report.
+        let no_time = json!({ "status": {
+            "refreshTime": "2026-10-19T17:00:00Z",
+            "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced" }]
+        }});
+        assert_eq!(sync_state(&no_time).last_sync, None);
         let failing = json!({ "status": { "conditions": [
             { "type": "Ready", "status": "False", "reason": "SecretSyncedError", "message": "permission denied" }
         ]}});
@@ -557,6 +567,28 @@ mod tests {
         let fresh = sync_state(&json!({ "metadata": {} }));
         assert!(!fresh.ready);
         assert!(fresh.message.unwrap().contains("first sync"));
+    }
+
+    #[test]
+    fn a_refresh_heartbeat_does_not_move_the_last_sync() {
+        let at = |refresh: &str| {
+            json!({ "status": {
+                "refreshTime": refresh,
+                "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced",
+                                 "lastTransitionTime": "2026-11-19T14:33:48Z" }]
+            }})
+        };
+        let first = sync_state(&at("2026-11-20T07:33:50Z"));
+        let second = sync_state(&at("2026-11-20T07:48:50Z"));
+        assert_eq!(first.last_sync.as_deref(), Some("2026-11-19T14:33:48Z"));
+        assert_eq!(first, second);
+        // The value changes: External Secrets flips the condition, so the transition time moves.
+        let flipped = sync_state(&json!({ "status": {
+            "refreshTime": "2026-11-20T08:03:50Z",
+            "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced",
+                             "lastTransitionTime": "2026-11-20T08:03:49Z" }]
+        }}));
+        assert_eq!(flipped.last_sync.as_deref(), Some("2026-11-20T08:03:49Z"));
     }
 
     #[test]
