@@ -1716,6 +1716,8 @@ export const api = {
   deploymentRecords: (keep401 = false) => jget<DeploymentRecord[]>('/api/deployments', keep401),
   /** One recorded deploy (`GET /api/deployments/{id}`, design nova#357); 404 when it is not one of the caller's groups. */
   deployment: (id: number, keep401 = false) => jget<DeploymentRecord>(`/api/deployments/${id}`, keep401),
+  /** Replay a recorded deploy (`POST /api/deployments/{id}/rollback`, design nova#357); 201 with the new row. */
+  deploymentRollback: (id: number) => jpost<DeploymentRecord>(`/api/deployments/${id}/rollback`, {}),
   /** The caller's personal settings as one JSON object (`{}` when none). */
   settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
   putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),
