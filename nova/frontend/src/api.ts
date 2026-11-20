@@ -1073,10 +1073,12 @@ export type ComputeCluster = {
   phase: 'Starting' | 'Running' | 'Stopping' | 'Stopped' | 'Failed' | string
   /** The operator's reason while the phase is `Failed` or `Starting`; absent when it has none. */
   message?: string | null
+  /** The Connect endpoint; `null` for a caller who sees the cluster only as a viewer. */
   endpoint: string | null
   startedAt: string | null
   lastActivityAt: string | null
   idleStopMinutes: number
+  /** The caller's group owns the cluster (or it is `shared`); a viewer sees `false`. */
   canUse: boolean
   shared: boolean
   /** `cluster` for a `SparkCluster`; `platform` for a Spark server the platform's manifests install. */

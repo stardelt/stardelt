@@ -192,34 +192,42 @@ export default function Compute() {
                         <p className="text-sm text-bad">{c.message}</p>
                       )}
                       <div className="flex gap-2">
-                        {(c.phase === 'Stopped' || c.phase === 'Failed') && (
-                          <button
-                            type="button"
-                            className="btn-ghost px-2.5 py-1 text-xs"
-                            disabled={pending}
-                            onClick={() => start.mutate(c.name)}
-                          >
-                            Start
-                          </button>
-                        )}
-                        {c.phase === 'Running' && (
-                          <button
-                            type="button"
-                            className="btn-ghost px-2.5 py-1 text-xs"
-                            disabled={pending}
-                            onClick={() => stop.mutate(c.name)}
-                          >
-                            Stop
-                          </button>
-                        )}
-                        {admin && (
-                          <button
-                            type="button"
-                            className="btn-ghost px-2.5 py-1 text-xs"
-                            onClick={() => setEditing({ cluster: c })}
-                          >
-                            Edit
-                          </button>
+                        {c.canUse ? (
+                          <>
+                            {(c.phase === 'Stopped' || c.phase === 'Failed') && (
+                              <button
+                                type="button"
+                                className="btn-ghost px-2.5 py-1 text-xs"
+                                disabled={pending}
+                                onClick={() => start.mutate(c.name)}
+                              >
+                                Start
+                              </button>
+                            )}
+                            {c.phase === 'Running' && (
+                              <button
+                                type="button"
+                                className="btn-ghost px-2.5 py-1 text-xs"
+                                disabled={pending}
+                                onClick={() => stop.mutate(c.name)}
+                              >
+                                Stop
+                              </button>
+                            )}
+                            {admin && (
+                              <button
+                                type="button"
+                                className="btn-ghost px-2.5 py-1 text-xs"
+                                onClick={() => setEditing({ cluster: c })}
+                              >
+                                Edit
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-sm text-text-dim">
+                            Shared with you by {audience(c.owner)} — their group runs the code on it.
+                          </p>
                         )}
                       </div>
                     </>
