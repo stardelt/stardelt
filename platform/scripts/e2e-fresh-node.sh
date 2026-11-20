@@ -43,6 +43,10 @@ E2E_RUN_ID="${E2E_RUN_ID:-$(date -u +%Y%m%d%H%M%S)}"
 # The three paths stay in the run directory: a `down` run finds them from the same name.
 FRESH_NAME="stardelt-fresh-e2e-${E2E_RUN_ID}"
 RUN_DIR="$HOME/.cache/stardelt-e2e/${E2E_RUN_ID}"
+# The commit this run proves (#620). Captured here, before the hour-long run, so a checkout
+# that moves during it cannot change what the report claims.
+RUN_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+[ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] || RUN_COMMIT="${RUN_COMMIT}-dirty"
 FRESH_CONFIG="$RUN_DIR/fresh.yaml"
 FRESH_KUBECONFIG="$RUN_DIR/kubeconfig.yaml"
 
@@ -215,6 +219,7 @@ report() {
       out+="${line}"$'\n'
     done
   fi
+  out+="commit: ${RUN_COMMIT}"$'\n'
   out+="node type: ${FRESH_NODE_TYPE} @ ${LOCATION}"$'\n'
   out+="base domain: ${FRESH_DOMAIN:-<none>}"$'\n'
   out+="wall time: ${SECONDS}s"$'\n'
