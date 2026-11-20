@@ -19,7 +19,7 @@ dependencies = ["pandas", "requests", "trino", "certifi", "pyyaml"]
 # pyspark-client is the Connect-only package: no Spark jars, same import name.
 spark = ["pyspark-client>=4.1,<4.3"]
 jupyter = ["jupysql", "ipython", "sqlalchemy", "ipykernel"]
-test = ["pytest"]
+test = ["pytest", "jsonschema"]
 
 [project.scripts]
 stardelt = "stardelt.cli:main"

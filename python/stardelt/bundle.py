@@ -351,6 +351,8 @@ def validate(directory, target=None):
             continue
         where = f"targets.{tname}"
         spec = spec if isinstance(spec, dict) else {}
+        for key in sorted(set(spec) - {"mode", "variables", "runAs", "drift"}):
+            problems.append((where, f"unknown key {key!r} (known: drift, mode, runAs, variables)"))
         mode = spec.get("mode")
         if mode not in MODES:
             problems.append((where, f"mode must be one of {', '.join(MODES)}"))
