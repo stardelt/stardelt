@@ -3706,6 +3706,70 @@
         }
       }
     },
+    "/api/deployments/{id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/deployments/{id}` — one row, or 404 when it is not one the caller may see.",
+        "description": "One deployment record by id: an administrator sees every row, anybody else only a row of their own groups. A row that does not exist and a row of somebody else's group answer the same 404, so the route never says which ids exist.",
+        "operationId": "deployments_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The deployment's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The caller has no identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such row among the ones the caller may see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/destinations": {
       "get": {
         "tags": [
