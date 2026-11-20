@@ -40,6 +40,10 @@
 # Pods are matched by owner, not by name prefix: `nova-` also matches the StatefulSet pod
 # `nova-pg-1`, so a pod counts only when `ownerReferences[0].kind == "ReplicaSet"` and the
 # ReplicaSet name starts with `<deployment>-`.
+# A pod the node already ended (phase `Succeeded`/`Failed`, e.g. an eviction under disk pressure) or
+# one carrying a `deletionTimestamp` is not a replica: the ReplicaSet already replaced it, and
+# counting it as "not ready" failed every row for hours after the node recovered (2026-11-20T14:32Z,
+# 13 rows while every Deployment was at its desired count). Its newest exit is still printed on the row.
 # A ReplicaSet belongs to the longest row that matches it: `spark-connect-auth-…` is the front's row,
 # not the driver's, even though `spark-connect` is its prefix.
 # spark-connect and spark-connect-auth are rows too: a driver restart drops every live session
@@ -138,6 +142,20 @@ def is_ready(pod):
         if cond.get("type") == "Ready":
             return cond.get("status") == "True"
     return False
+
+
+def is_gone(pod):
+    """A pod the node already ended, or one on its way out, is not a replica of the Deployment.
+
+    The kubelet evicts pods under disk pressure; the ReplicaSet replaces them at once, but the
+    evicted objects stay in the list (phase `Failed`, reason `Evicted`) until their ReplicaSet is
+    garbage-collected. Counting them as "not ready" failed every row for hours after the node
+    recovered (measured 2026-11-20T14:32Z: 13 rows, all their Deployments at their desired count).
+    """
+    meta = pod.get("metadata") or {}
+    if meta.get("deletionTimestamp"):
+        return True
+    return (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed")
 
 
 def _epoch(ts):
@@ -246,18 +264,25 @@ for name in rows:
         lines.append(row("–", name, "not installed"))
         continue
     found += 1
-    ready = sum(1 for p in pods if is_ready(p))
+    live = [pod for pod in pods if not is_gone(pod)]
+    if not live:
+        lines.append(row("✗", name, "%d pod(s), none running" % len(pods)))
+        not_ready += 1
+        continue
+    ready = sum(1 for p in live if is_ready(p))
     restarts = 0
     newest = None
-    for pod in pods:
+    for pod in live:
         for status in (pod.get("status") or {}).get("containerStatuses") or []:
             restarts += status.get("restartCount") or 0
+    for pod in pods:
+        for status in (pod.get("status") or {}).get("containerStatuses") or []:
             term = ((status.get("lastState") or {}).get("terminated") or {})
             finished = term.get("finishedAt")
             if finished and (newest is None or finished > newest[2]):
                 newest = (term.get("reason") or "?", term.get("exitCode"), finished)
-    if ready < len(pods):
-        lines.append(row("✗", name, "%d of %d pod(s) ready" % (ready, len(pods))))
+    if ready < len(live):
+        lines.append(row("✗", name, "%d of %d pod(s) ready" % (ready, len(live))))
         not_ready += 1
         continue
     text = "%d pod(s) ready, %d restart(s) in total" % (ready, restarts)
@@ -271,7 +296,7 @@ for name in rows:
         )
     crashes = []
     node_rows = []
-    for pod in pods:
+    for pod in live:
         term = crash_of(pod)
         if term is None:
             continue
