@@ -1119,6 +1119,10 @@ access-sync-now: _context ## Run one access-sync Job now, wait for it and print 
 	         echo "job $$name did not complete — see the log above" >&2; exit 1; }; \
 	  kubectl -n $(NAMESPACE) logs "job/$$name"
 
+.PHONY: verify-access-sync-script
+verify-access-sync-script: _context ## The live access-sync ConfigMap carries the repository's script
+	python3 scripts/check_access_sync_live.py
+
 # ---------------------------------------------------------------------------
 # More catalogs (platform#308, authz 6/8) — the Catalog objects become Trino
 # catalogs and bridge mappings.
