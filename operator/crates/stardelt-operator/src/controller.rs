@@ -930,6 +930,7 @@ async fn patch_lakehouse_status(
         &Patch::Merge(json!({ "status": status })),
     )
     .await?;
+    crate::metrics::record_status_write("lakehouse");
     Ok(())
 }
 
@@ -2000,6 +2001,7 @@ async fn write_stopped_platform_status(
             &Patch::Merge(json!({ "status": status })),
         )
         .await?;
+    crate::metrics::record_status_write("platform");
     Ok(Action::await_change())
 }
 
@@ -2051,6 +2053,7 @@ async fn reconcile_platform(
             &Patch::Merge(json!({ "status": status })),
         )
         .await?;
+        crate::metrics::record_status_write("platform");
         tracing::info!(instance = %name, "reconciliation paused; nothing was applied");
         return Ok(Action::await_change());
     }
@@ -2266,6 +2269,7 @@ async fn reconcile_platform(
         &Patch::Merge(json!({ "status": status })),
     )
     .await?;
+    crate::metrics::record_status_write("platform");
     tracing::info!(instance = %name, phase, dry_run = instance.spec.dry_run, "reconciled");
     Ok(Action::requeue(Duration::from_secs(300)))
 }

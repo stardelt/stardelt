@@ -361,6 +361,7 @@ pub async fn reconcile_connection(
             &Patch::Merge(json!({ "status": status })),
         )
         .await?;
+    crate::metrics::record_status_write("connection");
     tracing::info!(connection = %name, %namespace, ready, reason, "reconciled");
     // A change of the spec or of the status triggers the next run; the timer picks up the sync that
     // finishes while nothing else changes.

@@ -380,6 +380,7 @@ async fn patch_principal_status(
             &Patch::Merge(json!({ "status": status })),
         )
         .await?;
+    crate::metrics::record_status_write("principal");
     tracing::info!(
         principal = %name,
         %namespace,

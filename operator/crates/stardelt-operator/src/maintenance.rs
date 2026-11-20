@@ -559,7 +559,9 @@ pub async fn reconcile_catalog(
         )
         .await;
     match patch {
-        Ok(_) => {}
+        Ok(_) => {
+            crate::metrics::record_status_write("catalog");
+        }
         Err(error) if is_conflict(&error) => {
             // The access-sync job wrote a condition between our GET and our PATCH: re-read,
             // merge our condition into the fresh list and carry the fresh `resourceVersion`.
@@ -581,6 +583,7 @@ pub async fn reconcile_catalog(
                 )),
             )
             .await?;
+            crate::metrics::record_status_write("catalog");
         }
         Err(error) => return Err(error),
     }
