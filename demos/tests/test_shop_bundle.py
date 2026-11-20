@@ -59,6 +59,11 @@ def test_three_pipelines_one_per_layer():
         assert len(doc["name"]) <= MAX_NAME, f"{doc['name']} is {len(doc['name'])} characters"
 
 
+def test_every_pipeline_is_readable_by_visitors():
+    for path, doc in pipelines():
+        assert doc.get("viewers") == ["visitors"], f"{path.name} must name viewers: [visitors]"
+
+
 def test_every_task_names_a_statement_file_that_exists():
     found = pipelines()
     names = {doc["name"]: [task["name"] for task in doc["tasks"]] for _, doc in found}

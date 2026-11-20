@@ -13,6 +13,7 @@ metadata:
 spec:
   ownerGroup: demo
   runAs: pipeline-demo
+  viewers: [visitors]
   schedule:
     cron: "0 4 * * *"
     timezone: Europe/Berlin

@@ -1,6 +1,7 @@
 name: shop-3-gold
 description: "Builds the marts the demo reads: daily revenue, customer lifetime value and the product mix."
 schedule: {cron: "0 3 * * *", timezone: Europe/Berlin}
+viewers: [visitors]
 params:
   schema: "${var.schema}"
 notify: {onSuccess: [run-feed], onFailure: [run-feed]}
