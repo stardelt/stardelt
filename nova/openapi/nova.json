@@ -2,13 +2,19 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Nova API",
-    "description": "The stardelt Nova gateway: catalog browse, queries and jobs over one identity. In `dev` mode (the default) every route answers without sign-in; in `oidc` mode every described route below requires a session or bearer token except this document itself. Only routes tagged `public` are promised stable.",
+    "description": "The stardelt Nova gateway: catalog browse, queries and jobs over one identity. In `dev` mode (the default) every route answers without sign-in; in `oidc` mode every described route below requires a session or bearer token except this document itself. Only routes tagged `public` are promised stable. Every non-2xx answer is `{\"error\": \"<one sentence>\"}` (`ErrorResponse`), unless the operation documents another body: `POST /api/migrations/apply` answers 409 with `ApplyAnswer` and the refused migration file. A missing or invalid credential is 401 with an `ErrorResponse` on every operation the global `security` covers; the three routes that answer without a credential (the document itself, health and the sign-in config) carry an empty `security`.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
     },
     "version": "0.1.0"
   },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This Nova instance. Every path below starts with `/api`; a missing or invalid credential is answered with 401 and an ErrorResponse."
+    }
+  ],
   "paths": {
     "/api/admin/catalogs": {
       "get": {
