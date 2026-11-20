@@ -305,7 +305,7 @@ fn ready_condition(
     )
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     k8s_openapi::jiff::Timestamp::now().to_string()
 }
 

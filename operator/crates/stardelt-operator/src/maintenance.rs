@@ -19,9 +19,10 @@ use kube::ResourceExt;
 use kube::api::{Api, ListParams, LogParams, ObjectMeta};
 use kube::runtime::controller::Action;
 
-use crate::controller::{Context, delete_ignoring_not_found};
+use crate::conditions::{merge_condition, set_condition};
+use crate::controller::{Context, delete_ignoring_not_found, now_rfc3339};
 use crate::crd::{
-    Catalog, CatalogDomainStatus, Condition, MaintenanceSpec, MaintenanceStatus, ServicePrincipal,
+    Catalog, CatalogDomainStatus, MaintenanceSpec, MaintenanceStatus, ServicePrincipal,
     principal_client_id,
 };
 use crate::identity::PLATFORM_REALM;
@@ -272,12 +273,6 @@ pub fn cron_job(
     }
 }
 
-/// The conditions after replacing the one of `next`'s type and keeping every other one; see
-/// [`crate::conditions::merge_condition`] for why the transition time only moves with the status.
-pub fn merge_condition(existing: &[Condition], next: Condition) -> Vec<Condition> {
-    crate::conditions::merge_condition(existing, next)
-}
-
 /// The summary line `stardelt maintenance run` writes last:
 /// `{"catalog": …, "tablesDone": n, "tablesFailed": m}`. It is the last such line, not the last
 /// line: a warning after it must not hide the result.
@@ -470,30 +465,38 @@ pub async fn reconcile_catalog(
 
     let principals: Api<ServicePrincipal> = Api::namespaced(ctx.client.clone(), &namespace);
     let cron_jobs: Api<CronJob> = Api::namespaced(ctx.client.clone(), &namespace);
+    let existing = catalog
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+    let now = now_rfc3339();
     let condition = match principals.get_opt(&principal).await? {
         None => {
             delete_ignoring_not_found(&cron_jobs, &job_name(&name)).await?;
-            Condition {
-                type_: "MaintenanceReady".into(),
-                status: "False".into(),
-                reason: Some("NoRunner".into()),
-                message: Some(format!(
+            set_condition(
+                &existing,
+                "MaintenanceReady",
+                "False",
+                "NoRunner",
+                Some(format!(
                     "create ServicePrincipal {principal} to run maintenance"
                 )),
-                last_transition_time: Some(k8s_openapi::jiff::Timestamp::now().to_string()),
-                observed_generation: catalog.metadata.generation,
-            }
+                catalog.metadata.generation,
+                &now,
+            )
         }
         Some(sp) if !sp.status.as_ref().is_some_and(|status| status.ready) => {
             delete_ignoring_not_found(&cron_jobs, &job_name(&name)).await?;
-            Condition {
-                type_: "MaintenanceReady".into(),
-                status: "False".into(),
-                reason: Some("RunnerNotReady".into()),
-                message: Some(principal_not_ready_detail(&principal, &sp)),
-                last_transition_time: Some(k8s_openapi::jiff::Timestamp::now().to_string()),
-                observed_generation: catalog.metadata.generation,
-            }
+            set_condition(
+                &existing,
+                "MaintenanceReady",
+                "False",
+                "RunnerNotReady",
+                Some(principal_not_ready_detail(&principal, &sp)),
+                catalog.metadata.generation,
+                &now,
+            )
         }
         Some(_) => {
             let job = cron_job(
@@ -505,28 +508,24 @@ pub async fn reconcile_catalog(
                 &catalog_owner(&catalog),
             );
             crate::objects::apply(&ctx.client, &namespace, &job, false).await?;
-            Condition {
-                type_: "MaintenanceReady".into(),
-                status: "True".into(),
-                reason: Some("Scheduled".into()),
-                message: Some(format!(
+            set_condition(
+                &existing,
+                "MaintenanceReady",
+                "True",
+                "Scheduled",
+                Some(format!(
                     "{} on {}",
                     job_name(&name),
                     effective_schedule(&name, &catalog.spec.maintenance)
                 )),
-                last_transition_time: Some(k8s_openapi::jiff::Timestamp::now().to_string()),
-                observed_generation: catalog.metadata.generation,
-            }
+                catalog.metadata.generation,
+                &now,
+            )
         }
     };
 
     let (job_exists, maintenance) = last_maintenance(&ctx, &namespace, &name).await?;
 
-    let existing = catalog
-        .status
-        .as_ref()
-        .map(|s| s.conditions.clone())
-        .unwrap_or_default();
     let conditions = merge_condition(&existing, condition.clone());
     let observed = catalog.metadata.generation;
     let api: Api<Catalog> = Api::namespaced(ctx.client.clone(), &namespace);
@@ -622,7 +621,7 @@ pub fn error_policy<K>(_object: Arc<K>, error: &kube::Error, _ctx: Arc<Context>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{CatalogDomainStatus, MaintenanceSpec};
+    use crate::crd::{CatalogDomainStatus, Condition, MaintenanceSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kube::Client;
     use std::sync::Mutex;
@@ -969,6 +968,31 @@ mod tests {
             condition.last_transition_time.as_deref(),
             Some("2026-11-19T08:10:00Z"),
             "a status change takes next's transition time"
+        );
+    }
+
+    #[test]
+    fn the_maintenance_condition_reuses_the_transition_time_while_the_status_holds() {
+        let existing = vec![Condition {
+            type_: "MaintenanceReady".into(),
+            status: "True".into(),
+            reason: Some("Scheduled".into()),
+            message: Some("maint-mobility on 0 3 * * *".into()),
+            last_transition_time: Some("2026-01-01T00:00:00Z".into()),
+            observed_generation: Some(3),
+        }];
+        let next = set_condition(
+            &existing,
+            "MaintenanceReady",
+            "True",
+            "Scheduled",
+            Some("maint-mobility on 0 3 * * *".into()),
+            Some(3),
+            "2026-11-20T05:00:00Z",
+        );
+        assert_eq!(
+            next.last_transition_time.as_deref(),
+            Some("2026-01-01T00:00:00Z")
         );
     }
 
