@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The 0.0.4 exit list (stardelt/stardelt#401) as one command: one row per exit line, numbered
-# 1-6, then a summary and one exit code. #561 gave exit line 5 its own command
+# 1-7, then a summary and one exit code. #561 gave exit line 5 its own command
 # (`make verify-release`); this script is the "is 0.0.4 ready?" answer the tag (#430) starts from.
 #
 #   make exit-status
@@ -144,6 +144,29 @@ if [ "$offenders" -eq 0 ]; then
   row_pass 6 "every image is pinned by digest (0 offenders)"
 else
   row_fail 6 "every image is pinned by digest: $offenders offender(s)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. The Spark Connect front authorizes on both install paths: #404 (the
+#    platform front's group check) and #263 (the operator path, the D44 twin)
+#    are both closed. Maintainer decision, 2026-11-19, on #401.
+# ---------------------------------------------------------------------------
+open_front=()
+front_ok=1
+for n in 404 263; do
+  if state="$(gh_state "$n")"; then
+    [ "$state" = "CLOSED" ] || { front_ok=0; open_front+=("#$n $state"); }
+  else
+    front_ok=-1
+    break
+  fi
+done
+if [ "$front_ok" -eq 1 ]; then
+  row_pass 7 "the Spark Connect front authorizes on both install paths (#404 CLOSED, #263 CLOSED)"
+elif [ "$front_ok" -eq 0 ]; then
+  row_fail 7 "the Spark Connect front authorizes on both install paths: ${open_front[*]}"
+else
+  row_unverified 7 "cannot read #404 and #263 (gh answered with an error)"
 fi
 
 echo "exit-status: $pass pass, $fail fail, $unverified_count unverified, $manual manual"

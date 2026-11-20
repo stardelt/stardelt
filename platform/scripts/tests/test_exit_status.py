@@ -24,7 +24,8 @@ if os.environ.get("FAKE_GH_BROKEN") == "1":
 if "auth" in args:
     sys.exit(0)
 if "view" in args:
-    print(os.environ.get("FAKE_ISSUE_STATE", "CLOSED"))
+    n = next((a for a in args if a.isdigit()), "")
+    print(os.environ.get("FAKE_ISSUE_%s_STATE" % n, os.environ.get("FAKE_ISSUE_STATE", "CLOSED")))
     sys.exit(0)
 if "list" in args:
     if "length" in args:
@@ -64,7 +65,7 @@ class ExitStatus(unittest.TestCase):
     def test_every_exit_line_is_printed(self):
         done = self._run()
         rows = [line for line in done.stdout.splitlines() if line[:1] in ("✓", "✗", "·", "?")]
-        self.assertEqual(len(rows), 6, done.stdout)
+        self.assertEqual(len(rows), 7, done.stdout)
         for number, row in enumerate(rows, start=1):
             self.assertTrue(row.startswith(("✓ ", "✗ ", "· ", "? ")), row)
             self.assertEqual(row[2:].split(" ", 1)[0], str(number), row)
@@ -80,11 +81,21 @@ class ExitStatus(unittest.TestCase):
         self.assertIn("3", row3[0])
         self.assertIn("#16", row3[0])
 
+    def test_an_open_263_fails_the_script(self):
+        done = self._run({"FAKE_ISSUE_263_STATE": "OPEN"})
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        rows = [line for line in done.stdout.splitlines() if line.startswith(("✓ ", "✗ ", "· ", "? "))]
+        row7 = [row for row in rows if row[2:].split(" ", 1)[0] == "7"]
+        self.assertEqual(len(row7), 1, done.stdout)
+        self.assertIn("✗", row7[0])
+        self.assertIn("#263 OPEN", row7[0])
+
     def test_all_green_exits_zero(self):
         done = self._run({"FAKE_ISSUE_STATE": "CLOSED", "FAKE_P0_COUNT": "0", "FAKE_MAKE_EXIT": "0"})
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("0 fail", done.stdout)
         self.assertIn("✓ 6  every image is pinned by digest", done.stdout)
+        self.assertIn("✓ 7  the Spark Connect front authorizes on both install paths", done.stdout)
 
     def test_an_unreachable_gh_is_unverified(self):
         done = self._run({"FAKE_GH_BROKEN": "1"})
