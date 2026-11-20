@@ -83,16 +83,23 @@ def test_plan_format_markdown_is_a_table_a_pull_request_can_carry(tmp_path):
     make(tmp_path)
     code, out, err, session = run(
         ["bundle", "plan", str(tmp_path), "-t", "prod", "--format", "markdown"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=[]),
     )
     assert (code, err) == (0, "")
+    files = bundle._digests(tmp_path)
     assert out == (
         "### Bundle plan · `prod`\n\n"
         "| Action | Pipeline | Notes |\n"
         "|---|---|---|\n"
         "| would-create | load | next: 2026-11-02T03:00:00+01:00 |\n"
         "| would-update | nightly | statement |\n"
+        "\n### Bundle files · `prod`\n\n"
+        "| File | sha256 | State |\n"
+        "|---|---|---|\n"
+        + "".join(f"| {file['path']} | {file['sha256'][:12]} | new |\n" for file in files)
     )
+    assert calls(session)[-1] == ("GET", "/api/deployments")
+    assert session.calls[-1][2]["params"] == {"bundle": "sales-etl", "target": "prod"}
 
 
 def test_plan_markdown_escapes_a_pipe_and_a_line_break_and_has_one_row_per_result():

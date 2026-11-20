@@ -54,7 +54,8 @@ until a command needs the platform.
 - `stardelt bundle validate .` checks it with no host and no sign-in.
 - `stardelt bundle plan . -t <target>` asks Nova what a deploy would do and writes nothing. A
   breaking table migration in the plan names the tables that depend on it. Add --format markdown to
-  paste the plan into a pull request comment.
+  paste the plan into a pull request comment; it lists every bundle file with its sha256 and marks it
+  new, changed or unchanged against the newest applied deployment of that bundle and target.
 - `stardelt bundle deploy . -t <target>` is a write; run the plan first and show the person what it
   would change.
 - `stardelt bundle summary . -t <target>` says what the last deploy left on the stage, and
