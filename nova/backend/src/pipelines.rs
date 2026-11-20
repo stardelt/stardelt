@@ -950,7 +950,8 @@ const MAX_NOTEBOOK_PARAM_VALUE_CHARS: usize = 256;
 /// The longest the `params` JSON object string may be — the CRD's CEL limit.
 const MAX_NOTEBOOK_PARAMS_JSON_CHARS: usize = 4096;
 
-const ONE_OF_STATEMENT_NOTEBOOK_OR_DBT: &str = "give a statement, a notebook or a dbt run";
+const ONE_OF_STATEMENT_NOTEBOOK_OR_DBT: &str =
+    "give a statement, a notebook, a dbt run or a quality run";
 const NOTEBOOK_NAME_RULE: &str = "the notebook name is a .ipynb file name (letters, digits, \
                                   dots, dashes, underscores and spaces)";
 const NOTEBOOK_PARAM_NAMES: &str = "parameter names are letters, digits and underscores";
@@ -1035,6 +1036,21 @@ const MAX_DBT_BATCHES: usize = 8;
 const MAX_DBT_THREADS: u8 = 16;
 /// The longest the `vars` JSON object string may be — the CRD's CEL limit for a `config` value.
 const MAX_DBT_VARS_JSON_CHARS: usize = 4096;
+
+/// The `quality` task (`#114`): the sentences of `demos/dags/stardelt_pipelines/plan.py`'s
+/// `_quality_checks`, verbatim, so Nova refuses exactly what the loader refuses.
+const MAX_QUALITY_CHECKS: usize = 50;
+const MAX_CHECK_SQL_CHARS: usize = 20000;
+const QUALITY_NEEDS_CHECKS: &str = "a quality task needs checks (a list of 1 to 50 SQL assertions)";
+const QUALITY_CHECK_NEEDS_NAME: &str = "a check needs a name (1 to 63 letters, digits, dashes or \
+                                        underscores, starting with a letter or a digit)";
+const QUALITY_CHECK_NAME_TWICE: &str = "the check name is used twice";
+const QUALITY_CHECK_NEEDS_SQL: &str =
+    "a check's sql must be a non-empty string of at most 20000 characters";
+const QUALITY_CHECK_BAD_SEVERITY: &str = "a check's severity must be error or warn";
+const QUALITY_CHECK_AUDIT_TABLE: &str =
+    "`${table}` is the audit branch of publish: wap, which has no runtime yet";
+
 /// A project is one directory name under the tool image's `/opt/dbt/projects`: the loader's
 /// `^[a-z][a-z0-9-]{0,38}$`.
 fn valid_dbt_project(project: &str) -> bool {
@@ -1091,6 +1107,65 @@ fn dbt_config(request: &DbtRequest) -> Result<BTreeMap<String, String>, String> 
     Ok(config)
 }
 
+/// The `quality` task's `severity` values the loader accepts (`plan.py`'s `SEVERITIES`).
+const QUALITY_SEVERITIES: [&str; 2] = ["error", "warn"];
+
+/// `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`: the loader's `_CHECK_NAME`.
+fn valid_check_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+}
+
+/// One SQL assertion of a `quality` task as the resource stores it: the severity is resolved
+/// (`"error"` when the request gave none).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityCheck {
+    name: String,
+    sql: String,
+    severity: String,
+}
+
+/// The `quality` task's checks, checked the way `plan.py`'s `_quality_checks` checks them: 1 to
+/// 50 assertions, a unique loader-shaped name each, non-empty SQL without `${table}` (the audit
+/// branch of WAP), and `error` or `warn`. `Err` is the sentence the caller sees.
+fn quality_config(request: &QualityRequest) -> Result<Vec<QualityCheck>, String> {
+    if request.checks.is_empty() || request.checks.len() > MAX_QUALITY_CHECKS {
+        return Err(QUALITY_NEEDS_CHECKS.into());
+    }
+    let mut checks: Vec<QualityCheck> = Vec::with_capacity(request.checks.len());
+    for check in &request.checks {
+        if !valid_check_name(&check.name) {
+            return Err(QUALITY_CHECK_NEEDS_NAME.into());
+        }
+        if checks.iter().any(|done| done.name == check.name) {
+            return Err(QUALITY_CHECK_NAME_TWICE.into());
+        }
+        if check.sql.is_empty() || check.sql.chars().count() > MAX_CHECK_SQL_CHARS {
+            return Err(QUALITY_CHECK_NEEDS_SQL.into());
+        }
+        if check.sql.contains("${table}") {
+            return Err(QUALITY_CHECK_AUDIT_TABLE.into());
+        }
+        let severity = match check.severity.as_deref() {
+            None => "error",
+            Some(severity) if QUALITY_SEVERITIES.contains(&severity) => severity,
+            Some(_) => return Err(QUALITY_CHECK_BAD_SEVERITY.into()),
+        };
+        checks.push(QualityCheck {
+            name: check.name.clone(),
+            sql: check.sql.clone(),
+            severity: severity.to_string(),
+        });
+    }
+    Ok(checks)
+}
+
 /// The `run` task of a Nova-written pipeline as a write stores it (#210, #237): exactly one of a
 /// statement and a pinned notebook version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1108,15 +1183,18 @@ enum Statement {
     },
     /// A `dbt` task of a task list (`#112`): exactly the CRD's `config` map.
     Dbt(BTreeMap<String, String>),
+    /// A `quality` task of a task list (`#114`): the SQL assertions, severity resolved.
+    Quality(Vec<QualityCheck>),
     /// A whole task list, each task checked (`#905`).
     Tasks(Vec<TaskStatement>),
 }
 
 /// The body's statement with the rules of its kind applied: the SQL ones (statement, template
 /// parameters, placeholders), the notebook ones (name, parameters, and a pinned version that
-/// exists in the group), or the dbt ones (`plan.py`'s config rules). `Err` is the sentence and
-/// the audit's reason. A body gives exactly one of a non-empty `sql`, a `notebook` and a `dbt`
-/// run; two of them or none is the same sentence (#237, #112).
+/// exists in the group), the dbt ones (`plan.py`'s config rules), or the quality ones (`plan.py`'s
+/// check rules). `Err` is the sentence and the audit's reason. A body gives exactly one of a
+/// non-empty `sql`, a `notebook`, a `dbt` run and a `quality` run; two of them or none is the same
+/// sentence (#237, #112, #114).
 async fn checked_statement(
     sql: &str,
     notebook: Option<&NotebookRequest>,
@@ -1124,22 +1202,26 @@ async fn checked_statement(
     template_params: &BTreeMap<String, String>,
     notebooks: Option<&NotebookStore>,
     group: &str,
+    quality: Option<&QualityRequest>,
 ) -> Result<Statement, ActionError> {
     let refused = |reason: &'static str, message: String| {
         ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
     };
-    match (sql.trim().is_empty(), notebook, dbt) {
-        (true, None, Some(dbt)) => dbt_config(dbt)
+    match (sql.trim().is_empty(), notebook, dbt, quality) {
+        (true, None, Some(dbt), None) => dbt_config(dbt)
             .map(Statement::Dbt)
             .map_err(|message| refused("dbt", message)),
-        (false, None, None) => {
+        (true, None, None, Some(quality)) => quality_config(quality)
+            .map(Statement::Quality)
+            .map_err(|message| refused("quality", message)),
+        (false, None, None, None) => {
             let sql = validate_sql(sql).map_err(|message| refused("sql", message))?;
             validate_params(template_params).map_err(|message| refused("params", message))?;
             check_placeholders(&sql, template_params)
                 .map_err(|message| refused("params", message))?;
             Ok(Statement::Sql(sql))
         }
-        (true, Some(notebook), None) => {
+        (true, Some(notebook), None, None) => {
             let params =
                 validate_notebook(notebook).map_err(|message| refused("notebook", message))?;
             if !notebooks::object_version_ok(&notebook.object_version) {
@@ -1200,6 +1282,9 @@ fn task_json(task: &TaskStatement) -> Value {
         }
         // `checked_statement` never answers a task list.
         Statement::Dbt(config) => json!({ "name": task.name, "kind": "dbt", "config": config }),
+        Statement::Quality(checks) => {
+            json!({ "name": task.name, "kind": "quality", "checks": checks })
+        }
         Statement::Tasks(_) => unreachable!("a task carries one statement, not a list"),
     };
     if !task.depends_on.is_empty() {
@@ -1323,6 +1408,7 @@ async fn checked_tasks(
             template_params,
             notebooks,
             group,
+            task.quality.as_ref(),
         )
         .await
         .map_err(|error| error.about_task(&task.name))?;
@@ -1361,9 +1447,10 @@ async fn checked_run(
 ) -> Result<Statement, ActionError> {
     match (sql.trim().is_empty(), notebook.is_some(), tasks) {
         // A body without `tasks` behaves exactly as today, sentence included. A body's own
-        // `dbt` is not a shape this route takes (#112): only a task list carries one.
+        // `dbt` or `quality` is not a shape this route takes (#112, #114): only a task list
+        // carries one.
         (_, _, None) => {
-            checked_statement(sql, notebook, None, template_params, notebooks, group).await
+            checked_statement(sql, notebook, None, template_params, notebooks, group, None).await
         }
         (true, false, Some(tasks)) => {
             // Once for the whole list: the parameters are the pipeline's, shared by every task.
@@ -1386,14 +1473,14 @@ async fn checked_run(
 enum StoredShape {
     /// The form's single `run` task, of this kind (`sql` or `notebook`).
     Run(&'static str),
-    /// A task list: every task is `sql`, `notebook` or `dbt`, and it is not the single `run`
-    /// task.
+    /// A task list: every task is `sql`, `notebook`, `dbt` or `quality`, and it is not the single
+    /// `run` task.
     Tasks,
     /// A shape Nova does not write (another kind, or no tasks at all).
     Other,
 }
 
-/// A task list: `run_task_kind` does not answer, and every task is a kind Nova can write.
+/// A task list is a task list whatever each task runs: `sql`, `notebook`, `dbt` or `quality`.
 fn is_task_list(resource: &Value) -> bool {
     if run_task_kind(resource).is_some() {
         return false;
@@ -1407,7 +1494,7 @@ fn is_task_list(resource: &Value) -> bool {
                 && tasks.iter().all(|task| {
                     matches!(
                         task.get("kind").and_then(Value::as_str),
-                        Some("sql" | "notebook" | "dbt")
+                        Some("sql" | "notebook" | "dbt" | "quality")
                     )
                 })
         })
@@ -1922,6 +2009,8 @@ fn pipeline_resource(
         Statement::Tasks(tasks) => Value::Array(tasks.iter().map(task_json).collect()),
         // A top-level body never carries a `dbt` run: only a task list does (#112).
         Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
+        // Nor a `quality` run (#114).
+        Statement::Quality(_) => unreachable!("a quality run is one task of a task list"),
     };
     let mut spec = json!({
         "ownerGroup": group,
@@ -2002,6 +2091,8 @@ fn updated_resource(
         }
         // An update body never carries a `dbt` run: it names no `dbt` field (#112).
         Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
+        // Nor a `quality` run (#114).
+        Statement::Quality(_) => unreachable!("a quality run is one task of a task list"),
     }
     updated["spec"]["concurrency"] = json!(options.concurrency);
     updated["spec"]["retries"] = json!({
@@ -2279,22 +2370,50 @@ pub struct DbtRequest {
     pub vars: Option<BTreeMap<String, String>>,
 }
 
+/// One SQL assertion of a `quality` task (`#114`): a name the task log shows, the statement that
+/// must return no rows, and how a non-empty answer is treated.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityCheckRequest {
+    /// `[A-Za-z0-9][A-Za-z0-9_-]{0,62}` and unique within the task.
+    pub name: String,
+    /// The assertion: it passes when the query returns no rows.
+    pub sql: String,
+    /// `error` fails the run, `warn` only logs it; omitted is `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+}
+
+/// A `quality` task of a task list (`#114`): SQL assertions the loader runs after the task's
+/// predecessors. The rules are `demos/dags/stardelt_pipelines/plan.py`'s, so Nova refuses what the
+/// loader would refuse.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityRequest {
+    /// 1 to 50 SQL assertions; a check passes when its query returns no rows.
+    pub checks: Vec<QualityCheckRequest>,
+}
+
 /// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a
-/// notebook and a dbt run, and the tasks that must succeed first.
+/// notebook, a dbt run and a quality run, and the tasks that must succeed first.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineTaskRequest {
     /// Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}` (the CRD also accepts capitals).
     pub name: String,
-    /// The statement to run; exactly one of this, `notebook` and `dbt` is given.
+    /// The statement to run; exactly one of this, `notebook`, `dbt` and `quality` is given.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sql: String,
     /// A published notebook version to run instead (#237).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notebook: Option<NotebookRequest>,
-    /// A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the three.
+    /// A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the four.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbt: Option<DbtRequest>,
+    /// SQL assertions instead of a statement, a notebook or a dbt run (`#114`): exactly one of
+    /// the four.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<QualityRequest>,
     /// Names of the tasks that must succeed first; at most 8, each a task of this list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -2313,7 +2432,8 @@ pub struct CreatePipelineRequest {
     #[serde(default)]
     pub notebook: Option<NotebookRequest>,
     /// A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement, a
-    /// pinned notebook or a dbt run, with dependencies. Exclusive with `sql` and `notebook`.
+    /// pinned notebook, a dbt run or SQL checks, with dependencies. Exclusive with `sql` and
+    /// `notebook`.
     #[serde(default)]
     pub tasks: Option<Vec<PipelineTaskRequest>>,
     #[serde(default)]
@@ -2354,7 +2474,8 @@ pub struct UpdatePipelineRequest {
     #[serde(default)]
     pub notebook: Option<NotebookRequest>,
     /// A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement, a
-    /// pinned notebook or a dbt run, with dependencies. Exclusive with `sql` and `notebook`.
+    /// pinned notebook, a dbt run or SQL checks, with dependencies. Exclusive with `sql` and
+    /// `notebook`.
     #[serde(default)]
     pub tasks: Option<Vec<PipelineTaskRequest>>,
     /// Omitted means no schedule: the pipeline then runs on demand only.
@@ -3696,6 +3817,7 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
             sql: String::new(),
             notebook: None,
             dbt: None,
+            quality: None,
             depends_on,
         };
         match task.get("kind")?.as_str()? {
@@ -3747,6 +3869,24 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
                         None => None,
                     },
                 });
+            }
+            "quality" => {
+                let checks = task
+                    .get("checks")?
+                    .as_array()?
+                    .iter()
+                    .map(|check| {
+                        Some(QualityCheckRequest {
+                            name: check.get("name")?.as_str()?.to_string(),
+                            sql: check.get("sql")?.as_str()?.to_string(),
+                            severity: check
+                                .get("severity")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect::<Option<Vec<QualityCheckRequest>>>()?;
+                request.quality = Some(QualityRequest { checks });
             }
             _ => return None,
         }
@@ -6262,7 +6402,7 @@ fn spec_response_example() -> serde_json::Value {
     operation_id = "pipelines_create",
     path = "/api/pipelines",
     tag = "public",
-    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement, a notebook or a dbt run`. A body may instead give `tasks` (`[{ name, sql | notebook | dbt, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement, a notebook, a dbt run or a quality run`. A body may instead give `tasks` (`[{ name, sql | notebook | dbt | quality, dependsOn }]`, 1 to 30 tasks, each with exactly one source, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     request_body(content = CreatePipelineRequest, example = json!(create_request_example())),
     responses(
         (status = 201, description = "The resource as written", body = PipelineView, example = json!(pipeline_view_example())),
@@ -6344,7 +6484,7 @@ pub(crate) async fn validate(
     operation_id = "pipelines_update",
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement, a notebook or a dbt run`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement, a notebook, a dbt run or a quality run`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. In a stage whose NOVA_STAGE_KIND is prod, a body that schedules a notebook is refused with 400 \"In production a notebook comes from Git. Deploy it with a bundle.\" unless it carries a bundle deploy stamp (provenance, or one already on the pipeline); other stages and statement schedules are unaffected. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -11014,6 +11154,7 @@ mod tests {
             sql: sql.into(),
             notebook: None,
             dbt: None,
+            quality: None,
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11025,7 +11166,33 @@ mod tests {
             sql: String::new(),
             notebook: None,
             dbt: Some(dbt),
+            quality: None,
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    /// A `quality` task entry for the tests (`#114`).
+    fn quality_task(
+        name: &str,
+        checks: Vec<QualityCheckRequest>,
+        depends_on: &[&str],
+    ) -> PipelineTaskRequest {
+        PipelineTaskRequest {
+            name: name.into(),
+            sql: String::new(),
+            notebook: None,
+            dbt: None,
+            quality: Some(QualityRequest { checks }),
+            depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    /// One SQL assertion of a quality task.
+    fn check(name: &str, sql: &str, severity: Option<&str>) -> QualityCheckRequest {
+        QualityCheckRequest {
+            name: name.into(),
+            sql: sql.into(),
+            severity: severity.map(str::to_string),
         }
     }
 
@@ -11111,6 +11278,7 @@ mod tests {
                 sql: String::new(),
                 notebook: Some(report.clone()),
                 dbt: None,
+                quality: None,
                 depends_on: vec!["load".into()],
             },
         ];
@@ -11985,6 +12153,7 @@ mod tests {
                     connection: None,
                 }),
                 dbt: None,
+                quality: None,
                 depends_on: vec!["load".into()],
             },
         ]);
@@ -12032,6 +12201,7 @@ mod tests {
                 connection: Some("crm-db".into()),
             }),
             dbt: None,
+            quality: None,
             depends_on: Vec::new(),
         }]);
         create_pipeline(
@@ -12224,6 +12394,7 @@ mod tests {
                 threads: None,
                 vars: None,
             }),
+            quality: None,
             depends_on: vec![],
         }]);
         let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
@@ -12246,6 +12417,244 @@ mod tests {
             }
         });
         assert_eq!(stored_shape(&resource), StoredShape::Tasks);
+    }
+
+    #[tokio::test]
+    async fn create_with_tasks_accepts_a_quality_task() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-quality", "analytics", "");
+        body.tasks = Some(vec![quality_task(
+            "gate",
+            vec![check("no_null_ids", "SELECT 1 WHERE 1=0", Some("warn"))],
+            &[],
+        )]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a quality task list");
+        let stored = stored_pipeline(&resources, "shop-quality")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][0],
+            json!({
+                "name": "gate",
+                "kind": "quality",
+                "checks": [{
+                    "name": "no_null_ids",
+                    "sql": "SELECT 1 WHERE 1=0",
+                    "severity": "warn"
+                }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quality_task_refuses_the_loader_s_rules() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let refused = |checks: Vec<QualityCheckRequest>| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                let mut body = create_body("shop-quality", "analytics", "");
+                body.tasks = Some(vec![quality_task("gate", checks, &[])]);
+                let error =
+                    create_pipeline(Some(resources), None, None, &create_limiter(), ada, body)
+                        .await
+                        .expect_err("refused");
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+                error.message().to_string()
+            }
+        };
+
+        assert_eq!(
+            refused(Vec::new()).await,
+            format!("task `gate`: {QUALITY_NEEDS_CHECKS}")
+        );
+        assert_eq!(
+            refused(
+                (0..51)
+                    .map(|at| check(&format!("c{at}"), "select 1", None))
+                    .collect()
+            )
+            .await,
+            format!("task `gate`: {QUALITY_NEEDS_CHECKS}")
+        );
+        // A name is the loader's check-name pattern.
+        assert_eq!(
+            refused(vec![check("-bad", "select 1", None)]).await,
+            format!("task `gate`: {QUALITY_CHECK_NEEDS_NAME}")
+        );
+        assert_eq!(
+            refused(vec![
+                check("same", "select 1", None),
+                check("same", "select 2", None)
+            ])
+            .await,
+            format!("task `gate`: {QUALITY_CHECK_NAME_TWICE}")
+        );
+        assert_eq!(
+            refused(vec![check("empty", "", None)]).await,
+            format!("task `gate`: {QUALITY_CHECK_NEEDS_SQL}")
+        );
+        assert_eq!(
+            refused(vec![check("long", &"x".repeat(21000), None)]).await,
+            format!("task `gate`: {QUALITY_CHECK_NEEDS_SQL}")
+        );
+        assert_eq!(
+            refused(vec![check("fatal", "select 1", Some("fatal"))]).await,
+            format!("task `gate`: {QUALITY_CHECK_BAD_SEVERITY}")
+        );
+        assert_eq!(
+            refused(vec![check("audit", "select * from ${table}", None)]).await,
+            format!("task `gate`: {QUALITY_CHECK_AUDIT_TABLE}")
+        );
+        // Nothing was written by any of the refusals.
+        assert!(stored_pipeline(&resources, "shop-quality").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_quality_task_cannot_also_carry_a_statement() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-quality", "analytics", "");
+        body.tasks = Some(vec![PipelineTaskRequest {
+            name: "gate".into(),
+            sql: "select 1".into(),
+            notebook: None,
+            dbt: None,
+            quality: Some(QualityRequest {
+                checks: vec![check("no_null_ids", "select 1", None)],
+            }),
+            depends_on: vec![],
+        }]);
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("both");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            format!("task `gate`: {ONE_OF_STATEMENT_NOTEBOOK_OR_DBT}")
+        );
+        assert!(stored_pipeline(&resources, "shop-quality").await.is_none());
+    }
+
+    #[test]
+    fn a_stored_quality_task_list_is_a_task_list() {
+        let resource = json!({
+            "spec": {
+                "tasks": [{ "name": "gate", "kind": "quality",
+                            "checks": [{ "name": "no_null_ids", "sql": "select 1",
+                                         "severity": "warn" }] }]
+            }
+        });
+        assert!(is_task_list(&resource));
+        assert_eq!(stored_shape(&resource), StoredShape::Tasks);
+    }
+
+    #[tokio::test]
+    async fn spec_returns_a_task_list_with_a_quality_task() {
+        let mut stored = nova_pipeline("shop-quality", "analytics");
+        stored["spec"]["tasks"] = json!([{
+            "name": "gate",
+            "kind": "quality",
+            "checks": [{ "name": "no_null_ids", "sql": "SELECT 1 WHERE 1=0",
+                         "severity": "warn" }]
+        }]);
+        let resources = memory_with(&[("shop-quality", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let answer = pipeline_spec(Some(&resources), &ada, &namespace, "shop-quality")
+            .await
+            .expect("visible to its group");
+
+        // #762 merged after the ticket's snapshot: a Nova-written task list is edited whole, so
+        // the document is now editable (its own test pins the flip).
+        assert!(
+            answer.editable,
+            "a Nova-written task list is edited whole (#762)"
+        );
+        assert_eq!(
+            serde_json::to_value(&answer.document).unwrap()["tasks"],
+            json!([{
+                "name": "gate",
+                "quality": { "checks": [{ "name": "no_null_ids",
+                                          "sql": "SELECT 1 WHERE 1=0",
+                                          "severity": "warn" }] }
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_carries_a_quality_task() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-quality", "analytics", "");
+        body.tasks = Some(vec![quality_task(
+            "gate",
+            vec![check("no_null_ids", "SELECT 1 WHERE 1=0", Some("warn"))],
+            &[],
+        )]);
+        let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
+            .await
+            .expect("an answer");
+        assert!(answer.ok, "{answer:?}");
+        assert_eq!(answer.action.as_deref(), Some("create"));
+        assert!(answer.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_replaces_a_quality_task_list() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let mut body = create_body("shop-quality", "analytics", "");
+        body.tasks = Some(vec![quality_task(
+            "gate",
+            vec![check("no_null_ids", "select 1", None)],
+            &[],
+        )]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+
+        let mut update = update_body("");
+        update.tasks = Some(vec![
+            pipeline_task("load", "select 2", &[]),
+            quality_task(
+                "gate",
+                vec![check("no_null_ids", "select 3", Some("warn"))],
+                &["load"],
+            ),
+        ]);
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "shop-quality",
+            update,
+        )
+        .await
+        .expect("updated");
+        let stored = stored_pipeline(&resources, "shop-quality")
+            .await
+            .expect("stored");
+        assert_eq!(stored["spec"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            stored["spec"]["tasks"][1],
+            json!({
+                "name": "gate",
+                "kind": "quality",
+                "dependsOn": ["load"],
+                "checks": [{ "name": "no_null_ids", "sql": "select 3",
+                             "severity": "warn" }]
+            })
+        );
     }
 
     #[test]
@@ -14989,7 +15398,7 @@ mod tests {
 
     #[tokio::test]
     async fn exactly_one_of_sql_and_notebook() {
-        const SENTENCE: &str = "give a statement, a notebook or a dbt run";
+        const SENTENCE: &str = "give a statement, a notebook, a dbt run or a quality run";
         let resources = analytics_ready();
         let s3 = FakeS3::start().await;
         let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");

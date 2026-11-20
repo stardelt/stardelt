@@ -266,6 +266,63 @@ def test_a_dbt_task_validates_and_renders(tmp_path):
     assert specs[0]["ownerGroup"] == "sales"
 
 
+def test_a_quality_task_validates_and_renders(tmp_path):
+    """`quality` (#114 S1): the SQL assertions the loader runs, written in the bundle."""
+    task_bundle(
+        tmp_path,
+        ["{name: gate, quality: {checks: [{name: no_null_ids, sql: 'SELECT 1 WHERE 1=0', severity: warn}]}}"],
+    )
+    assert bundle.validate(tmp_path, "prod")[0] == []
+    problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
+    assert (problems, mode) == ([], "production")
+    assert specs[0]["tasks"] == [
+        {"name": "gate", "quality": {"checks": [{"name": "no_null_ids", "sql": "SELECT 1 WHERE 1=0", "severity": "warn"}]}}
+    ]
+    assert specs[0]["ownerGroup"] == "sales"
+
+
+def test_quality_task_rules_are_reported(tmp_path):
+    needs_checks = "a quality task needs checks (a list of 1 to 50 SQL assertions)"
+    needs_name = "a check needs a name (1 to 63 letters, digits, dashes or underscores, starting with a letter or a digit)"
+    many = "[" + ", ".join(f"{{name: c{index}, sql: 'select 1'}}" for index in range(51)) + "]"
+    rows = [
+        ("{name: x, quality: {checks: []}}", needs_checks),
+        (f"{{name: x, quality: {{checks: {many}}}}}", needs_checks),
+        ("{name: x, quality: yes}", "quality must be a mapping with checks"),
+        ("{name: x, quality: {checks: [{name: '-bad', sql: 'select 1'}]}}", needs_name),
+        (
+            "{name: x, quality: {checks: [{name: c, sql: 'select 1'}, {name: c, sql: 'select 2'}]}}",
+            "the check name is used twice",
+        ),
+        ("{name: x, quality: {checks: [{name: c, sql: ''}]}}", "a check's sql must be a non-empty string of at most 20000 characters"),
+        (
+            "{name: x, quality: {checks: [{name: c, sql: '" + "x" * 21000 + "'}]}}",
+            "a check's sql must be a non-empty string of at most 20000 characters",
+        ),
+        ("{name: x, quality: {checks: [{name: c, sql: 'select 1', severity: fatal}]}}", "a check's severity must be error or warn"),
+        (
+            "{name: x, quality: {checks: [{name: c, sql: 'select * from ${table}'}]}}",
+            "`${table}` is the audit branch of publish: wap, which has no runtime yet",
+        ),
+        (
+            "{name: x, quality: {checks: [{name: c, sql: 'select 1', model: x}]}}",
+            "a check accepts only name, sql and severity (found `model`)",
+        ),
+    ]
+    for index, (task, expected) in enumerate(rows):
+        directory = tmp_path / f"row{index}"
+        directory.mkdir()
+        task_bundle(directory, [task])
+        problems = bundle.validate(directory)[0]
+        assert problems[0][0] == "resources/gold.yaml (dev), task 'x'", problems
+        assert expected in said(problems), problems
+
+
+def test_a_quality_task_cannot_also_give_sql(tmp_path):
+    task_bundle(tmp_path, ["{name: gate, sql: select 1, quality: {checks: [{name: c, sql: 'select 2'}]}}"])
+    assert "task 'gate': give exactly one of sql, sqlFile, notebook, dbt or quality" in said(bundle.validate(tmp_path)[0])
+
+
 def test_dbt_task_rules_are_reported(tmp_path):
     needs_select = "a dbt task needs exactly one of select (one dbt selector) and batches (a list of 1 to 8 selectors, run in order)"
     rows = [
@@ -293,12 +350,12 @@ def test_a_task_problem_names_the_file_and_the_task(tmp_path):
     task_bundle(tmp_path, ["{name: customer_ltv, sql: select 1, sqlFile: sql/schema.sql}"])
     problems, _, _ = bundle.validate(tmp_path, "prod")
     assert problems[0][0] == "resources/gold.yaml (prod), task 'customer_ltv'"
-    assert problems[0][1] == "give exactly one of sql, sqlFile, notebook or dbt"
+    assert problems[0][1] == "give exactly one of sql, sqlFile, notebook, dbt or quality"
 
 
 def test_task_rules_are_reported(tmp_path):
     rows = [
-        (["{name: x, sql: select 1, sqlFile: sql/schema.sql}"], "task 'x': give exactly one of sql, sqlFile, notebook or dbt"),
+        (["{name: x, sql: select 1, sqlFile: sql/schema.sql}"], "task 'x': give exactly one of sql, sqlFile, notebook, dbt or quality"),
         (["{name: x, sql: select 1}", "{name: x, sql: select 2}"], "the name is used twice"),
         (["{name: x, sql: select 1, dependsOn: [nope]}"], "dependsOn names 'nope'"),
         (["{name: a, sql: select 1, dependsOn: [b]}", "{name: b, sql: select 2, dependsOn: [a]}"], "dependsOn is a cycle"),
