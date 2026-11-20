@@ -387,6 +387,7 @@ pub async fn reconcile_connection(
 mod tests {
     use super::*;
     use crate::crd::SecretsMode;
+    use std::sync::Mutex;
 
     fn secret(data: serde_json::Value) -> Secret {
         serde_json::from_value(serde_json::json!({
@@ -692,5 +693,287 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // The status-write guard of #582: an unchanged status is never patched (#590). The mock client
+    // is the one from `stream_app.rs`: it records every request and answers from `handler`.
+
+    type Recorded = Arc<Mutex<Vec<(String, String, String)>>>;
+
+    fn mock_client<F>(handler: F) -> (kube::Client, Recorded)
+    where
+        F: Fn(&str, &str, &str) -> (u16, String) + Send + Sync + 'static,
+    {
+        use http_body_util::BodyExt;
+        let requests: Recorded = Arc::default();
+        let recorder = requests.clone();
+        let handler = Arc::new(handler);
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let recorder = recorder.clone();
+            let handler = handler.clone();
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            async move {
+                let body_bytes = request
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|b| b.to_bytes().to_vec())
+                    .unwrap_or_default();
+                let body = String::from_utf8_lossy(&body_bytes).to_string();
+                recorder.lock().expect("requests poisoned").push((
+                    method.clone(),
+                    path.clone(),
+                    body.clone(),
+                ));
+                let (status, document) = handler(&method, &path, &body);
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(document.into_bytes()))
+                        .expect("valid mock response"),
+                )
+            }
+        });
+        (kube::Client::new(service, "stardelt"), requests)
+    }
+
+    /// The `Status` body Kubernetes answers for a missing object.
+    const NOT_FOUND: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"not found","reason":"NotFound","code":404}"#;
+
+    /// A minimal `Connection` for the status patch to deserialize.
+    const PATCHED_CONNECTION: &str = r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"Connection","metadata":{"name":"events","namespace":"data","uid":"uid-1","generation":1},"spec":{"scope":"group","ownerGroup":"analytics","type":"kafka","config":{"bootstrapServers":"kafka:9092"}}}"#;
+
+    fn context(client: kube::Client) -> Arc<Context> {
+        Arc::new(Context::new(
+            client,
+            Arc::new(crate::helm::testing::RecordingRunner::default()),
+        ))
+    }
+
+    /// The connection under test: `events` in `data`, a `kafka` bus without a secret (the
+    /// `Plan::NoSecret` arm) or a `sqlserver` database whose secret External Secrets syncs.
+    fn connection(with_secret: bool, status: Option<ConnectionStatus>) -> Connection {
+        let spec = if with_secret {
+            json!({
+                "scope": "group",
+                "ownerGroup": "analytics",
+                "type": "sqlserver",
+                "config": { "host": "crm.example.com" },
+                "secret": { "keys": ["user", "password"] }
+            })
+        } else {
+            json!({
+                "scope": "group",
+                "ownerGroup": "analytics",
+                "type": "kafka",
+                "config": { "bootstrapServers": "kafka-kafka-bootstrap.data.svc.cluster.local:9092" }
+            })
+        };
+        let mut value = json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Connection",
+            "metadata": { "name": "events", "namespace": "data", "uid": "uid-1", "generation": 1 },
+            "spec": spec,
+        });
+        if let Some(status) = status {
+            value["status"] = serde_json::to_value(&status).expect("serialise a ConnectionStatus");
+        }
+        serde_json::from_value(value).expect("deserialize Connection")
+    }
+
+    /// The client for a connection in `secrets.mode: none`: no `stardelt-secrets` ConfigMap, so no
+    /// ExternalSecret is planned; a status patch echoes a minimal `Connection`.
+    fn no_secret_client() -> (kube::Client, Recorded) {
+        mock_client(|method, path, _body| {
+            if method == "GET" && path.ends_with("/configmaps/stardelt-secrets") {
+                return (404, NOT_FOUND.to_string());
+            }
+            if method == "PATCH" && path.ends_with("/connections/events/status") {
+                return (200, PATCHED_CONNECTION.to_string());
+            }
+            (
+                200,
+                r#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#.to_string(),
+            )
+        })
+    }
+
+    /// The status patches the mock recorded, each body parsed.
+    fn status_patches(requests: &Recorded) -> Vec<Value> {
+        requests
+            .lock()
+            .expect("requests poisoned")
+            .iter()
+            .filter(|(method, path, _)| method == "PATCH" && path.ends_with("/status"))
+            .map(|(_, _, body)| serde_json::from_str(body).expect("a patch body is JSON"))
+            .collect()
+    }
+
+    /// How many requests the mock recorded with `method` on a path containing `fragment`.
+    fn count(requests: &Recorded, method: &str, fragment: &str) -> usize {
+        requests
+            .lock()
+            .expect("requests poisoned")
+            .iter()
+            .filter(|(m, path, _)| m == method && path.contains(fragment))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_connection_status_is_not_patched() {
+        let conn = connection(false, None);
+        assert!(
+            matches!(
+                plan(&conn.spec, "events", "data", "uid-1", SecretsMode::None),
+                Plan::NoSecret
+            ),
+            "the fixture must take the NoSecret arm"
+        );
+        let (client, requests) = no_secret_client();
+        let ctx = context(client);
+
+        let action = reconcile_connection(Arc::new(conn), ctx.clone())
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        let first = status_patches(&requests);
+        assert_eq!(first.len(), 1, "the first reconcile writes the status");
+        let status: ConnectionStatus = serde_json::from_value(first[0]["status"].clone())
+            .expect("the patch body carries a ConnectionStatus");
+
+        // The controller reads the status back on the next event: nothing changed, so nothing is written.
+        let action = reconcile_connection(Arc::new(connection(false, Some(status))), ctx)
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        let requests = requests.lock().expect("requests poisoned");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, _, _)| method == "PATCH" || method == "PUT")
+                .count(),
+            1,
+            "no second PATCH/PUT for an unchanged status: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_connection_status_is_patched() {
+        // A stored status that is not ready any more: the Ready transition must be written.
+        let stored: ConnectionStatus = serde_json::from_value(json!({
+            "ready": false,
+            "conditions": [{
+                "type": "Ready",
+                "status": "False",
+                "reason": "Syncing",
+                "lastTransitionTime": "t0",
+                "observedGeneration": 1
+            }],
+            "observedGeneration": 1
+        }))
+        .expect("stored ConnectionStatus");
+        let conn = connection(false, Some(stored));
+        assert!(matches!(
+            plan(&conn.spec, "events", "data", "uid-1", SecretsMode::None),
+            Plan::NoSecret
+        ));
+        let (client, requests) = no_secret_client();
+
+        let action = reconcile_connection(Arc::new(conn), context(client))
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        let patches = status_patches(&requests);
+        assert_eq!(patches.len(), 1, "exactly one status patch: {patches:?}");
+        assert!(
+            patches[0]["status"].to_string().contains("\"ready\":true"),
+            "the patch says the connection is ready: {}",
+            patches[0]
+        );
+    }
+
+    /// An `ExternalSecret` answer that is Ready; only the refresh heartbeat moves between calls.
+    fn external_secret(refresh_time: &str) -> String {
+        json!({
+            "apiVersion": "external-secrets.io/v1",
+            "kind": "ExternalSecret",
+            "metadata": { "name": "conn-events", "namespace": "data" },
+            "status": {
+                "refreshTime": refresh_time,
+                "conditions": [{
+                    "type": "Ready",
+                    "status": "True",
+                    "reason": "SecretSynced",
+                    "lastTransitionTime": "2026-11-19T14:33:48Z"
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_refresh_heartbeat_does_not_repatch_a_synced_connection() {
+        // #591: `lastSync` is the sync state transition, not External Secrets' refresh time. The
+        // answer below moves `refreshTime` on every reconcile, like the live `rnacentral` connection
+        // did of 15 minutes; the second status write must still not happen.
+        let answers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = answers.clone();
+        let (client, requests) = mock_client(move |method, path, _body| {
+            if method == "GET" && path.ends_with("/configmaps/stardelt-secrets") {
+                return (404, NOT_FOUND.to_string());
+            }
+            if method == "PATCH" && path.contains("/externalsecrets/") {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return (200, external_secret(&format!("2026-11-20T0{n}:33:50Z")));
+            }
+            if method == "PATCH" && path.ends_with("/connections/events/status") {
+                return (200, PATCHED_CONNECTION.to_string());
+            }
+            (
+                200,
+                r#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#.to_string(),
+            )
+        });
+        let conn = connection(true, None);
+        assert!(
+            matches!(
+                plan(&conn.spec, "events", "data", "uid-1", SecretsMode::None),
+                Plan::Apply(_)
+            ),
+            "the fixture must take the Apply arm"
+        );
+        let ctx = context(client);
+
+        let action = reconcile_connection(Arc::new(conn), ctx.clone())
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        let first = status_patches(&requests);
+        assert_eq!(first.len(), 1, "the first reconcile writes the status");
+        assert_eq!(first[0]["status"]["lastSync"], "2026-11-19T14:33:48Z");
+        let status: ConnectionStatus = serde_json::from_value(first[0]["status"].clone())
+            .expect("the patch body carries a ConnectionStatus");
+
+        let action = reconcile_connection(Arc::new(connection(true, Some(status))), ctx)
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        assert_eq!(
+            answers.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both reconciles asked External Secrets, with a new refresh time each"
+        );
+        assert_eq!(
+            count(&requests, "PATCH", "/externalsecrets/"),
+            2,
+            "both reconciles asked External Secrets, with a new refresh time each"
+        );
+        assert_eq!(
+            status_patches(&requests).len(),
+            1,
+            "a moved refresh time alone must not repatch the status: {requests:?}"
+        );
     }
 }
