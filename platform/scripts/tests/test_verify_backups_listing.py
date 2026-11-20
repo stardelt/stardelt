@@ -2,8 +2,10 @@
 
 Standard library only, like the other tests here: `python3 -m unittest discover -s scripts/tests -v`
 runs them in CI. `kubectl` is replaced by a shell shim that is first on PATH: it serves one PVC and
-one CronJob, makes the listing pod (`kubectl run`) fail as many times as the test asks, and records
-the pod names it was given. No cluster is touched.
+one CronJob, makes the listing pod fail (its `wait` exits 1) as many times as the test asks, and
+records the pod names it was given. No cluster is touched. #589 changed the attempt from one
+`run --attach` call to `run` + `wait` + `logs`, so the fake failure is a failed `wait` and the
+diagnosis comes from the pod's events.
 """
 import json
 import os
@@ -20,8 +22,9 @@ SCRIPT = REPO / "scripts" / "verify-backups-all.sh"
 SHIM = """#!/usr/bin/env bash
 set -u
 # Fake kubectl: `-n NS get pvc|cronjob -o json` serve canned files, every other `get` fails (the CNPG
-# kinds and the off-site Secret are absent), `run NAME ...` is the listing pod: it fails with 30 lines of
-# noise while fewer than FAKE_FAILS runs happened, else it prints what the real pod prints.
+# kinds and the off-site Secret are absent), `run NAME ...` records the attempt, `wait` fails while
+# fewer than FAKE_FAILS attempts were made, `logs` prints what the real pod prints, `describe` prints
+# the events.
 shift 2
 verb="${1-}"
 case "$verb" in
@@ -34,13 +37,20 @@ case "$verb" in
     ;;
   run)
     echo "$2" >> "$FAKE_DIR/run-names"
+    ;;
+  wait)
     count="$(wc -l < "$FAKE_DIR/run-names")"
     if [ "$count" -le "${FAKE_FAILS:-0}" ]; then
-      for i in $(seq 1 30); do echo "pod noise line $i"; done
       exit 1
     fi
+    ;;
+  logs)
     now="$(date -u +%s)"
     printf 'NOW %s\\nSOURCE pgdump/airflow %s dump.sql.gz\\n' "$now" "$now"
+    ;;
+  describe)
+    echo "Events:"
+    echo "  Warning Failed  container s3ls exited with code 1"
     ;;
   delete)
     echo "$3" >> "$FAKE_DIR/deleted"
@@ -77,7 +87,7 @@ class ListingPod(unittest.TestCase):
         self.assertEqual(len(self.names()), 1)
         self.assertNotIn("attempt", done.stderr)
 
-    def test_a_pod_that_fails_once_is_tried_again_under_a_new_name_and_its_whole_output_is_shown(self):
+    def test_a_pod_that_fails_once_is_tried_again_under_a_new_name_and_its_events_are_shown(self):
         done = self.run_script(1)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("verify-backups-all: PASS", done.stdout)
@@ -85,8 +95,8 @@ class ListingPod(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.endswith("-1") and second.endswith("-2"), self.names())
         self.assertIn("the listing pod failed (attempt 1 of 3); its whole output:", done.stderr)
-        self.assertIn("    pod noise line 1\n", done.stderr, "the first line, which `tail -n 20` used to cut off")
-        self.assertIn("    pod noise line 30\n", done.stderr)
+        self.assertIn("    Warning Failed  container s3ls exited with code 1\n", done.stderr,
+                      "the pod's events, which --rm used to delete with the pod")
         self.assertIn(first, (self.dir / "deleted").read_text().split(), "the failed attempt's pod is deleted")
 
     def test_three_failures_end_with_a_sentence_that_says_what_was_not_checked(self):

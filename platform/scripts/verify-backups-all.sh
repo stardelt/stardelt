@@ -340,19 +340,62 @@ POD
 
   info "listing ${#s3_requests[@]} object source(s) from one $S3_CHECK_IMAGE pod"
   pod_out=""
+  empty_attempts=0
+  failed_attempts=0
   attempt=1
   while [ "$attempt" -le "$LIST_ATTEMPTS" ]; do
     scratch_pod="verify-backups-all-s3-$$-$attempt"
-    if attempt_out="$(kubectl -n "$NAMESPACE" run "$scratch_pod" \
-          --rm --attach --quiet --restart=Never \
+    attempt_out=""
+    attempt_state="ok"
+    # Three calls, not `kubectl run --rm --attach`: attach can return 0 while the
+    # container's output is lost (a pod that prints its result and exits quickly is
+    # already finished when the attach connects), so a healthy listing looked like a
+    # failed attempt and a healthy backup was reported as unreadable (platform#589).
+    # Run detached, wait for Succeeded, then read the log of the finished pod.
+    if ! kubectl -n "$NAMESPACE" run "$scratch_pod" \
+          --restart=Never \
           --image "$S3_CHECK_IMAGE" \
           --pod-running-timeout=3m \
-          --overrides "$(pod_spec_for "$scratch_pod")" 2>&1)"; then
-      pod_out="$attempt_out"
-      break
+          --overrides "$(pod_spec_for "$scratch_pod")" >/dev/null; then
+      attempt_state="failed"
+    elif ! kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded \
+          --timeout=180s "pod/$scratch_pod" >/dev/null; then
+      attempt_state="failed"
+    elif ! attempt_out="$(kubectl -n "$NAMESPACE" logs "$scratch_pod" 2>&1)"; then
+      attempt_state="failed"
     fi
-    err "the listing pod failed (attempt $attempt of $LIST_ATTEMPTS); its whole output:"
-    printf '%s\n' "$attempt_out" | sed 's/^/    /' >&2
+
+    missing=""
+    if [ "$attempt_state" = ok ]; then
+      # Exit 0 with nothing to say is not an answer (platform#589): require the pod's
+      # own clock and one SOURCE line per requested source, else retry.
+      printf '%s\n' "$attempt_out" | grep -q '^NOW ' || missing="no NOW line"
+      for request in "${s3_requests[@]}"; do
+        IFS='|' read -r request_label _ _ <<<"$request"
+        printf '%s\n' "$attempt_out" | grep -q "^SOURCE $request_label " \
+          || missing="${missing:+$missing; }no SOURCE line for $request_label"
+      done
+      if [ -z "$missing" ]; then
+        pod_out="$attempt_out"
+        cleanup
+        break
+      fi
+      attempt_state="empty"
+    fi
+
+    if [ "$attempt_state" = empty ]; then
+      empty_attempts=$((empty_attempts + 1))
+      err "the listing pod answered nothing (attempt $attempt of $LIST_ATTEMPTS); its whole output:"
+      printf '%s\n' "$attempt_out" | sed 's/^/    /' >&2
+      printf '    (missing: %s)\n' "$missing" >&2
+    else
+      failed_attempts=$((failed_attempts + 1))
+      err "the listing pod failed (attempt $attempt of $LIST_ATTEMPTS); its whole output:"
+      printf '%s\n' "$attempt_out" | sed 's/^/    /' >&2
+    fi
+    # The reason is in the pod's events, which `--rm` deleted before anyone could
+    # look: print them before the pod goes (platform#589).
+    kubectl -n "$NAMESPACE" describe pod "$scratch_pod" 2>&1 | tail -n 15 | sed 's/^/    /' >&2 || true
     cleanup
     attempt=$((attempt + 1))
   done
@@ -483,7 +526,11 @@ for pvc in "${pvcs[@]}"; do
         failures+=("$pvc: no CronJob $NAMESPACE/$cronjob — apply manifests/pg-dump-backup.yaml (make backups)")
       elif [ -z "$pod_now" ]; then
         verdict="UNKNOWN"
-        unknowns+=("$pvc: cannot list $source — the listing pod failed $LIST_ATTEMPTS time(s), its output is printed above; this backup was NOT checked")
+        if [ "$failed_attempts" -eq 0 ]; then
+          unknowns+=("$pvc: cannot list $source — the listing pod answered nothing in $empty_attempts attempt(s); this backup was NOT checked")
+        else
+          unknowns+=("$pvc: cannot list $source — the listing pod failed $failed_attempts time(s), its output is printed above; this backup was NOT checked")
+        fi
       else
         case "${s3_state[$label]:-missing}" in
           ok)
