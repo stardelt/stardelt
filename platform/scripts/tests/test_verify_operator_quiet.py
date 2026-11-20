@@ -107,8 +107,11 @@ class OperatorQuietTest(unittest.TestCase):
         (self.dir / "objects.txt").write_text("bronze=1234\n")
         (self.dir / "top.txt").write_text("operator-a   1m   6Mi\n")
         (self.dir / "metrics.txt").write_text(
-            'stardelt_operator_leader 1\n'
+            '# HELP stardelt_operator_reconciles_total Reconciles since start, by controller and result.\n'
+            '# TYPE stardelt_operator_reconciles_total counter\n'
             'stardelt_operator_reconciles_total{controller="catalog",result="ok"} 15\n'
+            '# HELP stardelt_operator_status_writes_total Status patches written, by controller.\n'
+            '# TYPE stardelt_operator_status_writes_total counter\n'
             'stardelt_operator_status_writes_total{controller="catalog"} 7\n'
         )
 
@@ -148,7 +151,9 @@ class OperatorQuietTest(unittest.TestCase):
     def test_a_status_write_counter_moving_fails_and_names_the_count(self):
         (self.dir / "metrics_second.txt").write_text(
             'stardelt_operator_leader 1\n'
+            '# TYPE stardelt_operator_reconciles_total counter\n'
             'stardelt_operator_reconciles_total{controller="catalog",result="ok"} 15\n'
+            '# TYPE stardelt_operator_status_writes_total counter\n'
             'stardelt_operator_status_writes_total{controller="catalog"} 9\n'
         )
         result = self.run_script()
@@ -161,6 +166,19 @@ class OperatorQuietTest(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn("UNVERIFIED", result.stdout)
+
+    def test_a_help_only_metrics_page_reads_as_zero_not_unverified(self):
+        (self.dir / "metrics.txt").write_text(
+            "# HELP stardelt_operator_reconciles_total Reconciles since start, by controller and result.\n"
+            "# TYPE stardelt_operator_reconciles_total counter\n"
+            "# HELP stardelt_operator_status_writes_total Status patches written, by controller.\n"
+            "# TYPE stardelt_operator_status_writes_total counter\n"
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("✓ 0 reconciles", result.stdout)
+        self.assertIn("✓ no status write (counter 0 → 0)", result.stdout)
+        self.assertNotIn("UNVERIFIED", result.stdout)
 
 
 if __name__ == "__main__":

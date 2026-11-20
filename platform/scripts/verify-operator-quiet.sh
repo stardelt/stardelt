@@ -23,9 +23,9 @@
 #
 # Exit codes: 0 PASS (every row inside the budget), 1 FAIL (a row outside it, each changed
 # object named on its own ✗ line), 3 UNVERIFIED (no kubectl, no operator pod, the metrics
-# endpoint answers nothing or has no status-write counter, kubectl top says the Metrics API is
-# not available, or the kubelet stats summary cannot be read — the check proved nothing and
-# must not be read as PASS).
+# endpoint answers nothing, or has neither its series nor its `# TYPE` line, kubectl top says
+# the Metrics API is not available, or the kubelet stats summary cannot be read — the check
+# proved nothing and must not be read as PASS).
 # Needs: kubectl, python3.
 set -euo pipefail
 
@@ -111,7 +111,7 @@ reconcile_sum() {  # -> total reconciles over every operator pod, or UNREACHABLE
   for pod in "${op_pods[@]}"; do
     url="/api/v1/namespaces/$NS/pods/$pod:8082/proxy/metrics"
     if ! out="$(kubectl get --raw "$url" 2>&1)"; then continue; fi
-    printf '%s\n' "$out" | grep -q '^stardelt_operator_reconciles_total{' || continue
+    printf '%s\n' "$out" | grep -q '^# TYPE stardelt_operator_reconciles_total counter' || continue
     scraped=$((scraped + 1))
     total=$((total + $(printf '%s\n' "$out" | awk '/^stardelt_operator_reconciles_total\{/ {s += $2} END {print s+0}')))
   done
@@ -123,7 +123,7 @@ status_write_sum() {  # -> total status writes over every operator pod, or UNREA
   for pod in "${op_pods[@]}"; do
     url="/api/v1/namespaces/$NS/pods/$pod:8082/proxy/metrics"
     if ! out="$(kubectl get --raw "$url" 2>&1)"; then continue; fi
-    printf '%s\n' "$out" | grep -q '^stardelt_operator_status_writes_total{' || continue
+    printf '%s\n' "$out" | grep -q '^# TYPE stardelt_operator_status_writes_total counter' || continue
     scraped=$((scraped + 1))
     total=$((total + $(printf '%s\n' "$out" | awk '/^stardelt_operator_status_writes_total\{/ {s += $2} END {print s+0}')))
   done
