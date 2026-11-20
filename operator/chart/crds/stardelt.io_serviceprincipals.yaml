@@ -130,6 +130,13 @@ spec:
                   the account and the operator never talks to that provider.
                 nullable: true
                 type: string
+              workloadIdentity:
+                description: |-
+                  The catalog principal of this principal's workloads: `kubernetes~<ServiceAccount UID>`
+                  of the ServiceAccount `sp-<name>` the operator creates next to it (#492). Set in every
+                  identity mode: it does not depend on the identity provider.
+                nullable: true
+                type: string
             type: object
         required:
         - spec
