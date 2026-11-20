@@ -233,6 +233,15 @@
       "query_params": [],
       "body": true
     },
+    "deployments_rollback": {
+      "method": "POST",
+      "path": "/api/deployments/{id}/rollback",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "destinations_create": {
       "method": "POST",
       "path": "/api/destinations",
