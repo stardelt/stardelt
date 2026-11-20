@@ -517,6 +517,7 @@ fn status_patch(
 async fn patch_stream_status(
     apps: &Api<StreamApp>,
     name: &str,
+    current: Option<&StreamAppStatus>,
     generation: Option<i64>,
     previous: Option<&Condition>,
     phase: &str,
@@ -534,6 +535,9 @@ async fn patch_stream_status(
         attempts,
         last_submitted_at,
     );
+    if crate::conditions::status_is_current(current, &status) {
+        return Ok(());
+    }
     apps.patch_status(
         name,
         &PatchParams::default(),
@@ -576,7 +580,16 @@ pub async fn reconcile_stream_app(
             Err(e) => return Err(e),
         }
         patch_stream_status(
-            &apps, &name, generation, previous, "Stopped", "Stopped", None, None, None,
+            &apps,
+            &name,
+            app.status.as_ref(),
+            generation,
+            previous,
+            "Stopped",
+            "Stopped",
+            None,
+            None,
+            None,
         )
         .await?;
         tracing::info!(stream = %name, %namespace, "stream stopped");
@@ -601,6 +614,7 @@ pub async fn reconcile_stream_app(
                     patch_stream_status(
                         &apps,
                         &name,
+                        app.status.as_ref(),
                         generation,
                         previous,
                         "Failed",
@@ -866,6 +880,7 @@ pub async fn reconcile_stream_app(
     patch_stream_status(
         &apps,
         &name,
+        app.status.as_ref(),
         generation,
         previous,
         &phase,
@@ -1764,6 +1779,50 @@ mod tests {
         let log = requests.lock().expect("requests").join("\n");
         assert!(log.contains("PATCH"), "{log}");
         assert!(log.contains("\"phase\":\"Stopped\""), "{log}");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_stream_status_is_not_patched() {
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "DELETE" && path.contains("/sparkapplications/") {
+                return (
+                    404,
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"not found","reason":"NotFound","code":404}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#.into(),
+            )
+        });
+        let ctx = Arc::new(Context {
+            client,
+            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
+        });
+        let mut app = stream_app(true);
+        app.status = Some(
+            serde_json::from_value(json!({
+                "phase": "Stopped",
+                "conditions": [{
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "Stopped",
+                    "lastTransitionTime": "t0",
+                    "observedGeneration": 1
+                }],
+                "observedGeneration": 1
+            }))
+            .expect("deserialize StreamAppStatus"),
+        );
+        let action = reconcile_stream_app(Arc::new(app), ctx)
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(300)));
+        let log = requests.lock().expect("requests").join("\n");
+        assert!(
+            !log.contains("PATCH"),
+            "an unchanged status must not be patched: {log}"
+        );
     }
 
     #[tokio::test]

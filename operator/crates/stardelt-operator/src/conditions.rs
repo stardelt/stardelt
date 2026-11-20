@@ -61,10 +61,48 @@ pub fn merge_condition(existing: &[Condition], next: Condition) -> Vec<Condition
     conditions
 }
 
+/// Whether a merge-patch status body `next` (without the `status`/`metadata` wrapper) would leave
+/// the stored status unchanged. Only keys `next` names are compared: a merge patch leaves every
+/// other key alone. A `null` in `next` deletes its key, so it matches only an absent or `null`
+/// key. Objects are compared key by key, arrays and scalars as a whole (a merge patch replaces
+/// them). An unchanged status must not be patched (#274 rule 1).
+pub fn status_is_current<T: serde::Serialize>(
+    current: Option<&T>,
+    next: &serde_json::Value,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    let Ok(current) = serde_json::to_value(current) else {
+        return false;
+    };
+    merge_is_noop(&current, next)
+}
+
+fn merge_is_noop(target: &serde_json::Value, patch: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match patch {
+        Value::Object(fields) => {
+            let Value::Object(target) = target else {
+                return false;
+            };
+            fields
+                .iter()
+                .all(|(key, value)| match (value, target.get(key)) {
+                    (Value::Null, None | Some(Value::Null)) => true,
+                    (Value::Null, Some(_)) | (_, None) => false,
+                    (value, Some(existing)) => merge_is_noop(existing, value),
+                })
+        }
+        other => target == other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use k8s_openapi::jiff::Timestamp;
+    use serde_json::json;
 
     fn condition(type_: &str, status: &str, time: &str) -> Condition {
         Condition {
@@ -131,5 +169,55 @@ mod tests {
                 .as_deref(),
             Some("t0")
         );
+    }
+
+    #[test]
+    fn a_key_the_patch_does_not_name_is_ignored() {
+        let current = json!({ "phase": "Ready", "observedGeneration": 3 });
+        assert!(status_is_current(
+            Some(&current),
+            &json!({ "observedGeneration": 3 })
+        ));
+    }
+
+    #[test]
+    fn a_null_matches_only_an_absent_key() {
+        for current in [json!({}), json!({ "lastError": null })] {
+            assert!(
+                status_is_current(Some(&current), &json!({ "lastError": null })),
+                "{current}"
+            );
+        }
+        assert!(!status_is_current(
+            Some(&json!({ "lastError": "x" })),
+            &json!({ "lastError": null })
+        ));
+    }
+
+    #[test]
+    fn an_array_is_compared_whole() {
+        let current = json!({ "conditions": [{ "type": "A" }, { "type": "B" }] });
+        assert!(!status_is_current(
+            Some(&current),
+            &json!({ "conditions": [{ "type": "A" }] })
+        ));
+    }
+
+    #[test]
+    fn a_nested_object_is_compared_key_by_key() {
+        let current = json!({ "maintenance": { "lastRun": "t", "extra": 1 } });
+        assert!(status_is_current(
+            Some(&current),
+            &json!({ "maintenance": { "lastRun": "t" } })
+        ));
+        assert!(!status_is_current(
+            Some(&current),
+            &json!({ "maintenance": { "lastRun": "u" } })
+        ));
+    }
+
+    #[test]
+    fn no_stored_status_is_never_current() {
+        assert!(!status_is_current::<serde_json::Value>(None, &json!({})));
     }
 }

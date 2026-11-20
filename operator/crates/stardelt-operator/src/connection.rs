@@ -353,6 +353,14 @@ pub async fn reconcile_connection(
         )],
         observed_generation: conn.metadata.generation,
     };
+    let next = serde_json::to_value(&status).expect("a ConnectionStatus serialises");
+    if crate::conditions::status_is_current(conn.status.as_ref(), &next) {
+        return Ok(Action::requeue(Duration::from_secs(if ready {
+            300
+        } else {
+            30
+        })));
+    }
     let connections: Api<Connection> = Api::namespaced(ctx.client.clone(), &namespace);
     connections
         .patch_status(
