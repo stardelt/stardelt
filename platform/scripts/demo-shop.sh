@@ -65,11 +65,6 @@ principal="$(kubectl -n "$NAMESPACE" get serviceprincipals.stardelt.io pipeline-
   || fail "ServicePrincipal pipeline-demo is not ready (${principal:-absent}) — run make demo-access YES=1 first"
 echo "› ServicePrincipal pipeline-demo: ready"
 
-# `--host` is a global option of the CLI: it comes before the subcommand.
-plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
-  || fail "the stardelt CLI is not signed in to $NOVA ($(printf '%s' "$plan" | tail -1)) — run: stardelt login --host $NOVA"
-echo "› stardelt CLI: signed in to $NOVA"
-
 # 0b. The run feed (#79): an ntfy webhook on a random topic, made once and then kept.
 feed="$("$CLI" --host "$NOVA" api destinations_list 2>/dev/null \
   | jq -r '.[]? | select(.owner_group == "demo" and .name == "run-feed") | .config.url' || true)"
@@ -85,6 +80,14 @@ elif [ "$YES" = 1 ]; then
 else
   echo "would: create the destination demo/run-feed (webhook https://ntfy.sh/stardelt-demo-<random>, viewers=[visitors])"
 fi
+
+# `--host` is a global option of the CLI: it comes before the subcommand.
+plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
+  || { case "$plan" in
+         *"sign-in"*|*"not signed in"*|*"401"*) fail "the stardelt CLI is not signed in to $NOVA — run: stardelt login --host $NOVA" ;;
+         *) fail "stardelt bundle plan $BUNDLE -t prod failed: $(printf '%s' "$plan" | tail -1)" ;;
+       esac; }
+echo "› stardelt CLI: signed in to $NOVA; the plan reads"
 
 # 1. The bundle: three scheduled pipelines instead of twelve On demand ones.
 planned=()

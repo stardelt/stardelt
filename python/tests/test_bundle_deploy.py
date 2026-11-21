@@ -257,6 +257,29 @@ def test_a_production_target_refuses_a_dirty_tree_and_a_development_target_recor
     assert len(commit) == 40 and set(commit) <= set("0123456789abcdef")
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_an_untracked_file_outside_the_bundle_does_not_make_it_dirty(tmp_path):
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    make(bundle_dir)
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "bundle")
+    commit = git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / ".wt-x").mkdir()
+    (tmp_path / ".wt-x" / "f").write_text("")
+    prod_answers = (ME, FakeResponse(payload=CREATE), FakeResponse(payload=CREATE))
+
+    code, out, err, session = run(["bundle", "plan", str(bundle_dir), "-t", "prod"], *prod_answers)
+    assert (code, err) == (0, "") and out
+    assert session.calls[1][2]["json"]["provenance"] == {"bundle": "sales-etl", "target": "prod", "revision": commit}
+
+    (bundle_dir / "new.sql").write_text("select 1")
+    code, out, err, session = run(["bundle", "plan", str(bundle_dir), "-t", "prod"], *prod_answers)
+    assert (code, out) == (2, "")
+    assert "uncommitted changes" in err
+
+
 def test_the_stamp_names_the_bundle_and_the_target_and_leaves_the_commit_out_without_git(tmp_path):
     make(tmp_path)
     assert bundle.provenance(tmp_path, "dev") == {"bundle": "sales-etl", "target": "dev"}
