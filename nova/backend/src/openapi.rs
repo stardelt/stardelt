@@ -471,12 +471,24 @@ mod tests {
     /// Routes that are served but not in the document yet. This list only
     /// shrinks: document a route (add its `#[utoipa::path]`) and delete its
     /// line here. Adding a route without either fails the test below.
-    const UNDOCUMENTED: &[&str] = &[];
+    const UNDOCUMENTED: &[&str] = &[
+        // Browser redirects, not a JSON API: no client calls these meaningfully.
+        "/api/auth/login",
+        "/api/auth/callback",
+        "/api/auth/logout",
+        // The MCP server is served at the root; its own contract lands with #88.
+        "/mcp",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+    ];
 
     /// The `.route("<path>"` literals inside the router function that starts
-    /// at `marker` in `src`, each prefixed with `/api` (where every router is
-    /// mounted). The function body ends at the first closing brace in column 0.
-    fn routes_in(src: &str, marker: &str) -> Vec<String> {
+    /// at `marker` in `src`, each prefixed with `prefix` — where the router is
+    /// mounted: `/api` for everything in `api_router`, `/api/auth` for the
+    /// sign-in routes, and `""` for the MCP server, which `main`'s `app`
+    /// merges at the root. The function body ends at the first closing brace
+    /// in column 0.
+    fn routes_in(src: &str, marker: &str, prefix: &str) -> Vec<String> {
         let start = src
             .find(marker)
             .unwrap_or_else(|| panic!("{marker} not found"));
@@ -489,7 +501,7 @@ mod tests {
             if let Some(quoted) = rest.strip_prefix('"')
                 && let Some(end) = quoted.find('"')
             {
-                paths.push(format!("/api{}", &quoted[..end]));
+                paths.push(format!("{prefix}{}", &quoted[..end]));
             }
         }
         paths
@@ -504,14 +516,50 @@ mod tests {
         let main_rs = include_str!("main.rs");
         let mut served = Vec::new();
         for marker in ["fn public_router()", "fn api_router()", "fn admin_router()"] {
-            served.extend(routes_in(main_rs, marker));
+            served.extend(routes_in(main_rs, marker, "/api"));
         }
-        served.extend(routes_in(include_str!("pipelines.rs"), "fn router()"));
-        served.extend(routes_in(include_str!("notebooks.rs"), "fn router()"));
-        served.extend(routes_in(include_str!("statements.rs"), "fn router()"));
+        served.extend(routes_in(
+            include_str!("pipelines.rs"),
+            "fn router()",
+            "/api",
+        ));
+        served.extend(routes_in(
+            include_str!("notebooks.rs"),
+            "fn router()",
+            "/api",
+        ));
+        served.extend(routes_in(
+            include_str!("statements.rs"),
+            "fn router()",
+            "/api",
+        ));
+        for source in [
+            include_str!("stages.rs"),
+            include_str!("deployments.rs"),
+            include_str!("streams.rs"),
+            include_str!("migrations.rs"),
+        ] {
+            served.extend(routes_in(source, "fn router()", "/api"));
+        }
+        // The browser sign-in routes: their path prefix is what the document and the ingress use.
+        served.extend(routes_in(
+            include_str!("auth.rs"),
+            "pub fn router",
+            "/api/auth",
+        ));
+        served.extend(routes_in(
+            include_str!("auth.rs"),
+            "pub fn dev_router",
+            "/api/auth",
+        ));
+        // The MCP server is merged at the root by `main`'s `app`, not under /api.
+        served.extend(routes_in(include_str!("mcp.rs"), "pub fn router()", ""));
+        served.sort();
+        served.dedup();
         assert!(
-            served.len() > 40,
-            "the scan found only {} routes",
+            served.len() > 120,
+            "the scan of main.rs, pipelines.rs, notebooks.rs, statements.rs, stages.rs, \
+             deployments.rs, streams.rs, migrations.rs, auth.rs and mcp.rs found only {} routes",
             served.len()
         );
 
