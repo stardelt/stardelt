@@ -88,6 +88,29 @@ RUN chmod 0644 /opt/spark/jars/iceberg-spark-runtime.jar /opt/spark/jars/iceberg
     /opt/spark/jars/spark-sql-kafka-0-10_2.13.jar /opt/spark/jars/spark-token-provider-kafka-0-10_2.13.jar \
     /opt/spark/jars/kafka-clients-3.9.1.jar /opt/spark/jars/commons-pool2-2.12.1.jar
 
+# --- Catalog identity from a projected token file ---------------------------
+# A workload signs in to the catalog with its ServiceAccount's projected token
+# (audience `lakekeeper`), which the kubelet rewrites before it expires (#492,
+# #769 measured it). Iceberg loads a custom `rest.auth.type` with `(String)`
+# and hands the catalog properties to `catalogSession`; this class reads the
+# file inside every `authenticate`, so a long job survives a rotation without a
+# restart. Compiled here and checked here: a class that caches the token fails
+# the build (the check writes a second token and compares the header).
+#
+# The jar goes to /opt/spark/jars so the driver and every executor have it on
+# the classpath without a `spark.driver.extraClassPath` setting. Apache-2.0.
+COPY TokenFileAuthManager.java TokenFileAuthManagerCheck.java /tmp/stardelt-auth/
+RUN mkdir -p /tmp/stardelt-auth/classes /opt/spark/jars \
+    && javac -cp /opt/spark/jars/iceberg-spark-runtime.jar -d /tmp/stardelt-auth/classes \
+         /tmp/stardelt-auth/TokenFileAuthManager.java \
+         /tmp/stardelt-auth/TokenFileAuthManagerCheck.java \
+    && java -cp /tmp/stardelt-auth/classes:/opt/spark/jars/iceberg-spark-runtime.jar \
+         io.stardelt.iceberg.TokenFileAuthManagerCheck \
+    && jar --create --file /opt/spark/jars/stardelt-iceberg-auth.jar \
+         -C /tmp/stardelt-auth/classes . \
+    && chmod 0644 /opt/spark/jars/stardelt-iceberg-auth.jar \
+    && rm -rf /tmp/stardelt-auth
+
 # --- Python on the workers: the notebook's Python minor ----------------------
 # Python code travels to a worker as a pickle: the notebook pickles it on the
 # client (Python 3.13, pyspark 4.2.0), the executor unpickles and runs it.
