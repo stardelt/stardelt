@@ -3802,7 +3802,7 @@
             }
           },
           "403": {
-            "description": "Only a member of the pipeline's owner group may record a deployment",
+            "description": "Only a member of the pipeline's owner group may record a deployment; a deploy principal may only record a deployment to its stage and of its own group",
             "content": {
               "application/json": {
                 "schema": {
@@ -3939,7 +3939,7 @@
             }
           },
           "403": {
-            "description": "Only a member of the pipeline's owner group may plan a deployment",
+            "description": "Only a member of the pipeline's owner group may plan a deployment; a deploy principal may only plan a deployment to its stage and of its own group",
             "content": {
               "application/json": {
                 "schema": {

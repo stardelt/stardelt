@@ -665,7 +665,7 @@ pub async fn detail(
         (status = 201, description = "The stored row", body = Deployment, example = json!(row_example())),
         (status = 400, description = "A name is empty, too long or carries a `/`, the status or an action is not one of the known values, or there are more than 200 pipelines", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Only a member of the pipeline's owner group may record a deployment", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only a member of the pipeline's owner group may record a deployment; a deploy principal may only record a deployment to its stage and of its own group", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The planId does not name the rendered set of this row", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
     )
@@ -726,7 +726,7 @@ pub async fn record(
         (status = 200, description = "The plan, with its identity", body = BundlePlan, example = json!(bundle_plan_example())),
         (status = 400, description = "A name is empty, too long or carries a `/`, or there are more than 200 resources or 200 file digests", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Only a member of the pipeline's owner group may plan a deployment", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only a member of the pipeline's owner group may plan a deployment; a deploy principal may only plan a deployment to its stage and of its own group", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured, or there is no cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
