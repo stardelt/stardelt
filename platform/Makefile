@@ -897,6 +897,13 @@ sync-realm-admin: _context ## Point realm `stardelt`'s admin password at Secret 
 verify-realm-admin: _context ## Prove the realm-admin Secret still signs in to realm `stardelt` (password grant, in-cluster)
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-realm-admin.sh
 
+# A DeployStage is four facts that must agree (object, rendered client, issuer/subject, the
+# realm's GitHub IdP and its audience mapper); #57 slice 7 is the live check. Manual: it creates
+# and deletes a DeployStage, so it is not in verify-release.sh's table.
+.PHONY: verify-deploy-stage
+verify-deploy-stage: _context ## A DeployStage renders one federated client and names the realm's GitHub IdP (manual; creates and deletes a stage)
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-deploy-stage.sh
+
 sync-realm-user-management: _context ## Grant realm `stardelt` admins the Users roles and enforce brute-force protection (idempotent)
 	@NAMESPACE=$(NAMESPACE) bash scripts/sync-realm-user-management.sh
 
