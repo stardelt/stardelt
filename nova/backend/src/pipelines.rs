@@ -1548,7 +1548,11 @@ async fn checked_tasks(
         }
         for table in &task.writes {
             let parts: Vec<&str> = table.split('.').collect();
-            if parts.len() != 3 || parts.iter().any(|part| part.is_empty() || part.contains(' ')) {
+            if parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|part| part.is_empty() || part.contains(' '))
+            {
                 return Err(refused(
                     "task-writes",
                     format!(
@@ -13395,7 +13399,9 @@ mod tests {
         };
 
         assert!(
-            spec_of(&update(Some(Publish::Direct))).get("publish").is_none(),
+            spec_of(&update(Some(Publish::Direct)))
+                .get("publish")
+                .is_none(),
             "direct removes the key"
         );
         assert_eq!(
