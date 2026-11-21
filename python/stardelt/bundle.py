@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -953,13 +954,15 @@ def plan_files(nova, directory, target):
     ], ""
 
 
-def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=(), previous_deployment_id=None):
+def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=(), previous_deployment_id=None, plan_id=None):
     """Record one deploy (``deployments_record``) for ``owner``: the row on success, or a ``not-recorded`` row.
 
     ``resources`` is the rendered list of Pipeline documents the deploy applied, empty for a
     failed deploy; the record keeps them so a rollback can replay them. ``files`` is the same for
     the bundle's own files (``_digests``): which content the documents were built from.
     ``previous_deployment_id`` is the deployment a rollback replayed, ``None`` for a deploy that was not one.
+    ``plan_id`` is the ``planId`` of the plan the deploy followed (``deployments_plan``), ``None`` when
+    there was no plan.
 
     A record that cannot be written never fails the deploy: the caller prints the reason and keeps
     the exit code it already has.
@@ -976,16 +979,17 @@ def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=
             "resources": list(resources),
             "files": list(files),
             "previousDeploymentId": previous_deployment_id,
+            "planId": plan_id,
         })
     except api.StardeltApiError as err:
         return {"action": "not-recorded", "reason": str(err)}
     return {"action": "recorded", "id": answer["id"]}
 
 
-def _record(nova, stamp, directory, target, status, touched, resources=()):
+def _record(nova, stamp, directory, target, status, touched, resources=(), plan_id=None):
     """Record one deploy of the bundle in ``directory``: the owner group comes from its ``bundle.yaml``."""
     owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
-    return _record_at(nova, owner, stamp, target, status, touched, resources, _digests(directory))
+    return _record_at(nova, owner, stamp, target, status, touched, resources, _digests(directory), plan_id=plan_id)
 
 
 def _touched(nova, specs, done, stale):
@@ -1013,7 +1017,9 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     longer names is listed as ``would-delete`` and, in a real deploy, removed (``deleted``) after everything else
     succeeded. Every pipeline carries the bundle's name, the target and the Git commit of the bundle
     directory (``provenance``), which Nova stamps on it. Every deploy is recorded once in Nova's deployment record
-    (``deployments_record``: the bundle, the target, the commit, the caller and the pipelines it wrote); a deploy whose
+    (``deployments_record``: the bundle, the target, the commit, the caller and the pipelines it wrote); the record carries
+    the ``planId`` of the plan the deploy asked Nova for before writing (``deployments_plan``), so the row names the set
+    that was checked. A Nova without that route (404) deploys as before and says so on stderr. A deploy whose
     record cannot be written still succeeds and prints ``{"action": "not-recorded", "reason": …}``. A write that fails
     after an earlier one returns the rows already written and the sentence, and records a row with status `failed` —
     a deploy that did not finish is not recorded as applied. Only ``--prune``
@@ -1127,7 +1133,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             except (api.StardeltApiError, KeyError) as listing_err:
                 done.append({"action": "not-recorded", "reason": str(listing_err)})
             else:
-                done.append(_record(nova, stamp, directory, target, "failed", touched))
+                done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, str(err))], done
         specs[position] = spec = _pinned(spec, answer)
         done.append({"action": "published", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{spec['notebook']['name']}", "objectVersion": answer["objectVersion"], "kind": "Pipeline"})
@@ -1139,12 +1145,32 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             except (api.StardeltApiError, KeyError) as listing_err:
                 done.append({"action": "not-recorded", "reason": str(listing_err)})
             else:
-                done.append(_record(nova, stamp, directory, target, "failed", touched))
+                done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, str(err))], done
         if verdict.get("modified"):
             changed_by_hand.add(spec["name"])
     if changed_by_hand and not accept_drift and _drift_mode(directory, target) == "block":
         return _blocked(target, changed_by_hand), done
+    owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
+    plan_id = None
+    try:
+        plan = nova.call("deployments_plan", body={
+            "bundle": stamp["bundle"],
+            "ownerGroup": owner,
+            "target": target,
+            "revision": stamp.get("revision"),
+            "resources": specs,
+            "files": _digests(directory),
+        })
+    except api.StardeltApiError as err:
+        if getattr(err, "status", None) != 404:
+            return [(target, f"the plan was refused: {err}")], done
+        # A Nova before #784 has no plan route: deploy as before, and say so once.
+        print("plan: this Nova does not answer a deployment plan; deploying without one", file=sys.stderr)
+    else:
+        if not plan.get("ok"):
+            return [(target, f"{issue['path']}: {issue['message']}") for issue in plan.get("errors") or []], done
+        plan_id = plan.get("planId")
     if migration_files:
         try:
             answer = nova.call(
@@ -1176,7 +1202,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             except (api.StardeltApiError, KeyError) as listing_err:
                 done.append({"action": "not-recorded", "reason": str(listing_err)})
             else:
-                done.append(_record(nova, stamp, directory, target, "failed", touched))
+                done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, str(err))], done
         except api.StardeltApiError as err:
             try:
@@ -1184,7 +1210,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             except (api.StardeltApiError, KeyError) as listing_err:
                 done.append({"action": "not-recorded", "reason": str(listing_err)})
             else:
-                done.append(_record(nova, stamp, directory, target, "failed", touched))
+                done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, f"{spec['name']}: {err}")], done
         done.append({
             **answer,
@@ -1202,7 +1228,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             except (api.StardeltApiError, KeyError) as listing_err:
                 done.append({"action": "not-recorded", "reason": str(listing_err)})
             else:
-                done.append(_record(nova, stamp, directory, target, "failed", touched))
+                done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, f"{spec['name']}: {err}")], done
         done.append({"action": "created" if row["action"] == "would-create" else "updated", "name": spec["name"], "kind": "StreamApp"})
     for namespace, name in stale:
@@ -1215,7 +1241,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             except (api.StardeltApiError, KeyError) as listing_err:
                 done.append({"action": "not-recorded", "reason": str(listing_err)})
             else:
-                done.append(_record(nova, stamp, directory, target, "failed", touched))
+                done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name, "kind": "Pipeline"})
     for namespace, name in stale_streams:
@@ -1224,7 +1250,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         except api.StardeltApiError as err:
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
-    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), specs))
+    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), specs, plan_id=plan_id))
     return [], done
 
 

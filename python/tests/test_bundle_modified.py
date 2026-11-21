@@ -11,6 +11,7 @@ ENV = {"STARDELT_NOVA_URL": "https://nova.example", "STARDELT_TOKEN": CANARY}
 ME = FakeResponse(payload={"user": "alice"})
 UPDATE = {"ok": True, "action": "update", "errors": [], "changes": ["statement"], "nextRuns": []}
 BY_HAND = dict(UPDATE, modified=True)
+DEPLOY_PLAN = {"ok": True, "errors": [], "warnings": [], "changes": [], "files": [], "planId": "abc"}
 WARNING = "stardelt: warning: nightly was changed after its last deploy; deploying overwrites that change\n"
 EXISTING = {"pipelines": [{"name": "load", "namespace": "stardelt", "ownerGroup": "sales"}, {"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
 
@@ -55,7 +56,7 @@ def test_deploy_still_overwrites_and_keeps_the_fact_in_its_answer(tmp_path):
     make(tmp_path)
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=UPDATE), FakeResponse(payload=BY_HAND),
+        ME, FakeResponse(payload=UPDATE), FakeResponse(payload=BY_HAND), FakeResponse(payload=DEPLOY_PLAN),
         FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "load"}),
         FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),

@@ -5,7 +5,7 @@ import json
 from stardelt import bundle
 from tests.test_api import FakeResponse
 from tests.test_bundle import MANIFEST, make, said
-from tests.test_bundle_diff import CREATE, ME, run, update
+from tests.test_bundle_diff import CREATE, DEPLOY_PLAN, ME, run, update
 
 NOTEBOOK = {"nbformat": 4, "cells": []}
 EXPLORE = "name: explore\nnotebook: {file: notebooks/explore.ipynb, params: {rows: '5'}}\n"
@@ -45,7 +45,8 @@ def test_deploy_publishes_the_notebook_first_and_pins_the_version(tmp_path):
     make(tmp_path, resources=RESOURCES, files=FILES)
     code, out, _, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, NEW, STORED, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
+        ME, NEW, STORED, FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
         FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
@@ -55,9 +56,9 @@ def test_deploy_publishes_the_notebook_first_and_pins_the_version(tmp_path):
         {"action": "created", "name": "explore", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
-    assert [method for method, _ in urls(session)] == ["GET", "PUT", "PUT", "POST", "GET", "POST", "GET", "POST"]
+    assert [method for method, _ in urls(session)] == ["GET", "PUT", "PUT", "POST", "POST", "GET", "POST", "GET", "POST"]
     assert "params" not in session.calls[2][2], "the second publish is a real one"
-    assert session.calls[5][2]["json"]["notebook"] == PINNED
+    assert session.calls[6][2]["json"]["notebook"] == PINNED
 
 
 def test_a_deploy_sends_the_source_of_the_notebook_file(tmp_path, monkeypatch):
@@ -66,7 +67,8 @@ def test_a_deploy_sends_the_source_of_the_notebook_file(tmp_path, monkeypatch):
     make(tmp_path, resources=RESOURCES, files=FILES)
     code, _, _, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, NEW, STORED, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
+        ME, NEW, STORED, FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
         FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
@@ -78,7 +80,7 @@ def test_deploy_of_an_unchanged_notebook_publishes_nothing(tmp_path):
     make(tmp_path, resources=RESOURCES, files=FILES)
     listing = FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt", "ownerGroup": "sales"}]})
     code, out, _, session = run(
-        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update()), listing, FakeResponse(payload={}),
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update()), FakeResponse(payload=DEPLOY_PLAN), listing, FakeResponse(payload={}),
         FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )

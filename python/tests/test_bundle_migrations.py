@@ -22,6 +22,7 @@ PLAN = {
     "errors": [],
 }
 APPLIED = {"ok": True, "applied": ["002_add.sql"], "skipped": ["001_init.sql"], "errors": []}
+DEPLOY_PLAN = {"ok": True, "errors": [], "warnings": [], "changes": [], "files": [], "planId": "abc"}
 MANIFEST = """
 bundle: {name: sales-etl, ownerGroup: sales}
 include: [resources/*.yaml]
@@ -110,7 +111,7 @@ def test_deploy_applies_migrations_before_the_pipelines(tmp_path):
     build(tmp_path)
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
+        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
@@ -122,7 +123,7 @@ def test_deploy_applies_migrations_before_the_pipelines(tmp_path):
         {"action": "created", "name": "load", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
-    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "POST", "GET", "POST", "GET", "POST"]
+    assert [method for method, _ in calls(session)] == ["GET", "POST", "POST", "POST", "POST", "GET", "POST", "GET", "POST"]
     apply_call = [call for call in session.calls if call[1].endswith("/api/migrations/apply")][0]
     assert apply_call[2]["json"]["allowBreaking"] is False
 
@@ -135,13 +136,13 @@ def test_a_refused_breaking_migration_stops_the_deploy_and_allow_breaking_passes
         "skipped": [],
         "errors": ["002_add.sql: drop column is breaking; pass allowBreaking"],
     }
-    answers = (ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=refused))
+    answers = (ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), FakeResponse(payload=refused))
     code, out, err, session = run(["bundle", "deploy", str(tmp_path), "-t", "prod"], *answers)
     assert code == 2
     assert err == "stardelt: prod: migrations: 002_add.sql: drop column is breaking; pass allowBreaking\n"
     assert calls(session) == [
         ("GET", "/api/me"), ("POST", "/api/migrations/plan"), ("POST", "/api/pipelines/validate"),
-        ("POST", "/api/migrations/apply"),
+        ("POST", "/api/deployments/plan"), ("POST", "/api/migrations/apply"),
     ], "no pipeline is written"
 
     code, _, _, session = run(["bundle", "deploy", str(tmp_path), "-t", "prod", "--allow-breaking"], *answers)
@@ -153,7 +154,7 @@ def test_a_production_deploy_sends_the_mode_and_the_plan_id(tmp_path):
     build(tmp_path)
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
+        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "load"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
@@ -169,7 +170,7 @@ def test_a_development_deploy_sends_development_and_no_approval(tmp_path):
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "dev"],
         ME, FakeResponse(payload={"catalogs": [], "default": "gold"}),
-        FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=APPLIED),
+        FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "dev-alice-load"}),
         FakeResponse(payload={"pipelines": [{"name": "dev-alice-load", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "dev", "status": "applied"}),
@@ -197,7 +198,7 @@ def test_a_refused_production_deploy_prints_nova_s_sentence(tmp_path):
     refused = FakeResponse(status=409, payload={"ok": False, "applied": [], "skipped": [], "errors": [sentence]})
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), refused,
+        ME, FakeResponse(payload=PLAN), FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), refused,
     )
     assert code == 2
     assert err.startswith("stardelt: prod: migrations: ")
