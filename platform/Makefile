@@ -248,7 +248,7 @@ verify-spark-demo-sandbox: _context ## The demo Spark sandbox: restricted PSS, n
 
 .PHONY: verify-spark-demo-query
 verify-spark-demo-query: _context ## One session through the demo Spark sandbox: range(10) = 10 from a visitor-labelled client pod
-	@NS=$(NAMESPACE) DEMO_NS=stardelt-demo-spark bash scripts/verify-spark-demo-query.sh
+	@bash scripts/verify-spark-demo-query.sh
 
 .PHONY: verify-spark-demo-security
 verify-spark-demo-security: _context ## The demo sandbox's containment: no non-granted catalog, no storage, no token, no internet (manual; starts one pod)
