@@ -6021,8 +6021,8 @@ pub(crate) async fn plan_bundle(
             Err(fail) => return Err(fail),
         }
     }
-    // What this bundle and target own and the set no longer names: a warning, not a change —
-    // `--prune` decides removal and lands with a later slice of #101.
+    // What this bundle and target own and the set no longer names: a `delete` change when the
+    // caller prunes (`--prune`), a warning otherwise.
     for existing in resources.list().await.map_err(resource_fail)? {
         let Some(deployment) = deployment_of(&existing) else {
             continue;
@@ -6038,6 +6038,15 @@ pub(crate) async fn plan_bundle(
             .and_then(Value::as_str)
             .unwrap_or_default();
         if changes.iter().any(|change| change.name == name) {
+            continue;
+        }
+        if request.prune {
+            changes.push(PlanChange {
+                kind: "Pipeline".into(),
+                name: name.to_string(),
+                action: "delete".into(),
+                diff: Vec::new(),
+            });
             continue;
         }
         warnings.push(PlanIssue {
@@ -16396,6 +16405,7 @@ mod tests {
                 path: "pipelines/marts.yaml".into(),
                 sha256: "a".repeat(64),
             }],
+            prune: false,
         }
     }
 
@@ -16505,6 +16515,48 @@ mod tests {
                 .all(|change| change.name != "daily-trips"),
             "a pipeline the set omits is no change"
         );
+    }
+
+    #[tokio::test]
+    async fn bundle_plan_with_prune_names_the_deletes() {
+        let mut owned = nova_pipeline("daily-trips", "analytics");
+        stamp_provenance(&mut owned, &provenance("shop-etl", "prod", None), "ada");
+        let resources = memory_with(
+            &[("daily-trips", owned)],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut request = plan_request(vec![plan_document(
+            "other-marts",
+            "analytics",
+            "select 1",
+            "0 3 * * *",
+        )]);
+        request.prune = true;
+        let plan = plan_bundle(Some(&resources), None, None, &ada, None, request)
+            .await
+            .expect("an answer");
+
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert_eq!(plan.changes.len(), 2, "{:?}", plan.changes);
+        let create = plan
+            .changes
+            .iter()
+            .find(|change| change.name == "other-marts")
+            .expect("a create");
+        assert_eq!(create.action, "create");
+        let delete = plan
+            .changes
+            .iter()
+            .find(|change| change.name == "daily-trips")
+            .expect("a delete");
+        assert_eq!(delete.kind, "Pipeline");
+        assert_eq!(delete.name, "daily-trips");
+        assert_eq!(delete.action, "delete");
+        assert!(delete.diff.is_empty(), "a delete carries no diff");
     }
 
     #[tokio::test]

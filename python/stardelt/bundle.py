@@ -1217,6 +1217,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             "revision": stamp.get("revision"),
             "resources": specs,
             "files": _digests(directory),
+            "prune": prune,
         })
     except api.StardeltApiError as err:
         if getattr(err, "status", None) != 404:
