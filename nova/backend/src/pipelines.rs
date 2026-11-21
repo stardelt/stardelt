@@ -2265,6 +2265,7 @@ fn pipeline_resource(
     created_by: &str,
     notify: Option<&PipelineNotify>,
     viewers: &[String],
+    description: Option<&str>,
     publish: Option<Publish>,
 ) -> Value {
     let tasks = match statement {
@@ -2317,6 +2318,9 @@ fn pipeline_resource(
     if !viewers.is_empty() {
         spec["viewers"] = json!(viewers);
     }
+    if let Some(line) = description {
+        spec["description"] = json!(line);
+    }
     if publish == Some(Publish::Wap) {
         spec["publish"] = json!("wap");
     }
@@ -2349,6 +2353,7 @@ fn updated_resource(
     schedule: Option<&(String, String)>,
     notify: Option<&PipelineNotify>,
     viewers: Option<&[String]>,
+    description: Option<&str>,
     publish: Option<Publish>,
 ) -> Value {
     let mut updated = resource.clone();
@@ -2409,6 +2414,16 @@ fn updated_resource(
             }
         }
     }
+    // The body describes the whole editable state, as it does for `schedule`: `None` removes a
+    // line the resource carries.
+    match description {
+        Some(line) => updated["spec"]["description"] = json!(line),
+        None => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("description");
+            }
+        }
+    }
     // `None` leaves what the resource carries: until the form edits notifications, a save must
     // not wipe one a bundle deployed. All three lists empty removes the key.
     match notify {
@@ -2448,8 +2463,8 @@ fn updated_resource(
 }
 
 /// What differs between a stored pipeline and the resource an update would write, in the words
-/// of the form: `statement` or `notebook`, `schedule`, `params`, `options` (any of the
-/// concurrency, retries and time limit), and `deployment` when the bundle, the target or the
+/// of the form: `statement` or `notebook`, `schedule`, `description`, `params`, `options` (any of
+/// the concurrency, retries and time limit), and `deployment` when the bundle, the target or the
 /// commit a deploy stamped differs.
 fn changes_of(before_resource: &Value, after_resource: &Value) -> Vec<String> {
     let (before, after) = (spec_of(before_resource), spec_of(after_resource));
@@ -2464,6 +2479,10 @@ fn changes_of(before_resource: &Value, after_resource: &Value) -> Vec<String> {
     [
         (run, before.get("tasks") != after.get("tasks")),
         ("schedule", before.get("schedule") != after.get("schedule")),
+        (
+            "description",
+            before.get("description") != after.get("description"),
+        ),
         ("params", before.get("params") != after.get("params")),
         ("options", options),
         (
@@ -2767,6 +2786,10 @@ pub struct PipelineTaskRequest {
 pub struct CreatePipelineRequest {
     pub name: String,
     pub owner_group: String,
+    /// One line saying what the pipeline does (`spec.description`); at most 200 characters.
+    /// Omitted or blank writes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The statement to run; exactly one of this and `notebook` is given.
     #[serde(default)]
     pub sql: String,
@@ -2815,6 +2838,11 @@ pub struct UpdatePipelineRequest {
     /// The statement of a statement pipeline; a notebook pipeline refuses it.
     #[serde(default)]
     pub sql: String,
+    /// One line saying what the pipeline does (`spec.description`); at most 200 characters.
+    /// Omitted or blank removes the line, as the rest of the body describes the whole
+    /// editable state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The notebook, its version and its parameters for a notebook pipeline; a statement
     /// pipeline refuses it.
     #[serde(default)]
@@ -2950,8 +2978,9 @@ pub struct ValidatePipelineResponse {
     pub action: Option<String>,
     /// Why not: one sentence per problem (today the first rule that refuses).
     pub errors: Vec<ValidationIssue>,
-    /// What an `update` would change, from `statement` (or `notebook`), `schedule`, `params` and
-    /// `options`; empty for a `create`, for a refusal and for an update that changes nothing.
+    /// What an `update` would change, from `statement` (or `notebook`), `schedule`,
+    /// `description`, `params` and `options`; empty for a `create`, for a refusal and for an
+    /// update that changes nothing.
     pub changes: Vec<String>,
     /// The next five fire times (RFC 3339, in the schedule's zone) when the document is accepted
     /// and has a schedule.
@@ -2976,6 +3005,10 @@ pub struct PipelineDocument {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_group: Option<String>,
+    /// One line saying what the pipeline does (`spec.description`); left out when the
+    /// resource carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The statement of a statement pipeline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sql: Option<String>,
@@ -4472,6 +4505,10 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
                 .get("ownerGroup")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            description: spec
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             sql,
             notebook,
             tasks: if is_task_list(resource) {
@@ -5529,6 +5566,20 @@ pub(crate) fn check_viewers(viewers: Option<&[String]>) -> Result<(), String> {
     }
 }
 
+/// `spec.description`: one line, at most 200 characters (the CRD's bound). Blank is `None`:
+/// a form that sends "" clears the line instead of writing an empty string.
+fn check_description(text: Option<&str>) -> Result<Option<String>, String> {
+    let Some(text) = text else { return Ok(None) };
+    let line = text.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    if line.chars().count() > 200 {
+        return Err("a pipeline description is at most 200 characters".to_string());
+    }
+    Ok(Some(line.to_string()))
+}
+
 /// What a create writes once every rule has passed: the statement or notebook, the schedule, the options.
 struct Planned {
     statement: Statement,
@@ -5807,6 +5858,11 @@ async fn create_pipeline_inner(
         .ok_or_else(no_cluster)
         .map_err(ActionError::error)?;
 
+    // The description is one line at most 200 characters, blank meaning none (`spec.description`).
+    let description = check_description(body.description.as_deref()).map_err(|message| {
+        ActionError::refused("description", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
     let Planned {
         statement,
         schedule,
@@ -5841,6 +5897,7 @@ async fn create_pipeline_inner(
         &who.display_name,
         body.notify.as_ref(),
         body.viewers.as_deref().unwrap_or_default(),
+        description.as_deref(),
         body.publish,
     );
     if let Some(provenance) = &body.provenance {
@@ -5957,6 +6014,11 @@ pub(crate) async fn validate_pipeline(
     body: CreatePipelineRequest,
 ) -> Result<ValidatePipelineResponse, Fail> {
     let resources = resources.ok_or_else(no_cluster)?;
+    // The same rule a create and an update apply, so the answer and the write cannot disagree.
+    let description = match check_description(body.description.as_deref()) {
+        Ok(description) => description,
+        Err(message) => return Ok(not_ok(&message)),
+    };
     let planned = match plan_pipeline(resources, db, notebooks_store, who, &body).await {
         Ok(planned) => planned,
         Err(e) if e.outcome.starts_with("refused:") => return Ok(not_ok(e.fail.message())),
@@ -5993,6 +6055,7 @@ pub(crate) async fn validate_pipeline(
                 planned.schedule.as_ref(),
                 body.notify.as_ref(),
                 body.viewers.as_deref(),
+                description.as_deref(),
                 body.publish,
             );
             if let Some(provenance) = &body.provenance {
@@ -6308,6 +6371,11 @@ async fn update_pipeline_inner(
         .await
         .map_err(ActionError::load_refusal)?;
 
+    // The description is one line at most 200 characters, blank meaning none (`spec.description`).
+    let description = check_description(body.description.as_deref()).map_err(|message| {
+        ActionError::refused("description", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
     // Only what Nova wrote may be rewritten; a manifest stays its author's.
     if !nova_managed(&resource) {
         return Err(ActionError::refused("not-nova", managed_outside()));
@@ -6431,6 +6499,7 @@ async fn update_pipeline_inner(
         schedule.as_ref(),
         body.notify.as_ref(),
         body.viewers.as_deref(),
+        description.as_deref(),
         body.publish,
     );
     if let Some(provenance) = &body.provenance {
@@ -7144,6 +7213,7 @@ fn create_request_example() -> serde_json::Value {
     serde_json::json!({
         "name": "shop-marts",
         "ownerGroup": "shop",
+        "description": "Rebuilds the shop's marts for the dashboard.",
         "tasks": [{"name": "run", "sql": EXAMPLE_STATEMENT}],
         "schedule": {"cron": "0 3 * * *", "timezone": "UTC"}
     })
@@ -7190,6 +7260,7 @@ fn spec_response_example() -> serde_json::Value {
         "document": {
             "name": "shop-marts",
             "ownerGroup": "shop",
+            "description": "Rebuilds the shop's marts for the dashboard.",
             "tasks": [{"name": "run", "sql": EXAMPLE_STATEMENT}],
             "schedule": {"cron": "0 3 * * *", "timezone": "UTC"},
             "options": {
@@ -10446,6 +10517,137 @@ mod tests {
         );
     }
 
+    /// A create writes the body's line as `spec.description`, and leaves the key out of a body
+    /// that names none (#997).
+    #[test]
+    fn a_create_writes_the_description() {
+        let described = pipeline_resource(
+            "shop-bronze",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+            &[],
+            Some("loads the shop"),
+            None,
+        );
+        assert_eq!(spec_of(&described)["description"], json!("loads the shop"));
+
+        let plain = pipeline_resource(
+            "shop-bronze",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            spec_of(&plain).get("description").is_none(),
+            "a body that names no description writes no key"
+        );
+    }
+
+    /// The update body describes the whole editable state: a line replaces the stored one, and a
+    /// body without one removes it (#997).
+    #[test]
+    fn an_update_replaces_and_clears_the_description() {
+        let mut stored = resource("shop-bronze", Some("analytics"));
+        stored["spec"]["description"] = json!("the old line");
+        let statement = Statement::Sql("select 2".into());
+
+        let replaced = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            Some("the new line"),
+            None,
+        );
+        assert_eq!(spec_of(&replaced)["description"], json!("the new line"));
+
+        let cleared = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            spec_of(&cleared).get("description").is_none(),
+            "a body without a description removes the stored line"
+        );
+    }
+
+    /// The CRD's bound: a line of at most 200 characters, counted in characters, not bytes.
+    #[test]
+    fn a_description_longer_than_200_characters_is_refused() {
+        assert_eq!(
+            check_description(Some(&"ü".repeat(201))).unwrap_err(),
+            "a pipeline description is at most 200 characters"
+        );
+        assert_eq!(
+            check_description(Some(&"ü".repeat(200)))
+                .unwrap()
+                .as_deref(),
+            Some("ü".repeat(200).as_str())
+        );
+    }
+
+    /// A form that sends an empty or whitespace-only line clears it rather than writing `""`.
+    #[test]
+    fn a_blank_description_is_none() {
+        assert_eq!(check_description(Some("")), Ok(None));
+        assert_eq!(check_description(Some("  ")), Ok(None));
+        assert_eq!(check_description(None), Ok(None));
+        assert_eq!(
+            check_description(Some("  loads the shop  ")),
+            Ok(Some("loads the shop".to_string()))
+        );
+    }
+
+    /// `pipelines_spec` answers the line, so an edit sent back as it was read keeps it; a
+    /// resource without one leaves the key out (#997).
+    #[test]
+    fn spec_response_carries_the_description() {
+        let mut described = resource("shop-bronze", Some("analytics"));
+        described["spec"]["description"] = json!("Generates the shop's bronze layer");
+        let document = spec_response(&described).document;
+        assert_eq!(
+            document.description.as_deref(),
+            Some("Generates the shop's bronze layer")
+        );
+        assert_eq!(
+            serde_json::to_value(&document).unwrap()["description"],
+            json!("Generates the shop's bronze layer")
+        );
+
+        let plain = spec_response(&resource("shop-bronze", Some("analytics"))).document;
+        assert_eq!(plain.description, None);
+        assert!(
+            !serde_json::to_value(&plain)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("description"),
+            "a resource without a description leaves the key out"
+        );
+    }
+
     #[tokio::test]
     async fn detail_carries_params_retries_and_schedule() {
         let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
@@ -12084,6 +12286,7 @@ mod tests {
         CreatePipelineRequest {
             name: name.into(),
             owner_group: group.into(),
+            description: None,
             sql: sql.into(),
             notebook: None,
             tasks: None,
@@ -12103,6 +12306,7 @@ mod tests {
     fn update_body(sql: &str) -> UpdatePipelineRequest {
         UpdatePipelineRequest {
             sql: sql.into(),
+            description: None,
             notebook: None,
             tasks: None,
             schedule: None,
@@ -12220,6 +12424,7 @@ mod tests {
             "sub-ada",
             None,
             &[],
+            None,
             None,
         );
         resource["metadata"]["resourceVersion"] = json!("7");
@@ -12899,6 +13104,7 @@ mod tests {
         // The body carries the whole editable state: statement, schedule, params, options.
         let update = UpdatePipelineRequest {
             sql: "select 2;".into(),
+            description: None,
             notebook: None,
             tasks: None,
             schedule: None,
@@ -12970,6 +13176,7 @@ mod tests {
             "smoke",
             UpdatePipelineRequest {
                 sql: "select 3".into(),
+                description: None,
                 notebook: None,
                 tasks: None,
                 schedule: Some(ScheduleRequest {
@@ -13853,6 +14060,7 @@ mod tests {
             "sub-ada",
             None,
             &[],
+            None,
             Some(Publish::Wap),
         );
         assert_eq!(spec_of(&stored)["publish"], json!("wap"));
@@ -13863,6 +14071,7 @@ mod tests {
                 &statement,
                 &default_options(),
                 &BTreeMap::new(),
+                None,
                 None,
                 None,
                 None,
@@ -13900,6 +14109,7 @@ mod tests {
             "sub-ada",
             None,
             &[],
+            None,
             Some(Publish::Wap),
         );
         let document = spec_response(&resource).document;
@@ -16293,6 +16503,7 @@ mod tests {
         let body = CreatePipelineRequest {
             name: document.name.clone(),
             owner_group: document.owner_group.clone().unwrap(),
+            description: document.description.clone(),
             sql: document.sql.clone().unwrap(),
             notebook: None,
             tasks: None,
@@ -16506,6 +16717,7 @@ mod tests {
                 "ann",
                 None,
                 &[],
+                None,
                 None,
             )
         };
@@ -17113,6 +17325,7 @@ mod tests {
         CreatePipelineRequest {
             name: name.into(),
             owner_group: group.into(),
+            description: None,
             sql: String::new(),
             notebook: Some(NotebookRequest {
                 name: notebook.into(),
@@ -17137,6 +17350,7 @@ mod tests {
     fn update_notebook_body(notebook: &str, version: &str) -> UpdatePipelineRequest {
         UpdatePipelineRequest {
             sql: String::new(),
+            description: None,
             notebook: Some(NotebookRequest {
                 name: notebook.into(),
                 object_version: version.into(),
@@ -17172,6 +17386,7 @@ mod tests {
             "sub-ada",
             None,
             &[],
+            None,
             None,
         );
         resource["metadata"]["resourceVersion"] = json!("7");
@@ -17987,6 +18202,7 @@ mod tests {
             Some(&notify),
             &[],
             None,
+            None,
         );
         assert_eq!(spec_of(&resource)["notify"]["onFailure"], json!(["pager"]));
 
@@ -18077,6 +18293,7 @@ mod tests {
             }),
             &[],
             None,
+            None,
         );
         let statement = Statement::Sql("select 2".into());
 
@@ -18085,6 +18302,7 @@ mod tests {
             &statement,
             &default_options(),
             &BTreeMap::new(),
+            None,
             None,
             None,
             None,
@@ -18106,6 +18324,7 @@ mod tests {
             Some(&PipelineNotify::default()),
             None,
             None,
+            None,
         );
         assert!(
             spec_of(&removed).get("notify").is_none(),
@@ -18123,6 +18342,7 @@ mod tests {
                 on_success: vec!["digest".into()],
                 ..PipelineNotify::default()
             }),
+            None,
             None,
             None,
         );
@@ -18148,6 +18368,7 @@ mod tests {
                 "sub-ada",
                 None,
                 viewers,
+                None,
                 None,
             )
         };
@@ -18177,6 +18398,7 @@ mod tests {
             None,
             &["visitors".to_string()],
             None,
+            None,
         );
         let statement = Statement::Sql("select 2".into());
         let update = |viewers: Option<&[String]>| {
@@ -18188,6 +18410,7 @@ mod tests {
                 None,
                 None,
                 viewers,
+                None,
                 None,
             )
         };

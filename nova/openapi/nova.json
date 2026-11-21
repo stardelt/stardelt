@@ -6027,6 +6027,7 @@
                 "$ref": "#/components/schemas/CreatePipelineRequest"
               },
               "example": {
+                "description": "Rebuilds the shop's marts for the dashboard.",
                 "name": "shop-marts",
                 "ownerGroup": "shop",
                 "schedule": {
@@ -6325,6 +6326,7 @@
                 "$ref": "#/components/schemas/CreatePipelineRequest"
               },
               "example": {
+                "description": "Rebuilds the shop's marts for the dashboard.",
                 "name": "shop-marts",
                 "ownerGroup": "shop",
                 "schedule": {
@@ -7774,6 +7776,7 @@
                 },
                 "example": {
                   "document": {
+                    "description": "Rebuilds the shop's marts for the dashboard.",
                     "name": "shop-marts",
                     "options": {
                       "backoffMinutes": 5,
@@ -11907,6 +11910,13 @@
           "ownerGroup"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One line saying what the pipeline does (`spec.description`); at most 200 characters.\nOmitted or blank writes none."
+          },
           "name": {
             "type": "string"
           },
@@ -14016,6 +14026,13 @@
           "options"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One line saying what the pipeline does (`spec.description`); left out when the\nresource carries none."
+          },
           "name": {
             "type": "string"
           },
@@ -16879,6 +16896,13 @@
         "type": "object",
         "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters\nand the options — or, for a notebook pipeline, the notebook, its version and its parameters.\nEvery other field of the resource stays as it is, and what the pipeline runs never changes\nkind.",
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One line saying what the pipeline does (`spec.description`); at most 200 characters.\nOmitted or blank removes the line, as the rest of the body describes the whole\neditable state."
+          },
           "notebook": {
             "oneOf": [
               {
@@ -17200,7 +17224,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What an `update` would change, from `statement` (or `notebook`), `schedule`, `params` and\n`options`; empty for a `create`, for a refusal and for an update that changes nothing."
+            "description": "What an `update` would change, from `statement` (or `notebook`), `schedule`,\n`description`, `params` and `options`; empty for a `create`, for a refusal and for an\nupdate that changes nothing."
           },
           "errors": {
             "type": "array",
