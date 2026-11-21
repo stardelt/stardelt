@@ -328,6 +328,13 @@ export default function PipelineDetail() {
         </div>
         {showDefinition && (
           <div id="pipeline-definition" className="mt-3 space-y-2">
+            {pipeline.deployment && (
+              <p className="text-xs text-text-mute" data-testid="definition-owned-by-source">
+                {'Deployed from '}
+                {pipeline.deployment.bundle} · {pipeline.deployment.target}
+                {' — the next deploy overwrites changes made here.'}
+              </p>
+            )}
             {definition.isLoading && <p className="text-sm text-text-mute">Loading the definition…</p>}
             {definition.isError && <ErrorBox error={definition.error} onRetry={() => void definition.refetch()} />}
             {definition.data && (
