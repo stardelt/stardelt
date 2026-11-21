@@ -165,8 +165,11 @@ phase_up() {
     kubectl apply -f "$RUN_DIR/platform-instance.yaml" || return 1
   run_phase "platform ready" "$RUN_DIR/03-platform-instance.log" -- \
     wait_for_resources || return 1
+  # `product` is the ticket's assertion list (#48 scope 2): readiness first, then Airflow,
+  # Superset, Lakekeeper's token rule and Nova's sign-in page. Readiness alone would leave
+  # four of the six assertions unmade.
   run_phase "verify" "$RUN_DIR/04-verify.log" -- \
-    bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" || return 1
+    bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" product || return 1
   return 0
 }
 
