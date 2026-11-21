@@ -514,11 +514,10 @@ def test_a_spark_pipeline_graph_needs_the_catalog_block():
     )
 
 
-def test_publish_wap_refuses_a_spark_pipeline_task():
-    p = plan(*owned(spark(), publish="wap"))
+def test_publish_wap_accepts_a_spark_pipeline_task():
+    refuse_unrunnable(plan(*owned(spark(), publish="wap")))
+    # The fixture cannot give a spark-pipeline task no writes (the plan refuses that itself), so
+    # the "no writer" refusal is shown on a sql task: it still refuses.
     with pytest.raises(PlanError) as error:
-        refuse_unrunnable(p)
-    assert str(error.value) == (
-        "publish: wap with a spark-pipeline task is not wired yet: the audit branch is cut for "
-        "notebook writes only. Use publish: direct, or move the write into a notebook task."
-    )
+        plan(*owned(sql("a"), publish="wap"))
+    assert str(error.value) == "publish: wap needs a task that writes at least one table"
