@@ -914,7 +914,7 @@ pub struct IngestionSourceStatus {
 
 /// What a pipeline task does — the task contract behind `Pipeline`
 /// (master spec §5, plugs 6, 7 and 12). `sql`, `notebook` (scheduled jobs
-/// phases J0 and J1) and `dbt` run today; `python`, `quality` and
+/// phases J0 and J1), `dbt` and `quality` run today; `python` and
 /// `spark-pipeline` are accepted so manifests can be written ahead of their
 /// runtimes.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
@@ -930,8 +930,7 @@ pub enum TaskKind {
     /// dbt-core: `dbt build` of one selector (models and their tests) in the dbt tool image.
     Dbt,
     /// Data-quality gate: the SQL assertions in `checks` (a check passes when its
-    /// query returns no rows). Accepted; no runtime yet (#114). dbt tests run
-    /// inside a `dbt` task.
+    /// query returns no rows). Runs as a task; dbt tests run inside a `dbt` task.
     Quality,
     /// A declared graph run by `spark-pipelines` on the owner group's `SparkCluster`.
     /// Accepted; no runtime yet (#80). `project` is the bundle directory that holds
@@ -944,7 +943,7 @@ pub enum TaskKind {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PipelinePublish {
-    /// Write straight to `main` (the behaviour of every pipeline today).
+    /// Write straight to `main` (the default).
     #[default]
     Direct,
     /// Write to an `audit_<run>` branch, run the quality checks, then move `main` (nova#628).

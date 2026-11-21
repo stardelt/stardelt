@@ -214,7 +214,7 @@ spec:
                       description: |-
                         What a pipeline task does — the task contract behind `Pipeline`
                         (master spec §5, plugs 6, 7 and 12). `sql`, `notebook` (scheduled jobs
-                        phases J0 and J1) and `dbt` run today; `python`, `quality` and
+                        phases J0 and J1), `dbt` and `quality` run today; `python` and
                         `spark-pipeline` are accepted so manifests can be written ahead of their
                         runtimes.
                       enum:
