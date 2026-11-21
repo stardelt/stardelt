@@ -353,6 +353,24 @@ def test_spark_reads_remote_from_env(fake_spark, monkeypatch):
     assert fake_spark.sessions[-1].configs["spark.remote"] == stardelt.SPARK_REMOTE_DEFAULT
 
 
+def test_a_wap_branch_is_set_on_the_session(fake_spark, monkeypatch):
+    monkeypatch.setattr(stardelt, "_SPARK_SESSION", None)
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse"))
+    monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
+    monkeypatch.setenv("STARDELT_WAP_BRANCH", "audit_0123456789abcdef")
+    stardelt.spark()
+    assert fake_spark.sessions[-1].configs["spark.wap.branch"] == "audit_0123456789abcdef"
+
+
+def test_no_wap_branch_leaves_the_conf_absent(fake_spark, monkeypatch):
+    monkeypatch.setattr(stardelt, "_SPARK_SESSION", None)
+    monkeypatch.setattr(stardelt, "_sql", lambda _query: _catalogs("warehouse"))
+    monkeypatch.setattr(stardelt, "_token", lambda: "canary-token-317")
+    monkeypatch.delenv("STARDELT_WAP_BRANCH", raising=False)
+    stardelt.spark()
+    assert "spark.wap.branch" not in fake_spark.sessions[-1].configs
+
+
 def test_spark_docstring_states_credential_limitation():
     # `stardelt.spark` is the deprecated wrapper since 0.4; the session is `_session`.
     assert "shared storage credential" in stardelt._session.__doc__

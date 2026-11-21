@@ -82,6 +82,11 @@ DEFAULT_BATCH_ROWS = 1_000
 # nowhere else, because Spark Connect has no authentication of its own.
 SPARK_REMOTE_DEFAULT = "sc://spark-connect.stardelt.svc.cluster.local:15002"
 
+# A WAP run's audit branch (#114): the loader sets this on the notebook pod, and the
+# session sets `spark.wap.branch` from it. Writes then go to the branch only when the
+# table carries `write.wap.enabled=true` — the loader owns that property (measured, #820).
+WAP_BRANCH_ENV = "STARDELT_WAP_BRANCH"
+
 # The catalog and the lakehouse data, as the in-cluster services name them.
 # STARDELT_CATALOG_URI / STARDELT_S3_ENDPOINT override them for a split install.
 CATALOG_URI_DEFAULT = "http://lakekeeper.stardelt.svc.cluster.local:8181/catalog"
@@ -904,6 +909,10 @@ def _session(app_name="stardelt-notebook", cluster=None):
     server, so a drop (with or without ``PURGE``) removes the files once and cannot race
     a client-side purge (stardelt-platform#1127).
 
+    A run with an audit branch sets ``STARDELT_WAP_BRANCH`` (the loader does); the session
+    then sets ``spark.wap.branch`` and the notebook's writes land on that branch when the
+    table has ``write.wap.enabled=true`` (#114, #820).
+
     The catalogs and the token are set on the new session before its first catalog
     call (Spark reads ``spark.sql.catalog.*`` then). Setting the token again on a
     live session does not re-key an initialized catalog, so a later call with a
@@ -952,6 +961,11 @@ def _session(app_name="stardelt-notebook", cluster=None):
         session = SparkSession.builder.remote(remote).appName(app_name).create()
         # A DataFrame renders as a table in a notebook instead of printing its rows (D47).
         session.conf.set("spark.sql.repl.eagerEval.enabled", "true")
+        # The audit branch of a `publish: wap` run (#114). Set once, before the catalogs
+        # are loaded: Spark reads `spark.wap.branch` when a write resolves its table.
+        branch = (os.environ.get(WAP_BRANCH_ENV) or "").strip()
+        if branch:
+            session.conf.set("spark.wap.branch", branch)
         for name in names:
             session.conf.set(
                 f"spark.sql.catalog.{name}", "org.apache.iceberg.spark.SparkCatalog"
