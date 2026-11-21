@@ -11,6 +11,7 @@ ENV = {"STARDELT_NOVA_URL": "https://nova.example", "STARDELT_TOKEN": CANARY}
 ME = FakeResponse(payload={"user": "alice"})
 CREATE = {"ok": True, "action": "create", "errors": [], "changes": [], "nextRuns": []}
 LISTING = {"pipelines": [{"name": "load", "namespace": "stardelt", "ownerGroup": "sales"}]}
+DEPLOY_PLAN = {"ok": True, "errors": [], "warnings": [], "changes": [], "files": [], "planId": "abc"}
 
 
 def update(*changes):
@@ -99,7 +100,7 @@ def test_deploy_shows_the_difference_and_writes_as_before(tmp_path):
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--diff"],
         ME, FakeResponse(payload=update("statement")), FakeResponse(payload=CREATE),
-        FakeResponse(payload=LISTING), deployed(sql="select 0"),
+        FakeResponse(payload=LISTING), deployed(sql="select 0"), FakeResponse(payload=DEPLOY_PLAN),
         FakeResponse(payload=LISTING), FakeResponse(payload={"name": "load"}),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "nightly"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
@@ -108,4 +109,4 @@ def test_deploy_shows_the_difference_and_writes_as_before(tmp_path):
     assert code == 0
     assert [json.loads(line)["action"] for line in out.splitlines()] == ["updated", "created", "recorded"]
     assert "-select 0\n+select 1\n" in err
-    assert methods(session).count("PUT") == 1 and methods(session).count("POST") == 4
+    assert methods(session).count("PUT") == 1 and methods(session).count("POST") == 5

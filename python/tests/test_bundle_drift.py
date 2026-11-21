@@ -11,6 +11,7 @@ ENV = {"STARDELT_NOVA_URL": "https://nova.example", "STARDELT_TOKEN": CANARY}
 ME = FakeResponse(payload={"user": "alice"})
 UPDATE = {"ok": True, "action": "update", "errors": [], "changes": ["statement"], "nextRuns": []}
 BY_HAND = dict(UPDATE, modified=True)
+DEPLOY_PLAN = {"ok": True, "errors": [], "warnings": [], "changes": [], "files": [], "planId": "abc"}
 BLOCK = MANIFEST.replace("runAs: pipeline-sales}", "runAs: pipeline-sales, drift: block}")
 SENTENCE = "nightly was changed after its last deploy and this target says drift: block; look at the change, then pass --accept-drift to overwrite it"
 EXISTING = {
@@ -74,7 +75,7 @@ def test_a_blocking_deploy_writes_nothing_and_with_accept_drift_it_writes(tmp_pa
     assert methods(session) == ["GET", "POST", "POST"], "no listing, no write"
     code, out, _, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--accept-drift"],
-        ME, FakeResponse(payload=UPDATE), FakeResponse(payload=BY_HAND),
+        ME, FakeResponse(payload=UPDATE), FakeResponse(payload=BY_HAND), FakeResponse(payload=DEPLOY_PLAN),
         FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "load"}),
         FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),

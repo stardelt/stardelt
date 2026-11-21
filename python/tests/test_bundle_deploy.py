@@ -18,6 +18,7 @@ ME = FakeResponse(payload={"user": "alice"})
 CREATE = {"ok": True, "action": "create", "errors": [], "changes": [], "nextRuns": ["2026-11-02T03:00:00+01:00"]}
 UPDATE = {"ok": True, "action": "update", "errors": [], "changes": ["statement"], "nextRuns": []}
 STREAM_OK = {"ok": True, "errors": []}
+PLAN_OK = {"ok": True, "errors": [], "warnings": [], "changes": [], "files": [], "planId": "abc"}
 NO_STREAMS = {"namespace": "stardelt", "streams": []}
 NO_CATALOGS = {"catalogs": [], "default": "gold"}
 LOAD = {
@@ -131,7 +132,7 @@ def test_deploy_creates_or_updates_after_every_pipeline_passed(tmp_path):
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
@@ -145,6 +146,7 @@ def test_deploy_creates_or_updates_after_every_pipeline_passed(tmp_path):
     ]
     assert calls(session) == [
         ("GET", "/api/me"), ("POST", "/api/pipelines/validate"), ("POST", "/api/pipelines/validate"),
+        ("POST", "/api/deployments/plan"),
         ("GET", "/api/pipelines"), ("POST", "/api/pipelines"),
         ("GET", "/api/pipelines"), ("PUT", "/api/pipelines/stardelt/nightly"),
         ("GET", "/api/pipelines"), ("POST", "/api/deployments"),
@@ -156,7 +158,7 @@ def test_a_write_that_fails_reports_the_sentence_and_what_was_already_written(tm
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(503, {"error": "the scheduler is not reachable"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
@@ -176,7 +178,7 @@ def test_a_failed_deploy_whose_record_is_refused_still_exits_2_with_its_own_sent
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, _ = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(503, {"error": "the scheduler is not reachable"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
@@ -296,7 +298,7 @@ def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=NO_STREAMS),
-        FakeResponse(payload=LISTING),
+        FakeResponse(payload=LISTING), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(204),
@@ -320,7 +322,7 @@ def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=NO_STREAMS),
-        FakeResponse(payload=LISTING),
+        FakeResponse(payload=LISTING), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(503, {"error": "the scheduler is not reachable"}),
@@ -468,6 +470,7 @@ def test_deploy_puts_the_stream_with_its_stamp(tmp_path):
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=NO_STREAMS), FakeResponse(payload=STREAM_OK),
+        FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload={"name": "measurements"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
@@ -496,7 +499,7 @@ def test_a_deploy_with_prune_removes_a_stale_stream_app(tmp_path):
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--prune"],
         ME, FakeResponse(payload=CREATE), FakeResponse(payload=listed), FakeResponse(payload=STREAM_OK),
-        FakeResponse(payload={"pipelines": []}), FakeResponse(payload={"pipelines": []}),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(payload=PLAN_OK), FakeResponse(payload={"pipelines": []}),
         FakeResponse(201, {"name": "load"}),
         FakeResponse(201, {"name": "measurements"}), FakeResponse(204),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
@@ -526,7 +529,7 @@ def test_a_hand_changed_stream_is_refused_by_a_drift_block_target_unless_accepte
 
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod", "--accept-drift"], ME, FakeResponse(payload=CREATE),
-        FakeResponse(payload=MODIFIED), FakeResponse(payload=STREAM_OK),
+        FakeResponse(payload=MODIFIED), FakeResponse(payload=STREAM_OK), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload={"name": "measurements"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
@@ -542,7 +545,7 @@ def test_a_deploy_that_cannot_be_recorded_still_succeeds_and_says_so(tmp_path):
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, _ = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
         FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
@@ -553,6 +556,82 @@ def test_a_deploy_that_cannot_be_recorded_still_succeeds_and_says_so(tmp_path):
         "action": "not-recorded",
         "reason": "this needs Nova's database, and this installation has none; ask your administrator (HTTP 503)",
     }
+
+
+def test_the_deploy_asks_nova_for_the_plan_and_the_record_names_it(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    plan_call = next(call for call in session.calls if call[1].endswith("/api/deployments/plan"))
+    assert plan_call[0] == "POST"
+    sent = plan_call[2]["json"]
+    assert sent["bundle"] == "sales-etl" and sent["ownerGroup"] == "sales" and sent["target"] == "prod"
+    assert sent["files"] == bundle._digests(tmp_path), "the plan names the same files the record will"
+    stamp = {"bundle": "sales-etl", "target": "prod"}
+    assert sent["resources"] == [
+        {**LOAD, "provenance": stamp},
+        {"name": "nightly", "ownerGroup": "sales", "sql": "select * from sales.demo.trips", "provenance": stamp},
+    ], "the plan's set is the rendered set, in the order the deploy writes it"
+    create = next(call for call in session.calls if call[0] == "POST" and call[1].endswith("/api/pipelines"))
+    update = next(call for call in session.calls if call[0] == "PUT" and "/api/pipelines/" in call[1])
+    assert create[2]["json"] == sent["resources"][0], "the plan checked exactly the document the deploy creates"
+    assert update[2]["json"] == {k: v for k, v in sent["resources"][1].items() if k not in ("name", "ownerGroup")}
+    assert session.calls[-1][2]["json"]["planId"] == "abc"
+
+
+def test_a_plan_that_refuses_writes_nothing_and_its_sentence_is_the_problem(tmp_path):
+    make(tmp_path)
+    refused = {
+        "ok": False, "errors": [{"path": "resources[0] (gold)", "message": "you are not a member of the group sales"}],
+        "changes": [], "warnings": [], "files": [], "planId": "",
+    }
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=refused),
+    )
+    assert code == 2
+    assert err == "stardelt: prod: resources[0] (gold): you are not a member of the group sales\n"
+    assert out == ""
+    writes = [
+        f"{method} {url.removeprefix('https://nova.example')}"
+        for method, url, kwargs in session.calls
+        if method in ("POST", "PUT", "DELETE") and "/api/pipelines" in url and "/validate" not in url
+        or (method == "POST" and url.endswith("/api/deployments"))
+    ]
+    assert writes == [], "no create, no update, no record"
+    assert calls(session) == [
+        ("GET", "/api/me"), ("POST", "/api/pipelines/validate"), ("POST", "/api/pipelines/validate"),
+        ("POST", "/api/deployments/plan"),
+    ]
+
+
+def test_a_nova_without_the_plan_route_still_deploys_and_records_no_plan(tmp_path, capsys):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(404, {"error": "not found"}),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    assert "does not answer a deployment plan" in capsys.readouterr().err
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "kind": "Pipeline"},
+        {"action": "recorded", "id": 7},
+    ]
+    assert session.calls[-1][2]["json"]["planId"] is None
 
 
 def test_validate_rejects_nine_viewers(tmp_path):
@@ -574,7 +653,7 @@ def test_a_pipeline_with_viewers_is_sent_to_create(tmp_path):
          files={"sql/load.sql": "select 1", "notebooks/explore.ipynb": "{}"})
     code, _, _, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}),
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=PLAN_OK), FakeResponse(payload={"pipelines": []}),
         FakeResponse(201, {"name": "shared"}),
         FakeResponse(payload={"pipelines": [{"name": "shared", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
@@ -592,7 +671,7 @@ def test_a_pipeline_with_viewers_publishes_the_notebook_with_them(tmp_path):
     stored = FakeResponse(payload={"name": "explore.ipynb", "group": "sales", "objectVersion": "v8", "unchanged": False})
     code, _, _, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "prod"],
-        ME, new, stored, FakeResponse(payload=CREATE), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
+        ME, new, stored, FakeResponse(payload=CREATE), FakeResponse(payload=PLAN_OK), FakeResponse(payload={"pipelines": []}), FakeResponse(payload={}),
         FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
