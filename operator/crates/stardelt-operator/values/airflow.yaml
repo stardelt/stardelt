@@ -402,6 +402,17 @@ extraEnv: |
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
     value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:32010f4bf1b39533e858c5c020e9a20034ca65a6c0c32b03088de40482c3995e
+  # spark-pipeline tasks (#80 S2c-2): the same four variables as the platform's
+  # helm-values/airflow.yaml. Short names, like every address in this file: the operator
+  # installs into another namespace.
+  - name: PIPELINE_SPARK_IMAGE
+    value: ghcr.io/stardelt/spark:dev@sha256:71635e7637593b8612f11359bcd1ff49648360d40df90706a293653721f9d128
+  - name: PIPELINE_SPARK_REMOTE
+    value: sc://spark-connect:15002
+  - name: PIPELINE_SPARK_BUCKET
+    value: lakehouse
+  - name: PIPELINE_SPARK_PULL_SECRET
+    value: ghcr-creds
 
 # The internal CA that signs the query engine's certificate (Secret trino-ca, manifests/trino-tls.yaml),
 # mounted into every Airflow container, task pods included, so the pipeline loader can verify

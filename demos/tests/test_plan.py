@@ -1,7 +1,13 @@
 import json
 
 import pytest
-from stardelt_pipelines.plan import PlanError, PrincipalRef, parse_duration, plan
+from stardelt_pipelines.plan import (
+    PlanError,
+    PrincipalRef,
+    parse_duration,
+    plan,
+    refuse_unrunnable,
+)
 
 
 def resource(**spec):
@@ -427,3 +433,92 @@ def test_a_connection_without_secret_keys_needs_no_synced_secret():
 def test_a_connection_must_exist_and_belong_to_the_pipelines_group(task, connections, message):
     with pytest.raises(PlanError, match=message):
         plan(*owned(task()), connections=connections)
+
+
+# --- the spark-pipeline task: the graph rides a pod and stardelt owns catalog and database ------
+
+GRAPH = """\
+name: graph
+configuration:
+  spark.sql.catalog.playground: org.apache.iceberg.spark.SparkCatalog
+  spark.sql.catalog.playground.type: rest
+libraries:
+  - glob:
+      include: sql/**
+"""
+
+
+def spark(name="build", files=None, writes=("playground.scratch.range_ten",), **extra):
+    if files is None:
+        files = {"spark-pipeline.yml": GRAPH, "sql/range_ten.sql": "SELECT 1"}
+    task = {"name": name, "kind": "spark-pipeline", "files": files, "writes": list(writes)}
+    task.update(extra)
+    return task
+
+
+def test_plan_accepts_a_spark_pipeline_task():
+    p = plan(
+        *owned(spark(refresh="full", fullRefresh=["range_ten"]))
+    )
+    (build,) = p.tasks
+    assert build.kind == "spark-pipeline"
+    assert [path for path, _ in build.graph] == ["spark-pipeline.yml", "sql/range_ten.sql"]
+    assert dict(build.graph)["spark-pipeline.yml"] == GRAPH
+    assert build.refresh == "full"
+    assert build.full_refresh == ("range_ten",)
+    assert build.writes == ("playground.scratch.range_ten",)
+
+
+def test_a_spark_pipeline_graph_without_writes_is_refused():
+    with pytest.raises(PlanError) as error:
+        plan(*owned(spark(writes=())))
+    assert str(error.value) == (
+        "spark-pipeline task `build` needs writes: the catalog and schema the graph writes, as "
+        "catalog.schema.table — stardelt sets the graph's catalog and database from it"
+    )
+
+
+def test_a_spark_pipeline_graph_with_two_targets_is_refused():
+    with pytest.raises(PlanError) as error:
+        plan(*owned(spark(writes=("playground.scratch.a", "playground.other.b"))))
+    assert str(error.value) == (
+        "spark-pipeline task `build` writes into more than one catalog/schema "
+        "(playground.other, playground.scratch): a graph has one target; split the task"
+    )
+
+
+def test_a_spark_pipeline_graph_must_not_set_the_owned_keys():
+    files = {
+        "spark-pipeline.yml": GRAPH + "catalog: playground\n",
+        "sql/range_ten.sql": "SELECT 1",
+    }
+    with pytest.raises(PlanError) as error:
+        plan(*owned(spark(files=files)))
+    assert str(error.value) == (
+        "spark-pipeline task `build`: spark-pipeline.yml must not set catalog, database or "
+        "storage — the task's writes and the group's bucket set them at run time (#80)"
+    )
+
+
+def test_a_spark_pipeline_graph_needs_the_catalog_block():
+    files = {
+        "spark-pipeline.yml": "name: graph\nconfiguration:\n  spark.remote: sc://x\n",
+        "sql/range_ten.sql": "SELECT 1",
+    }
+    with pytest.raises(PlanError) as error:
+        plan(*owned(spark(files=files)))
+    assert str(error.value) == (
+        "spark-pipeline task `build`: catalog `playground` has no "
+        "`spark.sql.catalog.playground.type` under `configuration:` — the Connect session would "
+        "not know the catalog"
+    )
+
+
+def test_publish_wap_refuses_a_spark_pipeline_task():
+    p = plan(*owned(spark(), publish="wap"))
+    with pytest.raises(PlanError) as error:
+        refuse_unrunnable(p)
+    assert str(error.value) == (
+        "publish: wap with a spark-pipeline task is not wired yet: the audit branch is cut for "
+        "notebook writes only. Use publish: direct, or move the write into a notebook task."
+    )

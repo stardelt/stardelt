@@ -22,6 +22,8 @@ import json
 import re
 from dataclasses import dataclass, replace
 
+import yaml
+
 from stardelt_pipelines import wap
 from stardelt_pipelines.quality import SEVERITIES, Check
 
@@ -80,6 +82,34 @@ DBT_NEEDS_PRINCIPAL = (
 )
 MAX_DBT_BATCHES = 8
 MAX_DBT_THREADS = 16
+SPARK_PIPELINE_NEEDS_PRINCIPAL = (
+    "a spark-pipeline task needs the pipeline's ownerGroup and runAs: the graph's catalog "
+    "token is the principal's"
+)
+SPARK_PIPELINE_NEEDS_FILES = (
+    "spark-pipeline task `{task}` needs files: the graph's spark-pipeline.yml and its sources"
+)
+SPARK_PIPELINE_NEEDS_WRITES = (
+    "spark-pipeline task `{task}` needs writes: the catalog and schema the graph writes, as "
+    "catalog.schema.table — stardelt sets the graph's catalog and database from it"
+)
+SPARK_PIPELINE_TWO_TARGETS = (
+    "spark-pipeline task `{task}` writes into more than one catalog/schema ({targets}): a graph "
+    "has one target; split the task"
+)
+SPARK_PIPELINE_OWNS_THE_KEYS = (
+    "spark-pipeline task `{task}`: spark-pipeline.yml must not set catalog, database or storage — "
+    "the task's writes and the group's bucket set them at run time (#80)"
+)
+SPARK_PIPELINE_BAD_YAML = "spark-pipeline task `{task}`: spark-pipeline.yml is not a YAML map ({reason})"
+SPARK_PIPELINE_NEEDS_BLOCK = (
+    "spark-pipeline task `{task}`: catalog `{catalog}` has no `spark.sql.catalog.{catalog}.type` "
+    "under `configuration:` — the Connect session would not know the catalog"
+)
+WAP_SPARK_PIPELINE = (
+    "publish: wap with a spark-pipeline task is not wired yet: the audit branch is cut for "
+    "notebook writes only. Use publish: direct, or move the write into a notebook task."
+)
 # A project is one directory name under the tool image's /opt/dbt/projects.
 _DBT_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
 # A `quality` task's checks: SQL assertions that pass when they return no rows. The bounds are
@@ -160,6 +190,11 @@ class TaskPlan:
     dbt_select: tuple[str, ...] = ()
     dbt_threads: str = "4"
     dbt_vars: str | None = None
+    # `spark-pipeline` tasks only: the graph's (relative path, text) pairs, the refresh mode
+    # (`None` or `full`) and the datasets to rebuild. Defaults keep every other kind unchanged.
+    graph: tuple[tuple[str, str], ...] = ()
+    refresh: str | None = None
+    full_refresh: tuple[str, ...] = ()
     # `quality` tasks only: the SQL assertions the run is gated on. Defaults keep every other kind
     # unchanged.
     checks: tuple[Check, ...] = ()
@@ -236,10 +271,10 @@ def plan(
             raise PlanError(f"task name `{task_name}` is used twice")
         seen.add(task_name)
         kind = raw.get("kind")
-        if kind not in ("sql", "notebook", "dbt", "quality"):
+        if kind not in ("sql", "notebook", "dbt", "quality", "spark-pipeline"):
             raise PlanError(
                 f"task `{task_name}` has kind `{kind}`, which has no runtime yet "
-                "(only sql, notebook, dbt and quality run today)"
+                "(only sql, notebook, dbt, quality and spark-pipeline run today)"
             )
         if kind == "sql" and not raw.get("sql"):
             raise PlanError(f"sql task `{task_name}` needs a sql statement")
@@ -257,6 +292,13 @@ def plan(
             if not (spec.get("ownerGroup") and spec.get("runAs")):
                 raise PlanError(DBT_NEEDS_PRINCIPAL)
             dbt_project, dbt_select, dbt_threads, dbt_vars = _dbt_config(raw.get("config"))
+        graph: tuple[tuple[str, str], ...] = ()
+        refresh = None
+        full_refresh: tuple[str, ...] = ()
+        if kind == "spark-pipeline":
+            if not (spec.get("ownerGroup") and spec.get("runAs")):
+                raise PlanError(SPARK_PIPELINE_NEEDS_PRINCIPAL)
+            graph, refresh, full_refresh = _spark_pipeline_config(task_name, raw)
         checks: tuple[Check, ...] = ()
         if kind == "quality":
             checks = _quality_checks(task_name, raw.get("checks"), publish)
@@ -305,6 +347,9 @@ def plan(
                         dbt_select=(dbt_select[index],),
                         dbt_threads=dbt_threads,
                         dbt_vars=dbt_vars,
+                        graph=(),
+                        refresh=None,
+                        full_refresh=(),
                         checks=(),
                         writes=(),
                     )
@@ -327,6 +372,9 @@ def plan(
                 dbt_select=dbt_select,
                 dbt_threads=dbt_threads,
                 dbt_vars=dbt_vars,
+                graph=graph,
+                refresh=refresh,
+                full_refresh=full_refresh,
                 checks=checks,
                 writes=writes,
             )
@@ -429,8 +477,74 @@ def _dbt_config(config: dict | None) -> tuple[str, tuple[str, ...], str, str | N
     return project, selectors, threads, vars_text
 
 
+def _spark_pipeline_config(
+    task_name: str, raw: dict
+) -> tuple[tuple[tuple[str, str], ...], str | None, tuple[str, ...]]:
+    """The graph's files, its refresh mode and its full-refresh datasets, or a `PlanError`.
+
+    The graph must not set `catalog`, `database` or `storage` (the bundle refuses those too):
+    stardelt sets them from the task's `writes` — one catalog and one schema per graph — and
+    from the group's bucket. `spark-pipeline.yml` must be present and be a map; its
+    `configuration:` must carry the `spark.sql.catalog.<catalog>.type` block the loader gives
+    the principal's token to (#957 Q2/Q3).
+    """
+    files = raw.get("files")
+    if not isinstance(files, dict) or "spark-pipeline.yml" not in files:
+        raise PlanError(SPARK_PIPELINE_NEEDS_FILES.format(task=task_name))
+    text = files["spark-pipeline.yml"]
+    if not isinstance(text, str):
+        raise PlanError(SPARK_PIPELINE_NEEDS_FILES.format(task=task_name))
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        reason = " ".join(str(error).split())[:200]
+        raise PlanError(SPARK_PIPELINE_BAD_YAML.format(task=task_name, reason=reason)) from None
+    if not isinstance(document, dict):
+        raise PlanError(SPARK_PIPELINE_BAD_YAML.format(task=task_name, reason="not a map"))
+    owned = [key for key in ("catalog", "database", "storage") if key in document]
+    if owned:
+        raise PlanError(SPARK_PIPELINE_OWNS_THE_KEYS.format(task=task_name))
+    writes = raw.get("writes")
+    if not isinstance(writes, list) or not writes:
+        raise PlanError(SPARK_PIPELINE_NEEDS_WRITES.format(task=task_name))
+    if any(
+        not isinstance(table, str) or not wap.TABLE.match(table) for table in writes
+    ):
+        raise PlanError(WRITES_NOT_TABLE.format(task=task_name, table=writes))
+    targets = {table.rsplit(".", 1)[0] for table in writes}
+    if len(targets) != 1:
+        raise PlanError(SPARK_PIPELINE_TWO_TARGETS.format(
+            task=task_name, targets=", ".join(sorted(targets))
+        ))
+    catalog = next(iter(targets)).split(".")[0]
+    configuration = document.get("configuration") or {}
+    key = f"spark.sql.catalog.{catalog}.type"
+    if not isinstance(configuration, dict) or key not in configuration:
+        raise PlanError(
+            SPARK_PIPELINE_NEEDS_BLOCK.format(task=task_name, catalog=catalog)
+        )
+    for path, content in files.items():
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise PlanError(SPARK_PIPELINE_NEEDS_FILES.format(task=task_name))
+    refresh = raw.get("refresh")
+    if refresh is not None and refresh not in ("incremental", "full"):
+        raise PlanError(
+            f"spark-pipeline task `{task_name}` sets refresh: incremental or full"
+        )
+    full_refresh = raw.get("fullRefresh") or ()
+    if not isinstance(full_refresh, (list, tuple)) or any(
+        not isinstance(name, str) or not name for name in full_refresh
+    ):
+        raise PlanError(
+            f"spark-pipeline task `{task_name}` sets fullRefresh as a list of dataset names"
+        )
+    return tuple(sorted(files.items())), refresh, tuple(full_refresh)
+
+
 def refuse_unrunnable(p: PipelinePlan) -> None:
     """Refuse a plan the loader cannot run as declared; called by the DAG, not by `plan`."""
+    if p.publish == "wap" and any(task.kind == "spark-pipeline" for task in p.tasks):
+        raise PlanError(WAP_SPARK_PIPELINE)
     if p.publish != "wap":
         return
     tables = sorted({table for task in p.tasks for table in task.writes})
@@ -442,10 +556,10 @@ def refuse_unrunnable(p: PipelinePlan) -> None:
 def _writes(task_name: str, kind: str, raw) -> tuple[str, ...]:
     """The tables a task declares it writes, or a `PlanError`.
 
-    Only a `notebook` task writes a table today (the CRD also allows `spark-pipeline`, which has
-    no runtime yet), and every table is `catalog.schema.table`.
+    Only a `notebook` or `spark-pipeline` task writes a table, and every table is
+    `catalog.schema.table`.
     """
-    if kind != "notebook":
+    if kind not in ("notebook", "spark-pipeline"):
         raise PlanError(WRITES_ONLY_NOTEBOOK.format(task=task_name))
     if not isinstance(raw, list):
         raise PlanError(WRITES_NOT_TABLE.format(task=task_name, table=raw))

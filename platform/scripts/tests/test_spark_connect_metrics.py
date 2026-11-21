@@ -97,12 +97,12 @@ class SparkConnectMetricsTest(unittest.TestCase):
     def test_the_notebook_rule_is_unchanged(self):
         rules = [rule for rule in ingress_rules(self.documents)
                  if CONNECT_PORT in rule_ports(rule)]
-        # Two rules name 15002 since stardelt#231: the notebook rule below and the Envoy
-        # front (`spark-connect-auth`, manifests/spark-connect-auth.yaml) that verifies a
-        # token before a frame reaches the driver. The notebook rule is selected by its
-        # peer, and the other rule must be the front's — so the count still says something.
-        self.assertEqual(2, len(rules),
-                         "15002 is admitted to notebooks and to the token-checking front")
+        # Three rules name 15002: the notebook rule below, a pipeline's own `spark-pipeline`
+        # task pods (#80 S2c-2), and the Envoy front (`spark-connect-auth`,
+        # manifests/spark-connect-auth.yaml) that verifies a token before a frame reaches the
+        # driver. Each is selected by its peer, so the count still says something.
+        self.assertEqual(3, len(rules),
+                         "15002 is admitted to notebooks, task pods and the token-checking front")
         notebook = [rule for rule in rules
                     if {"component": "singleuser-server"}
                     == (((rule.get("from") or [{}])[0]).get("podSelector") or {}).get("matchLabels")]
@@ -122,11 +122,20 @@ class SparkConnectMetricsTest(unittest.TestCase):
                          "the notebook rule must not widen to other namespaces")
         self.assertNotEqual(SCRAPER, selector.get("matchLabels"),
                            "the notebook rule must not admit the scraper")
-        front = [other for other in rules if other is not rule]
+        task_pods = [other for other in rules
+                     if {"app.kubernetes.io/name": "pipeline-spark-pipeline"}
+                     == (((other.get("from") or [{}])[0]).get("podSelector") or {}).get("matchLabels")]
+        self.assertEqual(1, len(task_pods),
+                         "exactly one ingress rule admits a pipeline's own task pods")
+        task_selector = (task_pods[0].get("from") or [{}])[0].get("podSelector") or {}
+        self.assertIn({"key": "stardelt.io/group.visitors", "operator": "DoesNotExist"},
+                      task_selector.get("matchExpressions") or [],
+                      "a visitor-labelled task pod is still refused on 15002")
+        front = [other for other in rules if other is not rule and other is not task_pods[0]]
         self.assertEqual(
             [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "spark-connect-auth"}}}],
             front[0].get("from"),
-            "the second 15002 rule admits the token-checking front and nothing else",
+            "the token-checking front rule admits the front and nothing else",
         )
 
     def test_the_per_user_catalogue_keeps_the_ui_dark(self):
