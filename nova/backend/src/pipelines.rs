@@ -5985,40 +5985,80 @@ pub(crate) async fn plan_bundle(
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or("Pipeline");
-        if kind != "Pipeline" {
-            errors.push(PlanIssue {
-                path,
-                message: format!("a plan covers Pipeline documents; this one is kind {kind}"),
-            });
-            continue;
-        }
-        let body: CreatePipelineRequest = match serde_json::from_value(document.clone()) {
-            Ok(body) => body,
-            Err(err) => {
-                errors.push(PlanIssue {
-                    path,
-                    message: format!("not a pipeline document: {err}"),
-                });
-                continue;
-            }
-        };
-        let name = body.name.clone();
-        match validate_pipeline(Some(resources), db, notebooks_store, who, body).await {
-            Ok(answer) if answer.ok => changes.push(PlanChange {
-                kind: "Pipeline".into(),
-                name,
-                action: planned_action(&answer),
-                diff: answer.changes,
-            }),
-            Ok(answer) => {
-                for issue in answer.errors {
-                    errors.push(PlanIssue {
-                        path: format!("{path} ({name})"),
-                        message: issue.message,
-                    });
+        match kind {
+            "Pipeline" => {
+                let body: CreatePipelineRequest = match serde_json::from_value(document.clone()) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        errors.push(PlanIssue {
+                            path,
+                            message: format!("not a pipeline document: {err}"),
+                        });
+                        continue;
+                    }
+                };
+                let name = body.name.clone();
+                match validate_pipeline(Some(resources), db, notebooks_store, who, body).await {
+                    Ok(answer) if answer.ok => changes.push(PlanChange {
+                        kind: "Pipeline".into(),
+                        name,
+                        action: planned_action(&answer),
+                        diff: answer.changes,
+                    }),
+                    Ok(answer) => {
+                        for issue in answer.errors {
+                            errors.push(PlanIssue {
+                                path: format!("{path} ({name})"),
+                                message: issue.message,
+                            });
+                        }
+                    }
+                    Err(fail) => return Err(fail),
                 }
             }
-            Err(fail) => return Err(fail),
+            "StreamApp" => {
+                // A stream write is a PUT; without listing StreamApps the plan names every stream
+                // change as a create (#101).
+                let body: crate::streams::StreamWrite =
+                    match serde_json::from_value(document.clone()) {
+                        Ok(body) => body,
+                        Err(err) => {
+                            errors.push(PlanIssue {
+                                path: format!("{path} (stream)"),
+                                message: format!("not a stream document: {err}"),
+                            });
+                            continue;
+                        }
+                    };
+                if body.owner_group != request.owner_group {
+                    errors.push(PlanIssue {
+                        path,
+                        message: format!(
+                            "the stream's ownerGroup {} is not the plan's {}",
+                            body.owner_group, request.owner_group
+                        ),
+                    });
+                    continue;
+                }
+                match crate::streams::check_write(&body.name, &body, who) {
+                    Ok(_) => changes.push(PlanChange {
+                        kind: "StreamApp".into(),
+                        name: body.name.clone(),
+                        action: "create".into(),
+                        diff: Vec::new(),
+                    }),
+                    Err(message) => errors.push(PlanIssue {
+                        path: format!("{path} ({})", body.name),
+                        message,
+                    }),
+                }
+            }
+            _ => errors.push(PlanIssue {
+                path,
+                message: format!(
+                    "a plan covers Pipeline or StreamApp documents; this one is kind {kind}"
+                ),
+            }),
         }
     }
     // What this bundle and target own and the set no longer names: a `delete` change when the
@@ -16579,6 +16619,88 @@ mod tests {
         .await
         .expect_err("no cluster, no plan");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// One rendered StreamApp document in the shape `PUT /api/streams/{name}` takes.
+    fn stream_document(name: &str, group: &str) -> Value {
+        json!({
+            "kind": "StreamApp",
+            "name": name,
+            "ownerGroup": group,
+            "source": {"topic": "events"},
+            "sink": {"catalog": "bronze", "table": "events.raw", "mode": "append"},
+        })
+    }
+
+    #[tokio::test]
+    async fn a_plan_accepts_a_stream_document() {
+        let resources = memory_with(&[], &[]);
+        let ada = who("sub-ada", &["analytics"], false);
+        let plan = plan_bundle(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            None,
+            plan_request(vec![stream_document("events", "analytics")]),
+        )
+        .await
+        .expect("an answer");
+
+        assert!(plan.ok, "{:?}", plan.errors);
+        assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+        assert_eq!(plan.changes.len(), 1, "{:?}", plan.changes);
+        let change = &plan.changes[0];
+        assert_eq!(change.kind, "StreamApp");
+        assert_eq!(change.name, "events");
+        assert_eq!(change.action, "create");
+    }
+
+    #[tokio::test]
+    async fn a_plan_refuses_a_bad_stream_document() {
+        let resources = memory_with(&[], &[]);
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut document = stream_document("events", "analytics");
+        document["sink"]["mode"] = json!("upsert");
+        let plan = plan_bundle(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            None,
+            plan_request(vec![document]),
+        )
+        .await
+        .expect("an answer");
+
+        assert!(!plan.ok, "the stream is refused");
+        assert_eq!(plan.errors.len(), 1, "{:?}", plan.errors);
+        assert!(
+            plan.errors[0].message.contains("mode"),
+            "{}",
+            plan.errors[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_refuses_a_stream_of_another_group() {
+        let resources = memory_with(&[], &[]);
+        let ada = who("sub-ada", &["analytics"], false);
+        let plan = plan_bundle(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            None,
+            plan_request(vec![stream_document("events", "other")]),
+        )
+        .await
+        .expect("an answer");
+
+        assert_eq!(plan.errors.len(), 1, "{:?}", plan.errors);
+        let message = &plan.errors[0].message;
+        assert!(message.contains("other"), "{message}");
+        assert!(message.contains("analytics"), "{message}");
     }
 
     #[test]
