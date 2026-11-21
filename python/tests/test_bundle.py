@@ -320,7 +320,57 @@ def test_quality_task_rules_are_reported(tmp_path):
 
 def test_a_quality_task_cannot_also_give_sql(tmp_path):
     task_bundle(tmp_path, ["{name: gate, sql: select 1, quality: {checks: [{name: c, sql: 'select 2'}]}}"])
-    assert "task 'gate': give exactly one of sql, sqlFile, notebook, dbt or quality" in said(bundle.validate(tmp_path)[0])
+    assert "task 'gate': give exactly one of sql, sqlFile, notebook, dbt, quality or spark-pipeline" in said(bundle.validate(tmp_path)[0])
+
+
+def test_a_spark_pipeline_task_validates_and_renders(tmp_path):
+    """`spark-pipeline` (#80 S1b): a declared graph in a bundle directory, written ahead of its runtime."""
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop, refresh: full}}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+    )
+    assert bundle.validate(tmp_path, "prod")[0] == []
+    problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
+    assert (problems, mode) == ([], "production")
+    assert specs[0]["tasks"] == [{"name": "build", "spark-pipeline": {"project": "spark/shop", "refresh": "full"}}]
+    assert specs[0]["ownerGroup"] == "sales"
+
+
+def test_a_spark_pipeline_task_needs_its_project_directory(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/missing}}\n"},
+        files=dict(TASK_FILES),
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert problems[0][0] == "resources/gold.yaml (dev), task 'build'"
+    assert "project 'spark/missing' has no spark-pipeline.yml" in said(problems)
+
+
+def test_a_spark_pipeline_task_project_stays_inside_the_bundle(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: sql/../spark/shop}}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert problems[0][0] == "resources/gold.yaml (dev), task 'build'"
+    assert "project must be a relative directory inside the bundle" in said(problems)
+
+
+def test_a_spark_pipeline_yml_may_not_set_the_warehouse_keys(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\nstorage: warehouse\n"},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert problems[0][0] == "resources/gold.yaml (dev), task 'build'"
+    assert (
+        "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)"
+        in said(problems)
+    )
 
 
 def test_dbt_task_rules_are_reported(tmp_path):
@@ -350,12 +400,12 @@ def test_a_task_problem_names_the_file_and_the_task(tmp_path):
     task_bundle(tmp_path, ["{name: customer_ltv, sql: select 1, sqlFile: sql/schema.sql}"])
     problems, _, _ = bundle.validate(tmp_path, "prod")
     assert problems[0][0] == "resources/gold.yaml (prod), task 'customer_ltv'"
-    assert problems[0][1] == "give exactly one of sql, sqlFile, notebook, dbt or quality"
+    assert problems[0][1] == "give exactly one of sql, sqlFile, notebook, dbt, quality or spark-pipeline"
 
 
 def test_task_rules_are_reported(tmp_path):
     rows = [
-        (["{name: x, sql: select 1, sqlFile: sql/schema.sql}"], "task 'x': give exactly one of sql, sqlFile, notebook, dbt or quality"),
+        (["{name: x, sql: select 1, sqlFile: sql/schema.sql}"], "task 'x': give exactly one of sql, sqlFile, notebook, dbt, quality or spark-pipeline"),
         (["{name: x, sql: select 1}", "{name: x, sql: select 2}"], "the name is used twice"),
         (["{name: x, sql: select 1, dependsOn: [nope]}"], "dependsOn names 'nope'"),
         (["{name: a, sql: select 1, dependsOn: [b]}", "{name: b, sql: select 2, dependsOn: [a]}"], "dependsOn is a cycle"),

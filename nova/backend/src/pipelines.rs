@@ -519,6 +519,7 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                     let config = task.get("config");
                     let notebook = detailed && kind == "notebook";
                     let dbt = detailed && kind == "dbt";
+                    let spark = detailed && kind == "spark-pipeline";
                     Some(TaskSpecView {
                         name: task.get("name")?.as_str()?.to_string(),
                         kind: kind.to_string(),
@@ -567,6 +568,33 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                             None
                         },
                         dbt_select: if dbt { dbt_select_of(config) } else { None },
+                        project: if spark {
+                            task.get("project")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        refresh: if spark {
+                            task.get("refresh")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        full_refresh: if spark {
+                            task.get("fullRefresh")
+                                .and_then(Value::as_array)
+                                .map(|names| {
+                                    names
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_string)
+                                        .collect()
+                                })
+                        } else {
+                            None
+                        },
                         depends_on: task
                             .get("dependsOn")
                             .and_then(Value::as_array)
@@ -951,7 +979,7 @@ const MAX_NOTEBOOK_PARAM_VALUE_CHARS: usize = 256;
 const MAX_NOTEBOOK_PARAMS_JSON_CHARS: usize = 4096;
 
 const ONE_OF_STATEMENT_NOTEBOOK_OR_DBT: &str =
-    "give a statement, a notebook, a dbt run or a quality run";
+    "give a statement, a notebook, a dbt run, a quality run or a spark-pipeline graph";
 const NOTEBOOK_NAME_RULE: &str = "the notebook name is a .ipynb file name (letters, digits, \
                                   dots, dashes, underscores and spaces)";
 const NOTEBOOK_PARAM_NAMES: &str = "parameter names are letters, digits and underscores";
@@ -1166,6 +1194,80 @@ fn quality_config(request: &QualityRequest) -> Result<Vec<QualityCheck>, String>
     Ok(checks)
 }
 
+/// `^[A-Za-z0-9][A-Za-z0-9._/-]{1,127}$`: the CRD's `project` pattern with its 128-character
+/// limit, plus the segments a bundle directory may not carry.
+const SPARK_PROJECT_MAX_CHARS: usize = 128;
+const SPARK_NEEDS_PROJECT: &str =
+    "a spark-pipeline task needs project (the bundle directory with spark-pipeline.yml)";
+const SPARK_PROJECT_RULE: &str = "project must be a relative directory inside the bundle";
+const SPARK_BAD_REFRESH: &str = "refresh must be incremental or full";
+const SPARK_BAD_FULL_REFRESH: &str = "fullRefresh is 1 to 32 dataset names of 1 to 128 characters";
+const SPARK_REFRESH_TWICE: &str =
+    "a spark-pipeline task sets refresh: full or fullRefresh, not both";
+/// At most this many datasets a full refresh rebuilds (the CRD's `fullRefresh` `maxItems`).
+const MAX_FULL_REFRESH: usize = 32;
+/// The longest one dataset name of `fullRefresh` may be (the CRD's item `maxLength`).
+const MAX_FULL_REFRESH_NAME_CHARS: usize = 128;
+
+/// A `spark-pipeline` task's fields checked the way the CRD checks them (#80): a relative
+/// directory inside the bundle, `incremental` or `full`, and 1 to 32 dataset names — never
+/// `refresh: full` together with a `fullRefresh`. `Err` is the sentence the caller sees.
+fn spark_pipeline_config(request: &SparkPipelineRequest) -> Result<SparkPipelineShape, String> {
+    let project = request.project.as_str();
+    if project.is_empty() {
+        return Err(SPARK_NEEDS_PROJECT.into());
+    }
+    let chars: Vec<char> = project.chars().collect();
+    if chars.len() < 2
+        || chars.len() > SPARK_PROJECT_MAX_CHARS
+        || !chars[0].is_ascii_alphanumeric()
+        || !chars
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '_' | '/' | '-'))
+        || project.ends_with('/')
+        || project
+            .split('/')
+            .any(|part| part == ".." || part == ".git")
+    {
+        return Err(SPARK_PROJECT_RULE.into());
+    }
+    if let Some(refresh) = &request.refresh
+        && !matches!(refresh.as_str(), "incremental" | "full")
+    {
+        return Err(SPARK_BAD_REFRESH.into());
+    }
+    let full_refresh = request.full_refresh.clone().unwrap_or_default();
+    if !full_refresh.is_empty() {
+        if full_refresh.len() > MAX_FULL_REFRESH
+            || full_refresh.iter().any(|name| {
+                name.is_empty()
+                    || name.chars().count() > MAX_FULL_REFRESH_NAME_CHARS
+                    || name.chars().any(char::is_whitespace)
+            })
+        {
+            return Err(SPARK_BAD_FULL_REFRESH.into());
+        }
+        if request.refresh.as_deref() == Some("full") {
+            return Err(SPARK_REFRESH_TWICE.into());
+        }
+    }
+    Ok(SparkPipelineShape {
+        project: project.to_string(),
+        refresh: request.refresh.clone(),
+        full_refresh,
+    })
+}
+
+/// A `spark-pipeline` task of a task list as the resource stores it (#80): the bundle directory,
+/// the resolved refresh mode and the datasets a full refresh rebuilds (`full_refresh` stays
+/// empty when the request gave none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SparkPipelineShape {
+    project: String,
+    refresh: Option<String>,
+    full_refresh: Vec<String>,
+}
+
 /// The `run` task of a Nova-written pipeline as a write stores it (#210, #237): exactly one of a
 /// statement and a pinned notebook version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1185,16 +1287,20 @@ enum Statement {
     Dbt(BTreeMap<String, String>),
     /// A `quality` task of a task list (`#114`): the SQL assertions, severity resolved.
     Quality(Vec<QualityCheck>),
+    /// A `spark-pipeline` task of a task list (`#80`): the declared graph, checked.
+    SparkPipeline(SparkPipelineShape),
     /// A whole task list, each task checked (`#905`).
     Tasks(Vec<TaskStatement>),
 }
 
 /// The body's statement with the rules of its kind applied: the SQL ones (statement, template
 /// parameters, placeholders), the notebook ones (name, parameters, and a pinned version that
-/// exists in the group), the dbt ones (`plan.py`'s config rules), or the quality ones (`plan.py`'s
-/// check rules). `Err` is the sentence and the audit's reason. A body gives exactly one of a
-/// non-empty `sql`, a `notebook`, a `dbt` run and a `quality` run; two of them or none is the same
-/// sentence (#237, #112, #114).
+/// exists in the group), the dbt ones (`plan.py`'s config rules), the quality ones (`plan.py`'s
+/// check rules), or the spark-pipeline ones (the CRD's project, refresh and fullRefresh rules).
+/// `Err` is the sentence and the audit's reason. A body gives exactly one of a non-empty `sql`,
+/// a `notebook`, a `dbt` run, a `quality` run and a `sparkPipeline` graph; two of them or none is
+/// the same sentence (#237, #112, #114, #80).
+#[allow(clippy::too_many_arguments)]
 async fn checked_statement(
     sql: &str,
     notebook: Option<&NotebookRequest>,
@@ -1203,25 +1309,35 @@ async fn checked_statement(
     notebooks: Option<&NotebookStore>,
     group: &str,
     quality: Option<&QualityRequest>,
+    spark_pipeline: Option<&SparkPipelineRequest>,
 ) -> Result<Statement, ActionError> {
     let refused = |reason: &'static str, message: String| {
         ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
     };
-    match (sql.trim().is_empty(), notebook, dbt, quality) {
-        (true, None, Some(dbt), None) => dbt_config(dbt)
+    match (
+        sql.trim().is_empty(),
+        notebook,
+        dbt,
+        quality,
+        spark_pipeline,
+    ) {
+        (true, None, Some(dbt), None, None) => dbt_config(dbt)
             .map(Statement::Dbt)
             .map_err(|message| refused("dbt", message)),
-        (true, None, None, Some(quality)) => quality_config(quality)
+        (true, None, None, Some(quality), None) => quality_config(quality)
             .map(Statement::Quality)
             .map_err(|message| refused("quality", message)),
-        (false, None, None, None) => {
+        (true, None, None, None, Some(graph)) => spark_pipeline_config(graph)
+            .map(Statement::SparkPipeline)
+            .map_err(|message| refused("spark-pipeline", message)),
+        (false, None, None, None, None) => {
             let sql = validate_sql(sql).map_err(|message| refused("sql", message))?;
             validate_params(template_params).map_err(|message| refused("params", message))?;
             check_placeholders(&sql, template_params)
                 .map_err(|message| refused("params", message))?;
             Ok(Statement::Sql(sql))
         }
-        (true, Some(notebook), None, None) => {
+        (true, Some(notebook), None, None, None) => {
             let params =
                 validate_notebook(notebook).map_err(|message| refused("notebook", message))?;
             if !notebooks::object_version_ok(&notebook.object_version) {
@@ -1284,6 +1400,17 @@ fn task_json(task: &TaskStatement) -> Value {
         Statement::Dbt(config) => json!({ "name": task.name, "kind": "dbt", "config": config }),
         Statement::Quality(checks) => {
             json!({ "name": task.name, "kind": "quality", "checks": checks })
+        }
+        Statement::SparkPipeline(graph) => {
+            let mut task =
+                json!({ "name": task.name, "kind": "spark-pipeline", "project": graph.project });
+            if let Some(refresh) = &graph.refresh {
+                task["refresh"] = json!(refresh);
+            }
+            if !graph.full_refresh.is_empty() {
+                task["fullRefresh"] = json!(graph.full_refresh);
+            }
+            task
         }
         Statement::Tasks(_) => unreachable!("a task carries one statement, not a list"),
     };
@@ -1409,6 +1536,7 @@ async fn checked_tasks(
             notebooks,
             group,
             task.quality.as_ref(),
+            task.spark_pipeline.as_ref(),
         )
         .await
         .map_err(|error| error.about_task(&task.name))?;
@@ -1450,7 +1578,17 @@ async fn checked_run(
         // `dbt` or `quality` is not a shape this route takes (#112, #114): only a task list
         // carries one.
         (_, _, None) => {
-            checked_statement(sql, notebook, None, template_params, notebooks, group, None).await
+            checked_statement(
+                sql,
+                notebook,
+                None,
+                template_params,
+                notebooks,
+                group,
+                None,
+                None,
+            )
+            .await
         }
         (true, false, Some(tasks)) => {
             // Once for the whole list: the parameters are the pipeline's, shared by every task.
@@ -1473,14 +1611,15 @@ async fn checked_run(
 enum StoredShape {
     /// The form's single `run` task, of this kind (`sql` or `notebook`).
     Run(&'static str),
-    /// A task list: every task is `sql`, `notebook`, `dbt` or `quality`, and it is not the single
-    /// `run` task.
+    /// A task list: every task is `sql`, `notebook`, `dbt`, `quality` or `spark-pipeline`, and
+    /// it is not the single `run` task.
     Tasks,
     /// A shape Nova does not write (another kind, or no tasks at all).
     Other,
 }
 
-/// A task list is a task list whatever each task runs: `sql`, `notebook`, `dbt` or `quality`.
+/// A task list is a task list whatever each task runs: `sql`, `notebook`, `dbt`, `quality` or
+/// `spark-pipeline`.
 fn is_task_list(resource: &Value) -> bool {
     if run_task_kind(resource).is_some() {
         return false;
@@ -1494,7 +1633,7 @@ fn is_task_list(resource: &Value) -> bool {
                 && tasks.iter().all(|task| {
                     matches!(
                         task.get("kind").and_then(Value::as_str),
-                        Some("sql" | "notebook" | "dbt" | "quality")
+                        Some("sql" | "notebook" | "dbt" | "quality" | "spark-pipeline")
                     )
                 })
         })
@@ -2011,6 +2150,10 @@ fn pipeline_resource(
         Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
         // Nor a `quality` run (#114).
         Statement::Quality(_) => unreachable!("a quality run is one task of a task list"),
+        // Nor a `spark-pipeline` graph (#80).
+        Statement::SparkPipeline(_) => {
+            unreachable!("a spark-pipeline graph is one task of a task list")
+        }
     };
     let mut spec = json!({
         "ownerGroup": group,
@@ -2093,6 +2236,10 @@ fn updated_resource(
         Statement::Dbt(_) => unreachable!("a dbt run is one task of a task list"),
         // Nor a `quality` run (#114).
         Statement::Quality(_) => unreachable!("a quality run is one task of a task list"),
+        // Nor a `spark-pipeline` graph (#80).
+        Statement::SparkPipeline(_) => {
+            unreachable!("a spark-pipeline graph is one task of a task list")
+        }
     }
     updated["spec"]["concurrency"] = json!(options.concurrency);
     updated["spec"]["retries"] = json!({
@@ -2394,26 +2541,47 @@ pub struct QualityRequest {
     pub checks: Vec<QualityCheckRequest>,
 }
 
+/// A `spark-pipeline` task of a task list (#80): the declared graph `spark-pipelines` runs on
+/// the owner group's `SparkCluster`. `project` is a directory of the bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SparkPipelineRequest {
+    /// The bundle directory that holds `spark-pipeline.yml`.
+    pub project: String,
+    /// `incremental` (the default) or `full`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    /// Datasets to rebuild from scratch; 1 to 32 names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_refresh: Option<Vec<String>>,
+}
+
 /// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a
-/// notebook, a dbt run and a quality run, and the tasks that must succeed first.
+/// notebook, a dbt run, a quality run and a spark-pipeline graph, and the tasks that must succeed
+/// first.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineTaskRequest {
     /// Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}` (the CRD also accepts capitals).
     pub name: String,
-    /// The statement to run; exactly one of this, `notebook`, `dbt` and `quality` is given.
+    /// The statement to run; exactly one of this, `notebook`, `dbt`, `quality` and
+    /// `sparkPipeline` is given.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sql: String,
     /// A published notebook version to run instead (#237).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notebook: Option<NotebookRequest>,
-    /// A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the four.
+    /// A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the five.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbt: Option<DbtRequest>,
     /// SQL assertions instead of a statement, a notebook or a dbt run (`#114`): exactly one of
-    /// the four.
+    /// the five.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<QualityRequest>,
+    /// A declared Spark graph instead of a statement, a notebook, a dbt run or SQL checks
+    /// (#80): exactly one of the five.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spark_pipeline: Option<SparkPipelineRequest>,
     /// Names of the tasks that must succeed first; at most 8, each a task of this list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -2737,6 +2905,15 @@ pub struct TaskSpecView {
     /// The selector or the batched selectors, joined with `, `, detail route only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dbt_select: Option<String>,
+    /// The bundle directory of a `kind: "spark-pipeline"` task, detail route only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// `incremental` or `full` of a `kind: "spark-pipeline"` task, detail route only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    /// The datasets a full refresh rebuilds, detail route only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_refresh: Option<Vec<String>>,
     /// The task names this task waits for (`tasks[].dependsOn`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -3865,6 +4042,7 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
             notebook: None,
             dbt: None,
             quality: None,
+            spark_pipeline: None,
             depends_on,
         };
         match task.get("kind")?.as_str()? {
@@ -3934,6 +4112,24 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
                     })
                     .collect::<Option<Vec<QualityCheckRequest>>>()?;
                 request.quality = Some(QualityRequest { checks });
+            }
+            "spark-pipeline" => {
+                request.spark_pipeline = Some(SparkPipelineRequest {
+                    project: task.get("project")?.as_str()?.to_string(),
+                    refresh: task
+                        .get("refresh")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    full_refresh: match task.get("fullRefresh").and_then(Value::as_array) {
+                        Some(names) => Some(
+                            names
+                                .iter()
+                                .map(|name| name.as_str().map(str::to_string))
+                                .collect::<Option<Vec<String>>>()?,
+                        ),
+                        None => None,
+                    },
+                });
             }
             _ => return None,
         }
@@ -11284,6 +11480,7 @@ mod tests {
             notebook: None,
             dbt: None,
             quality: None,
+            spark_pipeline: None,
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11296,6 +11493,7 @@ mod tests {
             notebook: None,
             dbt: Some(dbt),
             quality: None,
+            spark_pipeline: None,
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11312,6 +11510,7 @@ mod tests {
             notebook: None,
             dbt: None,
             quality: Some(QualityRequest { checks }),
+            spark_pipeline: None,
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11322,6 +11521,30 @@ mod tests {
             name: name.into(),
             sql: sql.into(),
             severity: severity.map(str::to_string),
+        }
+    }
+
+    /// A `spark-pipeline` task entry for the tests (`#80`).
+    fn spark_pipeline_task(
+        name: &str,
+        project: &str,
+        refresh: Option<&str>,
+        full_refresh: Option<&[&str]>,
+        depends_on: &[&str],
+    ) -> PipelineTaskRequest {
+        PipelineTaskRequest {
+            name: name.into(),
+            sql: String::new(),
+            notebook: None,
+            dbt: None,
+            quality: None,
+            spark_pipeline: Some(SparkPipelineRequest {
+                project: project.into(),
+                refresh: refresh.map(str::to_string),
+                full_refresh: full_refresh
+                    .map(|names| names.iter().map(|name| (*name).to_string()).collect()),
+            }),
+            depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
 
@@ -11408,6 +11631,7 @@ mod tests {
                 notebook: Some(report.clone()),
                 dbt: None,
                 quality: None,
+                spark_pipeline: None,
                 depends_on: vec!["load".into()],
             },
         ];
@@ -12283,6 +12507,7 @@ mod tests {
                 }),
                 dbt: None,
                 quality: None,
+                spark_pipeline: None,
                 depends_on: vec!["load".into()],
             },
         ]);
@@ -12331,6 +12556,7 @@ mod tests {
             }),
             dbt: None,
             quality: None,
+            spark_pipeline: None,
             depends_on: Vec::new(),
         }]);
         create_pipeline(
@@ -12524,6 +12750,7 @@ mod tests {
                 vars: None,
             }),
             quality: None,
+            spark_pipeline: None,
             depends_on: vec![],
         }]);
         let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
@@ -12656,6 +12883,7 @@ mod tests {
             quality: Some(QualityRequest {
                 checks: vec![check("no_null_ids", "select 1", None)],
             }),
+            spark_pipeline: None,
             depends_on: vec![],
         }]);
         let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
@@ -12782,6 +13010,205 @@ mod tests {
                 "dependsOn": ["load"],
                 "checks": [{ "name": "no_null_ids", "sql": "select 3",
                              "severity": "warn" }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_tasks_accepts_a_spark_pipeline_task() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-graph", "analytics", "");
+        body.tasks = Some(vec![spark_pipeline_task(
+            "build",
+            "spark/shop",
+            Some("incremental"),
+            Some(&["gold.report"]),
+            &[],
+        )]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a spark-pipeline task list");
+        let stored = stored_pipeline(&resources, "shop-graph")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][0],
+            json!({
+                "name": "build",
+                "kind": "spark-pipeline",
+                "project": "spark/shop",
+                "refresh": "incremental",
+                "fullRefresh": ["gold.report"]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spark_pipeline_task_refuses_the_crd_rules() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let refused = |project: &'static str,
+                       refresh: Option<&'static str>,
+                       full_refresh: Option<&'static [&'static str]>| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                let mut body = create_body("shop-graph", "analytics", "");
+                body.tasks = Some(vec![spark_pipeline_task(
+                    "build",
+                    project,
+                    refresh,
+                    full_refresh,
+                    &[],
+                )]);
+                let error =
+                    create_pipeline(Some(resources), None, None, &create_limiter(), ada, body)
+                        .await
+                        .expect_err("refused");
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+                error.message().to_string()
+            }
+        };
+
+        assert_eq!(
+            refused("", None, None).await,
+            format!("task `build`: {SPARK_NEEDS_PROJECT}")
+        );
+        // The CRD's project is a relative directory of the bundle.
+        assert_eq!(
+            refused("/spark/shop", None, None).await,
+            format!("task `build`: {SPARK_PROJECT_RULE}")
+        );
+        assert_eq!(
+            refused("spark/../shop", None, None).await,
+            format!("task `build`: {SPARK_PROJECT_RULE}")
+        );
+        assert_eq!(
+            refused("spark/shop", Some("sometimes"), None).await,
+            format!("task `build`: {SPARK_BAD_REFRESH}")
+        );
+        assert_eq!(
+            refused("spark/shop", Some("full"), Some(&["gold.report"])).await,
+            format!("task `build`: {SPARK_REFRESH_TWICE}")
+        );
+        // Nothing was written by any of the refusals.
+        assert!(stored_pipeline(&resources, "shop-graph").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_spark_pipeline_task_cannot_also_carry_a_statement() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-graph", "analytics", "");
+        let mut task = spark_pipeline_task("build", "spark/shop", None, None, &[]);
+        task.sql = "select 1".into();
+        body.tasks = Some(vec![task]);
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("both");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            format!("task `build`: {ONE_OF_STATEMENT_NOTEBOOK_OR_DBT}")
+        );
+        assert!(stored_pipeline(&resources, "shop-graph").await.is_none());
+    }
+
+    #[test]
+    fn a_stored_spark_pipeline_task_list_is_a_task_list() {
+        let resource = json!({
+            "spec": {
+                "tasks": [{ "name": "build", "kind": "spark-pipeline",
+                            "project": "spark/shop", "refresh": "incremental",
+                            "fullRefresh": ["gold.report"] }]
+            }
+        });
+        assert!(is_task_list(&resource));
+        assert_eq!(stored_shape(&resource), StoredShape::Tasks);
+    }
+
+    #[tokio::test]
+    async fn spec_returns_a_task_list_with_a_spark_pipeline_task() {
+        let mut stored = nova_pipeline("shop-graph", "analytics");
+        stored["spec"]["tasks"] = json!([{
+            "name": "build",
+            "kind": "spark-pipeline",
+            "project": "spark/shop",
+            "refresh": "incremental",
+            "fullRefresh": ["gold.report"]
+        }]);
+        let resources = memory_with(&[("shop-graph", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let answer = pipeline_spec(Some(&resources), &ada, &namespace, "shop-graph")
+            .await
+            .expect("visible to its group");
+
+        assert!(
+            answer.editable,
+            "a Nova-written task list is edited whole (#762)"
+        );
+        assert_eq!(
+            serde_json::to_value(&answer.document).unwrap()["tasks"],
+            json!([{
+                "name": "build",
+                "sparkPipeline": {
+                    "project": "spark/shop",
+                    "refresh": "incremental",
+                    "fullRefresh": ["gold.report"]
+                }
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn update_replaces_a_spark_pipeline_task_list() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let mut body = create_body("shop-graph", "analytics", "");
+        body.tasks = Some(vec![spark_pipeline_task(
+            "build",
+            "spark/shop",
+            None,
+            None,
+            &[],
+        )]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+
+        let mut update = update_body("");
+        update.tasks = Some(vec![
+            pipeline_task("load", "select 2", &[]),
+            spark_pipeline_task("build", "spark/shop", Some("full"), None, &["load"]),
+        ]);
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "shop-graph",
+            update,
+        )
+        .await
+        .expect("updated");
+        let stored = stored_pipeline(&resources, "shop-graph")
+            .await
+            .expect("stored");
+        assert_eq!(stored["spec"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            stored["spec"]["tasks"][1],
+            json!({
+                "name": "build",
+                "kind": "spark-pipeline",
+                "project": "spark/shop",
+                "refresh": "full",
+                "dependsOn": ["load"]
             })
         );
     }
@@ -15527,7 +15954,7 @@ mod tests {
 
     #[tokio::test]
     async fn exactly_one_of_sql_and_notebook() {
-        const SENTENCE: &str = "give a statement, a notebook, a dbt run or a quality run";
+        const SENTENCE: &str = ONE_OF_STATEMENT_NOTEBOOK_OR_DBT;
         let resources = analytics_ready();
         let s3 = FakeS3::start().await;
         let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
@@ -16028,6 +16455,9 @@ mod tests {
                 connection: None,
                 dbt_project: None,
                 dbt_select: None,
+                project: None,
+                refresh: None,
+                full_refresh: None,
                 depends_on: vec![],
             }],
             "the edit dialog gets the version and the parameters it must prefill"
@@ -16049,6 +16479,9 @@ mod tests {
                 connection: None,
                 dbt_project: None,
                 dbt_select: None,
+                project: None,
+                refresh: None,
+                full_refresh: None,
                 depends_on: vec![],
             }]
         );
@@ -16070,6 +16503,9 @@ mod tests {
                 connection: None,
                 dbt_project: None,
                 dbt_select: None,
+                project: None,
+                refresh: None,
+                full_refresh: None,
                 depends_on: vec![],
             }]
         );
