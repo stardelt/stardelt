@@ -711,6 +711,12 @@ export type PipelineTaskSpec = {
   dbtProject?: string | null
   /** The selector or the batched selectors, joined with `, `; detail route only. */
   dbtSelect?: string | null
+  /** The bundle directory of a `kind: "spark-pipeline"` task; detail route only. */
+  project?: string | null
+  /** `incremental` or `full` of a `spark-pipeline` task; detail route only. */
+  refresh?: string | null
+  /** The datasets a full refresh rebuilds; detail route only. */
+  fullRefresh?: string[] | null
   /** The tables a `wap` run audits (`catalog.schema.table`); detail route only (#114). */
   writes?: string[]
   /** The task names this task waits for; absent when it waits for nothing. */
