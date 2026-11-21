@@ -16,6 +16,7 @@ engine error instead of leaving the query running behind it.
 Environment of the dag-processor and the task pods:
   PIPELINE_TRINO_URL        base URL of the query engine, e.g. https://trino:8443
   PIPELINE_TRINO_CA_FILE    CA bundle that signed the engine's certificate (optional; the token POST uses the public trust store)
+  PIPELINE_CATALOG_URL      base URL of the catalog, e.g. http://lakekeeper.stardelt.svc.cluster.local:8181
   PIPELINE_TOKEN_URL        token endpoint of the identity provider
   PIPELINE_CLIENT_ID        the default principal, `pipeline-runner` (a pipeline with a group
                             principal overrides it in its own task pods)
@@ -44,7 +45,7 @@ from airflow.timetables.trigger import CronTriggerTimetable
 # The support package sits next to this file. Airflow does not put the DAGs folder on the
 # import path in every process (dag-processor, task pod, tests), so do it here.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stardelt_pipelines import quality, trino  # noqa: E402
+from stardelt_pipelines import quality, trino, wap  # noqa: E402
 from stardelt_pipelines.access import dag_access  # noqa: E402
 from stardelt_pipelines.dbt import DbtPodOperator  # noqa: E402
 from stardelt_pipelines.expand import expand, run_values  # noqa: E402
@@ -161,7 +162,16 @@ def _run_task(task: dict, params: dict, **context) -> None:
     )
 
 
-def _run_quality(checks: list[dict], params: dict, **context) -> None:
+def _catalog_http(token: str) -> httpx.Client:
+    """The catalog's REST API with the run principal's bearer token (its audience must
+    include `lakekeeper`; a principal without it gets the catalog's 401)."""
+    return httpx.Client(headers={"Authorization": f"Bearer {token}"}, timeout=60.0)
+
+
+def _run_quality(
+    checks: list[dict], params: dict, publish: str = "direct", audit_table: str | None = None,
+    **context,
+) -> None:
     """Executes inside the task pod. Runs each check as the service principal, never logging it."""
     dag_run = context["dag_run"]
     fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
@@ -169,17 +179,29 @@ def _run_quality(checks: list[dict], params: dict, **context) -> None:
     tags = trino.lineage_tags(context["dag"].dag_id, context["ti"].task_id, dag_run.run_id)
 
     ca_file = os.environ.get("PIPELINE_TRINO_CA_FILE")
-    with trino.identity_client() as identity, httpx.Client(
-        verify=ca_file or True, timeout=60.0
-    ) as http:
+    with trino.identity_client() as identity:
         token = trino.client_credentials_token(
             os.environ["PIPELINE_TOKEN_URL"],
             os.environ.get("PIPELINE_CLIENT_ID", DEFAULT_PRINCIPAL),
             os.environ["PIPELINE_CLIENT_SECRET"],
             client=identity,
         )
+    with httpx.Client(
+        verify=ca_file or True, timeout=60.0
+    ) as http, _catalog_http(token) as catalog:
 
         def run_one(sql: str) -> int:
+            if "${table}" in sql:
+                sql = wap.resolve_table(
+                    sql,
+                    audit_table,
+                    wap.branch_snapshot(
+                        catalog,
+                        os.environ["PIPELINE_CATALOG_URL"],
+                        audit_table,
+                        wap.branch_name(dag_run.run_id),
+                    ),
+                )
             statement = expand(
                 sql,
                 run_date=run_date,
@@ -212,6 +234,47 @@ def _quality_failure_sentence(failed: list[tuple[str, int]]) -> str:
     return f"{count} quality check{'s' if count != 1 else ''} failed: {named}"
 
 
+WAP_PREPARE_TASK = "wap-prepare"
+WAP_PUBLISH_TASK = "wap-publish"
+
+
+def _wap_prepare(tables: list[str], **context) -> dict:
+    """Create this run's audit branch on every written table, before any writer runs."""
+    dag_run = context["dag_run"]
+    branch = wap.branch_name(dag_run.run_id)
+    with trino.identity_client() as identity:
+        token = trino.client_credentials_token(
+            os.environ["PIPELINE_TOKEN_URL"],
+            os.environ.get("PIPELINE_CLIENT_ID", DEFAULT_PRINCIPAL),
+            os.environ["PIPELINE_CLIENT_SECRET"],
+            client=identity,
+        )
+    with _catalog_http(token) as catalog:
+        main = wap.prepare(catalog, os.environ["PIPELINE_CATALOG_URL"], tables, branch)
+    log.info("wap: branch %s from main %s", branch, main)
+    return {"branch": branch, "main": main}
+
+
+def _wap_publish(tables: list[str], **context) -> None:
+    """Move `main` to the branch after the checks passed, then drop the branch."""
+    dag_run = context["dag_run"]
+    prepared = context["ti"].xcom_pull(task_ids=WAP_PREPARE_TASK) or {}
+    branch = prepared.get("branch") or wap.branch_name(dag_run.run_id)
+    main = prepared.get("main") or {}
+    with trino.identity_client() as identity:
+        token = trino.client_credentials_token(
+            os.environ["PIPELINE_TOKEN_URL"],
+            os.environ.get("PIPELINE_CLIENT_ID", DEFAULT_PRINCIPAL),
+            os.environ["PIPELINE_CLIENT_SECRET"],
+            client=identity,
+        )
+    with _catalog_http(token) as catalog:
+        for table in tables:
+            wap.publish(catalog, os.environ["PIPELINE_CATALOG_URL"], table, branch, int(main[table]))
+            wap.drop_branch(catalog, os.environ["PIPELINE_CATALOG_URL"], table, branch)
+    log.info("wap: published %s, dropped branch %s", ", ".join(tables), branch)
+
+
 def _build_dag(p) -> DAG:
     refuse_unrunnable(p)
     access = dag_access(p.owner_group)
@@ -237,6 +300,26 @@ def _build_dag(p) -> DAG:
         principal_pod_override(p.principal.secret_name) if p.principal is not None else None
     )
     operators = {}
+    wap_tables = sorted({table for t in p.tasks for table in t.writes})
+    wap_prepare = wap_publish = None
+    if p.publish == "wap":
+        # retries=0: a retried prepare would move an existing branch back to a newer `main`.
+        wap_prepare = PythonOperator(
+            task_id=WAP_PREPARE_TASK,
+            python_callable=_wap_prepare,
+            op_kwargs={"tables": wap_tables},
+            retries=0,
+            executor_config=executor_config,
+            dag=dag,
+        )
+        wap_publish = PythonOperator(
+            task_id=WAP_PUBLISH_TASK,
+            python_callable=_wap_publish,
+            op_kwargs={"tables": wap_tables},
+            retries=0,
+            executor_config=executor_config,
+            dag=dag,
+        )
     for t in p.tasks:
         if t.kind == "notebook":
             # A notebook runs in a pod of its own: the worker only orchestrates it, so the pod
@@ -254,6 +337,7 @@ def _build_dag(p) -> DAG:
                 principal_secret=p.principal.secret_name,
                 connection_name=t.connection,
                 connection_keys=t.connection_keys,
+                wap=p.publish == "wap",
                 namespace=namespace,
                 dag=dag,
             )
@@ -287,6 +371,8 @@ def _build_dag(p) -> DAG:
                         for c in t.checks
                     ],
                     "params": p.params,
+                    "publish": p.publish,
+                    "audit_table": wap_tables[0] if len(wap_tables) == 1 else None,
                 },
                 executor_config=executor_config,
                 dag=dag,
@@ -305,6 +391,13 @@ def _build_dag(p) -> DAG:
     for t in p.tasks:
         for dep in t.depends_on:
             operators[dep] >> operators[t.name]
+    if wap_prepare is not None:
+        for t in p.tasks:
+            if t.writes:
+                wap_prepare >> operators[t.name]
+        for t in p.tasks:
+            if t.kind == "quality":
+                operators[t.name] >> wap_publish
     return dag
 
 

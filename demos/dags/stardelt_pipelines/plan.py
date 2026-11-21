@@ -113,8 +113,7 @@ QUALITY_CHECK_AUDIT_TABLE = (
     "pipeline"
 )
 # `publish: wap` (#114): the run writes an `audit_<hash>` branch, the quality task checks that
-# branch and `main` moves only when the checks pass. The plan carries it; the DAG refuses it until
-# the loader has the audit-branch runtime.
+# branch and `main` moves only when the checks pass.
 PUBLISH_VALUES = ("direct", "wap")
 PUBLISH_BAD = "publish must be direct or wap (found `{publish}`)"
 WRITES_NOT_TABLE = "task `{task}` writes `{table}`, which is not catalog.schema.table"
@@ -122,9 +121,9 @@ WRITES_ONLY_NOTEBOOK = (
     "task `{task}` cannot write a table: only a spark-pipeline or notebook task declares writes"
 )
 WAP_NEEDS_WRITER = "publish: wap needs a task that writes at least one table"
-WAP_NO_RUNTIME = (
-    "publish: wap has no audit-branch runtime in the loader yet: the run would write main "
-    "directly (#114)"
+WAP_PLACEHOLDER_NEEDS_ONE_TABLE = (
+    "${{table}} names the audit branch of one table, and this pipeline writes {count}: "
+    "name the table in the check, or split the pipeline"
 )
 
 
@@ -432,8 +431,12 @@ def _dbt_config(config: dict | None) -> tuple[str, tuple[str, ...], str, str | N
 
 def refuse_unrunnable(p: PipelinePlan) -> None:
     """Refuse a plan the loader cannot run as declared; called by the DAG, not by `plan`."""
-    if p.publish == "wap":
-        raise PlanError(WAP_NO_RUNTIME)
+    if p.publish != "wap":
+        return
+    tables = sorted({table for task in p.tasks for table in task.writes})
+    placeholder = any("${table}" in check.sql for task in p.tasks for check in task.checks)
+    if placeholder and len(tables) > 1:
+        raise PlanError(WAP_PLACEHOLDER_NEEDS_ONE_TABLE.format(count=len(tables)))
 
 
 def _writes(task_name: str, kind: str, raw) -> tuple[str, ...]:

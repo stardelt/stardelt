@@ -366,6 +366,8 @@ extraEnv: |
         name: stardelt-identity
         key: trinoUrl
         optional: true
+  - name: PIPELINE_CATALOG_URL
+    value: http://lakekeeper.stardelt.svc.cluster.local:8181
   - name: PIPELINE_TOKEN_URL
     valueFrom:
       configMapKeyRef:

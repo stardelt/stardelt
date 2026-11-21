@@ -400,6 +400,8 @@ extraEnv: |
         name: stardelt-identity
         key: trinoUrl
         optional: true
+  - name: PIPELINE_CATALOG_URL
+    value: http://lakekeeper.stardelt.svc.cluster.local:8181
   # The pipeline runner's client-credentials token endpoint, from ConfigMap
   # stardelt-identity key `tokenEndpoint` (#611) — never a literal Keycloak URL here: an
   # external provider's path is not the realm's, and the in-cluster Service does not exist

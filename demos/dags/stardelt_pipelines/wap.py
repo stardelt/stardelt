@@ -64,6 +64,47 @@ def create_branch(client, base_url: str, table: str, branch: str, snapshot_id: i
     )
 
 
+def main_snapshot(client, base_url: str, table: str) -> int:
+    """The table's `main` snapshot id, or a `WapError` when the ref is missing."""
+    main = (refs(client, base_url, table).get("main") or {}).get("snapshot-id")
+    if main is None:
+        raise WapError(f"`{table}` has no main branch")
+    return int(main)
+
+
+def branch_snapshot(client, base_url: str, table: str, branch: str) -> int:
+    """The branch's current snapshot id, or a `WapError` naming the missing branch."""
+    snapshot = (refs(client, base_url, table).get(branch) or {}).get("snapshot-id")
+    if snapshot is None:
+        raise WapError(f"`{table}` has no branch `{branch}`")
+    return int(snapshot)
+
+
+def enable_branch_writes(client, base_url: str, table: str) -> None:
+    """`write.wap.enabled=true`: without it `spark.wap.branch` writes `main` silently (#820 Q1c)."""
+    commit(
+        client,
+        base_url,
+        table,
+        [],
+        [{"action": "set-properties", "updates": {"write.wap.enabled": "true"}}],
+    )
+
+
+def prepare(client, base_url: str, tables: list[str], branch: str) -> dict[str, int]:
+    """Create this run's audit branch on every written table, at that table's current `main`.
+
+    Returns `{table: main snapshot id}`; the publish asserts each `main` is still at that value.
+    A `set-properties` commit changes metadata only, so it does not move `main`'s snapshot.
+    """
+    main: dict[str, int] = {}
+    for table in tables:
+        main[table] = main_snapshot(client, base_url, table)
+        enable_branch_writes(client, base_url, table)
+        create_branch(client, base_url, table, branch, main[table])
+    return main
+
+
 def publish(client, base_url: str, table: str, branch: str, expected_main: int) -> None:
     """Move `main` to the branch's snapshot, only while `main` is still `expected_main`."""
     branch_snapshot = (refs(client, base_url, table).get(branch) or {}).get("snapshot-id")
