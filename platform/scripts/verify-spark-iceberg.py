@@ -148,6 +148,9 @@ def spark_session():
         ("warehouse", "warehouse"),
         ("token", CATALOG_TOKEN),
         ("io-impl", "org.apache.iceberg.aws.s3.S3FileIO"),
+        # The shared driver holds no storage key: the load must return the table-scoped
+        # credential, which is the only one a data file is read or written with (#75, #841).
+        ("header.X-Iceberg-Access-Delegation", "vended-credentials"),
         ("s3.endpoint", S3_ENDPOINT),
         ("s3.region", "us-east-1"),
         ("s3.path-style-access", "true"),

@@ -32,7 +32,8 @@ ADD --checksum=sha256:3123c3798af642dd537230923548e013ef41cc28b6626e5225808cf567
 
 # S3FileIO and the AWS SDK v2 it needs. The REST catalog vends a table-scoped
 # credential on every load (#75, #840) and S3FileIO signs the data request with
-# it: no static key is configured on the driver or the executors.
+# it: the shared Connect server configures no static key on its driver or its
+# executors.
 ADD --checksum=sha256:dd7e49ffa4ac9b215bed846581991259e3aec9bb2fa08d6cec029c46cd66d957 \
     https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar \
     /opt/spark/jars/iceberg-aws-bundle.jar

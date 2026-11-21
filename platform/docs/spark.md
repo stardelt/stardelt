@@ -318,9 +318,11 @@ to expose on an Ingress before then.
 
 Two more limits, deliberately not hidden: row and column masks are Trino-only
 (design `multitenant-catalogs.md` §5.8), so a Spark read is governed by table
-grants, not by a mask; and the driver/executors sign S3 with the platform key,
-so a person with write access to a table can write files the key reaches even
-where Trino would refuse. Use Spark where Trino cannot, not to bypass a policy.
+grants, not by a mask; and the shared Connect session writes with the credential
+the catalog vends for that table, so a person with write access to a table can
+write the files the table's own credential reaches (the batch and stream paths
+keep the platform key until #494). Use Spark where Trino cannot, not to bypass a
+policy.
 
 If the driver is killed hard, its executor pods can outlive it. They are labelled
 and safe to delete:
