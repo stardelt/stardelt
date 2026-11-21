@@ -298,6 +298,14 @@ def test_login_federated_without_the_ci_token_is_usage(tmp_path):
     assert (code, session.calls) == (cli.USAGE, []) and "STARDELT_CI_TOKEN" in err
 
 
+def test_federated_login_does_not_take_novas_device_client(tmp_path):
+    environ = {"HOME": str(tmp_path), "STARDELT_CI_TOKEN": "ci-token-1"}
+    session = asking_nova(NOVA_CONFIG)
+    code, _, err = run(["--host", NOVA, "login", "--federated"], session, environ)
+    assert code == cli.USAGE and "needs --client-id" in err
+    assert len(session.calls) == 1 and session.calls[0][0] == "GET" and session.calls[0][1].endswith("/api/auth/config")
+
+
 def test_fresh_token_re_mints_a_federated_sign_in(tmp_path):
     stored(tmp_path, expires_at=1, refresh_token=None, federated={"env": "STARDELT_CI_TOKEN"})
     session = FakeSession(FakeResponse(200, META), FEDERATED_ANSWER)

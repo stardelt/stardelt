@@ -328,7 +328,7 @@ def _login(args, environ, stderr, session):
     try:
         if not issuer:
             issuer, advertised = login.nova_sign_in(http, host)
-            client_id = client_id or advertised or ""
+            client_id = client_id or ("" if args.federated else (advertised or ""))
         reaching = issuer
         if args.federated:
             assertion = environ.get(args.assertion_env, "")
