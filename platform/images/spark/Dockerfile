@@ -99,11 +99,17 @@ RUN chmod 0644 /opt/spark/jars/iceberg-spark-runtime.jar /opt/spark/jars/iceberg
 #
 # The jar goes to /opt/spark/jars so the driver and every executor have it on
 # the classpath without a `spark.driver.extraClassPath` setting. Apache-2.0.
-COPY TokenFileAuthManager.java TokenFileAuthManagerCheck.java /tmp/stardelt-auth/
-RUN mkdir -p /tmp/stardelt-auth/classes /opt/spark/jars \
+#
+# The sources arrive as a bind mount, not a COPY: a `rm` in a later layer would
+# only hide them from the final filesystem, they would stay in the COPY layer.
+# A build mount leaves no layer behind and the RUN below still throws away the
+# class files it compiled.
+RUN --mount=type=bind,source=TokenFileAuthManager.java,target=/src/TokenFileAuthManager.java \
+    --mount=type=bind,source=TokenFileAuthManagerCheck.java,target=/src/TokenFileAuthManagerCheck.java \
+    mkdir -p /tmp/stardelt-auth/classes /opt/spark/jars \
     && javac -cp /opt/spark/jars/iceberg-spark-runtime.jar -d /tmp/stardelt-auth/classes \
-         /tmp/stardelt-auth/TokenFileAuthManager.java \
-         /tmp/stardelt-auth/TokenFileAuthManagerCheck.java \
+         /src/TokenFileAuthManager.java \
+         /src/TokenFileAuthManagerCheck.java \
     && java -cp /tmp/stardelt-auth/classes:/opt/spark/jars/iceberg-spark-runtime.jar \
          io.stardelt.iceberg.TokenFileAuthManagerCheck \
     && jar --create --file /opt/spark/jars/stardelt-iceberg-auth.jar \
