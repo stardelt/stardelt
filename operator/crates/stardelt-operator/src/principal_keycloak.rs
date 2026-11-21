@@ -1,9 +1,10 @@
 //! Keycloak client convergence for `ServicePrincipal` in `identity.mode: platform`.
 //!
 //! Pure builders ([`client_payload`], [`credentials_secret`]) are tested without a cluster.
-//! [`ensure_principal_client`] talks to Keycloak through the API server's service proxy,
-//! the same transport `stardelt-platform/scripts/keycloak-sync-principal.sh` uses via a
-//! port-forward. It does not create the owner group or grant admin roles.
+//! [`ensure_principal_client`] calls the Keycloak Service directly (never through the API
+//! server's service proxy: kube's own auth layer replaces an `Authorization` header with the
+//! operator's ServiceAccount token, so the administrator's bearer token never arrived — #856).
+//! It does not create the owner group or grant admin roles.
 //!
 //! Secret generation uses [`crate::keycloak::generate_secret`] (48 lower-case hex characters),
 //! not the platform script's 40 mixed-case alphanumerics: Keycloak accepts any non-empty
@@ -11,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use futures::future::BoxFuture;
 use k8s_openapi::{
     ByteString,
     api::core::v1::{ConfigMap, Secret},
@@ -157,116 +159,95 @@ pub enum ClientOutcome {
     Unavailable { message: String },
 }
 
-/// One request to Keycloak through the API server's service proxy:
-/// `/api/v1/namespaces/<ns>/services/http:keycloak:8080/proxy<path>`.
-///
-/// Keycloak runs with `KC_PROXY_HEADERS=xforwarded` and `KC_HOSTNAME=https://id.<domain>`
-/// (`keycloak.rs`), so the request must carry `X-Forwarded-Host` and
-/// `X-Forwarded-Proto: https` or Quarkus answers 404 on every route.
-#[allow(dead_code)] // specified by the ticket's transport shape
-async fn proxy(
-    ctx: &Context,
-    namespace: &str,
-    method: &str,
-    path: &str,
-    content_type: Option<&str>,
-    body: Option<serde_json::Value>,
-) -> Result<String, String> {
-    let config_maps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
-    let config = config_maps
-        .get_opt(ENV_CONFIG_MAP)
-        .await
-        .map_err(|e| format!("cannot read ConfigMap {ENV_CONFIG_MAP}: {e}"))?
-        .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} is missing"))?;
-    let hostname = config
-        .data
-        .as_ref()
-        .and_then(|d| d.get("KC_HOSTNAME"))
-        .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} has no KC_HOSTNAME"))?;
-    let host = hostname
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
+/// One Keycloak call, with everything the transport needs. `namespace` names the Keycloak
+/// Service; `path` is the Keycloak path (for example `/admin/realms/stardelt/clients`).
+#[derive(Clone, Debug)]
+pub struct KeycloakRequest {
+    pub namespace: String,
+    pub method: String,
+    pub path: String,
+    pub token: Option<String>,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
+    /// `KC_HOSTNAME` with its scheme stripped: Keycloak runs with `KC_PROXY_HEADERS=xforwarded`,
+    /// so the transport sends it as `X-Forwarded-Host`.
+    pub host: String,
+}
 
-    let uri = format!("/api/v1/namespaces/{namespace}/services/http:keycloak:8080/proxy{path}");
-    let mut builder = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("X-Forwarded-Host", host)
-        .header("X-Forwarded-Proto", "https");
-    if let Some(content_type) = content_type {
-        builder = builder.header("Content-Type", content_type);
-    }
-    let bytes = match body {
-        Some(value) => serde_json::to_vec(&value)
-            .map_err(|e| format!("cannot encode the Keycloak request: {e}"))?,
-        None => Vec::new(),
-    };
-    let request = builder
-        .body(bytes)
-        .map_err(|e| format!("cannot build the Keycloak request: {e}"))?;
+/// The transport to Keycloak. Production goes to the Service; tests inject a recorder, the
+/// way `HelmRunner` is injected (#856).
+pub trait KeycloakTransport: Send + Sync {
+    /// `Ok((status, body))` for any HTTP answer; `Err` only when no answer arrived.
+    fn request(
+        &self,
+        request: KeycloakRequest,
+    ) -> BoxFuture<'static, Result<(u16, String), String>>;
+}
 
-    match ctx.client.request_text(request).await {
-        Ok(text) => Ok(text),
-        Err(kube::Error::Api(response)) => Err(map_api_error(&response)),
-        Err(error) => Err(format!("Keycloak is not reachable: {error}")),
+/// `http://keycloak.<namespace>.svc.cluster.local:8080<path>` — the Service the operator's own
+/// `keycloak-ingress` NetworkPolicy admits on 8080 (`network_policy.rs::keycloak_ingress`).
+pub fn keycloak_service_url(namespace: &str, path: &str) -> String {
+    format!("http://keycloak.{namespace}.svc.cluster.local:8080{path}")
+}
+
+/// The production transport: one `reqwest` client with rustls, a 30 s timeout.
+pub struct HttpKeycloakTransport;
+
+impl KeycloakTransport for HttpKeycloakTransport {
+    fn request(&self, r: KeycloakRequest) -> BoxFuture<'static, Result<(u16, String), String>> {
+        Box::pin(async move {
+            static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+            let client = CLIENT.get_or_init(|| {
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .expect("a reqwest client with rustls is always buildable")
+            });
+            let mut request = client.request(
+                reqwest::Method::from_bytes(r.method.as_bytes())
+                    .map_err(|e| format!("cannot build the Keycloak request: {e}"))?,
+                keycloak_service_url(&r.namespace, &r.path),
+            );
+            if let Some(token) = &r.token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            if let Some(content_type) = &r.content_type {
+                request = request.header("Content-Type", content_type);
+            }
+            if !r.host.is_empty() {
+                request = request
+                    .header("X-Forwarded-Host", &r.host)
+                    .header("X-Forwarded-Proto", "https");
+            }
+            if !r.body.is_empty() {
+                request = request.body(r.body);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|e| format!("Keycloak is not reachable: {e}"))?;
+            let status = response.status().as_u16();
+            let body = response
+                .text()
+                .await
+                .map_err(|e| format!("Keycloak is not reachable: {e}"))?;
+            Ok((status, body))
+        })
     }
 }
 
-/// Like [`proxy`] but sends a pre-encoded body (for form posts).
-async fn proxy_raw(
-    ctx: &Context,
-    namespace: &str,
-    method: &str,
-    path: &str,
-    content_type: &str,
-    body: Vec<u8>,
-) -> Result<String, String> {
-    let config_maps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
-    let config = config_maps
-        .get_opt(ENV_CONFIG_MAP)
-        .await
-        .map_err(|e| format!("cannot read ConfigMap {ENV_CONFIG_MAP}: {e}"))?
-        .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} is missing"))?;
-    let hostname = config
-        .data
-        .as_ref()
-        .and_then(|d| d.get("KC_HOSTNAME"))
-        .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} has no KC_HOSTNAME"))?;
-    let host = hostname
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
-
-    let uri = format!("/api/v1/namespaces/{namespace}/services/http:keycloak:8080/proxy{path}");
-    let request = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("X-Forwarded-Host", host)
-        .header("X-Forwarded-Proto", "https")
-        .header("Content-Type", content_type)
-        .body(body)
-        .map_err(|e| format!("cannot build the Keycloak request: {e}"))?;
-
-    match ctx.client.request_text(request).await {
-        Ok(text) => Ok(text),
-        Err(kube::Error::Api(response)) => Err(map_api_error(&response)),
-        Err(error) => Err(format!("Keycloak is not reachable: {error}")),
-    }
-}
-
-fn map_api_error(response: &kube::core::Status) -> String {
-    let code = response.code;
-    if code == 404 {
+/// The sentence a caller sees for a Keycloak answer. A 401 reads as a 401 (it was `answered 0:
+/// ` while the request went through the API server proxy, which returned Keycloak's own body and
+/// kube-rs turned it into a `Status` without a code — #856).
+fn map_keycloak_error(status: u16, body: &str) -> String {
+    if status == 404 {
         return "Keycloak is not installed in this namespace".to_string();
     }
-    if code == 401 || code == 403 {
+    if status == 401 || status == 403 {
         return "Keycloak refused the administrator token".to_string();
     }
-    let body = response.message.chars().take(200).collect::<String>();
-    format!("Keycloak answered {code}: {body}")
+    let body = body.trim().chars().take(200).collect::<String>();
+    format!("Keycloak answered {status}: {body}")
 }
 
 fn secret_text(secret: &Secret, key: &str) -> Option<String> {
@@ -307,12 +288,13 @@ async fn admin_token(ctx: &Context, namespace: &str) -> Result<String, String> {
         url_encode_component(&username),
         url_encode_component(&password)
     );
-    let body = proxy_raw(
+    let body = keycloak_request(
         ctx,
         namespace,
         "POST",
         "/realms/master/protocol/openid-connect/token",
-        "application/x-www-form-urlencoded",
+        None,
+        Some("application/x-www-form-urlencoded"),
         form.into_bytes(),
     )
     .await?;
@@ -325,14 +307,17 @@ async fn admin_token(ctx: &Context, namespace: &str) -> Result<String, String> {
         .ok_or_else(|| "Keycloak returned no access_token".to_string())
 }
 
-async fn proxy_auth(
+/// One request to Keycloak. `token` is the administrator's bearer token (absent only for the
+/// token endpoint). `KC_HOSTNAME` still travels as `X-Forwarded-Host` because Keycloak runs
+/// with `KC_PROXY_HEADERS=xforwarded`; the transport adds it.
+async fn keycloak_request(
     ctx: &Context,
     namespace: &str,
-    token: &str,
     method: &str,
     path: &str,
+    token: Option<&str>,
     content_type: Option<&str>,
-    body: Option<serde_json::Value>,
+    body: Vec<u8>,
 ) -> Result<String, String> {
     let config_maps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), namespace);
     let config = config_maps
@@ -340,41 +325,33 @@ async fn proxy_auth(
         .await
         .map_err(|e| format!("cannot read ConfigMap {ENV_CONFIG_MAP}: {e}"))?
         .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} is missing"))?;
-    let hostname = config
+    let host = config
         .data
         .as_ref()
         .and_then(|d| d.get("KC_HOSTNAME"))
-        .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} has no KC_HOSTNAME"))?;
-    let host = hostname
+        .ok_or_else(|| format!("ConfigMap {ENV_CONFIG_MAP} has no KC_HOSTNAME"))?
         .trim()
         .trim_start_matches("https://")
         .trim_start_matches("http://")
-        .trim_end_matches('/');
-
-    let uri = format!("/api/v1/namespaces/{namespace}/services/http:keycloak:8080/proxy{path}");
-    let mut builder = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("X-Forwarded-Host", host)
-        .header("X-Forwarded-Proto", "https")
-        .header("Authorization", format!("Bearer {token}"));
-    if let Some(content_type) = content_type {
-        builder = builder.header("Content-Type", content_type);
+        .trim_end_matches('/')
+        .to_string();
+    let (status, text) = ctx
+        .keycloak
+        .request(KeycloakRequest {
+            namespace: namespace.to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            token: token.map(str::to_string),
+            content_type: content_type.map(str::to_string),
+            body,
+            // Host travels with the request so the transport needs no ConfigMap read.
+            host,
+        })
+        .await?;
+    if status >= 400 {
+        return Err(map_keycloak_error(status, &text));
     }
-    let bytes = match body {
-        Some(value) => serde_json::to_vec(&value)
-            .map_err(|e| format!("cannot encode the Keycloak request: {e}"))?,
-        None => Vec::new(),
-    };
-    let request = builder
-        .body(bytes)
-        .map_err(|e| format!("cannot build the Keycloak request: {e}"))?;
-
-    match ctx.client.request_text(request).await {
-        Ok(text) => Ok(text),
-        Err(kube::Error::Api(response)) => Err(map_api_error(&response)),
-        Err(error) => Err(format!("Keycloak is not reachable: {error}")),
-    }
+    Ok(text)
 }
 
 /// The platform-mode instance that owns `namespace`, if any.
@@ -400,14 +377,14 @@ pub async fn ensure_spark_audience(ctx: &Context, namespace: &str) -> Result<(),
     let token = admin_token(ctx, namespace).await?;
 
     // 1. The bearer-only client the front names as its audience (keycloak_realm.json).
-    let clients = proxy_auth(
+    let clients = keycloak_request(
         ctx,
         namespace,
-        &token,
         "GET",
         "/admin/realms/stardelt/clients?clientId=spark-connect",
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
     let clients: serde_json::Value = serde_json::from_str(&clients)
@@ -425,28 +402,29 @@ pub async fn ensure_spark_audience(ctx: &Context, namespace: &str) -> Result<(),
             "directAccessGrantsEnabled": false,
             "serviceAccountsEnabled": false
         });
-        proxy_auth(
+        keycloak_request(
             ctx,
             namespace,
-            &token,
             "POST",
             "/admin/realms/stardelt/clients",
+            Some(&token),
             Some("application/json"),
-            Some(client),
+            serde_json::to_vec(&client)
+                .map_err(|e| format!("cannot encode the Keycloak request: {e}"))?,
         )
         .await?;
     }
 
     // 2. The audience mapper on the two clients a person signs in with.
     for client_id in ["jupyterhub", "stardelt-dev"] {
-        let listed = proxy_auth(
+        let listed = keycloak_request(
             ctx,
             namespace,
-            &token,
             "GET",
             &format!("/admin/realms/stardelt/clients?clientId={client_id}"),
+            Some(&token),
             None,
-            None,
+            Vec::new(),
         )
         .await?;
         let listed: serde_json::Value = serde_json::from_str(&listed)
@@ -460,7 +438,16 @@ pub async fn ensure_spark_audience(ctx: &Context, namespace: &str) -> Result<(),
             return Err(format!("Keycloak has no client {client_id}"));
         };
         let mappers_path = format!("/admin/realms/stardelt/clients/{uuid}/protocol-mappers/models");
-        let mappers = proxy_auth(ctx, namespace, &token, "GET", &mappers_path, None, None).await?;
+        let mappers = keycloak_request(
+            ctx,
+            namespace,
+            "GET",
+            &mappers_path,
+            Some(&token),
+            None,
+            Vec::new(),
+        )
+        .await?;
         let mappers: serde_json::Value = serde_json::from_str(&mappers)
             .map_err(|_| format!("Keycloak returned the {client_id} mappers that are not JSON"))?;
         let present = mappers.as_array().is_some_and(|list| {
@@ -480,14 +467,15 @@ pub async fn ensure_spark_audience(ctx: &Context, namespace: &str) -> Result<(),
                     "introspection.token.claim": "true"
                 }
             });
-            proxy_auth(
+            keycloak_request(
                 ctx,
                 namespace,
-                &token,
                 "POST",
                 &mappers_path,
+                Some(&token),
                 Some("application/json"),
-                Some(mapper),
+                serde_json::to_vec(&mapper)
+                    .map_err(|e| format!("cannot encode the Keycloak request: {e}"))?,
             )
             .await?;
         }
@@ -521,14 +509,14 @@ pub async fn delete_principal_client(
     }
 
     let token = admin_token(ctx, namespace).await?;
-    let clients_json = proxy_auth(
+    let clients_json = keycloak_request(
         ctx,
         namespace,
-        &token,
         "GET",
         &format!("/admin/realms/stardelt/clients?clientId={client_id}"),
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
     let clients: Vec<serde_json::Value> = serde_json::from_str(&clients_json)
@@ -547,14 +535,14 @@ pub async fn delete_principal_client(
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("Keycloak client {client_id} has no id"))?;
-        proxy_auth(
+        keycloak_request(
             ctx,
             namespace,
-            &token,
             "DELETE",
             &format!("/admin/realms/stardelt/clients/{id}"),
+            Some(&token),
             None,
-            None,
+            Vec::new(),
         )
         .await?;
     }
@@ -618,14 +606,14 @@ async fn ensure_principal_client_inner(
     let token = admin_token(ctx, namespace).await?;
 
     // 2. GET clients?clientId=sp-<name>
-    let clients_json = proxy_auth(
+    let clients_json = keycloak_request(
         ctx,
         namespace,
-        &token,
         "GET",
         &format!("/admin/realms/stardelt/clients?clientId={client_id}"),
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
     let clients: Vec<serde_json::Value> = serde_json::from_str(&clients_json)
@@ -638,17 +626,17 @@ async fn ensure_principal_client_inner(
 
     // 4 (checked before mutations). Owner group must exist: never create it, and never
     // create or mutate a client for a group the IdP does not know.
-    let groups_json = proxy_auth(
+    let groups_json = keycloak_request(
         ctx,
         namespace,
-        &token,
         "GET",
         &format!(
             "/admin/realms/stardelt/groups?search={}",
             url_encode_component(&spec.owner_group)
         ),
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
     let groups: Vec<serde_json::Value> = serde_json::from_str(&groups_json)
@@ -674,14 +662,15 @@ async fn ensure_principal_client_inner(
         if let Some(secret) = known_secret.as_deref() {
             let mut payload = client_payload(name, spec);
             payload["secret"] = serde_json::Value::String(secret.to_string());
-            proxy_auth(
+            keycloak_request(
                 ctx,
                 namespace,
-                &token,
                 "PUT",
                 &format!("/admin/realms/stardelt/clients/{uuid}"),
+                Some(&token),
                 Some("application/json"),
-                Some(payload),
+                serde_json::to_vec(&payload)
+                    .map_err(|e| format!("cannot encode the Keycloak request: {e}"))?,
             )
             .await?;
             (secret.to_string(), false, uuid)
@@ -696,25 +685,26 @@ async fn ensure_principal_client_inner(
         };
         let mut payload = client_payload(name, spec);
         payload["secret"] = serde_json::Value::String(secret.clone());
-        proxy_auth(
+        keycloak_request(
             ctx,
             namespace,
-            &token,
             "POST",
             "/admin/realms/stardelt/clients",
+            Some(&token),
             Some("application/json"),
-            Some(payload),
+            serde_json::to_vec(&payload)
+                .map_err(|e| format!("cannot encode the Keycloak request: {e}"))?,
         )
         .await?;
         // POST returns 201 with no body through this transport: GET the uuid.
-        let clients_json = proxy_auth(
+        let clients_json = keycloak_request(
             ctx,
             namespace,
-            &token,
             "GET",
             &format!("/admin/realms/stardelt/clients?clientId={client_id}"),
+            Some(&token),
             None,
-            None,
+            Vec::new(),
         )
         .await?;
         let clients: Vec<serde_json::Value> = serde_json::from_str(&clients_json)
@@ -729,14 +719,14 @@ async fn ensure_principal_client_inner(
     };
 
     // 5. Service-account user membership: only the owner group.
-    let sa_json = proxy_auth(
+    let sa_json = keycloak_request(
         ctx,
         namespace,
-        &token,
         "GET",
         &format!("/admin/realms/stardelt/clients/{uuid}/service-account-user"),
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
     let sa: serde_json::Value = serde_json::from_str(&sa_json)
@@ -747,14 +737,14 @@ async fn ensure_principal_client_inner(
         .ok_or_else(|| "the service-account user has no id".to_string())?;
     let subject = uid.to_string();
 
-    let user_groups_json = proxy_auth(
+    let user_groups_json = keycloak_request(
         ctx,
         namespace,
-        &token,
         "GET",
         &format!("/admin/realms/stardelt/users/{uid}/groups"),
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
     let user_groups: Vec<serde_json::Value> = serde_json::from_str(&user_groups_json)
@@ -762,26 +752,26 @@ async fn ensure_principal_client_inner(
     for group in &user_groups {
         let gid = group.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if gid != owner_group_id && !gid.is_empty() {
-            let _ = proxy_auth(
+            let _ = keycloak_request(
                 ctx,
                 namespace,
-                &token,
                 "DELETE",
                 &format!("/admin/realms/stardelt/users/{uid}/groups/{gid}"),
+                Some(&token),
                 None,
-                None,
+                Vec::new(),
             )
             .await;
         }
     }
-    proxy_auth(
+    keycloak_request(
         ctx,
         namespace,
-        &token,
         "PUT",
         &format!("/admin/realms/stardelt/users/{uid}/groups/{owner_group_id}"),
+        Some(&token),
         None,
-        None,
+        Vec::new(),
     )
     .await?;
 
@@ -891,14 +881,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_keycloak_url_names_the_service_and_the_port() {
+        assert_eq!(
+            keycloak_service_url("stardelt", "/admin/realms/stardelt/clients"),
+            "http://keycloak.stardelt.svc.cluster.local:8080/admin/realms/stardelt/clients"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_the_refused_token_sentence_not_a_zero() {
+        assert_eq!(
+            map_keycloak_error(401, ""),
+            "Keycloak refused the administrator token"
+        );
+        assert_eq!(
+            map_keycloak_error(403, r#"{"error":"forbidden"}"#),
+            "Keycloak refused the administrator token"
+        );
+    }
+
+    #[test]
+    fn a_missing_install_and_an_unexpected_code_keep_their_sentences() {
+        assert_eq!(
+            map_keycloak_error(404, ""),
+            "Keycloak is not installed in this namespace"
+        );
+        assert_eq!(
+            map_keycloak_error(400, "  invalid request \n"),
+            "Keycloak answered 400: invalid request"
+        );
+        assert_eq!(
+            map_keycloak_error(500, r#"{"error":"boom"}"#),
+            r#"Keycloak answered 500: {"error":"boom"}"#
+        );
+    }
+
     type Recorded = Arc<Mutex<Vec<(String, String, String)>>>;
+
+    /// The injected Keycloak transport (#856): the same `handler` the kube mock uses, so every
+    /// test keeps one place where its Keycloak answers live.
+    struct MockKeycloak {
+        handler: Arc<dyn Fn(String, String, String) -> (u16, serde_json::Value) + Send + Sync>,
+        requests: Recorded,
+    }
+
+    impl KeycloakTransport for MockKeycloak {
+        fn request(&self, r: KeycloakRequest) -> BoxFuture<'static, Result<(u16, String), String>> {
+            let handler = self.handler.clone();
+            let requests = self.requests.clone();
+            Box::pin(async move {
+                let body = String::from_utf8_lossy(&r.body).to_string();
+                let uri = format!("/proxy{}", r.path);
+                requests.lock().expect("requests poisoned").push((
+                    r.method.clone(),
+                    uri.clone(),
+                    body.clone(),
+                ));
+                let (status, document) = handler(r.method, uri, body);
+                Ok((
+                    status,
+                    serde_json::to_string(&document).expect("mock document"),
+                ))
+            })
+        }
+    }
 
     fn mock_ctx(
         handler: impl Fn(String, String, String) -> (u16, serde_json::Value) + Send + Sync + 'static,
     ) -> (Arc<Context>, Recorded) {
         let requests: Recorded = Arc::default();
         let recorder = requests.clone();
-        let handler = Arc::new(handler);
+        let handler: Arc<dyn Fn(String, String, String) -> (u16, serde_json::Value) + Send + Sync> =
+            Arc::new(handler);
+        let keycloak_handler = handler.clone();
         let service = service_fn(move |request: Request<Body>| {
             let recorder = recorder.clone();
             let handler = handler.clone();
@@ -951,6 +1007,10 @@ mod tests {
         let ctx = Arc::new(Context {
             client,
             helm: Arc::new(RecordingRunner::default()),
+            keycloak: Arc::new(MockKeycloak {
+                handler: keycloak_handler,
+                requests: requests.clone(),
+            }),
             platforms,
         });
         (ctx, requests)
@@ -1286,16 +1346,5 @@ mod tests {
                 .any(|(m, u, _)| m == "PATCH" && u.contains("/secrets/sp-demo")),
             "no Secret patch expected: {requests:?}"
         );
-        // POST to create client happened (step 3 before group check? step 3 creates if missing, step 4 checks group).
-        // The ticket says "no request to POST /clients and no Secret patch" for missing owner group.
-        // But step order: 1-3 create/converge client, 4 checks owner group. If group missing at step 4,
-        // client was already POSTed in step 3 when no existing client. That contradicts "no request to POST /clients".
-        // Let us re-read: "a_missing_owner_group_writes_no_secret: outcome OwnerGroupMissing, and no request to POST /clients and no Secret patch."
-        // That means the implementation must check owner group BEFORE creating the client? Or the test setup assumes client exists?
-        // I need to follow the ticket's step order as written, but also make the test pass as specified.
-        // The ticket states steps in order 1-7; step 4 is after step 3. So POST can happen. But the test says "no request to POST /clients".
-        // This is a tension. I'll read the ticket more carefully: "no request to POST /clients and no Secret patch" - maybe check group earlier?
-        // Or adjust: check group before creating. That's safer anyway (don't create orphan clients for missing groups).
-        // I'll move group check before client creation in my implementation to satisfy the test's intent.
     }
 }

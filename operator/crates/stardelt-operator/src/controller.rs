@@ -70,6 +70,9 @@ use crate::values::{deep_merge, effective_values, identity_values, parse_values_
 pub struct Context {
     pub client: Client,
     pub helm: Arc<dyn HelmRunner>,
+    /// Keycloak's Service, called directly (never through the API server proxy: kube's auth
+    /// layer replaces an `Authorization` header with the operator's own token, #856).
+    pub keycloak: Arc<dyn crate::principal_keycloak::KeycloakTransport>,
     /// The cached `PlatformInstance` list (#274 rule 5): every principal reconcile reads it
     /// instead of a cluster-wide LIST.
     pub platforms: kube::runtime::reflector::Store<PlatformInstance>,
@@ -83,6 +86,7 @@ impl Context {
         Self {
             client,
             helm,
+            keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
             platforms,
         }
     }
@@ -158,6 +162,7 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
     let ctx = Arc::new(Context {
         client: client.clone(),
         helm: Arc::new(CommandHelmRunner),
+        keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
         platforms,
     });
 

@@ -790,7 +790,49 @@ mod tests {
         Context {
             client,
             helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
+            keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
             platforms: store,
+        }
+    }
+
+    /// A `Context` with the platform store filled and an injected Keycloak transport (#856).
+    fn context_with_platforms_and_keycloak(
+        client: kube::Client,
+        instances: &[PlatformInstance],
+        keycloak: Arc<dyn crate::principal_keycloak::KeycloakTransport>,
+    ) -> Context {
+        Context {
+            keycloak,
+            ..context_with_platforms(client, instances)
+        }
+    }
+
+    /// The Keycloak answers a test needs, recorded beside the kube requests (#856).
+    struct MockKeycloak {
+        handler: Arc<dyn Fn(String, String) -> (u16, serde_json::Value) + Send + Sync>,
+        requests: Recorded,
+    }
+
+    impl crate::principal_keycloak::KeycloakTransport for MockKeycloak {
+        fn request(
+            &self,
+            r: crate::principal_keycloak::KeycloakRequest,
+        ) -> futures::future::BoxFuture<'static, Result<(u16, String), String>> {
+            let handler = self.handler.clone();
+            let requests = self.requests.clone();
+            Box::pin(async move {
+                let path = format!("/proxy{}", r.path);
+                requests.lock().expect("requests poisoned").push((
+                    r.method.clone(),
+                    path.clone(),
+                    String::from_utf8_lossy(&r.body).to_string(),
+                ));
+                let (status, document) = handler(r.method, path);
+                Ok((
+                    status,
+                    serde_json::to_string(&document).expect("mock document"),
+                ))
+            })
         }
     }
 
@@ -1383,9 +1425,34 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(context_with_platforms(
+        let keycloak_requests = requests.clone();
+        let ctx = Arc::new(context_with_platforms_and_keycloak(
             client,
             &[platform_instance("stardelt", "platform")],
+            Arc::new(MockKeycloak {
+                handler: Arc::new(|method, path| {
+                    if path == "/proxy/realms/master/protocol/openid-connect/token" {
+                        (200, json!({"access_token": "tok"}))
+                    } else if method == "GET"
+                        && path.contains("/admin/realms/stardelt/clients?clientId=sp-etl")
+                    {
+                        (
+                            200,
+                            json!([{"id":"kc-1","attributes":{"stardelt-managed":"principal"}}]),
+                        )
+                    } else if method == "DELETE"
+                        && path.contains("/admin/realms/stardelt/clients/kc-1")
+                    {
+                        (200, json!({}))
+                    } else {
+                        (
+                            404,
+                            json!({"kind":"Status","code":404,"reason":"NotFound","message":"not found"}),
+                        )
+                    }
+                }),
+                requests: keycloak_requests,
+            }),
         ));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
@@ -1478,9 +1545,28 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "stardelt");
-        let ctx = Arc::new(context_with_platforms(
+        let keycloak_requests = requests.clone();
+        let ctx = Arc::new(context_with_platforms_and_keycloak(
             client,
             &[platform_instance("stardelt", "platform")],
+            Arc::new(MockKeycloak {
+                handler: Arc::new(|method, path| {
+                    if path == "/proxy/realms/master/protocol/openid-connect/token" {
+                        (200, json!({"access_token": "tok"}))
+                    } else if method == "GET"
+                        && path.contains("/admin/realms/stardelt/clients?clientId=sp-etl")
+                    {
+                        // No `stardelt-managed`: the operator must refuse to delete it.
+                        (200, json!([{"id":"kc-1","attributes":{}}]))
+                    } else {
+                        (
+                            404,
+                            json!({"kind":"Status","code":404,"reason":"NotFound","message":"not found"}),
+                        )
+                    }
+                }),
+                requests: keycloak_requests,
+            }),
         ));
         let principal: ServicePrincipal = serde_json::from_value(json!({
             "apiVersion": "stardelt.io/v1alpha1",
