@@ -22,39 +22,47 @@ const BANNED = ['bundle', 'digest', 'target', 'object version', 'DAG', 'CRD'].ma
   (word) => new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:e?s)?\\b`, 'gi'),
 )
 
-const JSX_TEXT = />([^<{]+)</g
+const JSX_TEXT = /(?<![=-])>([^<>{}]+)</g
 const STRING_LITERAL = /'([^'\\\n]*)'|"([^"\\\n]*)"/g
 const TEMPLATE_LITERAL = /`([^`]*)`/g
 
-/** Only text a person reads: JSX text, quoted strings and templates without `${`. */
-function textsOf(line) {
-  const texts = []
-  for (const match of line.matchAll(JSX_TEXT)) texts.push(match[1])
-  for (const match of line.matchAll(STRING_LITERAL)) texts.push(match[1] ?? match[2])
-  for (const match of line.matchAll(TEMPLATE_LITERAL)) {
-    if (!match[1].includes('${')) texts.push(match[1])
+/**
+ * Every text a person reads in `source` and where it starts: JSX text — which may span lines, so
+ * the match begins at the `>` of the tag before it — quoted strings and templates without `${`.
+ * `[^<>{}]` stops at the next tag or expression, so the text is the text and not the markup; the
+ * lookbehind keeps an arrow's `=>` from starting one.
+ */
+function* textsOf(source) {
+  for (const match of source.matchAll(JSX_TEXT)) {
+    const text = match[1]
+    const lead = text.search(/\S/)
+    yield { text, start: match.index + 1 + Math.max(lead, 0) }
   }
-  return texts
+  for (const match of source.matchAll(STRING_LITERAL)) yield { text: match[1] ?? match[2], start: match.index }
+  for (const match of source.matchAll(TEMPLATE_LITERAL)) {
+    if (!match[1].includes('${')) yield { text: match[1], start: match.index }
+  }
 }
 
 let hits = 0
 for (const file of FILES) {
-  const lines = readFileSync(join(root, file), 'utf8').split('\n')
+  const source = readFileSync(join(root, file), 'utf8')
+  const lines = source.split('\n')
+  const lineAt = (index) => source.slice(0, index).split('\n').length
   const shown = relative(process.cwd(), join(root, file))
-  lines.forEach((line, index) => {
-    const trimmed = line.trimStart()
-    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return
-    for (const text of textsOf(line)) {
-      for (const re of BANNED) {
-        for (const match of text.matchAll(re)) {
-          hits += 1
-          console.log(
-            `${shown}:${index + 1}: "${match[0]}" is an engine word; use Notebook, Version, Schedule or Run (docs: reference/glossary)`,
-          )
-        }
+  for (const { text, start } of textsOf(source)) {
+    const line = lineAt(start)
+    const trimmed = lines[line - 1].trimStart()
+    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    for (const re of BANNED) {
+      for (const match of text.matchAll(re)) {
+        hits += 1
+        console.log(
+          `${shown}:${line}: "${match[0]}" is an engine word; use Notebook, Version, Schedule or Run (docs: reference/glossary)`,
+        )
       }
     }
-  })
+  }
 }
 
 if (hits > 0) process.exit(1)
