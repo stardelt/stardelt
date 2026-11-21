@@ -175,26 +175,47 @@ export default function RunDetail() {
 
       <section className="card space-y-3 p-4" aria-labelledby="run-checks-heading">
         <h2 id="run-checks-heading" className="text-sm font-semibold">Checks</h2>
-        <RunCheckTable checks={checks.data?.checks ?? []} error={checks.error} />
+        <RunCheckTable
+          checks={checks.data?.checks ?? []}
+          error={checks.error}
+          wap={pipeline.data?.publish === 'wap'}
+        />
       </section>
     </div>
   )
 }
 
-/** The checks a run declares and what each returned; `rows` is null until the task's log has the line (#829). */
-function RunCheckTable({ checks, error }: { checks: RunCheckView[]; error: unknown }) {
+/**
+ * The checks a run declares and what each returned; `rows` is null until the task's log has the
+ * line (#829). A `wap` run publishes only when its checks pass, so a failed blocking check also
+ * says what that means for production (#866, design #114 decision 6).
+ */
+function RunCheckTable({
+  checks,
+  error,
+  wap,
+}: {
+  checks: RunCheckView[]
+  error: unknown
+  wap: boolean
+}) {
   if (error && checks.length === 0) {
     return <ErrorBox error={error} />
   }
   if (checks.length === 0) {
     return <p className="text-sm text-text-mute">This run declares no checks.</p>
   }
-  const failed = checks.filter((c) => c.passed === false && c.severity !== 'warn').length
+  const blocking = checks.filter((c) => c.passed === false && c.severity !== 'warn')
   return (
     <div className="space-y-2">
+      {wap && blocking.length > 0 ? (
+        <p className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
+          Not published: {blocking.length === 1 ? '1 check failed' : `${blocking.length} checks failed`}. Production data is unchanged.
+        </p>
+      ) : null}
       <p className="text-sm text-text-dim">
         {checks.length === 1 ? '1 check' : `${checks.length} checks`}
-        {failed > 0 ? ` · ${failed} failed` : ''}
+        {blocking.length > 0 ? ` · ${blocking.length} failed` : ''}
       </p>
       <table className="w-full text-sm">
         <thead>
