@@ -110,6 +110,7 @@ use crate::api_json::ApiJson;
 use crate::audit::{self, PipelineWrite};
 use crate::auth::{Identity, Principal};
 use crate::connection_routes::{Fail, SignedIn};
+use crate::deployments::{BundlePlan, PlanChange, PlanFile, PlanIssue};
 use crate::notebooks::{self, NotebookStore};
 
 /// The `Pipeline` resources of the platform namespace: the cluster, or memory in tests.
@@ -5573,7 +5574,7 @@ async fn update_production_refusal(
 /// Run every rule of a create against `body` and say what would happen, writing nothing and
 /// taking no slot of the creation limit. A refusal of a rule is an answer (`ok: false`); an
 /// unreachable cluster or notebook store is still an error, as on create.
-async fn validate_pipeline(
+pub(crate) async fn validate_pipeline(
     resources: Option<&PipelineResources>,
     db: Option<&sqlx::PgPool>,
     notebooks_store: Option<&NotebookStore>,
@@ -5645,6 +5646,134 @@ async fn validate_pipeline(
         next_runs,
         modified,
     })
+}
+
+/// `POST /api/deployments/plan`: what creating and updating this bundle's rendered Pipeline
+/// documents on one target would do, writing nothing (#101). Each document goes through
+/// `validate_pipeline`, the same function `pipelines_validate` and every write route use, so the
+/// plan and the apply cannot disagree. `recorded_files` is the `files` of the newest applied
+/// deployment of this bundle and target, or `None` when none was recorded.
+pub(crate) async fn plan_bundle(
+    resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
+    notebooks_store: Option<&NotebookStore>,
+    who: &Identity,
+    recorded_files: Option<&[crate::deployments::DeploymentFile]>,
+    request: crate::deployments::BundlePlanRequest,
+) -> Result<crate::deployments::BundlePlan, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut changes = Vec::new();
+    for (index, document) in request.resources.iter().enumerate() {
+        let path = format!("resources[{index}]");
+        let kind = document
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("Pipeline");
+        if kind != "Pipeline" {
+            errors.push(PlanIssue {
+                path,
+                message: format!("a plan covers Pipeline documents; this one is kind {kind}"),
+            });
+            continue;
+        }
+        let body: CreatePipelineRequest = match serde_json::from_value(document.clone()) {
+            Ok(body) => body,
+            Err(err) => {
+                errors.push(PlanIssue {
+                    path,
+                    message: format!("not a pipeline document: {err}"),
+                });
+                continue;
+            }
+        };
+        let name = body.name.clone();
+        match validate_pipeline(Some(resources), db, notebooks_store, who, body).await {
+            Ok(answer) if answer.ok => changes.push(PlanChange {
+                kind: "Pipeline".into(),
+                name,
+                action: planned_action(&answer),
+                diff: answer.changes,
+            }),
+            Ok(answer) => {
+                for issue in answer.errors {
+                    errors.push(PlanIssue {
+                        path: format!("{path} ({name})"),
+                        message: issue.message,
+                    });
+                }
+            }
+            Err(fail) => return Err(fail),
+        }
+    }
+    // What this bundle and target own and the set no longer names: a warning, not a change —
+    // `--prune` decides removal and lands with a later slice of #101.
+    for existing in resources.list().await.map_err(resource_fail)? {
+        let Some(deployment) = deployment_of(&existing) else {
+            continue;
+        };
+        if deployment.bundle != request.bundle || deployment.target != request.target {
+            continue;
+        }
+        if spec_of(&existing)["ownerGroup"].as_str() != Some(request.owner_group.as_str()) {
+            continue;
+        }
+        let name = existing
+            .pointer("/metadata/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if changes.iter().any(|change| change.name == name) {
+            continue;
+        }
+        warnings.push(PlanIssue {
+            path: "pipelines".into(),
+            message: format!(
+                "{name} is deployed from this bundle and target and this plan does not name it"
+            ),
+        });
+    }
+    let before: BTreeMap<&str, &str> = recorded_files
+        .unwrap_or_default()
+        .iter()
+        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .collect();
+    let mut files: Vec<PlanFile> = request
+        .files
+        .iter()
+        .map(|file| PlanFile {
+            path: file.path.clone(),
+            sha256: file.sha256.clone(),
+            new: before.get(file.path.as_str()) != Some(&file.sha256.as_str()),
+        })
+        .collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let plan_id = crate::deployments::rendered_set_id(
+        &request.bundle,
+        &request.target,
+        &request.resources,
+        &request.files,
+    );
+    Ok(BundlePlan {
+        ok: errors.is_empty(),
+        errors,
+        warnings,
+        changes,
+        files,
+        plan_id,
+    })
+}
+
+/// What a document's check means for the plan: `pipelines_validate` answers `update` even when
+/// nothing differs, and the plan says `unchanged` then (#101's action set).
+fn planned_action(answer: &ValidatePipelineResponse) -> String {
+    match answer.action.as_deref() {
+        Some("update") if answer.changes.is_empty() && answer.modified != Some(true) => {
+            "unchanged".into()
+        }
+        Some(other) => other.to_string(),
+        None => "create".into(),
+    }
 }
 
 /// The view after a write: the DAG and last run when Airflow is configured (a failed lookup only
@@ -15575,6 +15704,160 @@ mod tests {
         )
         .await
         .expect_err("no cluster, no answer");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// One rendered Pipeline document in the shape `POST /api/pipelines` takes: what a bundle
+    /// plan reads.
+    fn plan_document(name: &str, group: &str, sql: &str, cron: &str) -> Value {
+        json!({
+            "name": name,
+            "ownerGroup": group,
+            "sql": sql,
+            "schedule": {"cron": cron, "timezone": "Europe/Berlin"},
+        })
+    }
+
+    fn plan_request(resources: Vec<Value>) -> crate::deployments::BundlePlanRequest {
+        crate::deployments::BundlePlanRequest {
+            bundle: "shop-etl".into(),
+            owner_group: "analytics".into(),
+            target: "prod".into(),
+            revision: Some("0123abc".into()),
+            resources,
+            files: vec![crate::deployments::DeploymentFile {
+                path: "pipelines/marts.yaml".into(),
+                sha256: "a".repeat(64),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn bundle_plan_answers_create_update_and_a_refusal() {
+        let resources = memory_with(
+            &[("daily-trips", nova_pipeline("daily-trips", "analytics"))],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let request = plan_request(vec![
+            plan_document("new-marts", "analytics", "select 1", "0 3 * * *"),
+            plan_document("bad-cron", "analytics", "select 1", "not a cron"),
+            plan_document("daily-trips", "analytics", "select 2", "0 3 * * *"),
+        ]);
+        let before = resources.list().await.expect("memory list").len();
+        let plan = plan_bundle(Some(&resources), None, None, &ada, None, request.clone())
+            .await
+            .expect("an answer");
+
+        assert!(!plan.ok, "one document is refused");
+        assert_eq!(plan.errors.len(), 1, "{:?}", plan.errors);
+        assert_eq!(plan.errors[0].message, CRON_FIELDS);
+        assert!(
+            plan.errors[0].path.starts_with("resources[1]"),
+            "the refusal names where it is: {}",
+            plan.errors[0].path
+        );
+
+        let create = plan
+            .changes
+            .iter()
+            .find(|change| change.name == "new-marts")
+            .expect("a create");
+        assert_eq!(
+            (create.kind.as_str(), create.action.as_str()),
+            ("Pipeline", "create")
+        );
+        assert!(create.diff.is_empty(), "a create changes nothing");
+        let update = plan
+            .changes
+            .iter()
+            .find(|change| change.name == "daily-trips")
+            .expect("an update");
+        assert_eq!(update.action, "update");
+        assert!(!update.diff.is_empty(), "an update says what it changes");
+
+        assert_eq!(
+            resources.list().await.expect("memory list").len(),
+            before,
+            "the plan writes nothing"
+        );
+        assert_eq!(
+            plan.plan_id,
+            crate::deployments::rendered_set_id(
+                &request.bundle,
+                &request.target,
+                &request.resources,
+                &request.files
+            ),
+            "the planId names the set the plan describes"
+        );
+        assert_eq!(plan.files.len(), 1);
+        assert!(plan.files[0].new, "no deployment was recorded yet");
+    }
+
+    #[tokio::test]
+    async fn bundle_plan_names_owned_pipelines_the_set_omits() {
+        let mut owned = nova_pipeline("daily-trips", "analytics");
+        stamp_provenance(&mut owned, &provenance("shop-etl", "prod", None), "ada");
+        let resources = memory_with(
+            &[("daily-trips", owned)],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let plan = plan_bundle(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            None,
+            plan_request(vec![plan_document(
+                "other-marts",
+                "analytics",
+                "select 1",
+                "0 3 * * *",
+            )]),
+        )
+        .await
+        .expect("an answer");
+
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(
+            plan.warnings[0].message.contains("daily-trips"),
+            "{}",
+            plan.warnings[0].message
+        );
+        assert!(
+            plan.changes
+                .iter()
+                .all(|change| change.name != "daily-trips"),
+            "a pipeline the set omits is no change"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_plan_without_a_cluster_is_503() {
+        let ada = who("sub-ada", &["analytics"], false);
+        let error = plan_bundle(
+            None,
+            None,
+            None,
+            &ada,
+            None,
+            plan_request(vec![plan_document(
+                "new-marts",
+                "analytics",
+                "select 1",
+                "0 3 * * *",
+            )]),
+        )
+        .await
+        .expect_err("no cluster, no plan");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 

@@ -34,6 +34,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -95,6 +96,10 @@ pub struct NewDeployment {
     /// caller may not see answers 404 there.
     #[serde(default)]
     pub previous_deployment_id: Option<i64>,
+    /// The `planId` of the plan this apply followed (`POST /api/deployments/plan`), or absent. When
+    /// given, the row must describe the same rendered set the plan named; otherwise 409.
+    #[serde(default)]
+    pub plan_id: Option<String>,
 }
 
 /// One file of the bundle the deploy read: its path inside the bundle and the sha256 of its bytes.
@@ -104,6 +109,71 @@ pub struct DeploymentFile {
     pub path: String,
     /// The file's content, lowercase hex sha256 (64 characters).
     pub sha256: String,
+}
+
+/// `POST /api/deployments/plan` body: one bundle's rendered Pipeline documents and file digests,
+/// for one target. The same `resources` list the record call carries, so a `planId` names both.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundlePlanRequest {
+    pub bundle: String,
+    pub owner_group: String,
+    pub target: String,
+    /// The commit the bundle was read at; display metadata, not part of the plan's identity.
+    /// Nothing reads it yet: the record carries the revision, and a later slice shows it beside
+    /// the plan.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub revision: Option<String>,
+    pub resources: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub files: Vec<DeploymentFile>,
+}
+
+/// `POST /api/deployments/plan` answer: what applying that set would do, and its identity.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BundlePlan {
+    pub ok: bool,
+    pub errors: Vec<PlanIssue>,
+    pub warnings: Vec<PlanIssue>,
+    pub changes: Vec<PlanChange>,
+    pub files: Vec<PlanFile>,
+    /// The identity of the set this plan describes; `POST /api/deployments` answers 409 when a
+    /// `planId` it is given does not name the set it was sent.
+    pub plan_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PlanIssue {
+    /// Where the problem is: `resources[2] (gold)` or `resources` (the set).
+    pub path: String,
+    /// One sentence, the same sentence the write route would refuse with.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanChange {
+    /// `Pipeline` today; the bundle's other kinds are a later slice.
+    pub kind: String,
+    pub name: String,
+    /// `create`, `update` or `unchanged` (from `ValidatePipelineResponse::action`, with `create`
+    /// when `action` is absent).
+    pub action: String,
+    /// What an `update` would change, the sentences `pipelines_validate` answers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diff: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFile {
+    pub path: String,
+    pub sha256: String,
+    /// `true` when the newest applied deployment of this bundle and target does not name this path
+    /// with this digest; every file when no deployment was recorded yet.
+    pub new: bool,
 }
 
 /// One pipeline of a deploy: what changed in it.
@@ -176,6 +246,48 @@ fn new_deployment_example() -> serde_json::Value {
     })
 }
 
+/// The example `POST /api/deployments/plan` takes: one rendered Pipeline document and one file
+/// digest. It must deserialize as [`BundlePlanRequest`]; a test checks that.
+fn bundle_plan_request_example() -> serde_json::Value {
+    serde_json::json!({
+        "bundle": "shop-etl",
+        "ownerGroup": "analytics",
+        "target": "production",
+        "revision": "4f3c2a1",
+        "resources": [{
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": {"name": "shop-marts"},
+            "spec": {"ownerGroup": "analytics", "tasks": [{"name": "run", "kind": "sql", "sql": "select 1"}]}
+        }],
+        "files": [{
+            "path": "shop-marts.yaml",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }]
+    })
+}
+
+/// The example [`BundlePlan`] the plan route answers: one update with its diff and one new file.
+fn bundle_plan_example() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "errors": [],
+        "warnings": [],
+        "changes": [{
+            "kind": "Pipeline",
+            "name": "shop-marts",
+            "action": "update",
+            "diff": ["the schedule changed from 0 3 * * * to 0 4 * * *"]
+        }],
+        "files": [{
+            "path": "shop-marts.yaml",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "new": true
+        }],
+        "planId": "a3f1c0f4b9a4ce7a7b2a0f2e8a3a3fd0c9de5c4f5e1c2b3a4958687788a9b0c1"
+    })
+}
+
 /// A row as the API returns it. `created_at` is RFC 3339 in UTC.
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -224,30 +336,82 @@ pub fn may_record(identity: &Identity, owner_group: &str) -> bool {
     identity.is_admin || identity.groups.iter().any(|g| g == owner_group)
 }
 
+/// The identity of a rendered set: the lowercase hex SHA-256 of the bundle, the target, the
+/// rendered documents **in the order given** and the files **sorted by path** — one line each,
+/// the form `migrations::plan_id` uses (#101). `plan` answers it and `record` recomputes it, so
+/// a `planId` proves the row describes the set that was planned. The revision is metadata and is
+/// not part of it.
+pub(crate) fn rendered_set_id(
+    bundle: &str,
+    target: &str,
+    resources: &[serde_json::Value],
+    files: &[DeploymentFile],
+) -> String {
+    let mut lines = vec![format!("bundle={bundle}"), format!("target={target}")];
+    for document in resources {
+        let json = serde_json::to_string(document).expect("a JSON value serializes");
+        lines.push(format!("resource\t{json}"));
+    }
+    let mut files: Vec<&DeploymentFile> = files.iter().collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.sha256.cmp(&b.sha256)));
+    lines.extend(
+        files
+            .iter()
+            .map(|f| format!("file\t{}\t{}", f.path, f.sha256)),
+    );
+    crate::migrations::hex_lower(&Sha256::digest(lines.join("\n").as_bytes()))
+}
+
+/// `None` when the apply names no plan or names this set's plan; the 409's sentence when the id
+/// is for another set.
+fn plan_problem(new: &NewDeployment) -> Option<String> {
+    let plan_id = new.plan_id.as_ref()?;
+    let ours = rendered_set_id(&new.bundle, &new.target, &new.resources, &new.files);
+    (plan_id != &ours)
+        .then(|| "the plan you applied is not the plan you saw: plan the bundle again".to_string())
+}
+
 /// A name the API stores: 1 to 64 characters, no `/`.
 fn valid_name(value: &str) -> bool {
     let len = value.chars().count();
     (1..=MAX_NAME_CHARS).contains(&len) && !value.contains('/')
 }
 
+/// The rule for one stored name. `what` is `"bundle"`, `"ownerGroup"` or `"target"`; `Err` is the
+/// sentence the caller sees. The plan and the record use it, so they cannot drift.
+pub(crate) fn name_rule(what: &str, value: &str) -> Result<(), String> {
+    if !valid_name(value) {
+        return Err(format!(
+            "{what} must be 1 to {MAX_NAME_CHARS} characters and must not contain '/'"
+        ));
+    }
+    Ok(())
+}
+
+/// The rule for the bundle's file digests. `Err` is the sentence the caller sees. The plan and the
+/// record use it, so they cannot drift.
+pub(crate) fn file_rules(files: &[DeploymentFile]) -> Result<(), String> {
+    for file in files {
+        let inside = !file.path.is_empty()
+            && file.path.chars().count() <= 512
+            && !file.path.starts_with('/')
+            && !file.path.split('/').any(|s| s == "..");
+        let digest = file.sha256.len() == 64 && file.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+        if !inside || !digest {
+            return Err(
+                "every file needs a path inside the bundle and a 64-character hex sha256".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The body rules the table's CHECK constraints enforce, repeated as one sentence so a
 /// caller gets a `400` instead of a database error.
 pub fn validate(new: &NewDeployment) -> Result<(), String> {
-    if !valid_name(&new.bundle) {
-        return Err(format!(
-            "bundle must be 1 to {MAX_NAME_CHARS} characters and must not contain '/'"
-        ));
-    }
-    if !valid_name(&new.owner_group) {
-        return Err(format!(
-            "ownerGroup must be 1 to {MAX_NAME_CHARS} characters and must not contain '/'"
-        ));
-    }
-    if !valid_name(&new.target) {
-        return Err(format!(
-            "target must be 1 to {MAX_NAME_CHARS} characters and must not contain '/'"
-        ));
-    }
+    name_rule("bundle", &new.bundle)?;
+    name_rule("ownerGroup", &new.owner_group)?;
+    name_rule("target", &new.target)?;
     if !STATUSES.contains(&new.status.as_str()) {
         return Err("status must be `applied` or `failed`".into());
     }
@@ -267,18 +431,7 @@ pub fn validate(new: &NewDeployment) -> Result<(), String> {
             "a deployment may list at most {MAX_FILE_DIGESTS} files"
         ));
     }
-    for file in &new.files {
-        let inside = !file.path.is_empty()
-            && file.path.chars().count() <= 512
-            && !file.path.starts_with('/')
-            && !file.path.split('/').any(|s| s == "..");
-        let digest = file.sha256.len() == 64 && file.sha256.bytes().all(|b| b.is_ascii_hexdigit());
-        if !inside || !digest {
-            return Err(
-                "every file needs a path inside the bundle and a 64-character hex sha256".into(),
-            );
-        }
-    }
+    file_rules(&new.files)?;
     for pipeline in &new.pipelines {
         if pipeline.namespace.is_empty() {
             return Err("every pipeline needs a namespace".into());
@@ -473,6 +626,7 @@ pub async fn detail(
         (status = 400, description = "A name is empty, too long or carries a `/`, the status or an action is not one of the known values, or there are more than 200 pipelines", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
         (status = 403, description = "Only a member of the pipeline's owner group may record a deployment", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The planId does not name the rendered set of this row", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -483,6 +637,9 @@ pub async fn record(
 ) -> Response {
     if let Err(message) = validate(&new) {
         return error(StatusCode::BAD_REQUEST, &message);
+    }
+    if let Some(sentence) = plan_problem(&new) {
+        return error(StatusCode::CONFLICT, &sentence);
     }
     let Some(pool) = s.db.as_ref() else {
         return unavailable();
@@ -512,6 +669,110 @@ pub async fn record(
         }
         Err(e) => store_failed(e),
     }
+}
+
+/// `POST /api/deployments/plan` — what the set would do, `200` with the plan, nothing written.
+#[utoipa::path(
+    post,
+    operation_id = "deployments_plan",
+    path = "/api/deployments/plan",
+    tag = "public",
+    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (today a warning, not a prune). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. `prune`, the stage modes and StreamApps are not covered yet.",
+    request_body(content = BundlePlanRequest, example = json!(bundle_plan_request_example())),
+    responses(
+        (status = 200, description = "The plan, with its identity", body = BundlePlan, example = json!(bundle_plan_example())),
+        (status = 400, description = "A name is empty, too long or carries a `/`, or there are more than 200 resources or 200 file digests", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only a member of the pipeline's owner group may plan a deployment", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured, or there is no cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn plan(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    ApiJson(request): ApiJson<BundlePlanRequest>,
+) -> Response {
+    if let Err(message) = validate_plan(&request) {
+        return error(StatusCode::BAD_REQUEST, &message);
+    }
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return error(StatusCode::UNAUTHORIZED, SIGN_IN);
+    };
+    if !may_record(&caller.identity, &request.owner_group) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "only a member of the pipeline's owner group may plan a deployment",
+        );
+    }
+    let recorded =
+        match last_applied(pool, &request.owner_group, &request.bundle, &request.target).await {
+            Ok(row) => row,
+            Err(e) => return store_failed(e),
+        };
+    let files = recorded
+        .as_ref()
+        .and_then(|row| serde_json::from_value::<Vec<DeploymentFile>>(row.files.clone()).ok());
+    let resources = crate::pipelines::resources(&s);
+    crate::pipelines::answer(
+        crate::pipelines::plan_bundle(
+            resources.as_ref(),
+            s.db.as_ref(),
+            s.notebooks.as_ref(),
+            &caller.identity,
+            files.as_deref(),
+            request,
+        )
+        .await,
+    )
+}
+
+/// The newest `applied` row of one bundle, target and owner group: its `files` say what the plan
+/// calls new. `None` when none was recorded or none is applied.
+async fn last_applied(
+    pool: &sqlx::PgPool,
+    owner_group: &str,
+    bundle: &str,
+    target: &str,
+) -> Result<Option<Deployment>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {ROW_COLUMNS} FROM deployment \
+         WHERE owner_group = $1 AND bundle = $2 AND target = $3 AND status = 'applied' \
+         ORDER BY id DESC LIMIT 1"
+    );
+    sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
+        .bind(owner_group)
+        .bind(bundle)
+        .bind(target)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The body rules of a plan: the names and file digests the record enforces, plus its own caps.
+pub(crate) fn validate_plan(request: &BundlePlanRequest) -> Result<(), String> {
+    name_rule("bundle", &request.bundle)?;
+    name_rule("ownerGroup", &request.owner_group)?;
+    name_rule("target", &request.target)?;
+    if request.resources.len() > MAX_RESOURCES {
+        return Err(format!(
+            "a plan may carry at most {MAX_RESOURCES} resources"
+        ));
+    }
+    if serde_json::to_vec(&request.resources)
+        .unwrap_or_default()
+        .len()
+        > 1024 * 1024
+    {
+        return Err("the rendered resources must be under 1 MiB".into());
+    }
+    if request.files.len() > MAX_FILE_DIGESTS {
+        return Err(format!(
+            "a plan may carry at most {MAX_FILE_DIGESTS} file digests"
+        ));
+    }
+    file_rules(&request.files)
 }
 
 /// Whether a refusal from replaying one stored document is the platform's rule saying no (the
@@ -629,6 +890,7 @@ pub async fn rollback(
         resources: documents,
         files: serde_json::from_value(row.files.clone()).unwrap_or_default(),
         previous_deployment_id: Some(id),
+        plan_id: None,
     };
     let stored = match store(pool, &replay, &caller.identity).await {
         Ok(row) => row,
@@ -656,6 +918,7 @@ pub async fn rollback(
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/deployments", get(list).post(record))
+        .route("/deployments/plan", post(plan))
         .route("/deployments/{id}", get(detail))
         .route("/deployments/{id}/rollback", post(rollback))
 }
@@ -676,6 +939,7 @@ mod tests {
             resources: Vec::new(),
             files: Vec::new(),
             previous_deployment_id: None,
+            plan_id: None,
         }
     }
 
@@ -799,6 +1063,156 @@ mod tests {
             validate(&new).is_ok(),
             "the digest is back to 64 hex characters"
         );
+    }
+
+    fn file(path: &str, sha256: &str) -> DeploymentFile {
+        DeploymentFile {
+            path: path.into(),
+            sha256: sha256.into(),
+        }
+    }
+
+    fn plan_request() -> BundlePlanRequest {
+        BundlePlanRequest {
+            bundle: "sales".into(),
+            owner_group: "analytics".into(),
+            target: "prod".into(),
+            revision: None,
+            resources: vec![serde_json::json!({"kind": "Pipeline", "metadata": {"name": "p"}})],
+            files: vec![file("b.yaml", &"b".repeat(64))],
+        }
+    }
+
+    #[test]
+    fn rendered_set_id_ignores_file_order_and_keeps_resource_order() {
+        let documents = vec![
+            serde_json::json!({"kind": "Pipeline", "metadata": {"name": "one"}}),
+            serde_json::json!({"kind": "Pipeline", "metadata": {"name": "two"}}),
+        ];
+        let files = vec![
+            file("a.sql", &"a".repeat(64)),
+            file("b.sql", &"b".repeat(64)),
+        ];
+        let sorted = rendered_set_id("sales", "prod", &documents, &files);
+        let reversed_files = vec![files[1].clone(), files[0].clone()];
+        assert_eq!(
+            rendered_set_id("sales", "prod", &documents, &reversed_files),
+            sorted,
+            "the files are sorted by path before they are hashed"
+        );
+        let reversed_documents = vec![documents[1].clone(), documents[0].clone()];
+        assert_ne!(
+            rendered_set_id("sales", "prod", &reversed_documents, &files),
+            sorted,
+            "the documents keep the order they were given in"
+        );
+        assert_ne!(
+            rendered_set_id("sales", "test", &documents, &files),
+            sorted,
+            "the target is part of the identity"
+        );
+    }
+
+    #[test]
+    fn rendered_set_id_changes_with_a_digest() {
+        let documents = vec![serde_json::json!({"kind": "Pipeline", "metadata": {"name": "one"}})];
+        let first = rendered_set_id(
+            "sales",
+            "prod",
+            &documents,
+            &[file("a.sql", &"a".repeat(64))],
+        );
+        let second = rendered_set_id(
+            "sales",
+            "prod",
+            &documents,
+            &[file("a.sql", &"b".repeat(64))],
+        );
+        assert_ne!(first, second, "one changed digest is another set");
+        assert_eq!(first.len(), 64, "lower-case hex sha256");
+        assert!(
+            first
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn plan_problem_refuses_another_sets_id() {
+        let mut new = deployment("applied");
+        assert_eq!(plan_problem(&new), None, "no planId is no problem");
+        let ours = rendered_set_id(&new.bundle, &new.target, &new.resources, &new.files);
+        new.plan_id = Some(ours.clone());
+        assert_eq!(plan_problem(&new), None, "the row's own planId is the set");
+        new.plan_id = Some("0".repeat(64));
+        assert_eq!(
+            plan_problem(&new).as_deref(),
+            Some("the plan you applied is not the plan you saw: plan the bundle again"),
+            "another set's planId is a 409"
+        );
+        new.plan_id = Some(ours);
+        new.files = vec![file("a.sql", &"a".repeat(64))];
+        assert!(
+            plan_problem(&new).is_some(),
+            "a file the plan did not name changes the set"
+        );
+    }
+
+    #[test]
+    fn validate_plan_refuses_the_names_the_record_refuses() {
+        assert!(validate_plan(&plan_request()).is_ok());
+        for set in [
+            |r: &mut BundlePlanRequest| r.bundle = "shop/sales".into(),
+            |r: &mut BundlePlanRequest| r.owner_group = String::new(),
+            |r: &mut BundlePlanRequest| r.target = "t".repeat(MAX_NAME_CHARS + 1),
+        ] {
+            let mut request = plan_request();
+            set(&mut request);
+            let err = validate_plan(&request).expect_err("the record refuses this name too");
+            assert!(
+                err.contains("must not contain '/'") || err.contains("1 to"),
+                "{err}"
+            );
+            let mut new = deployment("applied");
+            new.bundle = request.bundle.clone();
+            new.owner_group = request.owner_group.clone();
+            new.target = request.target.clone();
+            assert_eq!(
+                validate_plan(&request).err(),
+                validate(&new).err(),
+                "one sentence for both routes"
+            );
+        }
+        let mut request = plan_request();
+        request.files = vec![file("a.sql", "abc")];
+        assert_eq!(
+            validate_plan(&request),
+            Err("every file needs a path inside the bundle and a 64-character hex sha256".into()),
+            "the plan refuses what the record refuses"
+        );
+    }
+
+    #[test]
+    fn validate_plan_refuses_201_resources() {
+        let mut request = plan_request();
+        request.resources = (0..=MAX_RESOURCES)
+            .map(|i| serde_json::json!({"kind": "Pipeline", "metadata": {"name": format!("p{i}")}}))
+            .collect();
+        let err = validate_plan(&request).expect_err("201 resources");
+        assert!(err.contains("200"), "{err}");
+        request.resources.truncate(MAX_RESOURCES);
+        assert!(validate_plan(&request).is_ok(), "exactly at the limit");
+    }
+
+    #[tokio::test]
+    async fn plan_answers_503_before_401_without_a_state_store() {
+        let response = plan(
+            State(crate::router_tests::test_state_with_db(None)),
+            None,
+            ApiJson(plan_request()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

@@ -226,6 +226,13 @@
       ],
       "body": false
     },
+    "deployments_plan": {
+      "method": "POST",
+      "path": "/api/deployments/plan",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
     "deployments_record": {
       "method": "POST",
       "path": "/api/deployments",
