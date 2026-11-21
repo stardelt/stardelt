@@ -11809,6 +11809,17 @@
               }
             ]
           },
+          "publish": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Publish",
+                "description": "How the writes reach the tables people read (`spec.publish`, #114). Omitted on a create\nmeans `direct`; on an update it keeps what the pipeline says, and `direct` removes it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schedule": {
             "oneOf": [
               {
@@ -13892,6 +13903,17 @@
               "type": "string"
             }
           },
+          "publish": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Publish",
+                "description": "How the writes reach the tables people read (`spec.publish`); left out when the pipeline\nwrites straight to `main`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schedule": {
             "oneOf": [
               {
@@ -14128,6 +14150,13 @@
           "sql": {
             "type": "string",
             "description": "The statement to run; exactly one of this, `notebook`, `dbt`, `quality` and\n`sparkPipeline` is given."
+          },
+          "writes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tables this task writes, as `catalog.schema.table`; only a `sql` task may name them,\nand at most 16. `spec.publish: wap` audits exactly these tables (#114)."
           }
         }
       },
@@ -14576,6 +14605,14 @@
             "description": "The target of the bundle: 1 to 32 lower-case letters, digits and dashes."
           }
         }
+      },
+      "Publish": {
+        "type": "string",
+        "description": "How a pipeline's writes reach the tables people read: straight to `main`, or through an\naudit branch that a `quality` task must pass first (`spec.publish`, #114).",
+        "enum": [
+          "direct",
+          "wap"
+        ]
       },
       "PublishedNotebook": {
         "type": "object",
@@ -16710,6 +16747,17 @@
               {
                 "$ref": "#/components/schemas/Provenance",
                 "description": "Which bundle, target and commit this update deploys. Omitted leaves what the pipeline\nalready says untouched; given, it replaces it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publish": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Publish",
+                "description": "How the writes reach the tables people read (`spec.publish`, #114). Omitted on a create\nmeans `direct`; on an update it keeps what the pipeline says, and `direct` removes it."
               },
               {
                 "type": "null"

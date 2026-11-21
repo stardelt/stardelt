@@ -1374,6 +1374,7 @@ async fn checked_statement(
 struct TaskStatement {
     name: String,
     depends_on: Vec<String>,
+    writes: Vec<String>,
     statement: Statement,
 }
 
@@ -1417,6 +1418,9 @@ fn task_json(task: &TaskStatement) -> Value {
     };
     if !task.depends_on.is_empty() {
         value["dependsOn"] = json!(task.depends_on);
+    }
+    if !task.writes.is_empty() {
+        value["writes"] = json!(task.writes);
     }
     value
 }
@@ -1527,6 +1531,37 @@ async fn checked_tasks(
                 format!("task `{}` cannot depend on itself", task.name),
             ));
         }
+        if !task.writes.is_empty() && task.sql.is_empty() {
+            return Err(refused(
+                "task-writes",
+                format!(
+                    "task `{}` is not a sql task: only a sql task declares writes",
+                    task.name
+                ),
+            ));
+        }
+        if task.writes.len() > 16 {
+            return Err(refused(
+                "task-writes",
+                format!("task `{}` names more than 16 tables", task.name),
+            ));
+        }
+        for table in &task.writes {
+            let parts: Vec<&str> = table.split('.').collect();
+            if parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|part| part.is_empty() || part.contains(' '))
+            {
+                return Err(refused(
+                    "task-writes",
+                    format!(
+                        "task `{}` writes `{table}`, which is not catalog.schema.table",
+                        task.name
+                    ),
+                ));
+            }
+        }
         // The same rules the single `run` task gets (#821, #237); `checked_run` has already
         // validated the pipeline-level parameter table, so a refusal here is the task's own.
         let statement = checked_statement(
@@ -1544,6 +1579,7 @@ async fn checked_tasks(
         checked.push(TaskStatement {
             name: task.name.clone(),
             depends_on: task.depends_on.clone(),
+            writes: task.writes.clone(),
             statement,
         });
     }
@@ -1562,6 +1598,35 @@ async fn checked_tasks(
     }
     check_task_cycles(&checked).map_err(|message| refused("task-cycle", message))?;
     Ok(checked)
+}
+
+/// `publish: wap` moves `main` only after a `quality` task's checks passed, and only for the
+/// tables a `sql` task wrote: a body that asks for it without both is refused here, the same
+/// rule the CRD's CEL carries (#114).
+fn check_publish(
+    publish: Option<Publish>,
+    tasks: Option<&[PipelineTaskRequest]>,
+) -> Result<(), ActionError> {
+    if publish != Some(Publish::Wap) {
+        return Ok(());
+    }
+    let ready = tasks.is_some_and(|tasks| {
+        tasks.iter().any(|task| {
+            task.quality
+                .as_ref()
+                .is_some_and(|quality| !quality.checks.is_empty())
+        }) && tasks.iter().any(|task| !task.writes.is_empty())
+    });
+    if ready {
+        return Ok(());
+    }
+    Err(ActionError::refused(
+        "publish",
+        Fail::new(
+            StatusCode::BAD_REQUEST,
+            "publish: wap needs a task list with a quality task that has a check and a sql task that writes a table",
+        ),
+    ))
 }
 
 /// What a body asks the pipeline to run: one statement, one pinned notebook, or a task list —
@@ -2127,6 +2192,7 @@ fn pipeline_resource(
     created_by: &str,
     notify: Option<&PipelineNotify>,
     viewers: &[String],
+    publish: Option<Publish>,
 ) -> Value {
     let tasks = match statement {
         Statement::Sql(sql) => json!([{ "name": "run", "kind": "sql", "sql": sql }]),
@@ -2178,6 +2244,9 @@ fn pipeline_resource(
     if !viewers.is_empty() {
         spec["viewers"] = json!(viewers);
     }
+    if publish == Some(Publish::Wap) {
+        spec["publish"] = json!("wap");
+    }
     let mut labels = serde_json::Map::new();
     labels.insert(MANAGED_BY_LABEL.to_string(), json!(MANAGED_BY_NOVA));
     labels.insert("stardelt.io/owner-group".to_string(), json!(group));
@@ -2198,6 +2267,7 @@ fn pipeline_resource(
 /// options, the parameters and the schedule replaced by the body's (the body describes the whole
 /// editable state, nothing is merged), and nothing else touched. The update and the validation
 /// both build it here, so what is checked is what is written.
+#[allow(clippy::too_many_arguments)]
 fn updated_resource(
     resource: &Value,
     statement: &Statement,
@@ -2206,6 +2276,7 @@ fn updated_resource(
     schedule: Option<&(String, String)>,
     notify: Option<&PipelineNotify>,
     viewers: Option<&[String]>,
+    publish: Option<Publish>,
 ) -> Value {
     let mut updated = resource.clone();
     match statement {
@@ -2285,6 +2356,17 @@ fn updated_resource(
         Some(_) => {
             if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
                 spec.remove("viewers");
+            }
+        }
+        None => {}
+    }
+    // `None` keeps what the resource carries, like `viewers`: a form save must not turn an
+    // audited pipeline into a direct one.
+    match publish {
+        Some(Publish::Wap) => updated["spec"]["publish"] = json!("wap"),
+        Some(Publish::Direct) => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("publish");
             }
         }
         None => {}
@@ -2557,6 +2639,16 @@ pub struct SparkPipelineRequest {
     pub full_refresh: Option<Vec<String>>,
 }
 
+/// How a pipeline's writes reach the tables people read: straight to `main`, or through an
+/// audit branch that a `quality` task must pass first (`spec.publish`, #114).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Publish {
+    #[default]
+    Direct,
+    Wap,
+}
+
 /// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a
 /// notebook, a dbt run, a quality run and a spark-pipeline graph, and the tasks that must succeed
 /// first.
@@ -2583,6 +2675,10 @@ pub struct PipelineTaskRequest {
     /// (#80): exactly one of the five.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spark_pipeline: Option<SparkPipelineRequest>,
+    /// The tables this task writes, as `catalog.schema.table`; only a `sql` task may name them,
+    /// and at most 16. `spec.publish: wap` audits exactly these tables (#114).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
     /// Names of the tasks that must succeed first; at most 8, each a task of this list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -2626,6 +2722,10 @@ pub struct CreatePipelineRequest {
     /// each a group name; omitted writes none. A bundle's pipeline file carries it (#79).
     #[serde(default)]
     pub viewers: Option<Vec<String>>,
+    /// How the writes reach the tables people read (`spec.publish`, #114). Omitted on a create
+    /// means `direct`; on an update it keeps what the pipeline says, and `direct` removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<Publish>,
 }
 
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
@@ -2674,6 +2774,10 @@ pub struct UpdatePipelineRequest {
     /// Omitted keeps the stored viewers; an empty list removes them.
     #[serde(default)]
     pub viewers: Option<Vec<String>>,
+    /// How the writes reach the tables people read (`spec.publish`, #114). Omitted on a create
+    /// means `direct`; on an update it keeps what the pipeline says, and `direct` removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<Publish>,
 }
 
 /// Where a pipeline came from when `stardelt bundle deploy` published it. It names things and
@@ -2819,6 +2923,10 @@ pub struct PipelineDocument {
     /// Groups that may read the pipeline without being members; left out when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub viewers: Vec<String>,
+    /// How the writes reach the tables people read (`spec.publish`); left out when the pipeline
+    /// writes straight to `main`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<Publish>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -4037,6 +4145,14 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
                 .collect::<Option<Vec<String>>>()?,
             None => Vec::new(),
         };
+        let writes = match task.get("writes") {
+            Some(tables) => tables
+                .as_array()?
+                .iter()
+                .map(|table| table.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()?,
+            None => Vec::new(),
+        };
         let mut request = PipelineTaskRequest {
             name: task.get("name")?.as_str()?.to_string(),
             sql: String::new(),
@@ -4044,6 +4160,7 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
             dbt: None,
             quality: None,
             spark_pipeline: None,
+            writes,
             depends_on,
         };
         match task.get("kind")?.as_str()? {
@@ -4193,6 +4310,10 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
             options: options_of(spec),
             notify: notify_of(spec),
             viewers: viewers_of(spec),
+            publish: match spec.get("publish").and_then(Value::as_str) {
+                Some("wap") => Some(Publish::Wap),
+                _ => None,
+            },
         },
         resource_version: resource
             .get("metadata")
@@ -5442,6 +5563,9 @@ async fn create_pipeline_inner(
         options,
     } = plan_pipeline(resources, db, notebooks_store, who, &body).await?;
 
+    // A `wap` pipeline must have a quality gate and a table to publish (#114).
+    check_publish(body.publish, body.tasks.as_deref())?;
+
     // 7. The name is free.
     if resources
         .get(&body.name)
@@ -5467,6 +5591,7 @@ async fn create_pipeline_inner(
         &who.display_name,
         body.notify.as_ref(),
         body.viewers.as_deref().unwrap_or_default(),
+        body.publish,
     );
     if let Some(provenance) = &body.provenance {
         stamp_provenance(&mut resource, provenance, &who.display_name);
@@ -5618,6 +5743,7 @@ pub(crate) async fn validate_pipeline(
                 planned.schedule.as_ref(),
                 body.notify.as_ref(),
                 body.viewers.as_deref(),
+                body.publish,
             );
             if let Some(provenance) = &body.provenance {
                 stamp_provenance(&mut updated, provenance, &who.display_name);
@@ -5960,6 +6086,11 @@ async fn update_pipeline_inner(
         }
     }
 
+    // Asking for `wap` with a task list is the same rule as on create (#114).
+    if body.tasks.is_some() {
+        check_publish(body.publish, body.tasks.as_deref())?;
+    }
+
     let options = body
         .options
         .clone()
@@ -6000,6 +6131,7 @@ async fn update_pipeline_inner(
         schedule.as_ref(),
         body.notify.as_ref(),
         body.viewers.as_deref(),
+        body.publish,
     );
     if let Some(provenance) = &body.provenance {
         stamp_provenance(&mut updated, provenance, &who.display_name);
@@ -11583,6 +11715,7 @@ mod tests {
             provenance: None,
             notify: None,
             viewers: None,
+            publish: None,
         }
     }
 
@@ -11598,6 +11731,7 @@ mod tests {
             provenance: None,
             notify: None,
             viewers: None,
+            publish: None,
         }
     }
 
@@ -11610,6 +11744,7 @@ mod tests {
             dbt: None,
             quality: None,
             spark_pipeline: None,
+            writes: Vec::new(),
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11623,6 +11758,7 @@ mod tests {
             dbt: Some(dbt),
             quality: None,
             spark_pipeline: None,
+            writes: Vec::new(),
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11640,6 +11776,7 @@ mod tests {
             dbt: None,
             quality: Some(QualityRequest { checks }),
             spark_pipeline: None,
+            writes: Vec::new(),
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11673,6 +11810,7 @@ mod tests {
                 full_refresh: full_refresh
                     .map(|names| names.iter().map(|name| (*name).to_string()).collect()),
             }),
+            writes: Vec::new(),
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -11700,6 +11838,7 @@ mod tests {
             "sub-ada",
             None,
             &[],
+            None,
         );
         resource["metadata"]["resourceVersion"] = json!("7");
         resource
@@ -11761,6 +11900,7 @@ mod tests {
                 dbt: None,
                 quality: None,
                 spark_pipeline: None,
+                writes: Vec::new(),
                 depends_on: vec!["load".into()],
             },
         ];
@@ -12393,6 +12533,7 @@ mod tests {
             provenance: None,
             notify: None,
             viewers: None,
+            publish: None,
         };
         let view = update_pipeline(
             Some(&resources),
@@ -12459,6 +12600,7 @@ mod tests {
                 provenance: None,
                 notify: None,
                 viewers: None,
+                publish: None,
             },
         )
         .await
@@ -12637,6 +12779,7 @@ mod tests {
                 dbt: None,
                 quality: None,
                 spark_pipeline: None,
+                writes: Vec::new(),
                 depends_on: vec!["load".into()],
             },
         ]);
@@ -12686,6 +12829,7 @@ mod tests {
             dbt: None,
             quality: None,
             spark_pipeline: None,
+            writes: Vec::new(),
             depends_on: Vec::new(),
         }]);
         create_pipeline(
@@ -12880,6 +13024,7 @@ mod tests {
             }),
             quality: None,
             spark_pipeline: None,
+            writes: Vec::new(),
             depends_on: vec![],
         }]);
         let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
@@ -13013,6 +13158,7 @@ mod tests {
                 checks: vec![check("no_null_ids", "select 1", None)],
             }),
             spark_pipeline: None,
+            writes: Vec::new(),
             depends_on: vec![],
         }]);
         let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
@@ -13140,6 +13286,166 @@ mod tests {
                 "checks": [{ "name": "no_null_ids", "sql": "select 3",
                              "severity": "warn" }]
             })
+        );
+    }
+
+    /// A `wap` create writes the branch decision and the tables its `sql` task publishes (#114).
+    #[tokio::test]
+    async fn a_create_with_publish_wap_writes_the_branch_and_the_tables() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut load = pipeline_task("load", "insert into gold.shop.t select 1", &[]);
+        load.writes = vec!["gold.shop.t".into()];
+        let mut body = create_body("shop-wap", "analytics", "");
+        body.tasks = Some(vec![
+            load,
+            quality_task("check", vec![check("rows", "select 1", None)], &["load"]),
+        ]);
+        body.publish = Some(Publish::Wap);
+
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a wap pipeline");
+        let stored = stored_pipeline(&resources, "shop-wap")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["publish"], json!("wap"));
+        assert_eq!(stored["spec"]["tasks"][0]["writes"], json!(["gold.shop.t"]));
+        assert!(
+            stored["spec"]["tasks"][1].get("writes").is_none(),
+            "a quality task writes no table: {}",
+            stored["spec"]["tasks"][1]
+        );
+    }
+
+    /// `publish: wap` without a quality task that checks and a `sql` task that writes is refused
+    /// with the ticket's sentence, and nothing is written (#114).
+    #[tokio::test]
+    async fn a_wap_create_without_a_quality_check_and_a_written_table_is_refused() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut load = pipeline_task("load", "insert into gold.shop.t select 1", &[]);
+        load.writes = vec!["gold.shop.t".into()];
+        let mut body = create_body("shop-wap", "analytics", "");
+        body.tasks = Some(vec![load]);
+        body.publish = Some(Publish::Wap);
+
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("no quality task");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            "publish: wap needs a task list with a quality task that has a check and a sql task that writes a table"
+        );
+        assert!(stored_pipeline(&resources, "shop-wap").await.is_none());
+    }
+
+    /// `writes` belongs to a `sql` task only: a notebook task that names one is refused (#114).
+    #[tokio::test]
+    async fn a_notebook_task_with_writes_is_refused() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut task = pipeline_task("extract", "", &[]);
+        task.notebook = Some(NotebookRequest {
+            name: "smoke.ipynb".into(),
+            object_version: "v3".into(),
+            params: BTreeMap::new(),
+            connection: None,
+        });
+        task.writes = vec!["gold.shop.t".into()];
+        let mut body = create_body("shop-writes", "analytics", "");
+        body.tasks = Some(vec![task]);
+
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("a notebook task cannot write a table");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            "task `extract` is not a sql task: only a sql task declares writes"
+        );
+        assert!(stored_pipeline(&resources, "shop-writes").await.is_none());
+    }
+
+    /// `Some(Direct)` removes `spec.publish`, `None` keeps what the resource says (#114).
+    #[test]
+    fn an_update_with_publish_direct_removes_it_and_none_keeps_it() {
+        let stored = pipeline_resource(
+            "shop-wap",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+            &[],
+            Some(Publish::Wap),
+        );
+        assert_eq!(spec_of(&stored)["publish"], json!("wap"));
+        let statement = Statement::Sql("select 2".into());
+        let update = |publish: Option<Publish>| {
+            updated_resource(
+                &stored,
+                &statement,
+                &default_options(),
+                &BTreeMap::new(),
+                None,
+                None,
+                None,
+                publish,
+            )
+        };
+
+        assert!(
+            spec_of(&update(Some(Publish::Direct)))
+                .get("publish")
+                .is_none(),
+            "direct removes the key"
+        );
+        assert_eq!(
+            spec_of(&update(None))["publish"],
+            json!("wap"),
+            "an omitted publish keeps the stored one"
+        );
+        assert_eq!(
+            spec_of(&update(Some(Publish::Wap)))["publish"],
+            json!("wap")
+        );
+    }
+
+    /// The document reads `spec.publish` back, so an editor can send it as it was read (#114).
+    #[test]
+    fn spec_response_round_trips_publish() {
+        let resource = pipeline_resource(
+            "shop-wap",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            None,
+            &[],
+            Some(Publish::Wap),
+        );
+        let document = spec_response(&resource).document;
+        assert_eq!(document.publish, Some(Publish::Wap));
+        assert_eq!(
+            serde_json::to_value(&document).expect("serialises")["publish"],
+            json!("wap")
+        );
+
+        let direct = nova_pipeline("shop-direct", "analytics");
+        let document = spec_response(&direct).document;
+        assert_eq!(document.publish, None);
+        assert!(
+            serde_json::to_value(&document)
+                .expect("serialises")
+                .get("publish")
+                .is_none(),
+            "a direct pipeline carries no key"
         );
     }
 
@@ -15416,6 +15722,7 @@ mod tests {
             provenance: None,
             notify: None,
             viewers: None,
+            publish: None,
         };
         let verdict = validate_pipeline(Some(&resources), None, None, &ada, body)
             .await
@@ -15614,6 +15921,7 @@ mod tests {
                 "ann",
                 None,
                 &[],
+                None,
             )
         };
         let resources = vec![
@@ -16112,6 +16420,7 @@ mod tests {
             provenance: None,
             notify: None,
             viewers: None,
+            publish: None,
         }
     }
 
@@ -16132,6 +16441,7 @@ mod tests {
             provenance: None,
             notify: None,
             viewers: None,
+            publish: None,
         }
     }
 
@@ -16152,6 +16462,7 @@ mod tests {
             "sub-ada",
             None,
             &[],
+            None,
         );
         resource["metadata"]["resourceVersion"] = json!("7");
         resource
@@ -16962,6 +17273,7 @@ mod tests {
             "sub-ada",
             Some(&notify),
             &[],
+            None,
         );
         assert_eq!(spec_of(&resource)["notify"]["onFailure"], json!(["pager"]));
 
@@ -17051,6 +17363,7 @@ mod tests {
                 ..PipelineNotify::default()
             }),
             &[],
+            None,
         );
         let statement = Statement::Sql("select 2".into());
 
@@ -17059,6 +17372,7 @@ mod tests {
             &statement,
             &default_options(),
             &BTreeMap::new(),
+            None,
             None,
             None,
             None,
@@ -17078,6 +17392,7 @@ mod tests {
             None,
             Some(&PipelineNotify::default()),
             None,
+            None,
         );
         assert!(
             spec_of(&removed).get("notify").is_none(),
@@ -17095,6 +17410,7 @@ mod tests {
                 on_success: vec!["digest".into()],
                 ..PipelineNotify::default()
             }),
+            None,
             None,
         );
         assert_eq!(
@@ -17119,6 +17435,7 @@ mod tests {
                 "sub-ada",
                 None,
                 viewers,
+                None,
             )
         };
 
@@ -17146,6 +17463,7 @@ mod tests {
             "sub-ada",
             None,
             &["visitors".to_string()],
+            None,
         );
         let statement = Statement::Sql("select 2".into());
         let update = |viewers: Option<&[String]>| {
@@ -17157,6 +17475,7 @@ mod tests {
                 None,
                 None,
                 viewers,
+                None,
             )
         };
 
