@@ -1,7 +1,13 @@
 import json
 
 import pytest
-from stardelt_pipelines.plan import PlanError, PrincipalRef, parse_duration, plan
+from stardelt_pipelines.plan import (
+    PlanError,
+    PrincipalRef,
+    parse_duration,
+    plan,
+    refuse_unrunnable,
+)
 
 
 def resource(**spec):
@@ -427,3 +433,76 @@ def test_a_connection_without_secret_keys_needs_no_synced_secret():
 def test_a_connection_must_exist_and_belong_to_the_pipelines_group(task, connections, message):
     with pytest.raises(PlanError, match=message):
         plan(*owned(task()), connections=connections)
+
+
+# --- the spark-pipeline task: a graph, one catalog/schema from writes, run as the principal -----
+
+GRAPH = (
+    "name: spark-check\n"
+    "configuration:\n"
+    "  spark.sql.catalog.playground.type: rest\n"
+    "  spark.sql.catalog.playground.uri: http://lakekeeper:8181/catalog\n"
+    "libraries:\n"
+    "  - glob:\n"
+    "      include: sql/**\n"
+)
+
+
+def spark_pipeline(name="build", graph=GRAPH, writes=("playground.scratch.range_ten",), **extra):
+    task = {
+        "name": name,
+        "kind": "spark-pipeline",
+        "project": "graph",
+        "files": {"spark-pipeline.yml": graph, "sql/range_ten.sql": "SELECT 1"},
+    }
+    if writes is not None:
+        task["writes"] = list(writes)
+    task.update(extra)
+    return task
+
+
+def test_plan_accepts_a_spark_pipeline_task():
+    p = plan(
+        *owned(spark_pipeline(refresh="full", fullRefresh=["range_ten"]))
+    )
+    (build,) = p.tasks
+    assert dict(build.graph)["spark-pipeline.yml"] == GRAPH
+    # The files are the graph's, path-sorted: the ConfigMap key order is the operator's.
+    assert [path for path, _ in build.graph] == ["spark-pipeline.yml", "sql/range_ten.sql"]
+    assert build.refresh == "full"
+    assert build.full_refresh == ("range_ten",)
+    assert build.writes == ("playground.scratch.range_ten",)
+
+
+def test_refuses_a_spark_pipeline_without_writes():
+    with pytest.raises(PlanError, match="needs writes"):
+        plan(*owned(spark_pipeline(writes=None)))
+
+
+def test_refuses_a_spark_pipeline_with_two_targets():
+    with pytest.raises(PlanError, match="writes into more than one catalog/schema"):
+        plan(
+            *owned(
+                spark_pipeline(
+                    writes=["playground.scratch.one", "playground.staging.two"]
+                )
+            )
+        )
+
+
+def test_refuses_a_graph_that_sets_a_key_stardelt_owns():
+    graph = GRAPH.replace("name: spark-check\n", "name: spark-check\ncatalog: playground\n")
+    with pytest.raises(PlanError, match="must not set catalog, database or storage"):
+        plan(*owned(spark_pipeline(graph=graph)))
+
+
+def test_refuses_a_graph_without_the_catalog_type_block():
+    graph = GRAPH.replace("spark.sql.catalog.playground.type: rest\n", "")
+    with pytest.raises(PlanError, match="has no `spark.sql.catalog.playground.type`"):
+        plan(*owned(spark_pipeline(graph=graph)))
+
+
+def test_refuses_a_wap_pipeline_with_a_spark_pipeline_task():
+    p = plan(*owned(spark_pipeline(), publish="wap"))
+    with pytest.raises(PlanError, match="publish: wap with a spark-pipeline task is not wired yet"):
+        refuse_unrunnable(p)

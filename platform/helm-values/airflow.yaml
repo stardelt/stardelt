@@ -450,6 +450,21 @@ extraEnv: |
   - name: PIPELINE_DBT_TRINO_CA_SECRET
     value: trino-ca
 
+  # spark-pipeline tasks (#80 S2c-2): the graph runs in a pod of the pinned Spark image as a
+  # thin Spark Connect client (#957 measured the shape: 6.6 s, two flows, no S3 key). The
+  # image must equal manifests/spark.yaml's — `scripts/check-spark-image-pin.sh` (make lint)
+  # fails when the two drift, as with the notebook image. The remote is the shared Connect
+  # server; a per-group SparkCluster is #493. Checkpoints live under the lakehouse bucket,
+  # `pipelines/<group>/<pipeline>/<task>/checkpoints`.
+  - name: PIPELINE_SPARK_IMAGE
+    value: ghcr.io/stardelt/spark:dev@sha256:71635e7637593b8612f11359bcd1ff49648360d40df90706a293653721f9d128
+  - name: PIPELINE_SPARK_REMOTE
+    value: sc://spark-connect.stardelt.svc.cluster.local:15002
+  - name: PIPELINE_SPARK_BUCKET
+    value: lakehouse
+  - name: PIPELINE_SPARK_PULL_SECRET
+    value: ghcr-creds
+
 # The internal CA that signs the query engine's certificate (Secret trino-ca, manifests/trino-tls.yaml),
 # mounted into every Airflow container, task pods included, so the pipeline loader can verify
 # the engine's TLS endpoint. Optional: absent on an install without the identity overlay.
