@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, api, type PipelineTaskSpec, type RunView, type TaskView } from '../api'
+import { ApiError, api, type PipelineTaskSpec, type RunCheckView, type RunView, type TaskView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import RunTaskTable from '../components/RunTaskTable'
 import { formatTime } from '../format'
@@ -68,6 +68,12 @@ export default function RunDetail() {
   const queries = useQuery({
     queryKey: ['pipeline-run-queries', namespace, name, runId],
     queryFn: () => api.pipelineRunQueries(namespace, name, runId),
+    refetchInterval:
+      detail.data?.run.state === 'running' || detail.data?.run.state === 'queued' ? 5_000 : false,
+  })
+  const checks = useQuery({
+    queryKey: ['pipeline-run-checks', namespace, name, runId],
+    queryFn: () => api.pipelineRunChecks(namespace, name, runId),
     refetchInterval:
       detail.data?.run.state === 'running' || detail.data?.run.state === 'queued' ? 5_000 : false,
   })
@@ -166,8 +172,59 @@ export default function RunDetail() {
           taskKinds={taskKinds}
         />
       </section>
+
+      <section className="card space-y-3 p-4" aria-labelledby="run-checks-heading">
+        <h2 id="run-checks-heading" className="text-sm font-semibold">Checks</h2>
+        <RunCheckTable checks={checks.data?.checks ?? []} error={checks.error} />
+      </section>
     </div>
   )
+}
+
+/** The checks a run declares and what each returned; `rows` is null until the task's log has the line (#829). */
+function RunCheckTable({ checks, error }: { checks: RunCheckView[]; error: unknown }) {
+  if (error && checks.length === 0) {
+    return <ErrorBox error={error} />
+  }
+  if (checks.length === 0) {
+    return <p className="text-sm text-text-mute">This run declares no checks.</p>
+  }
+  const failed = checks.filter((c) => c.passed === false && c.severity !== 'warn').length
+  return (
+    <div className="space-y-2">
+      <p className="text-sm text-text-dim">
+        {checks.length === 1 ? '1 check' : `${checks.length} checks`}
+        {failed > 0 ? ` · ${failed} failed` : ''}
+      </p>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-text-mute">
+            <th className="py-1 pr-3 font-medium">Task</th>
+            <th className="py-1 pr-3 font-medium">Check</th>
+            <th className="py-1 pr-3 font-medium">Rows</th>
+            <th className="py-1 font-medium">Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          {checks.map((c) => (
+            <tr key={`${c.task}/${c.name}`} className="border-t border-border">
+              <td className="py-1 pr-3">{c.task}</td>
+              <td className="py-1 pr-3 break-words">{c.name}</td>
+              <td className="py-1 pr-3 tabular-nums">{c.rows ?? '—'}</td>
+              <td className="py-1">{checkVerdict(c)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** A pass is zero rows; `warn` never fails the run, so its non-zero answer reads Warned. */
+function checkVerdict(check: RunCheckView): string {
+  if (check.passed === null) return 'Not run yet'
+  if (check.passed) return 'Passed'
+  return check.severity === 'warn' ? 'Warned' : 'Failed'
 }
 
 /** The instants a bar is drawn on: the run's own span, or now while it is still running. */
