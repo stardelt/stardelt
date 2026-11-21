@@ -220,7 +220,7 @@ pub fn visible_streams(apps: &[Value], who: &Identity) -> Vec<StreamView> {
 
 /// What a write produces once every rule has passed.
 #[derive(Debug)]
-struct PlannedStream {
+pub(crate) struct PlannedStream {
     group: String,
     spec: Value,
 }
@@ -266,7 +266,11 @@ fn bad_table() -> String {
 
 /// Every rule a stream write runs, in order, with the CRD's own limits
 /// (`crates/stardelt-operator/src/crd.rs:1953-2072`). `Ok` carries the spec to write.
-fn check_write(name: &str, body: &StreamWrite, who: &Identity) -> Result<PlannedStream, String> {
+pub(crate) fn check_write(
+    name: &str,
+    body: &StreamWrite,
+    who: &Identity,
+) -> Result<PlannedStream, String> {
     // 1. The name the CRD (and the operator) accepts.
     crate::pipelines::validate_name(name)?;
 
