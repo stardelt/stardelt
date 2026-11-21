@@ -711,6 +711,8 @@ export type PipelineTaskSpec = {
   dbtProject?: string | null
   /** The selector or the batched selectors, joined with `, `; detail route only. */
   dbtSelect?: string | null
+  /** The tables a `wap` run audits (`catalog.schema.table`); detail route only (#114). */
+  writes?: string[]
   /** The task names this task waits for; absent when it waits for nothing. */
   dependsOn?: string[]
 }
@@ -1068,6 +1070,9 @@ export type PipelineView = {
   runAs: string | null
   /** `Allow`, `Forbid` or `Replace`. */
   concurrency: string
+  /** `direct`, or `wap` — the run writes an audit branch and publishes only when its checks pass. */
+  publish: string
+
   createdAt: string | null
   /** Absent for a pipeline made in the interface or with `stardelt apply`. */
   deployment?: DeploymentView

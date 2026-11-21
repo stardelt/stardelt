@@ -560,6 +560,7 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
                 tasks: vec![],
                 run_as: Some("pipeline-analytics".into()),
                 concurrency: "Allow".into(),
+                publish: "direct".into(),
                 created_at: Some("2026-10-21T09:15:00Z".into()),
                 // A sample that shows where a pipeline comes from (stardelt-nova#618): deployed
                 // from the `shop-etl` bundle and not touched since.
@@ -597,6 +598,7 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
                 tasks: vec![],
                 run_as: Some("pipeline-mobility".into()),
                 concurrency: "Allow".into(),
+                publish: "direct".into(),
                 created_at: Some("2026-10-29T14:20:00Z".into()),
                 // The same bundle, changed by hand after the deploy: the amber badge
                 // (`deployment.modified`) needs a sample to show.

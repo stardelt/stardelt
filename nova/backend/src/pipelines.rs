@@ -596,6 +596,20 @@ fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
                         } else {
                             None
                         },
+                        writes: if detailed {
+                            task.get("writes")
+                                .and_then(Value::as_array)
+                                .map(|writes| {
+                                    writes
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_string)
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
                         depends_on: task
                             .get("dependsOn")
                             .and_then(Value::as_array)
@@ -3023,6 +3037,10 @@ pub struct TaskSpecView {
     /// The datasets a full refresh rebuilds, detail route only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_refresh: Option<Vec<String>>,
+    /// `tasks[].writes` (`catalog.schema.table`), detail route only (#114): the tables a
+    /// `wap` run audits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
     /// The task names this task waits for (`tasks[].dependsOn`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -3058,6 +3076,9 @@ pub struct PipelineView {
     pub run_as: Option<String>,
     /// `spec.concurrency` as the resource carries it (`Allow`, `Forbid`, `Replace`).
     pub concurrency: String,
+    /// `spec.publish`: `direct` (the default) or `wap` — a `wap` run writes an audit
+    /// branch, runs its checks, and only a passing run publishes (#114).
+    pub publish: String,
     /// `metadata.creationTimestamp` as the cluster wrote it (RFC 3339); `None` for a malformed
     /// resource.
     pub created_at: Option<String>,
@@ -3378,6 +3399,11 @@ fn view_of(
             .get("concurrency")
             .and_then(Value::as_str)
             .unwrap_or("Forbid")
+            .to_string(),
+        publish: spec
+            .get("publish")
+            .and_then(Value::as_str)
+            .unwrap_or("direct")
             .to_string(),
         created_at: created_at_of(resource).map(str::to_string),
         deployment: deployment_of(resource),
@@ -10209,6 +10235,7 @@ mod tests {
                 "tasks",
                 "runAs",
                 "concurrency",
+                "publish",
                 "createdAt",
             ])
         );
@@ -17312,6 +17339,7 @@ mod tests {
                 project: None,
                 refresh: None,
                 full_refresh: None,
+                writes: vec![],
                 depends_on: vec![],
             }],
             "the edit dialog gets the version and the parameters it must prefill"
@@ -17336,6 +17364,7 @@ mod tests {
                 project: None,
                 refresh: None,
                 full_refresh: None,
+                writes: vec![],
                 depends_on: vec![],
             }]
         );
@@ -17360,6 +17389,7 @@ mod tests {
                 project: None,
                 refresh: None,
                 full_refresh: None,
+                writes: vec![],
                 depends_on: vec![],
             }]
         );

@@ -120,6 +120,8 @@ export default function PipelineDetail() {
     return null
   }
 
+  const audited = pipeline.tasks.flatMap((task) => task.writes ?? [])
+
   return (
     <div className="max-w-6xl space-y-5">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -210,6 +212,14 @@ export default function PipelineDetail() {
         </Fact>
         <Fact label="Concurrency">
           <span className="break-words">{pipeline.concurrency || '—'}</span>
+        </Fact>
+        <Fact label="Publishing">
+          <span className="break-words">
+            {pipeline.publish === 'wap' ? 'Only checked data' : 'Direct'}
+          </span>
+          {pipeline.publish === 'wap' && audited.length > 0 && (
+            <p className="mt-0.5 text-xs text-text-mute break-words">{audited.join(', ')}</p>
+          )}
         </Fact>
         {([
           ['Tells on failure', pipeline.notify?.onFailure],
