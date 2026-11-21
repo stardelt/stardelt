@@ -39,6 +39,11 @@ CHECK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
 MAX_CHECKS = 50
 MAX_CHECK_SQL = 20000
 SPARK_KEYS = ("project", "refresh", "fullRefresh")
+MAX_SPARK_FILES = 64
+MAX_SPARK_FILE_BYTES = 64 * 1024
+MAX_SPARK_GRAPH_BYTES = 256 * 1024
+# Directories a graph never carries to the run pod.
+SPARK_SKIPPED_DIRS = ("__pycache__", ".git")
 # The CRD's `project` pattern and 128-character limit (operator/crates/stardelt-operator/src/crd.rs).
 SPARK_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,127}$")
 # What `spark-pipeline.yml` may not set: stardelt sets them at run time (#80).
@@ -321,6 +326,48 @@ def _spark_pipeline_problems(where, task, root):
             (where, "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)")
         )
     return problems
+
+
+def _spark_pipeline_files(root, project):
+    """The graph's files, ``{relative path: text}``, for one project directory of the bundle.
+
+    The loader caps one file at 64 KiB and a whole graph at 256 KiB (``#80`` S2b); a bad graph is an ``ApplyError``
+    whose message is one sentence, so ``render`` can refuse it as a problem.
+    """
+    base = Path(root) / project
+    contents = {}
+    total = 0
+    for path in sorted(base.rglob("*")):
+        relative = path.relative_to(base).as_posix()
+        if any(part in SPARK_SKIPPED_DIRS for part in relative.split("/")):
+            continue
+        # The graph is sent to the server, so it may not reach outside the bundle through a link.
+        if _linked(root, path):
+            raise apply.ApplyError(f"a symbolic link is not allowed: {relative}")
+        if not path.is_file():
+            continue
+        if path.stat().st_size > MAX_SPARK_FILE_BYTES:
+            raise apply.ApplyError(f"{relative} is larger than 64 KiB")
+        try:
+            data = path.read_bytes()
+        except OSError:
+            raise apply.ApplyError(f"the graph file {relative} cannot be read") from None
+        # A NUL byte is what makes a file binary; Git and every text tool agree (git's own
+        # `buffer_is_binary`), and UTF-8 decoding alone would accept it.
+        if b"\x00" in data:
+            raise apply.ApplyError(f"the graph file {relative} is not UTF-8 text")
+        try:
+            contents[relative] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise apply.ApplyError(f"the graph file {relative} is not UTF-8 text") from None
+        total += len(data)
+    if "spark-pipeline.yml" not in contents:
+        raise apply.ApplyError("the graph has no spark-pipeline.yml")
+    if len(contents) > MAX_SPARK_FILES:
+        raise apply.ApplyError("a spark-pipeline graph is at most 64 files")
+    if total > MAX_SPARK_GRAPH_BYTES:
+        raise apply.ApplyError("a spark-pipeline graph is at most 256 KiB")
+    return contents
 
 
 def _task_problems(where, tasks, files, root):
@@ -622,6 +669,13 @@ def render(directory, target, user=None):
         for task in doc.get("tasks") or []:
             if isinstance(task, dict) and "sqlFile" in task:
                 task["sql"] = (root / task.pop("sqlFile")).read_text(encoding="utf-8")
+            if isinstance(task, dict) and isinstance(task.get("spark-pipeline"), dict):
+                graph = task["spark-pipeline"]
+                if isinstance(graph.get("project"), str) and graph["project"]:
+                    try:
+                        graph["files"] = _spark_pipeline_files(root, graph["project"])
+                    except apply.ApplyError as err:
+                        problems.append((f"{where} ({task.get('name', '?')})", str(err)))
         apply.api_tasks(doc)
         if mode == "development":
             doc["name"] = f"dev-{_slug(user)}-{doc['name']}"

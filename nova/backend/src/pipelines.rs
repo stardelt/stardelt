@@ -1223,6 +1223,18 @@ const SPARK_BAD_REFRESH: &str = "refresh must be incremental or full";
 const SPARK_BAD_FULL_REFRESH: &str = "fullRefresh is 1 to 32 dataset names of 1 to 128 characters";
 const SPARK_REFRESH_TWICE: &str =
     "a spark-pipeline task sets refresh: full or fullRefresh, not both";
+const SPARK_NEEDS_GRAPH_FILE: &str =
+    "a spark-pipeline task's files must hold spark-pipeline.yml at the project root";
+const SPARK_TOO_MANY_FILES: &str = "a spark-pipeline graph is at most 64 files";
+const SPARK_BAD_FILE_PATH: &str = "a graph file path is relative to the project directory";
+const SPARK_GRAPH_TOO_LARGE: &str = "a spark-pipeline graph is at most 256 KiB";
+/// At most this many files one graph carries (the CRD's `files` `maxProperties`).
+const MAX_GRAPH_FILES: usize = 64;
+/// The longest one graph file may be (the CRD's file `maxLength`).
+const MAX_GRAPH_FILE_BYTES: usize = 65536;
+/// The largest one graph may be over all its files; the CRD caps the count and each file, the
+/// sum is checked here and by the loader.
+const MAX_GRAPH_BYTES: usize = 262144;
 /// At most this many datasets a full refresh rebuilds (the CRD's `fullRefresh` `maxItems`).
 const MAX_FULL_REFRESH: usize = 32;
 /// The longest one dataset name of `fullRefresh` may be (the CRD's item `maxLength`).
@@ -1270,11 +1282,45 @@ fn spark_pipeline_config(request: &SparkPipelineRequest) -> Result<SparkPipeline
             return Err(SPARK_REFRESH_TWICE.into());
         }
     }
+    if !request.files.is_empty() {
+        if request.files.len() > MAX_GRAPH_FILES {
+            return Err(SPARK_TOO_MANY_FILES.into());
+        }
+        if !request.files.contains_key("spark-pipeline.yml") {
+            return Err(SPARK_NEEDS_GRAPH_FILE.into());
+        }
+        let mut total = 0usize;
+        for (path, text) in &request.files {
+            if !graph_file_path_ok(path) {
+                return Err(SPARK_BAD_FILE_PATH.into());
+            }
+            if text.len() > MAX_GRAPH_FILE_BYTES {
+                return Err(SPARK_GRAPH_TOO_LARGE.into());
+            }
+            total += text.len();
+        }
+        if total > MAX_GRAPH_BYTES {
+            return Err(SPARK_GRAPH_TOO_LARGE.into());
+        }
+    }
     Ok(SparkPipelineShape {
         project: project.to_string(),
         refresh: request.refresh.clone(),
         full_refresh,
+        files: request.files.clone(),
     })
+}
+
+/// A graph file's path is relative to the project directory: segments of letters, digits, `.`,
+/// `_` and `-`, the first character a letter or digit, and no `..` segment.
+fn graph_file_path_ok(path: &str) -> bool {
+    let mut chars = path.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        && !path.split('/').any(|part| part == "..")
 }
 
 /// A `spark-pipeline` task of a task list as the resource stores it (#80): the bundle directory,
@@ -1285,6 +1331,7 @@ struct SparkPipelineShape {
     project: String,
     refresh: Option<String>,
     full_refresh: Vec<String>,
+    files: BTreeMap<String, String>,
 }
 
 /// The `run` task of a Nova-written pipeline as a write stores it (#210, #237): exactly one of a
@@ -1430,6 +1477,9 @@ fn task_json(task: &TaskStatement) -> Value {
             }
             if !graph.full_refresh.is_empty() {
                 task["fullRefresh"] = json!(graph.full_refresh);
+            }
+            if !graph.files.is_empty() {
+                task["files"] = json!(graph.files);
             }
             task
         }
@@ -2660,6 +2710,10 @@ pub struct SparkPipelineRequest {
     /// Datasets to rebuild from scratch; 1 to 32 names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_refresh: Option<Vec<String>>,
+    /// The graph's files, relative path to text; at most 64 files of 64 KiB each, the whole
+    /// graph at most 256 KiB. `spark-pipeline.yml` must be one of them.
+    #[serde(default)]
+    pub files: BTreeMap<String, String>,
 }
 
 /// How a pipeline's writes reach the tables people read: straight to `main`, or through an
@@ -4358,6 +4412,14 @@ fn task_requests_of(spec: &Value) -> Option<Vec<PipelineTaskRequest>> {
                                 .collect::<Option<Vec<String>>>()?,
                         ),
                         None => None,
+                    },
+                    // An edit that changes the schedule must not drop the graph (#80 S2b).
+                    files: match task.get("files").and_then(Value::as_object) {
+                        Some(files) => files
+                            .iter()
+                            .map(|(path, text)| Some((path.clone(), text.as_str()?.to_string())))
+                            .collect::<Option<BTreeMap<String, String>>>()?,
+                        None => BTreeMap::new(),
                     },
                 });
             }
@@ -12128,6 +12190,7 @@ mod tests {
                 refresh: refresh.map(str::to_string),
                 full_refresh: full_refresh
                     .map(|names| names.iter().map(|name| (*name).to_string()).collect()),
+                files: BTreeMap::new(),
             }),
             writes: Vec::new(),
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
@@ -13980,7 +14043,8 @@ mod tests {
             "kind": "spark-pipeline",
             "project": "spark/shop",
             "refresh": "incremental",
-            "fullRefresh": ["gold.report"]
+            "fullRefresh": ["gold.report"],
+            "files": { "spark-pipeline.yml": "name: shop\n", "sql/trips.sql": "select 1\n" }
         }]);
         let resources = memory_with(&[("shop-graph", stored)], &analytics_principal());
         let ada = who("sub-ada", &["analytics"], false);
@@ -14001,7 +14065,11 @@ mod tests {
                 "sparkPipeline": {
                     "project": "spark/shop",
                     "refresh": "incremental",
-                    "fullRefresh": ["gold.report"]
+                    "fullRefresh": ["gold.report"],
+                    "files": {
+                        "spark-pipeline.yml": "name: shop\n",
+                        "sql/trips.sql": "select 1\n"
+                    }
                 }
             }])
         );
@@ -14054,6 +14122,114 @@ mod tests {
                 "refresh": "full",
                 "dependsOn": ["load"]
             })
+        );
+    }
+
+    /// A task list's `sparkPipeline` carries the graph's files onto the resource (#80 S2b).
+    #[tokio::test]
+    async fn a_spark_pipeline_task_stores_its_graph_files() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-graph", "analytics", "");
+        let mut build = spark_pipeline_task("build", "spark/shop", None, None, &[]);
+        let graph = build.spark_pipeline.as_mut().expect("a graph task");
+        graph
+            .files
+            .insert("spark-pipeline.yml".into(), "name: shop\n".into());
+        graph
+            .files
+            .insert("sql/trips.sql".into(), "select 1\n".into());
+        body.tasks = Some(vec![build]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a spark-pipeline task with its graph");
+        let stored = stored_pipeline(&resources, "shop-graph")
+            .await
+            .expect("stored");
+        assert_eq!(
+            stored["spec"]["tasks"][0]["files"],
+            json!({ "spark-pipeline.yml": "name: shop\n", "sql/trips.sql": "select 1\n" })
+        );
+        assert_eq!(stored["spec"]["tasks"][0]["project"], json!("spark/shop"));
+    }
+
+    /// A graph's files without `spark-pipeline.yml` at the root are the CRD's refusal, in Nova's
+    /// words (#80 S2b).
+    #[tokio::test]
+    async fn a_spark_pipeline_graph_must_hold_spark_pipeline_yml() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-graph", "analytics", "");
+        let mut build = spark_pipeline_task("build", "spark/shop", None, None, &[]);
+        build
+            .spark_pipeline
+            .as_mut()
+            .expect("a graph task")
+            .files
+            .insert("sql/trips.sql".into(), "select 1\n".into());
+        body.tasks = Some(vec![build]);
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("no spark-pipeline.yml");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            "task `build`: a spark-pipeline task's files must hold spark-pipeline.yml at the project root"
+        );
+        assert!(stored_pipeline(&resources, "shop-graph").await.is_none());
+    }
+
+    /// The graph's own bounds (#80 S2b): at most 64 files, paths relative to the project directory,
+    /// and 64 KiB per file and 256 KiB for the whole graph.
+    #[test]
+    fn a_spark_pipeline_graph_is_bounded() {
+        let graph = |files: BTreeMap<String, String>| SparkPipelineRequest {
+            project: "spark/shop".into(),
+            refresh: None,
+            full_refresh: None,
+            files,
+        };
+        let with = |extra: &[(String, String)]| {
+            let mut files =
+                BTreeMap::from([("spark-pipeline.yml".to_string(), "name: shop\n".into())]);
+            for (path, text) in extra {
+                files.insert(path.clone(), text.clone());
+            }
+            files
+        };
+
+        let many: Vec<(String, String)> = (0..64)
+            .map(|at| (format!("sql/{at}.sql"), "select 1\n".to_string()))
+            .collect();
+        assert_eq!(
+            spark_pipeline_config(&graph(with(&many))).unwrap_err(),
+            "a spark-pipeline graph is at most 64 files"
+        );
+        for path in ["../outside.sql", "/abs.sql", "sql/a b.sql"] {
+            assert_eq!(
+                spark_pipeline_config(&graph(with(&[(
+                    path.to_string(),
+                    "select 1\n".to_string()
+                )])))
+                .unwrap_err(),
+                "a graph file path is relative to the project directory",
+                "{path}"
+            );
+        }
+        assert_eq!(
+            spark_pipeline_config(&graph(with(&[(
+                "sql/big.sql".to_string(),
+                "x".repeat(65537)
+            )])))
+            .unwrap_err(),
+            "a spark-pipeline graph is at most 256 KiB"
+        );
+        let large: Vec<(String, String)> = (0..5)
+            .map(|at| (format!("sql/{at}.sql"), "x".repeat(60000)))
+            .collect();
+        assert_eq!(
+            spark_pipeline_config(&graph(with(&large))).unwrap_err(),
+            "a spark-pipeline graph is at most 256 KiB"
         );
     }
 

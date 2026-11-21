@@ -15888,6 +15888,16 @@
           "project"
         ],
         "properties": {
+          "files": {
+            "type": "object",
+            "description": "The graph's files, relative path to text; at most 64 files of 64 KiB each, the whole\ngraph at most 256 KiB. `spark-pipeline.yml` must be one of them.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "fullRefresh": {
             "type": [
               "array",

@@ -1049,6 +1049,14 @@ pub enum PipelineRefresh {
         "message": "only a spark-pipeline task names a project"
     },
     {
+        "rule": "!has(self.files) || self.kind == 'spark-pipeline'",
+        "message": "only a spark-pipeline task carries files"
+    },
+    {
+        "rule": "self.kind != 'spark-pipeline' || !has(self.files) || ('spark-pipeline.yml' in self.files)",
+        "message": "a spark-pipeline task's files must hold spark-pipeline.yml"
+    },
+    {
         "rule": "!has(self.refresh) || self.kind == 'spark-pipeline'",
         "message": "only a spark-pipeline task sets refresh"
     },
@@ -1112,6 +1120,15 @@ pub struct PipelineTask {
         regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
     )]
     pub project: Option<String>,
+    /// The graph's files for a `spark-pipeline` task: relative path to text, `spark-pipeline.yml`
+    /// and its sources. Empty on every other kind. The loader caps one file at 64 KiB and a whole
+    /// graph at 256 KiB; the schema caps the count and each file's length.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend(
+        "maxProperties" = 64,
+        "additionalProperties" = { "type": "string", "maxLength": 65536 }
+    ))]
+    pub files: BTreeMap<String, String>,
     /// `incremental` (the default) or `full`; only a `spark-pipeline` task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<PipelineRefresh>,
@@ -4437,6 +4454,7 @@ mod tests {
             writes: Vec::new(),
             checks: Vec::new(),
             project: None,
+            files: BTreeMap::new(),
             refresh: None,
             full_refresh: Vec::new(),
         }
@@ -5195,6 +5213,40 @@ mod tests {
         assert!(crd.contains("a notebook task needs config.notebook"));
         assert!(crd.contains("notebook tasks accept only notebook, objectVersion and params"));
         assert!(crd.contains("a sql task cannot name a connection"));
+    }
+
+    fn pipeline_task_schema() -> serde_json::Value {
+        let yaml = serde_yaml::to_string(&Pipeline::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+            ["tasks"]["items"]
+            .clone()
+    }
+
+    #[test]
+    fn a_spark_pipeline_task_carries_its_graph_files() {
+        let task = pipeline_task_schema();
+        for (rule, message) in [
+            (
+                "!has(self.files) || self.kind == 'spark-pipeline'",
+                "only a spark-pipeline task carries files",
+            ),
+            (
+                "self.kind != 'spark-pipeline' || !has(self.files) || ('spark-pipeline.yml' in self.files)",
+                "a spark-pipeline task's files must hold spark-pipeline.yml",
+            ),
+        ] {
+            assert!(
+                has_cel_rule(&task, rule, message),
+                "the task schema lacks `{message}`"
+            );
+        }
+        let files = &task["properties"]["files"];
+        assert_eq!(files["maxProperties"], 64, "the files map caps at 64 keys");
+        assert_eq!(
+            files["additionalProperties"]["maxLength"], 65536,
+            "each graph file caps at 64 KiB"
+        );
     }
 
     #[test]

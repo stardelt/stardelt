@@ -202,6 +202,16 @@ spec:
                         type: string
                       maxItems: 8
                       type: array
+                    files:
+                      additionalProperties:
+                        maxLength: 65536
+                        type: string
+                      description: |-
+                        The graph's files for a `spark-pipeline` task: relative path to text, `spark-pipeline.yml`
+                        and its sources. Empty on every other kind. The loader caps one file at 64 KiB and a whole
+                        graph at 256 KiB; the schema caps the count and each file's length.
+                      maxProperties: 64
+                      type: object
                     fullRefresh:
                       description: Datasets to rebuild from scratch on every run; only a `spark-pipeline` task.
                       items:
@@ -293,6 +303,10 @@ spec:
                     rule: self.kind != 'spark-pipeline' || (has(self.project) && size(self.project) > 0)
                   - message: only a spark-pipeline task names a project
                     rule: self.kind == 'spark-pipeline' || !has(self.project)
+                  - message: only a spark-pipeline task carries files
+                    rule: '!has(self.files) || self.kind == ''spark-pipeline'''
+                  - message: a spark-pipeline task's files must hold spark-pipeline.yml
+                    rule: self.kind != 'spark-pipeline' || !has(self.files) || ('spark-pipeline.yml' in self.files)
                   - message: only a spark-pipeline task sets refresh
                     rule: '!has(self.refresh) || self.kind == ''spark-pipeline'''
                   - message: only a spark-pipeline task sets fullRefresh

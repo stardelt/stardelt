@@ -291,6 +291,7 @@ mod tests {
             writes: Vec::new(),
             checks: Vec::new(),
             project: None,
+            files: BTreeMap::new(),
             refresh: None,
             full_refresh: Vec::new(),
         }
