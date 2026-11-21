@@ -35,6 +35,7 @@ pub mod secrets;
 pub mod spark;
 pub mod spark_auth;
 pub mod spark_cluster;
+pub mod spark_project;
 pub mod stop;
 pub mod stream_app;
 pub mod superset;

@@ -7,6 +7,7 @@
 //! - `ServicePrincipal` → validation and its credentials Secret check (see [`crate::principal`])
 //! - `StreamApp` → a SparkApplication job (see [`crate::stream_app`])
 //! - `SparkCluster` → the Spark Operator's `SparkConnect` server (see [`crate::spark_cluster`])
+//! - `Pipeline` → one read-only ConfigMap per `spark-pipeline` task (see [`crate::spark_project`])
 //!
 //! Applies go through Helm. Both resources default to `dryRun: true`, so a new
 //! resource plans first and changes nothing until explicitly flipped.
@@ -40,7 +41,7 @@ use crate::connection::reconcile_connection;
 use crate::crd::Profile;
 use crate::crd::{
     Catalog, ComponentStatus, ComponentValues, Condition, Connection, DeletionPolicy, DeployStage,
-    IdentityMode, Lakehouse, LakehouseStatus, PlatformInstance, PlatformInstanceStatus,
+    IdentityMode, Lakehouse, LakehouseStatus, Pipeline, PlatformInstance, PlatformInstanceStatus,
     ServicePrincipal, SparkCluster, StorageImpl, StreamApp, ValuesSource,
 };
 use crate::helm::{
@@ -228,6 +229,21 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         ctx.clone(),
     );
 
+    let spark_projects = Controller::new(
+        Api::<Pipeline>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .run(
+        |obj, ctx| {
+            crate::metrics::timed(
+                "spark_project",
+                crate::spark_project::reconcile_spark_project(obj, ctx),
+            )
+        },
+        error_policy,
+        ctx.clone(),
+    );
+
     let streams = Controller::new(
         Api::<StreamApp>::all(client.clone()),
         watcher::Config::default(),
@@ -291,7 +307,7 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
     );
 
     tracing::info!(
-        "stardelt-operator watching PlatformInstance, Lakehouse, Connection, ServicePrincipal, DeployStage, StreamApp, SparkCluster and Catalog"
+        "stardelt-operator watching PlatformInstance, Lakehouse, Connection, ServicePrincipal, DeployStage, Pipeline, StreamApp, SparkCluster and Catalog"
     );
     futures::pin_mut!(
         lakehouses,
@@ -299,6 +315,7 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         connections,
         principals,
         deploy_stages,
+        spark_projects,
         streams,
         spark_clusters,
         catalogs
@@ -311,6 +328,7 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
             _ = connections.next() => {}
             _ = principals.next() => {}
             _ = deploy_stages.next() => {}
+            _ = spark_projects.next() => {}
             _ = streams.next() => {}
             _ = spark_clusters.next() => {}
             _ = catalogs.next() => {}
