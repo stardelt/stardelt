@@ -48,6 +48,11 @@ fi
 echo "› script: check-notebook-image-pin"
 bash scripts/check-notebook-image-pin.sh
 
+# The Spark image a `spark-pipeline` task pod runs must be the image the shared Connect server
+# runs (#80 S2c-2).
+echo "› script: check-spark-image-pin"
+bash scripts/check-spark-image-pin.sh
+
 # The extra Trino catalogs are rendered from helm-values/catalog.properties.tmpl, which must stay
 # the identity overlay's `warehouse` block (platform#308): drift only shows up as a property
 # missing in one catalog at query time.

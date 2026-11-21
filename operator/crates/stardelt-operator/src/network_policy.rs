@@ -220,10 +220,11 @@ pub fn spark_connect_ingress(
 pub const CONNECT_POD_LABEL: &str = "sparkoperator.k8s.io/connect-name";
 
 /// Ingress to the Lakehouse's shared Spark Connect server (platform#1097). The server
-/// authenticates nobody, so the network admits members' notebook pods on 15002 (not a
-/// pod labelled `stardelt.io/group.visitors`) and the server's own driver and executor
-/// pods on any port. Both carry `app.kubernetes.io/name: spark-connect`
-/// (values/spark.yaml), so one peer covers the driver-executor traffic both ways.
+/// authenticates nobody, so the network admits members' notebook pods and a pipeline's own
+/// `spark-pipeline` task pods on 15002 (not a pod labelled `stardelt.io/group.visitors`) and
+/// the server's own driver and executor pods on any port. Both carry
+/// `app.kubernetes.io/name: spark-connect` (values/spark.yaml), so one peer covers the
+/// driver-executor traffic both ways.
 /// The customer's Prometheus reads the driver's metrics on the UI port 4040 from any
 /// namespace; a NetworkPolicy selects ports, not paths, so that rule admits the whole UI
 /// (jobs, stages, the redacted environment page) as well — the exposure
@@ -247,6 +248,27 @@ pub fn shared_spark_connect_ingress(namespace: &str) -> NetworkPolicy {
                             match_labels: Some(BTreeMap::from([(
                                 "component".to_string(),
                                 "singleuser-server".to_string(),
+                            )])),
+                            match_expressions: Some(vec![LabelSelectorRequirement {
+                                key: "stardelt.io/group.visitors".to_string(),
+                                operator: "DoesNotExist".to_string(),
+                                values: None,
+                            }]),
+                        }),
+                        namespace_selector: None,
+                        ip_block: None::<IPBlock>,
+                    }]),
+                    ports: Some(vec![port(SPARK_CONNECT_PORT)]),
+                },
+                // A scheduled task pod of a pipeline (#80 S2c-2): it runs the group's own code
+                // and holds no standing storage credential. Visitors are excluded, as for
+                // notebooks.
+                NetworkPolicyIngressRule {
+                    from: Some(vec![NetworkPolicyPeer {
+                        pod_selector: Some(LabelSelector {
+                            match_labels: Some(BTreeMap::from([(
+                                "app.kubernetes.io/name".to_string(),
+                                PIPELINE_SPARK_PIPELINE_LABEL.to_string(),
                             )])),
                             match_expressions: Some(vec![LabelSelectorRequirement {
                                 key: "stardelt.io/group.visitors".to_string(),
@@ -518,26 +540,32 @@ pub fn seaweedfs_internal(namespace: &str) -> NetworkPolicy {
     }
 }
 
-/// Egress from a scheduled notebook pod (stardelt-platform#1100's "Then" item 3): it runs a
-/// person's code, so it reaches the query engine, the S3 gateway, DNS and the public
-/// internet — and no other private address. Mirrors
+/// Egress from a scheduled notebook pod or a `spark-pipeline` task pod (stardelt-platform#1100's
+/// "Then" item 3): it runs a person's code, so it reaches the query engine, the S3 gateway, DNS
+/// and the public internet — and no other private address. Mirrors
 /// stardelt-platform/manifests/pipeline-notebook-egress.yaml (measured there before the
 /// ticket was written: without it, a pod with these labels reached nova-pg:5432 and
 /// openfga-pg:5432).
 pub const PIPELINE_NOTEBOOK_POLICY: &str = "pipeline-notebook-egress";
 /// The label the pipeline loader puts on every notebook task pod.
 pub const PIPELINE_NOTEBOOK_LABEL: &str = "pipeline-notebook";
+/// The label the pipeline loader puts on a `spark-pipeline` task pod (#80 S2c-2).
+pub const PIPELINE_SPARK_PIPELINE_LABEL: &str = "pipeline-spark-pipeline";
 
 pub fn pipeline_notebook_egress(namespace: &str) -> NetworkPolicy {
     NetworkPolicy {
         metadata: meta(PIPELINE_NOTEBOOK_POLICY, namespace),
         spec: Some(NetworkPolicySpec {
             pod_selector: Some(LabelSelector {
-                match_labels: Some(BTreeMap::from([(
-                    "app.kubernetes.io/name".to_string(),
-                    PIPELINE_NOTEBOOK_LABEL.to_string(),
-                )])),
-                match_expressions: None,
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: "app.kubernetes.io/name".to_string(),
+                    operator: "In".to_string(),
+                    values: Some(vec![
+                        PIPELINE_NOTEBOOK_LABEL.to_string(),
+                        PIPELINE_SPARK_PIPELINE_LABEL.to_string(),
+                    ]),
+                }]),
+                match_labels: None,
             }),
             policy_types: Some(vec!["Egress".to_string()]),
             ingress: None,
@@ -609,6 +637,12 @@ pub fn pipeline_notebook_egress(namespace: &str) -> NetworkPolicy {
                         }),
                         ..Default::default()
                     }]),
+                    ports: Some(vec![port(15002)]),
+                },
+                // The shared Spark Connect server (#80 S2c-2): the graph runs there. The rule above
+                // matches a group's SparkCluster; the shared server carries no CONNECT_POD_LABEL.
+                NetworkPolicyEgressRule {
+                    to: Some(vec![peer(&[("app.kubernetes.io/name", "spark-connect")])]),
                     ports: Some(vec![port(15002)]),
                 },
                 // The public internet, never a private range and never the metadata address.
@@ -1141,7 +1175,7 @@ mod tests {
             &vec!["Ingress".to_string()]
         );
         let ingress = spec.ingress.as_ref().expect("rules");
-        assert_eq!(ingress.len(), 4);
+        assert_eq!(ingress.len(), 5);
         // Rule 1: members' notebook pods only, on the Connect port.
         let members = ingress[0].from.as_ref().unwrap();
         assert_eq!(members.len(), 1);
@@ -1158,8 +1192,30 @@ mod tests {
             ingress[0].ports.as_ref().unwrap(),
             &vec![port(SPARK_CONNECT_PORT)]
         );
-        // Rule 2: the server's own driver and executor pods on any port.
-        let own = ingress[1].from.as_ref().unwrap();
+        // Rule 2: a pipeline's own spark-pipeline task pods, on the Connect port. Not a visitor.
+        let task_pods = ingress[1].from.as_ref().unwrap();
+        assert_eq!(task_pods.len(), 1);
+        let task_selector = task_pods[0].pod_selector.as_ref().expect("pod selector");
+        assert_eq!(
+            task_selector.match_labels.as_ref().unwrap(),
+            &BTreeMap::from([(
+                "app.kubernetes.io/name".to_string(),
+                "pipeline-spark-pipeline".to_string()
+            )])
+        );
+        let task_expressions = task_selector
+            .match_expressions
+            .as_ref()
+            .expect("expressions");
+        assert_eq!(task_expressions.len(), 1);
+        assert_eq!(task_expressions[0].key, "stardelt.io/group.visitors");
+        assert_eq!(task_expressions[0].operator, "DoesNotExist");
+        assert_eq!(
+            ingress[1].ports.as_ref().unwrap(),
+            &vec![port(SPARK_CONNECT_PORT)]
+        );
+        // Rule 3: the server's own driver and executor pods on any port.
+        let own = ingress[2].from.as_ref().unwrap();
         assert_eq!(
             own[0]
                 .pod_selector
@@ -1173,9 +1229,9 @@ mod tests {
                 "spark-connect".to_string()
             )])
         );
-        assert!(ingress[1].ports.is_none());
-        // Rule 3: the customer's Prometheus, any namespace, on the metrics port.
-        let scrape = ingress[2].from.as_ref().unwrap();
+        assert!(ingress[2].ports.is_none());
+        // Rule 4: the customer's Prometheus, any namespace, on the metrics port.
+        let scrape = ingress[3].from.as_ref().unwrap();
         assert_eq!(scrape.len(), 1);
         assert_eq!(
             scrape[0]
@@ -1195,12 +1251,12 @@ mod tests {
             "the scraper lives in another namespace"
         );
         assert_eq!(
-            ingress[2].ports.as_ref().unwrap()[0].port,
+            ingress[3].ports.as_ref().unwrap()[0].port,
             Some(IntOrString::Int(4040))
         );
-        assert_eq!(ingress[2].ports.as_ref().unwrap().len(), 1);
-        // Rule 4: the token-checking front, on the Connect port.
-        let front = ingress[3].from.as_ref().unwrap();
+        assert_eq!(ingress[3].ports.as_ref().unwrap().len(), 1);
+        // Rule 5: the token-checking front, on the Connect port.
+        let front = ingress[4].from.as_ref().unwrap();
         assert_eq!(front.len(), 1);
         assert_eq!(
             front[0]
@@ -1217,7 +1273,7 @@ mod tests {
         );
         assert!(front[0].namespace_selector.is_none(), "same namespace");
         assert_eq!(
-            ingress[3].ports.as_ref().unwrap(),
+            ingress[4].ports.as_ref().unwrap(),
             &vec![port(SPARK_CONNECT_PORT)]
         );
     }
@@ -1251,17 +1307,32 @@ mod tests {
             &vec!["Egress".to_string()]
         );
         assert!(spec.ingress.is_none());
-        let labels = spec
-            .pod_selector
-            .as_ref()
-            .unwrap()
-            .match_labels
-            .as_ref()
-            .unwrap();
-        assert_eq!(labels.len(), 1);
+        let selector = spec.pod_selector.as_ref().unwrap();
+        assert!(selector.match_labels.is_none());
+        let expressions = selector.match_expressions.as_ref().unwrap();
+        assert_eq!(expressions.len(), 1);
+        assert_eq!(expressions[0].key, "app.kubernetes.io/name");
+        assert_eq!(expressions[0].operator, "In");
         assert_eq!(
-            labels.get("app.kubernetes.io/name").unwrap(),
-            "pipeline-notebook"
+            expressions[0].values.as_ref().unwrap(),
+            &vec![
+                PIPELINE_NOTEBOOK_LABEL.to_string(),
+                PIPELINE_SPARK_PIPELINE_LABEL.to_string(),
+            ]
+        );
+        assert!(
+            expressions[0]
+                .values
+                .as_ref()
+                .unwrap()
+                .contains(&"pipeline-notebook".to_string())
+        );
+        assert!(
+            expressions[0]
+                .values
+                .as_ref()
+                .unwrap()
+                .contains(&"pipeline-spark-pipeline".to_string())
         );
     }
 
@@ -1270,7 +1341,7 @@ mod tests {
         let policy = pipeline_notebook_egress("data");
         let spec = policy.spec.as_ref().unwrap();
         let rules = spec.egress.as_ref().unwrap();
-        assert_eq!(rules.len(), 5);
+        assert_eq!(rules.len(), 6);
 
         // Rule 1: DNS on TCP and UDP 53.
         let dns = rules[0].ports.as_ref().unwrap();
@@ -1347,8 +1418,28 @@ mod tests {
             Some(IntOrString::Int(15002))
         );
 
-        // Rule 5: the public internet, every private range and the metadata address excepted.
-        let public = rules[4].to.as_ref().unwrap();
+        // Rule 5: the shared Spark Connect server on 15002, selected by its own label.
+        let shared_peers = rules[4].to.as_ref().unwrap();
+        assert_eq!(shared_peers.len(), 1);
+        assert!(shared_peers[0].namespace_selector.is_none());
+        let shared = shared_peers[0]
+            .pod_selector
+            .as_ref()
+            .unwrap()
+            .match_labels
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            shared.get("app.kubernetes.io/name").unwrap(),
+            "spark-connect"
+        );
+        assert_eq!(
+            rules[4].ports.as_ref().unwrap()[0].port,
+            Some(IntOrString::Int(15002))
+        );
+
+        // Rule 6: the public internet, every private range and the metadata address excepted.
+        let public = rules[5].to.as_ref().unwrap();
         assert_eq!(public.len(), 1);
         let block = public[0].ip_block.as_ref().unwrap();
         assert_eq!(block.cidr, "0.0.0.0/0");
@@ -1361,7 +1452,7 @@ mod tests {
                 "169.254.169.254/32".to_string(),
             ]
         );
-        assert!(rules[4].ports.is_none());
+        assert!(rules[5].ports.is_none());
     }
 
     #[test]

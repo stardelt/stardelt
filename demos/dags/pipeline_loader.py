@@ -28,6 +28,11 @@ Environment of the dag-processor and the task pods:
   PIPELINE_NOTEBOOK_KERNEL_TIMEOUT  seconds a notebook pod waits for its kernel (optional, 30 to 900, default 180)
   PIPELINE_DBT_IMAGE        the dbt tool image a `dbt` task's own pod runs (default `ghcr.io/stardelt/dbt:demo`)
   PIPELINE_DBT_TRINO_CA_SECRET  the Secret mounted into the dbt pod for the CA (default `trino-ca`)
+  PIPELINE_SPARK_IMAGE      the Spark image a `spark-pipeline` task's own pod runs (must equal
+                            manifests/spark.yaml; scripts/check-spark-image-pin.sh checks it)
+  PIPELINE_SPARK_REMOTE     the Connect URL the graph runs on (default the shared server)
+  PIPELINE_SPARK_BUCKET     the bucket under which a graph's checkpoints live (default lakehouse)
+  PIPELINE_SPARK_PULL_SECRET the image pull secret of that pod (default `ghcr-creds`)
   PIPELINE_API_GROUP / PIPELINE_API_PLURAL   defaults `stardelt.io` / `pipelines` (tests override)
 """
 from __future__ import annotations
@@ -52,6 +57,7 @@ from stardelt_pipelines.expand import expand, run_values  # noqa: E402
 from stardelt_pipelines.notebook import NotebookPodOperator  # noqa: E402
 from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan, refuse_unrunnable  # noqa: E402
 from stardelt_pipelines.principal import principal_pod_override  # noqa: E402
+from stardelt_pipelines.spark_pipeline import SparkPipelinePodOperator  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -356,6 +362,25 @@ def _build_dag(p) -> DAG:
                 select=t.dbt_select[0],
                 threads=t.dbt_threads,
                 vars_text=t.dbt_vars,
+                principal_secret=p.principal.secret_name,
+                namespace=namespace,
+                dag=dag,
+            )
+            continue
+        if t.kind == "spark-pipeline":
+            # The graph runs in a pod of the Spark image as a thin Connect client (#957): the worker
+            # has no Spark, and the principal's token must not pass through it either.
+            if p.principal is None:  # the plan refuses this; a silent default would run as nobody
+                raise PlanError(f"spark-pipeline task `{t.name}` has no principal")
+            operators[t.name] = SparkPipelinePodOperator(
+                task_id=t.name,
+                pipeline=p.name,
+                task_name=t.name,
+                owner_group=p.owner_group,
+                files=dict(t.graph),
+                writes=t.writes,
+                refresh=t.refresh,
+                full_refresh=t.full_refresh,
                 principal_secret=p.principal.secret_name,
                 namespace=namespace,
                 dag=dag,

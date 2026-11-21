@@ -332,10 +332,9 @@ spec:
 # Who may talk to this server (platform#1097, platform#1160). Spark Connect
 # authenticates nobody and its pods hold platform credentials, so the network is
 # the only gate until the design in platform#1096 lands.
-#   * 15002 (Spark Connect's gRPC port): members' notebook pods only — the public
-#     demo's notebook pod (`stardelt.io/group.visitors`, set by the hub's
-#     modify_pod_hook) and every other pod, pipeline notebook pods included, are
-#     refused.
+#   * 15002 (Spark Connect's gRPC port): members' notebook pods and a pipeline's own
+#     task pods only — a pipeline notebook pod and a spark-pipeline pod are admitted;
+#     the public demo's visitor pod is not.
 #   * every port: this server's own executors (they call back to the driver).
 #   * 4040 (the driver's UI, which also serves /metrics/executors/prometheus): a
 #     pod labelled as the customer's scraper, in any namespace. The UI has no
@@ -357,6 +356,17 @@ spec:
         - podSelector:
             matchLabels:
               component: singleuser-server
+            matchExpressions:
+              - { key: stardelt.io/group.visitors, operator: DoesNotExist }
+      ports:
+        - protocol: TCP
+          port: 15002
+    # A scheduled task pod of a pipeline (#80 S2c-2): it runs the group's own code and holds
+    # no standing storage credential. Visitors are excluded, as for notebooks.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pipeline-spark-pipeline
             matchExpressions:
               - { key: stardelt.io/group.visitors, operator: DoesNotExist }
       ports:
