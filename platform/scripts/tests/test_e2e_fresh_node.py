@@ -45,6 +45,52 @@ echo "${FRESH_NAME:-}" >> "$HOME/calls"
 exit 0
 """
 
+# A kubectl that answers the diagnostics' questions with fixed text, and fails every other call
+# (= `apply`) so the first failing phase runs collect_diagnostics (stardelt/stardelt#933). One
+# pod is not ready, so the pod-log loop has work to do.
+FAKE_KUBECTL_DIAGNOSTICS = """#!/usr/bin/env bash
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n | --namespace) shift 2 ;;
+    *) args+=("$1") && shift ;;
+  esac
+done
+set -- "${args[@]:-}"
+case "${1:-} ${2:-}" in
+  "get pods")
+    if [ "${3:-}" = "-o" ] && [ "${4:-}" = "json" ]; then
+      cat <<'JSON'
+{"items":[{"metadata":{"name":"bootstrap-trino"},"status":{"phase":"Failed","containerStatuses":[{"name":"load","ready":false,"restartCount":3,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}
+JSON
+      exit 0
+    fi
+    ;;
+  "get pod")
+    echo "POD STATUS ${3:-}"
+    exit 0
+    ;;
+  "describe pod")
+    echo "POD DESCRIBE ${3:-}"
+    exit 0
+    ;;
+  "get jobs")
+    echo "JOBS WIDE"
+    exit 0
+    ;;
+  "describe jobs")
+    echo "JOBS DESCRIBE"
+    exit 0
+    ;;
+  logs*)
+    echo "POD LOGS ${2:-}"
+    exit 0
+    ;;
+esac
+echo "kubectl: refusing ${*}" >&2
+exit 1
+"""
+
 
 class E2EFreshNode(unittest.TestCase):
     def setUp(self):
@@ -107,6 +153,28 @@ class E2EFreshNode(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("re-run with YES=1", done.stderr)
         self.assertFalse((self.home / "hetzner-k3s.called").exists(), "a server was created")
+
+    def test_a_failed_phase_keeps_the_jobs_and_a_describe(self):
+        self._write(self.bindir / "kubectl", FAKE_KUBECTL_DIAGNOSTICS)
+        done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", DRY_RUN="")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("e2e-fresh-node: FAIL", done.stdout)
+        run_dir = self.home / ".cache" / "stardelt-e2e" / "testid"
+        jobs = run_dir / "jobs.txt"
+        jobs_describe = run_dir / "jobs.describe.txt"
+        pod_describe = run_dir / "pod-logs" / "bootstrap-trino.describe.txt"
+        self.assertTrue(jobs.exists(), done.stdout + done.stderr)
+        self.assertTrue(jobs_describe.exists(), done.stdout + done.stderr)
+        self.assertTrue(pod_describe.exists(), done.stdout + done.stderr)
+        self.assertEqual(jobs.read_text().strip(), "JOBS WIDE", done.stdout)
+        self.assertEqual(jobs_describe.read_text().strip(), "JOBS DESCRIBE", done.stdout)
+        self.assertEqual(
+            pod_describe.read_text().strip(), "POD DESCRIBE bootstrap-trino", done.stdout
+        )
+        # #924's loop is exercised by the same fake: the unready pod keeps its logs.
+        pod_log = run_dir / "pod-logs" / "bootstrap-trino.log"
+        self.assertTrue(pod_log.exists(), done.stdout + done.stderr)
+        self.assertIn("POD LOGS bootstrap-trino", pod_log.read_text(), done.stdout)
 
     def test_down_deletes_every_run_this_checkout_started(self):
         (self.fresh_dir / ".fresh-stardelt-fresh-a.yaml").write_text("cluster_name: stardelt-fresh-a\n")

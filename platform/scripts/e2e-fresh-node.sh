@@ -135,6 +135,8 @@ for p in json.load(sys.stdin).get("items", []):
         restarted.append(name)
 print("\n".join(broken + restarted))
 ' 2>/dev/null | head -n 20); do
+    # A scheduler or volume problem is in the describe, not in a log line (#48 run #3).
+    kubectl -n "$NAMESPACE" describe pod "$pod" >"$RUN_DIR/pod-logs/${pod}.describe.txt" 2>&1 || true
     {
       echo "=== kubectl logs ${pod} --all-containers --tail=300"
       kubectl -n "$NAMESPACE" logs "$pod" --all-containers --prefix --tail=300 2>&1 || true
@@ -145,6 +147,9 @@ print("\n".join(broken + restarted))
     } >"$RUN_DIR/pod-logs/${pod}.log"
   done
   helm -n "$NAMESPACE" history "$OPERATOR_RELEASE" >"$RUN_DIR/helm.txt" 2>&1 || true
+  # The bootstrap Jobs that never finish never appear as a reason in a pod row (#48 run #3).
+  kubectl -n "$NAMESPACE" get jobs -o wide >"$RUN_DIR/jobs.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" describe jobs >"$RUN_DIR/jobs.describe.txt" 2>&1 || true
 }
 
 # run_phase <name> <logfile> -- <command...>: one line in the report per phase, the command's
