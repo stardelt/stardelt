@@ -79,6 +79,8 @@ ns_created=no
 netpol_created=no
 assigned=no
 GRANT_PID=""
+# Only tables whose pre-run 404 check passed; `cleanup` never purges anything else.
+DROP_TABLES=""
 
 # shellcheck disable=SC2329  # called by the trap below
 cleanup() {
@@ -89,8 +91,8 @@ cleanup() {
   fi
   # The two tables this run created, dropped through the catalog as the bootstrap service
   # account: the `visitors` role grants `write` and `create`, not `delete`.
-  if [ -n "$WID" ] && [ -s "$tmp/auth" ]; then
-    for name in workload_token workload_token_custom; do
+  if [ -n "$DROP_TABLES" ] && [ -n "$WID" ] && [ -s "$tmp/auth" ]; then
+    for name in $DROP_TABLES; do
       code="$(drop_table "$WID" scratch "$name" 2>/dev/null || echo 000)"
       echo "L cleanup drop-table=$name code=$code"
     done
@@ -316,10 +318,11 @@ echo "L grant-reached=$code after=${waited}s (first=$first)"
 for table in workload_token workload_token_custom; do
   code="$(mgmt GET "/catalog/v1/$WID/namespaces/scratch/tables/$table")"
   echo "L table-before=$table http=$code"
-  if [ "$code" = "200" ]; then
-    echo "table $WAREHOUSE.scratch.$table already exists; refusing to overwrite and purge it" >&2
+  if [ "$code" != "404" ]; then
+    echo "table $WAREHOUSE.scratch.$table answered $code, not 404; refusing to touch it" >&2
     exit 1
   fi
+  DROP_TABLES="$DROP_TABLES $table"
 done
 
 # --- the additive NetworkPolicy (see the header) -----------------------------------------
@@ -734,9 +737,16 @@ then
   # A loop rather than `kubectl wait`: a Failed pod (or a deleted one) must be reported at once,
   # not after the full timeout.
   phase=""
+  missing=0
   while :; do
     phase="$(kubectl -n "$SA_NS" get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "$phase" in Succeeded|Failed) break ;; esac
+    if [ -z "$phase" ]; then
+      missing=$(( missing + 1 ))
+      if [ "$missing" -ge 6 ]; then break; fi
+    else
+      missing=0
+    fi
     if [ $(( $(date +%s) - started_s )) -gt 1080 ]; then break; fi
     sleep 5
   done
