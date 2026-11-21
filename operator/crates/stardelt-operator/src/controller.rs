@@ -39,9 +39,9 @@ use serde_json::json;
 use crate::connection::reconcile_connection;
 use crate::crd::Profile;
 use crate::crd::{
-    Catalog, ComponentStatus, ComponentValues, Condition, Connection, DeletionPolicy, IdentityMode,
-    Lakehouse, LakehouseStatus, PlatformInstance, PlatformInstanceStatus, ServicePrincipal,
-    SparkCluster, StorageImpl, StreamApp, ValuesSource,
+    Catalog, ComponentStatus, ComponentValues, Condition, Connection, DeletionPolicy, DeployStage,
+    IdentityMode, Lakehouse, LakehouseStatus, PlatformInstance, PlatformInstanceStatus,
+    ServicePrincipal, SparkCluster, StorageImpl, StreamApp, ValuesSource,
 };
 use crate::helm::{
     CommandHelmRunner, HelmRelease, HelmRunner, is_deployed, is_owned, last_deployed_revision,
@@ -213,6 +213,21 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         ctx.clone(),
     );
 
+    let deploy_stages = Controller::new(
+        Api::<DeployStage>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    .run(
+        |obj, ctx| {
+            crate::metrics::timed(
+                "deploy_stage",
+                crate::deploy_stage_keycloak::reconcile_deploy_stage(obj, ctx),
+            )
+        },
+        error_policy,
+        ctx.clone(),
+    );
+
     let streams = Controller::new(
         Api::<StreamApp>::all(client.clone()),
         watcher::Config::default(),
@@ -276,13 +291,14 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
     );
 
     tracing::info!(
-        "stardelt-operator watching PlatformInstance, Lakehouse, Connection, ServicePrincipal, StreamApp, SparkCluster and Catalog"
+        "stardelt-operator watching PlatformInstance, Lakehouse, Connection, ServicePrincipal, DeployStage, StreamApp, SparkCluster and Catalog"
     );
     futures::pin_mut!(
         lakehouses,
         platforms,
         connections,
         principals,
+        deploy_stages,
         streams,
         spark_clusters,
         catalogs
@@ -294,6 +310,7 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
             _ = platforms.next() => {}
             _ = connections.next() => {}
             _ = principals.next() => {}
+            _ = deploy_stages.next() => {}
             _ = streams.next() => {}
             _ = spark_clusters.next() => {}
             _ = catalogs.next() => {}
