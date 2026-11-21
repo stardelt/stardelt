@@ -7099,6 +7099,96 @@
         }
       }
     },
+    "/api/pipelines/{namespace}/{name}/runs/{run_id}/checks": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "Every check a run's `quality` tasks declare, with its verdict: the rows the assertion returned (`0` is a pass) and the severity, read from the task's log line `check <name>: <error|warn>, <n> row(s)`. A check whose task has not run, or whose line is not in the log yet, answers `rows: null, passed: null`. `warn` checks with rows never fail the run. The same visibility rule as the run (404 for another group's pipeline).",
+        "operationId": "pipelines_run_checks",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Airflow's run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The checks of the run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChecksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller, or no such run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines/{namespace}/{name}/runs/{run_id}/queries": {
       "get": {
         "tags": [
@@ -11134,6 +11224,59 @@
               "boolean",
               "null"
             ]
+          }
+        }
+      },
+      "CheckView": {
+        "type": "object",
+        "description": "One check of one `quality` task. `rows` and `passed` are `None` until the task's log\ncarries the line (the task has not run, or has not reached the check yet).",
+        "required": [
+          "task",
+          "name",
+          "severity"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The check's name, as declared in `spec.tasks[].checks[].name`."
+          },
+          "passed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`Some(rows == 0)` once the log carries the line, `None` before that."
+          },
+          "rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The rows the assertion returned; `0` is a pass."
+          },
+          "severity": {
+            "type": "string",
+            "description": "`error` or `warn`; `warn` never fails the run."
+          },
+          "task": {
+            "type": "string",
+            "description": "The `quality` task's name."
+          }
+        }
+      },
+      "ChecksResponse": {
+        "type": "object",
+        "description": "`GET …/runs/{run_id}/checks`: one row per declared check of the run's `quality` tasks.",
+        "required": [
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckView"
+            }
           }
         }
       },
