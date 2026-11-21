@@ -135,52 +135,6 @@ class FreshNode(unittest.TestCase):
 
     # -- teardown -----------------------------------------------------------
     def test_down_deletes_the_recorded_volumes_after_the_cluster(self):
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir()
-        calls = self.tmp / "calls.log"
-        for name in ("kubectl", "helm", "hcloud", "hetzner-k3s"):
-            lines = [
-                "#!/usr/bin/env bash",
-                'printf "%s %s\\n" "$(basename "$0")" "$*" >>"{}"'.format(calls),
-            ]
-            if name == "kubectl":
-                lines.append('case "$*" in *"get pv"*) printf "101\\n102\\n" ;; esac')
-            lines.append("exit 0")
-            fake = bin_dir / name
-            fake.write_text("\n".join(lines) + "\n")
-            fake.chmod(0o755)
-        self.kubeconfig.write_text("apiVersion: v1\n")
-        self.write_config("stardelt-fresh-test")
-
-        result = self.run_script(
-            "down",
-            DRY_RUN="0",
-            PATH="{}:{}".format(bin_dir, os.environ["PATH"]),
-            FRESH_VOLUME_SLEEP="0",
-            FORCE="1",
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        log = calls.read_text().splitlines()
-        self.assertIn("hcloud volume delete 101", log)
-        self.assertIn("hcloud volume delete 102", log)
-        first_cluster = next(
-            i for i, line in enumerate(log) if line.startswith("hetzner-k3s delete")
-        )
-        first_volume = next(
-            i for i, line in enumerate(log) if line.startswith("hcloud volume delete")
-        )
-        self.assertLess(
-            first_cluster,
-            first_volume,
-            "the volumes were deleted before the cluster was gone",
-        )
-        self.assertFalse([line for line in log if "--wait=true" in line])
-        self.assertFalse((self.tmp / "fresh.volumes").exists())
-
-
-    # -- teardown -----------------------------------------------------------
-    def test_down_deletes_the_recorded_volumes_after_the_cluster(self):
         fake_bin = self.tmp / "bin"
         fake_bin.mkdir()
         calls = self.tmp / "calls.log"
