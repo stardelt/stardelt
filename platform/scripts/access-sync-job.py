@@ -1110,17 +1110,56 @@ def warehouse_body(name, spec, s3):
 
 
 def ensure_warehouse(name, spec, s3):
-    """`(warehouse_id, "created"|"exists"|"failed")` — create only when missing.
+    """`(warehouse_id, "created"|"exists"|"updated"|"failed")` — create when missing, start vending when the profile does not.
 
-    An existing warehouse is adopted as it is: no storage change, no credential
-    refresh (the bootstrap Job owns the platform warehouse's credential) and no
-    project move. A 409 on create means somebody else created it first — the same
-    name in this project, since that is the only way this call conflicts — and counts
-    as `exists`.
+    An existing warehouse is adopted as it is: no credential refresh (the bootstrap Job
+    owns the platform warehouse's credential) and no project move. A 409 on create means
+    somebody else created it first — the same name in this project, since that is the
+    only way this call conflicts — and counts as `exists`. An existing warehouse whose
+    storage profile has `sts-enabled` not true gets the storage update, so an upgraded
+    install starts vending without a manual step (#75).
     """
     index = warehouse_index()
     if name in index:
-        return index[name], "exists"
+        warehouse_id = index[name]
+        status, existing = lk("GET", "/management/v1/warehouse/%s" % warehouse_id)
+        if status != 200:
+            print(
+                "access-sync: catalog `%s` could not read warehouse `%s` (HTTP %s)"
+                % (name, warehouse_id, status)
+            )
+            return warehouse_id, "failed"
+        profile = (existing or {}).get("storage-profile") or {}
+        if profile.get("sts-enabled") is True:
+            return warehouse_id, "exists"
+        flipped = dict(profile)
+        flipped.update(
+            {
+                "sts-enabled": True,
+                "sts-role-arn": STS_ROLE_ARN,
+                "sts-endpoint": s3["endpoint"],
+                "sts-session-policy-principal": False,
+            }
+        )
+        body = warehouse_body(name, spec, s3)
+        status, _ = lk(
+            "POST",
+            "/management/v1/warehouse/%s/storage" % warehouse_id,
+            {
+                "storage-profile": flipped,
+                "storage-credential": body["storage-credential"],
+            },
+        )
+        if status != 200:
+            print(
+                "access-sync: catalog `%s` could not start vending credentials on "
+                "warehouse `%s` (HTTP %s)" % (name, warehouse_id, status)
+            )
+            return warehouse_id, "failed"
+        print(
+            "access-sync: catalog `%s` now vends table-scoped credentials" % name
+        )
+        return warehouse_id, "updated"
     status, body = lk("POST", "/management/v1/warehouse", warehouse_body(name, spec, s3))
     if status == 409:
         warehouse_id = warehouse_index().get(name)
