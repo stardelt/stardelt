@@ -1,12 +1,36 @@
 import logging
 
 import pytest
-from stardelt_pipelines.plan import PlanError, plan
+from stardelt_pipelines.plan import WAP_NO_RUNTIME, PlanError, plan, refuse_unrunnable
 from stardelt_pipelines.quality import Check, evaluate
 
 
 def resource(**spec):
     return {"metadata": {"name": "daily"}, "spec": spec}
+
+
+def principal(name="pipeline-analytics", group="analytics"):
+    """A ready `ServicePrincipal` of the namespace, as the controller fills its status."""
+    return {
+        "metadata": {"name": name},
+        "spec": {"ownerGroup": group},
+        "status": {"ready": True, "secretName": f"sp-{name}"},
+    }
+
+
+def sql_task(name="load"):
+    return {"name": name, "kind": "sql", "sql": "SELECT 1"}
+
+
+def notebook_task(name="report", writes=None):
+    task = {
+        "name": name,
+        "kind": "notebook",
+        "config": {"notebook": "report.ipynb", "objectVersion": "v1"},
+    }
+    if writes is not None:
+        task["writes"] = writes
+    return task
 
 
 def quality(name="assert", checks=None, **extra):
@@ -93,16 +117,63 @@ def test_an_unknown_key_is_refused():
     )
 
 
-def test_the_audit_table_placeholder_is_refused():
+def test_the_audit_table_placeholder_is_refused_without_wap():
     with pytest.raises(PlanError) as error:
         plan(
             resource(tasks=[quality(checks=[check("a", "SELECT * FROM ${table}")])]),
             "t",
         )
     assert str(error.value) == (
-        "check 'a' in quality task 'assert' uses ${table}: that placeholder is the audit branch "
-        "(publish: wap), which has no runtime yet"
+        "check 'a' in quality task 'assert' uses ${table}, which needs publish: wap in the "
+        "pipeline"
     )
+
+
+def test_a_wap_plan_carries_publish_and_the_audit_table_placeholder():
+    p = plan(
+        resource(
+            publish="wap",
+            ownerGroup="analytics",
+            runAs="pipeline-analytics",
+            tasks=[
+                notebook_task(writes=["gold.shop.t"]),
+                quality(checks=[check("a", "SELECT count(*) FROM ${table}")]),
+            ],
+        ),
+        "t",
+        {"pipeline-analytics": principal()},
+    )
+    assert p.publish == "wap"
+    assert p.tasks[0].writes == ("gold.shop.t",)
+    assert p.tasks[1].checks[0].sql == "SELECT count(*) FROM ${table}"
+
+
+def test_a_wap_plan_without_a_writing_task_is_refused():
+    with pytest.raises(PlanError) as error:
+        plan(
+            resource(
+                publish="wap",
+                tasks=[sql_task()],
+            ),
+            "t",
+        )
+    assert str(error.value) == "publish: wap needs a task that writes at least one table"
+
+
+def test_a_wap_plan_is_unrunnable_until_the_loader_wires_it():
+    p = plan(
+        resource(
+            publish="wap",
+            ownerGroup="analytics",
+            runAs="pipeline-analytics",
+            tasks=[notebook_task(writes=["gold.shop.t"])],
+        ),
+        "t",
+        {"pipeline-analytics": principal()},
+    )
+    with pytest.raises(PlanError) as error:
+        refuse_unrunnable(p)
+    assert str(error.value) == WAP_NO_RUNTIME
 
 
 def test_a_quality_task_cannot_name_a_connection():
