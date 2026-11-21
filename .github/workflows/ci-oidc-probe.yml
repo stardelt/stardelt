@@ -27,6 +27,22 @@ jobs:
                   "repository_owner_id", "repository_id", "job_workflow_ref")
           print(json.dumps({k: claims.get(k) for k in keys}, indent=1))
           PY
+      - name: exchange-main
+        run: |
+          set -uo pipefail
+          code=$(curl -sS -o "$RUNNER_TEMP/answer-main.json" -w '%{http_code}' \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=stardelt-deploy-ci-proof-main" \
+            --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion@$RUNNER_TEMP/token" \
+            https://id.alpha.dev.stardelt.io/realms/stardelt/protocol/openid-connect/token)
+          echo "main-status=$code"
+          python3 - "$RUNNER_TEMP/answer-main.json" <<'PY'
+          import json, sys
+          body = json.load(open(sys.argv[1]))
+          keys = ("error", "error_description", "access_token")
+          print(json.dumps({k: ("<present>" if k == "access_token" and body.get(k) else body.get(k)) for k in keys}))
+          PY
       - name: shape
         run: |
           set -euo pipefail
