@@ -933,16 +933,18 @@ The script also sets `bruteForceProtected` with explicit thresholds (ten failure
 it: `make install-identity` after the realm-admin guard, and `make chart-install` whenever the
 release ships Keycloak.
 
-The `id.` Ingress publishes exactly the realm console and its API, as
-ingress-nginx regexes: `/admin/stardelt(/|$)` (the console app) and
-`/admin/realms/stardelt(/|$)` (the REST calls the console makes), plus the realm's existing
-`/realms/stardelt`, `/resources` and `/robots.txt`. The `(/|$)` group keeps each match on its
-exact path segment (Kubernetes requires the path to start with `/`, so a leading `^` cannot be
-written), so `/admin/master/console/`, `/realms/master` and `/admin/realms/master/...` stay
-`404`. The umbrella chart carries the same list in `chart/templates/ingress.yaml`.
+The `id.` Ingress publishes exactly the realm console and its API, as plain
+path prefixes: `/admin/stardelt` (the console app) and
+`/admin/realms/stardelt` (the REST calls the console makes), plus the realm's existing
+`/realms/stardelt`, `/resources` and `/robots.txt`. `pathType: Prefix` matches path
+segment by segment, so `/admin/master/console/`, `/realms/master` and
+`/admin/realms/master/...` stay `404`, and the list routes the same under
+ingress-nginx and Traefik (earlier `(/|$)` regexes were read as literal prefixes
+by Traefik and answered 404 for every `/realms/...` request, stardelt/stardelt#882).
+The umbrella chart carries the same list in `chart/templates/ingress.yaml`.
 
 If a future Keycloak version needs another endpoint for the console (an extra `/admin/...` call),
-add the narrowest regex path — never `/admin`.
+add the narrowest prefix path — never `/admin`.
 
 Sizing (single node): Keycloak 100m / 512Mi request, 1 CPU / 1Gi limit, one replica,
 `KC_CACHE=local`; its Postgres 50m / 128Mi request, 256Mi limit, 1Gi volume. The Keycloak image is
