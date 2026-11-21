@@ -19,7 +19,7 @@ use k8s_openapi::api::{
         Capabilities, ConfigMap, ConfigMapVolumeSource, Container, ContainerPort,
         EmptyDirVolumeSource, EnvVar, EnvVarSource, LocalObjectReference, ObjectFieldSelector,
         PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile,
-        SecretKeySelector, SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec,
+        SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec,
         TCPSocketAction, Volume, VolumeMount,
     },
     rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject},
@@ -414,30 +414,6 @@ pub fn deployment(namespace: &str) -> Deployment {
                                 }),
                                 ..EnvVar::default()
                             },
-                            EnvVar {
-                                name: "AWS_ACCESS_KEY_ID".into(),
-                                value_from: Some(EnvVarSource {
-                                    secret_key_ref: Some(SecretKeySelector {
-                                        name: "stardelt-s3-creds".into(),
-                                        key: "access-key".into(),
-                                        optional: Some(false),
-                                    }),
-                                    ..EnvVarSource::default()
-                                }),
-                                ..EnvVar::default()
-                            },
-                            EnvVar {
-                                name: "AWS_SECRET_ACCESS_KEY".into(),
-                                value_from: Some(EnvVarSource {
-                                    secret_key_ref: Some(SecretKeySelector {
-                                        name: "stardelt-s3-creds".into(),
-                                        key: "secret-key".into(),
-                                        optional: Some(false),
-                                    }),
-                                    ..EnvVarSource::default()
-                                }),
-                                ..EnvVar::default()
-                            },
                         ]),
                         resources: Some(ResourceRequirements {
                             requests: Some({
@@ -812,8 +788,8 @@ pub fn pod_guard_policy() -> ValidatingAdmissionPolicy {
                 validation("object.spec.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged != true)", "the Spark Connect driver may not create a privileged container"),
                 validation("object.spec.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))", "the Spark Connect driver may not bind a host port"),
                 validation("!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.configMap) || has(v.emptyDir))", "executor pods may mount only configMap and emptyDir volumes (no secret, hostPath, PVC, projected or csi volume)"),
-                validation("object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == 'stardelt-s3-creds'))", "executor pods may read only Secret stardelt-s3-creds (secretKeyRef)"),
-                validation("object.spec.containers.all(c, !has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef) || e.secretRef.name == 'stardelt-s3-creds'))", "executor pods may read only Secret stardelt-s3-creds (envFrom)"),
+                validation("object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef)))", "executor pods may read no Secret (secretKeyRef)"),
+                validation("object.spec.containers.all(c, !has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef)))", "executor pods may read no Secret (envFrom)"),
             ]),
             ..ValidatingAdmissionPolicySpec::default()
         }),
@@ -1438,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn the_driver_reads_the_s3_secret_and_its_own_ip() {
+    fn the_driver_reads_only_its_own_ip() {
         let dep = deployment("stardelt");
         let container = container_of(&dep);
         let env = container.env.as_ref().unwrap();
@@ -1456,25 +1432,10 @@ mod tests {
                 .field_path,
             "status.podIP"
         );
-        // S3 secret keys
-        let ak = find("AWS_ACCESS_KEY_ID")
-            .value_from
-            .as_ref()
-            .unwrap()
-            .secret_key_ref
-            .as_ref()
-            .unwrap();
-        assert_eq!(ak.name, "stardelt-s3-creds");
-        assert_eq!(ak.key, "access-key");
-        let sk = find("AWS_SECRET_ACCESS_KEY")
-            .value_from
-            .as_ref()
-            .unwrap()
-            .secret_key_ref
-            .as_ref()
-            .unwrap();
-        assert_eq!(sk.name, "stardelt-s3-creds");
-        assert_eq!(sk.key, "secret-key");
+        assert!(
+            !env.iter().any(|e| e.name == "AWS_ACCESS_KEY_ID" || e.name == "AWS_SECRET_ACCESS_KEY"),
+            "the shared driver holds no storage key (#75)"
+        );
     }
 
     #[test]
@@ -1760,10 +1721,15 @@ mod tests {
         let batch = expressions(&batch_pod_guard_policy());
         let batch_secrets = secret_expressions(&batch_pod_guard_policy());
         assert_eq!(batch_secrets.len(), 2);
-        assert_eq!(
-            batch_secrets,
-            secret_expressions(&pod_guard_policy()),
-            "the batch driver gets the Connect driver's two Secret rules unchanged"
+        assert!(
+            batch_secrets.iter().all(|e| e.contains("stardelt-s3-creds")),
+            "a batch driver still reads the platform key until #494: {batch_secrets:?}"
+        );
+        assert!(
+            secret_expressions(&pod_guard_policy())
+                .iter()
+                .all(|e| !e.contains("stardelt-s3-creds")),
+            "the shared Connect driver admits no Secret at all (#75)"
         );
         for expression in &batch {
             assert!(
@@ -2061,8 +2027,8 @@ mod tests {
             "object.spec.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged != true)",
             "object.spec.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))",
             "!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.configMap) || has(v.emptyDir))",
-            "object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name == 'stardelt-s3-creds'))",
-            "object.spec.containers.all(c, !has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef) || e.secretRef.name == 'stardelt-s3-creds'))",
+            "object.spec.containers.all(c, !has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef)))",
+            "object.spec.containers.all(c, !has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef)))",
         ];
         assert_eq!(actual.len(), 12);
         assert_eq!(actual, expected);

@@ -19,10 +19,11 @@ defaults: |
   spark.kubernetes.driver.label.app.kubernetes.io/name   spark-connect
   spark.kubernetes.executor.label.app.kubernetes.io/name spark-connect
   spark.kubernetes.executor.podNamePrefix                spark-connect-exec
-  # Executors run user code and carry the platform's S3 key; the driver mounts this
-  # file and Spark merges it into every executor pod (platform#1096 question 5).
-  # The path is inside the driver container; `spark.rs` mounts `executor-pod-template.yaml`
-  # from the same ConfigMap there.
+  # Executors run user code and carry no storage credential of the platform; the
+  # catalog vends one per table (#75). The driver mounts this file and Spark merges
+  # it into every executor pod (platform#1096 question 5). The path is inside the
+  # driver container; `spark.rs` mounts `executor-pod-template.yaml` from the same
+  # ConfigMap there.
   spark.kubernetes.executor.podTemplateFile /opt/spark/conf/executor-pod-template.yaml
   spark.kubernetes.namespace.labels                      app.kubernetes.io/part-of=stardelt
   spark.sql.extensions                                   org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
@@ -30,9 +31,7 @@ defaults: |
   spark.hadoop.fs.s3a.path.style.access                  true
   spark.hadoop.fs.s3a.connection.ssl.enabled             false
   spark.hadoop.fs.s3a.impl                               org.apache.hadoop.fs.s3a.S3AFileSystem
-  spark.hadoop.fs.s3a.aws.credentials.provider           org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
-  spark.hadoop.fs.s3a.access.key                         ${env:AWS_ACCESS_KEY_ID}
-  spark.hadoop.fs.s3a.secret.key                         ${env:AWS_SECRET_ACCESS_KEY}
+  spark.hadoop.fs.s3a.aws.credentials.provider           org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider
   spark.sql.adaptive.enabled                             true
   spark.sql.adaptive.coalescePartitions.enabled          true
   spark.driver.memory                                    1g
