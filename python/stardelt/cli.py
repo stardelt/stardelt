@@ -55,6 +55,16 @@ def _parser():
         "--issuer", help="your identity provider's realm address (default: $STARDELT_ISSUER, else asked from Nova's address)"
     )
     signin.add_argument("--client-id", help=f"the public client to sign in with (default: {login.DEFAULT_CLIENT_ID})")
+    signin.add_argument(
+        "--federated",
+        action="store_true",
+        help="sign in with the CI's own token, no browser (a stage's federated client; #57)",
+    )
+    signin.add_argument(
+        "--assertion-env",
+        default=login.ASSERTION_ENV,
+        help=f"the environment variable that holds the CI token (default: {login.ASSERTION_ENV})",
+    )
     commands.add_parser("logout", help="forget the stored sign-in")
     setup = commands.add_parser("setup", help="install local integration files (the VS Code kernel)")
     setup_commands = setup.add_subparsers(dest="setup_command", required=True)
@@ -320,8 +330,23 @@ def _login(args, environ, stderr, session):
             issuer, advertised = login.nova_sign_in(http, host)
             client_id = client_id or advertised or ""
         reaching = issuer
-        say = lambda line: stderr.write(f"stardelt: {line}\n")  # noqa: E731
-        creds = login.device_login(http, issuer, client_id or login.DEFAULT_CLIENT_ID, say)
+        if args.federated:
+            assertion = environ.get(args.assertion_env, "")
+            if not assertion:
+                stderr.write(
+                    f"stardelt: login --federated needs the CI token in {args.assertion_env}\n"
+                )
+                return USAGE
+            if not client_id:
+                stderr.write(
+                    "stardelt: login --federated needs --client-id (the federated client a stage defines)\n"
+                )
+                return USAGE
+            creds = login.federated_login(http, issuer, client_id, assertion)
+            creds["federated"] = {"env": args.assertion_env}
+        else:
+            say = lambda line: stderr.write(f"stardelt: {line}\n")  # noqa: E731
+            creds = login.device_login(http, issuer, client_id or login.DEFAULT_CLIENT_ID, say)
         if host:
             creds["host"] = host
         path = login.save(environ, creds)
@@ -331,7 +356,9 @@ def _login(args, environ, stderr, session):
     except requests.RequestException:
         stderr.write(f"stardelt: cannot reach {reaching}\n")
         return ERROR
-    stderr.write(f"stardelt: signed in; the sign-in is kept in {path}\n")
+    stderr.write(
+        f"stardelt: signed in{' (federated)' if args.federated else ''}; the sign-in is kept in {path}\n"
+    )
     return OK
 
 
