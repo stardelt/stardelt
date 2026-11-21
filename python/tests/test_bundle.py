@@ -282,6 +282,41 @@ def test_a_quality_task_validates_and_renders(tmp_path):
     assert specs[0]["ownerGroup"] == "sales"
 
 
+NOTES = "notebooks/explore.ipynb"  # the notebook fixture TASK_FILES already writes
+
+
+def test_a_wap_check_may_name_the_audit_branch(tmp_path):
+    """`${table}` is the branch the run audits (#114); the loader resolves it since #858."""
+    task_bundle(
+        tmp_path,
+        [
+            "{name: build, notebook: {file: " + NOTES + "}, writes: [gold.shop.daily]}",
+            "{name: gate, quality: {checks: [{name: no_null_ids, sql: 'SELECT 1 FROM ${table}'}]}}",
+        ],
+        extra="publish: wap\n",
+    )
+    assert bundle.validate(tmp_path, "prod")[0] == []
+
+
+def test_a_table_placeholder_needs_wap_and_one_written_table(tmp_path):
+    direct = tmp_path / "direct"
+    direct.mkdir()
+    task_bundle(direct, ["{name: gate, quality: {checks: [{name: c, sql: 'SELECT 1 FROM ${table}'}]}}"])
+    assert "a check that names ${table} needs publish: wap in the pipeline" in said(bundle.validate(direct)[0])
+
+    two = tmp_path / "two"
+    two.mkdir()
+    task_bundle(
+        two,
+        [
+            "{name: build, notebook: {file: " + NOTES + "}, writes: [gold.shop.a, gold.shop.b]}",
+            "{name: gate, quality: {checks: [{name: c, sql: 'SELECT 1 FROM ${table}'}]}}",
+        ],
+        extra="publish: wap\n",
+    )
+    assert "${table} names the audit branch of one table, and this pipeline writes 2" in said(bundle.validate(two)[0])
+
+
 def test_quality_task_rules_are_reported(tmp_path):
     needs_checks = "a quality task needs checks (a list of 1 to 50 SQL assertions)"
     needs_name = "a check needs a name (1 to 63 letters, digits, dashes or underscores, starting with a letter or a digit)"
@@ -301,10 +336,6 @@ def test_quality_task_rules_are_reported(tmp_path):
             "a check's sql must be a non-empty string of at most 20000 characters",
         ),
         ("{name: x, quality: {checks: [{name: c, sql: 'select 1', severity: fatal}]}}", "a check's severity must be error or warn"),
-        (
-            "{name: x, quality: {checks: [{name: c, sql: 'select * from ${table}'}]}}",
-            "`${table}` is the audit branch of publish: wap, which has no runtime yet",
-        ),
         (
             "{name: x, quality: {checks: [{name: c, sql: 'select 1', model: x}]}}",
             "a check accepts only name, sql and severity (found `model`)",
