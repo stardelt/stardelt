@@ -19,8 +19,8 @@ use k8s_openapi::api::{
         Capabilities, ConfigMap, ConfigMapVolumeSource, Container, ContainerPort,
         EmptyDirVolumeSource, EnvVar, EnvVarSource, LocalObjectReference, ObjectFieldSelector,
         PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile,
-        SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec,
-        TCPSocketAction, Volume, VolumeMount,
+        SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec, TCPSocketAction,
+        Volume, VolumeMount,
     },
     rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject},
 };
@@ -402,19 +402,17 @@ pub fn deployment(namespace: &str) -> Deployment {
                             host_ip: None,
                             host_port: None,
                         }]),
-                        env: Some(vec![
-                            EnvVar {
-                                name: "POD_IP".into(),
-                                value_from: Some(EnvVarSource {
-                                    field_ref: Some(ObjectFieldSelector {
-                                        field_path: "status.podIP".into(),
-                                        ..ObjectFieldSelector::default()
-                                    }),
-                                    ..EnvVarSource::default()
+                        env: Some(vec![EnvVar {
+                            name: "POD_IP".into(),
+                            value_from: Some(EnvVarSource {
+                                field_ref: Some(ObjectFieldSelector {
+                                    field_path: "status.podIP".into(),
+                                    ..ObjectFieldSelector::default()
                                 }),
-                                ..EnvVar::default()
-                            },
-                        ]),
+                                ..EnvVarSource::default()
+                            }),
+                            ..EnvVar::default()
+                        }]),
                         resources: Some(ResourceRequirements {
                             requests: Some({
                                 let mut m = BTreeMap::new();
@@ -1433,7 +1431,8 @@ mod tests {
             "status.podIP"
         );
         assert!(
-            !env.iter().any(|e| e.name == "AWS_ACCESS_KEY_ID" || e.name == "AWS_SECRET_ACCESS_KEY"),
+            !env.iter()
+                .any(|e| e.name == "AWS_ACCESS_KEY_ID" || e.name == "AWS_SECRET_ACCESS_KEY"),
             "the shared driver holds no storage key (#75)"
         );
     }
@@ -1722,7 +1721,9 @@ mod tests {
         let batch_secrets = secret_expressions(&batch_pod_guard_policy());
         assert_eq!(batch_secrets.len(), 2);
         assert!(
-            batch_secrets.iter().all(|e| e.contains("stardelt-s3-creds")),
+            batch_secrets
+                .iter()
+                .all(|e| e.contains("stardelt-s3-creds")),
             "a batch driver still reads the platform key until #494: {batch_secrets:?}"
         );
         assert!(
