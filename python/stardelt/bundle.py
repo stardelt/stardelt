@@ -249,11 +249,38 @@ def _quality_problems(where, quality):
         sql = check.get("sql")
         if not isinstance(sql, str) or not sql or len(sql) > MAX_CHECK_SQL:
             problems.append((where, needs_sql))
-        elif "${table}" in sql:
-            problems.append((where, "`${table}` is the audit branch of publish: wap, which has no runtime yet"))
         if check.get("severity", "error") not in QUALITY_SEVERITIES:
             problems.append((where, "a check's severity must be error or warn"))
     return problems
+
+
+def _wap_placeholder_problems(where, doc):
+    """A `${table}` check needs `publish: wap` and one written table — the loader's two rules (#114)."""
+    tasks = doc.get("tasks") if isinstance(doc.get("tasks"), list) else []
+    checks = [
+        check
+        for task in tasks
+        if isinstance(task, dict) and isinstance(task.get("quality"), dict)
+        for check in (task["quality"].get("checks") or [])
+    ]
+    if not any(isinstance(check, dict) and "${table}" in str(check.get("sql") or "") for check in checks):
+        return []
+    if doc.get("publish") != "wap":
+        return [(where, "a check that names ${table} needs publish: wap in the pipeline")]
+    tables = sorted(
+        {
+            table
+            for task in tasks
+            if isinstance(task, dict)
+            for table in (task.get("writes") or [])
+            if isinstance(table, str)
+        }
+    )
+    if len(tables) > 1:
+        return [(where,
+                 f"${{table}} names the audit branch of one table, and this pipeline writes {len(tables)}: "
+                 "name the table in the check, or split the pipeline")]
+    return []
 
 
 def _spark_pipeline_problems(where, task, root):
@@ -530,6 +557,7 @@ def validate(directory, target=None):
                         (f"{relative} ({tname})",
                          "publish: wap needs a task list with a quality task that has a check and a spark-pipeline or notebook task with writes")
                     )
+            problems.extend(_wap_placeholder_problems(f"{relative} ({tname})", doc))
             if "dbt" in doc:
                 problems.append((f"{relative} ({tname})", "a dbt run is a task: put it under tasks: with a name"))
             if "tasks" in doc:
