@@ -164,6 +164,7 @@ and read it back, or aggregate first; do not raise the limit. The
 | `spark.sql.catalog.<name>.warehouse` | the catalog name |
 | `spark.sql.catalog.<name>.token` | the signed-in person's token (`_token()`) |
 | `spark.sql.catalog.<name>.io-impl` | `org.apache.iceberg.aws.s3.S3FileIO` |
+| `spark.sql.catalog.<name>.header.X-Iceberg-Access-Delegation` | `vended-credentials` — the load returns the table-scoped storage credential (#75, #840) |
 | `spark.sql.catalog.<name>.s3.endpoint` | `http://seaweedfs-s3.stardelt.svc.cluster.local:8333` (`STARDELT_S3_ENDPOINT`) |
 | `spark.sql.catalog.<name>.s3.region` | `us-east-1` |
 | `spark.sql.catalog.<name>.s3.path-style-access` | `true` |
@@ -187,12 +188,15 @@ catalog does that one purge itself: without it Iceberg also runs a client-side p
 races, and `DROP TABLE … PURGE` can report a `NoSuchKey` failure after the table is already
 gone (platform#1127, measured).
 
-Lakekeeper runs without vended credentials, so both engines sign their own S3
-requests. Spark gets the credentials from Secret `stardelt-s3-creds` through
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` on the driver and through
-`spark.kubernetes.executor.secretKeyRef.*` on every executor; nothing is written
-into a config file. Storage credentials stay platform-side (platform#272); the
-person's token governs the catalog, not the data files.
+The catalog vends a **table-scoped, short-lived storage credential** on every load
+(#75, #840): every warehouse has `sts-enabled`, the session asks for it with the
+`X-Iceberg-Access-Delegation` header above, and the credential is the only one a
+data file is read or written with. Neither the shared driver nor its executors
+carry a platform S3 key — no `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in the
+driver's environment, no `spark.kubernetes.executor.secretKeyRef.*`, and the
+executor admission policy (`spark-connect-pod-guard.yaml`) refuses any pod that
+reads a Secret. The person's token governs the catalog, the catalog governs the
+files (platform#272, #494).
 
 ## Catalog authorization
 

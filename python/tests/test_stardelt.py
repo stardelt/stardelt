@@ -778,6 +778,12 @@ def test_sets_catalog_conf_for_visible_names_only(fake_spark, visible_catalogs):
             session.configs[f"spark.sql.catalog.{name}.io-impl"]
             == "org.apache.iceberg.aws.s3.S3FileIO"
         )
+        assert (
+            session.configs[
+                f"spark.sql.catalog.{name}.header.X-Iceberg-Access-Delegation"
+            ]
+            == "vended-credentials"
+        ), "the client must ask for the table-scoped credential (#75)"
     assert session.configs["spark.sql.catalog.warehouse.uri"] == stardelt.CATALOG_URI_DEFAULT
     assert (
         session.configs["spark.sql.catalog.warehouse.s3.endpoint"]

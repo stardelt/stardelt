@@ -26,12 +26,12 @@
 # the notebook helper configures it with the person's token when it creates the
 # session (the stardelt library, python/ in stardelt/stardelt, platform#317).
 #
-# Two S3 clients live here, with separate credentials. Iceberg's S3FileIO reads
-# the platform's own storage with the Secret key the executors carry; Hadoop's
-# S3A reads *public* buckets only, pinned to the anonymous provider, so the
-# platform key can never sign an S3A request (platform#347). S3A is for public
-# datasets (NOAA GHCN, Ookla, ...), not for private buckets and not for the
-# lakehouse — that data is read through Trino or an Iceberg table.
+# Two S3 clients live here, and neither holds a standing platform key. Iceberg's
+# S3FileIO signs each data request with the table-scoped credential the catalog
+# vends on load (#75, #840); Hadoop's S3A reads *public* buckets only, pinned to
+# the anonymous provider (platform#347). S3A is for public datasets (NOAA GHCN,
+# Ookla, ...), not for private buckets and not for the lakehouse — that data is
+# read through Trino or an Iceberg table.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

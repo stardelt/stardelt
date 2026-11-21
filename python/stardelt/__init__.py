@@ -981,6 +981,10 @@ def _session(app_name="stardelt-notebook", cluster=None):
                 ("warehouse", name),
                 ("token", token),
                 ("io-impl", "org.apache.iceberg.aws.s3.S3FileIO"),
+                # Ask Lakekeeper for the table-scoped credential on every load (#75, #840).
+                # Without this header the catalog returns none, and S3FileIO — which holds
+                # no key of its own — cannot sign a request to the platform's bucket.
+                ("header.X-Iceberg-Access-Delegation", "vended-credentials"),
                 ("s3.endpoint", s3_endpoint),
                 ("s3.region", "us-east-1"),
                 ("s3.path-style-access", "true"),
