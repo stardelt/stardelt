@@ -49,7 +49,7 @@ images:
     # would silently redeploy a different DAG image.
     repository: ghcr.io/stardelt/airflow
     tag: demo
-    digest: sha256:beb8adccb30136cac94e1dcac76386e09afb0e02c0a010fbda29b520d53496a3
+    digest: sha256:47cc5ad4d1f1645dce17ddcd1118533c0cb67e2f4151930dbb1807a8d9b2189d
     pullPolicy: IfNotPresent
   # The chart's statsd exporter pod, which the scheduler and the workers push metrics to
   # (the twin of stardelt-platform#1594). Left at the chart default it is the bare tag `v0.30.0`.
@@ -285,7 +285,7 @@ env:
   - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_REPOSITORY
     value: ghcr.io/stardelt/airflow
   - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG
-    value: "demo@sha256:beb8adccb30136cac94e1dcac76386e09afb0e02c0a010fbda29b520d53496a3"
+    value: "demo@sha256:47cc5ad4d1f1645dce17ddcd1118533c0cb67e2f4151930dbb1807a8d9b2189d"
 
 # Secret-backed envs use extraEnv (templated string accepting valueFrom).
 extraEnv: |
@@ -401,7 +401,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:c0cb1d3b957589e0c8e5d248fd3111bb2c9d2da55487fed2b41048a732a00e36
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:bd68205acb4ab7af1ba7bf80d273fcdc6ab78137172b8a1624fbcbc475063123
   # spark-pipeline tasks (#80 S2c-2): the same four variables as the platform's
   # helm-values/airflow.yaml. Short names, like every address in this file: the operator
   # installs into another namespace.
