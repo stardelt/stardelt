@@ -117,7 +117,10 @@ cleanup() {
   if [ -n "$LK_PID" ]; then kill "$LK_PID" >/dev/null 2>&1 || true; fi
   rm -rf "$tmp"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# A signal must end the script; the EXIT trap above still runs `cleanup` on every path.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for tool in kubectl curl jq python3 base64; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing tool: $tool" >&2; exit 1; }
@@ -280,7 +283,7 @@ keep_grant() {
       -d @"$tmp/assign.json" "$LK/management/v1/permissions/role/$ROLE_ID/assignments" \
       -o "$tmp/loop.json" -w '%{http_code}')" || code="000"
     if [ "$code" = "401" ]; then bootstrap_auth; fi
-    sleep 20
+    sleep 10
   done
 }
 touch "$tmp/grant-loop"
@@ -308,7 +311,22 @@ if [ "$code" != "200" ]; then
 fi
 echo "L grant-reached=$code after=${waited}s (first=$first)"
 
+# The two scratch tables must not exist: `createOrReplace` would overwrite another run's data
+# and `cleanup` would purge it. A leftover table stops the run instead.
+for table in workload_token workload_token_custom; do
+  code="$(mgmt GET "/catalog/v1/$WID/namespaces/scratch/tables/$table")"
+  echo "L table-before=$table http=$code"
+  if [ "$code" = "200" ]; then
+    echo "table $WAREHOUSE.scratch.$table already exists; refusing to overwrite and purge it" >&2
+    exit 1
+  fi
+done
+
 # --- the additive NetworkPolicy (see the header) -----------------------------------------
+if kubectl -n "$NS" get networkpolicy "$NETPOL" >/dev/null 2>&1; then
+  echo "NetworkPolicy $NETPOL already exists; not overwriting something this run did not create" >&2
+  exit 1
+fi
 if ! kubectl -n "$NS" apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -327,6 +345,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ${SA_NS}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ${POD}
       ports:
         - port: 8181
           protocol: TCP
@@ -535,21 +556,35 @@ configure("playgroundcustom", dict(dict(common, **storage), **{
 }))
 
 
-def write(catalog, table):
-    session.createDataFrame([(1,)], "x int").writeTo(table_for(catalog, table)).createOrReplace()
-    return session.table(table_for(catalog, table)).count()
+def write(catalog, table, retries=4, delay=20):
+    """Write and read back; a `Forbidden` retries, because access-sync removes the hand-made
+    grant every cycle and the keeper loop re-applies it within ~20 s (an authorisation window,
+    not the token). Returns (rows, waits)."""
+    last = None
+    for attempt in range(retries):
+        try:
+            session.createDataFrame([(1,)], "x int").writeTo(table_for(catalog, table)).createOrReplace()
+            return session.table(table_for(catalog, table)).count(), attempt
+        except Exception as exc:
+            last = exc
+            if "Forbidden" not in str(exc):
+                raise
+            time.sleep(delay)
+    raise last
 
 
 # --- W3: a write with the file's token, no client secret, before the rotation -------------
 try:
-    out("W3: write=ok rows=%d token-file=yes client-secret=no" % write("playground", TABLE))
+    rows, waits = write("playground", TABLE)
+    out("W3: write=ok rows=%d token-file=yes client-secret=no grant-waits=%d" % (rows, waits))
 except Exception as exc:
     out("W3: write=refused: %s token-file=yes client-secret=no" % first_line(exc))
 
 # --- W3b: the same write with the platform's S3 Secret -----------------------------------
 if storage:
     try:
-        out("W3b: write=ok rows=%d storage=platform-secret client-secret=no" % write("playgroundstatic", TABLE))
+        rows, waits = write("playgroundstatic", TABLE)
+        out("W3b: write=ok rows=%d storage=platform-secret client-secret=no grant-waits=%d" % (rows, waits))
     except Exception as exc:
         out("W3b: write=refused: %s storage=platform-secret client-secret=no" % first_line(exc))
 else:
@@ -583,8 +618,9 @@ for offset in (10, 70, 130):
     out("W5: session-token=%s file-token=%s rotated-between=%s after-exp-s=%d" % (
         digest(static), digest(token()), "yes" if token() != static else "no", offset))
     try:
-        out("W5: static-token-write-after-rotation=ok rows=%d after-exp-s=%d" % (
-            write("playgroundstatic", TABLE), offset))
+        rows, waits = write("playgroundstatic", TABLE)
+        out("W5: static-token-write-after-rotation=ok rows=%d after-exp-s=%d grant-waits=%d" % (
+            rows, offset, waits))
     except Exception as exc:
         out("W5: static-token-write-after-rotation=refused: %s after-exp-s=%d" % (
             first_line(exc), offset))
@@ -608,7 +644,8 @@ if spi == "yes" and javac == "yes" and os.path.exists(AUTH_JAR):
     out("W4: custom-session-token=%s file-token=%s rotated-between=%s" % (
         digest(built), digest(token()), "yes" if token() != built else "no"))
     try:
-        out("W4: custom-auth-write-after-rotation=ok rows=%d" % write("playgroundcustom", TABLE_CUSTOM))
+        rows, waits = write("playgroundcustom", TABLE_CUSTOM)
+        out("W4: custom-auth-write-after-rotation=ok rows=%d grant-waits=%d" % (rows, waits))
     except Exception as exc:
         out("W4: custom-auth-write-after-rotation=refused: %s" % first_line(exc))
 else:
@@ -699,7 +736,7 @@ then
   phase=""
   while :; do
     phase="$(kubectl -n "$SA_NS" get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    case "$phase" in Succeeded|Failed|"") break ;; esac
+    case "$phase" in Succeeded|Failed) break ;; esac
     if [ $(( $(date +%s) - started_s )) -gt 1080 ]; then break; fi
     sleep 5
   done
@@ -714,6 +751,7 @@ then
   if ! grep -q '^W5: static-token-write-after-rotation=' "$tmp/w.txt"; then
     echo "--- the pod did not reach W5; last lines:" >&2
     printf '%s\n' "$logs" | grep -v -E '^[0-9]{2}/[0-9]{2}/[0-9]{2} ' | tail -n 15 >&2 || true
+    exit 1
   fi
 else
   echo "the workload pod could not be created" >&2
