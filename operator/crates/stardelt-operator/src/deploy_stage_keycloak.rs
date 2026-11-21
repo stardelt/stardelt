@@ -256,11 +256,24 @@ pub async fn reconcile_deploy_stage(
     let namespace = stage.namespace().unwrap_or_else(|| "default".into());
 
     if stage.metadata.deletion_timestamp.is_some() {
-        if let Err(message) = delete_deploy_stage_client(&ctx, &namespace, &name).await {
-            tracing::warn!(stage = %name, %namespace, %message, "finalize failed");
-            return Err(kube::Error::Service(
-                anyhow::anyhow!("cannot delete the deploy-stage client: {message}").into(),
-            ));
+        // No Keycloak, no client to delete: without this the removal would sit on
+        // `admin_token`'s error for ever once the namespace stopped owning an identity provider.
+        let owns_keycloak = keycloak_owns_namespace(&ctx, &namespace)
+            .await
+            .map_err(|message| kube::Error::Service(anyhow::anyhow!("{message}").into()))?;
+        if owns_keycloak {
+            if let Err(message) = delete_deploy_stage_client(&ctx, &namespace, &name).await {
+                tracing::warn!(stage = %name, %namespace, %message, "finalize failed");
+                return Err(kube::Error::Service(
+                    anyhow::anyhow!("cannot delete the deploy-stage client: {message}").into(),
+                ));
+            }
+        } else {
+            tracing::info!(
+                stage = %name,
+                %namespace,
+                "no Keycloak in this namespace; nothing to delete"
+            );
         }
         let stages: Api<DeployStage> = Api::namespaced(ctx.client.clone(), &namespace);
         let finalizers: Vec<String> = stage
@@ -673,5 +686,62 @@ mod tests {
             !requests.iter().any(|(m, _, _)| m == "DELETE"),
             "no DELETE expected: {requests:?}"
         );
+    }
+    #[tokio::test]
+    async fn removing_a_stage_without_keycloak_releases_the_finalizer() {
+        let deleting: DeployStage = serde_json::from_value(json!({
+            "metadata": {
+                "name": "prod",
+                "namespace": "stardelt",
+                "deletionTimestamp": "2026-11-21T15:00:00Z",
+                "finalizers": [DEPLOY_STAGE_FINALIZER]
+            },
+            "spec": { "subject": "repo:stardelt/stardelt:ref:refs/heads/main" }
+        }))
+        .expect("DeployStage");
+        let (ctx, requests) = mock_ctx(|method, uri, _body| {
+            if method == "GET" && uri.contains("/configmaps/keycloak-env") {
+                return (
+                    404,
+                    json!({"kind":"Status","code":404,"reason":"NotFound","message":"not found"}),
+                );
+            }
+            if method == "PATCH" {
+                return (
+                    200,
+                    json!({
+                        "apiVersion": "stardelt.io/v1alpha1",
+                        "kind": "DeployStage",
+                        "metadata": { "name": "prod", "namespace": "stardelt", "finalizers": [] },
+                        "spec": { "subject": "repo:stardelt/stardelt:ref:refs/heads/main" }
+                    }),
+                );
+            }
+            (
+                404,
+                json!({"kind":"Status","code":404,"message":"not found"}),
+            )
+        });
+
+        reconcile_deploy_stage(Arc::new(deleting), ctx)
+            .await
+            .expect("removal must not need a Keycloak");
+
+        let requests = requests.lock().expect("poisoned");
+        assert!(
+            !requests.iter().any(|(_, u, _)| u.starts_with("/proxy")),
+            "no Keycloak request expected: {requests:?}"
+        );
+        let patches: Vec<_> = requests
+            .iter()
+            .filter(|(m, u, _)| m == "PATCH" && u.contains("/deploystages/prod"))
+            .collect();
+        assert_eq!(
+            patches.len(),
+            1,
+            "one finalizer patch expected: {requests:?}"
+        );
+        let body: serde_json::Value = serde_json::from_str(&patches[0].2).expect("json");
+        assert_eq!(body["metadata"]["finalizers"], json!([]));
     }
 }
