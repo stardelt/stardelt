@@ -143,13 +143,19 @@ fi
 #    the manifest from that line, and nothing compares the live pod with it afterwards: a
 #    roll that does not re-apply the manifest leaves the sandbox on an older digest (the
 #    stardelt/stardelt#224 class, one level down). Compared by digest, not by tag.
+#
+#    The **Running** pod is the one measured. A rollout leaves its replaced pod around while it
+#    terminates (and a crashed predecessor stays `Failed`), so `.items[0]` could read a pod that
+#    is not serving: measured 2026-11-21T20:5xZ, after `make install-spark-demo` moved the
+#    sandbox to the pinned digest, this probe failed on the terminating `Failed` pod
+#    (`1caae00f…`) beside the Running one (`71635e76…`).
 # ---------------------------------------------------------------------------
 pin="$(sed -nE 's/^[[:space:]]*spark\.kubernetes\.container\.image[[:space:]]+(ghcr\.io\/stardelt\/spark[^[:space:]]+)[[:space:]]*$/\1/p' manifests/spark.yaml)"
-live="$(kubectl -n "$DEMO_NS" get pod -l app.kubernetes.io/name=spark-demo -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null || true)"
+live="$(kubectl -n "$DEMO_NS" get pod -l app.kubernetes.io/name=spark-demo --field-selector=status.phase=Running -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null || true)"
 pin_digest="${pin##*@}"
 live_digest="${live##*@}"
 if [ -z "$pin_digest" ] || [ -z "$live_digest" ]; then
-  fail image "pin '${pin:-none}', live '${live:-none}' — make install-spark-demo"
+  fail image "pin '${pin:-none}', live '${live:-none}' — make install-spark-demo (no Running spark-demo pod measured)"
 elif [ "$live_digest" = "$pin_digest" ]; then
   pass image "spark-demo runs ${live_digest:0:19}… (the pin)"
 else
