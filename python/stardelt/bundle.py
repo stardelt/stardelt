@@ -325,6 +325,30 @@ def _spark_pipeline_problems(where, task, root):
         problems.append(
             (where, "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)")
         )
+    # The two keys stardelt derives are not authorable, so the bundle must say where they come
+    # from: the task's writes name one catalog and one schema, and the graph's session must know
+    # that catalog (#80, #969). A graph without them deploys and then fails in the DAG.
+    writes = task.get("writes")
+    if not isinstance(writes, list) or not writes:
+        problems.append(
+            (where, "a spark-pipeline task needs writes: the catalog and schema the graph writes, as catalog.schema.table")
+        )
+        return problems
+    if any(not isinstance(table, str) for table in writes):
+        return problems  # the shape check below names the bad table
+    targets = {table.rsplit(".", 1)[0] for table in writes}
+    if len(targets) != 1:
+        problems.append(
+            (where, f"a spark-pipeline task writes into one catalog/schema, not {', '.join(sorted(targets))}")
+        )
+        return problems
+    catalog = next(iter(targets)).split(".")[0]
+    configuration = spec.get("configuration")
+    key = f"spark.sql.catalog.{catalog}.type"
+    if not isinstance(configuration, dict) or key not in configuration:
+        problems.append(
+            (where, f"spark-pipeline.yml has no `{key}` under configuration: the graph's session would not know catalog {catalog}")
+        )
     return problems
 
 

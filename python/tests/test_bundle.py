@@ -359,8 +359,14 @@ def test_a_spark_pipeline_task_validates_and_renders(tmp_path):
     """`spark-pipeline` (#80 S1b): a declared graph in a bundle directory, rendered as the body Nova takes."""
     make(
         tmp_path,
-        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop, refresh: full}}\n"},
-        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop, refresh: full}, writes: [gold.shop.trips]}\n"
+        },
+        files={
+            **TASK_FILES,
+            "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
+        },
     )
     assert bundle.validate(tmp_path, "prod")[0] == []
     problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
@@ -371,8 +377,9 @@ def test_a_spark_pipeline_task_validates_and_renders(tmp_path):
             "sparkPipeline": {
                 "project": "spark/shop",
                 "refresh": "full",
-                "files": {"spark-pipeline.yml": "name: shop\n"},
+                "files": {"spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n"},
             },
+            "writes": ["gold.shop.trips"],
         }
     ]
     assert specs[0]["ownerGroup"] == "sales"
@@ -382,17 +389,20 @@ def test_a_spark_pipeline_task_carries_its_graph_files(tmp_path):
     """`spark-pipeline` (#80 S2b): every file of the graph rides the task, `spark-pipeline.yml` at the root."""
     make(
         tmp_path,
-        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
         files={
             **TASK_FILES,
-            "spark/shop/spark-pipeline.yml": "name: shop\n",
+            "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
             "spark/shop/sql/trips.sql": "select 1\n",
         },
     )
     problems, _, specs = bundle.render(tmp_path, "prod", "alice")
     assert problems == []
     assert specs[0]["tasks"][0]["sparkPipeline"]["files"] == {
-        "spark-pipeline.yml": "name: shop\n",
+        "spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
         "sql/trips.sql": "select 1\n",
     }
 
@@ -400,8 +410,14 @@ def test_a_spark_pipeline_task_carries_its_graph_files(tmp_path):
 def test_a_graph_file_symlink_is_refused(tmp_path):
     make(
         tmp_path,
-        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
-        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
+        files={
+            **TASK_FILES,
+            "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
+        },
     )
     (tmp_path / "secret.txt").write_text("x")
     (tmp_path / "spark/shop/linked.sql").symlink_to(tmp_path / "secret.txt")
@@ -413,8 +429,14 @@ def test_a_graph_file_symlink_is_refused(tmp_path):
 def test_a_graph_file_that_is_not_utf8_text_is_refused(tmp_path):
     make(
         tmp_path,
-        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
-        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
+        files={
+            **TASK_FILES,
+            "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
+        },
     )
     (tmp_path / "spark/shop/sql").mkdir()
     (tmp_path / "spark/shop/sql/trips.sql").write_bytes(b"select \x00 1")
@@ -462,6 +484,40 @@ def test_a_spark_pipeline_yml_may_not_set_the_warehouse_keys(tmp_path):
     )
 
 
+def test_a_spark_pipeline_task_needs_writes_for_its_target(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n"},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert problems[0][0] == "resources/gold.yaml (dev), task 'build'"
+    assert "a spark-pipeline task needs writes: the catalog and schema the graph writes, as catalog.schema.table" in said(problems)
+
+
+def test_a_spark_pipeline_task_has_one_catalog_and_schema(tmp_path):
+    make(
+        tmp_path,
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips, silver.shop.trips]}\n"
+        },
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n"},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert "a spark-pipeline task writes into one catalog/schema, not gold.shop, silver.shop" in said(problems)
+
+
+def test_a_spark_pipeline_yml_names_the_catalog_its_writes_use(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.silver.type: rest\n"},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert "spark-pipeline.yml has no `spark.sql.catalog.gold.type` under configuration: the graph's session would not know catalog gold" in said(problems)
+
+
 def test_a_wap_pipeline_with_a_check_and_a_spark_writer_validates_and_renders(tmp_path):
     """`publish: wap` (#114, #797): a quality check and a Spark task that names the tables it writes."""
     make(
@@ -471,7 +527,10 @@ def test_a_wap_pipeline_with_a_check_and_a_spark_writer_validates_and_renders(tm
             "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.daily]}\n"
             "  - {name: gate, quality: {checks: [{name: no_null_ids, sql: 'SELECT 1 WHERE 1=0'}]}}\n"
         },
-        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+        files={
+            **TASK_FILES,
+            "spark/shop/spark-pipeline.yml": "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
+        },
     )
     assert bundle.validate(tmp_path, "prod")[0] == []
     problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
