@@ -30,7 +30,10 @@ HELM = shutil.which("helm")
 
 MANIFEST = REPO_ROOT / "manifests" / "pipeline-notebook-egress.yaml"
 NAME = "pipeline-notebook-egress"
-SELECTOR = {"app.kubernetes.io/name": "pipeline-notebook"}
+# The pod selector: a notebook task pod and a `spark-pipeline` task pod (#80 S2c-2).
+SELECTOR = {"key": "app.kubernetes.io/name",
+            "operator": "In",
+            "values": ["pipeline-notebook", "pipeline-spark-pipeline"]}
 PUBLIC_EXCEPT = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.169.254/32"]
 
 
@@ -78,12 +81,13 @@ class ManifestTest(unittest.TestCase):
         policy = rendered[0]
         self.assertEqual(policy["metadata"]["name"], NAME)
         self.assertEqual(policy["metadata"]["namespace"], "stardelt")
-        self.assertEqual(policy["spec"]["podSelector"]["matchLabels"], SELECTOR)
+        self.assertEqual(policy["spec"]["podSelector"],
+                         {"matchExpressions": [SELECTOR]})
         self.assertEqual(policy["spec"]["policyTypes"], ["Egress"])
 
-    def test_five_rules_in_order(self):
+    def test_six_rules_in_order(self):
         rules = policies(self.documents)[0]["spec"]["egress"]
-        self.assertEqual(len(rules), 5, f"expected five egress rules, got {len(rules)}")
+        self.assertEqual(len(rules), 6, f"expected six egress rules, got {len(rules)}")
 
         dns = rules[0]
         peers = to_peers(dns)
@@ -112,7 +116,12 @@ class ManifestTest(unittest.TestCase):
             {"key": "sparkoperator.k8s.io/connect-name", "operator": "Exists"}]}}])
         self.assertEqual([port_tuple(p) for p in spark["ports"]], [("TCP", 15002)])
 
-        public = rules[4]
+        shared = rules[4]
+        self.assertEqual(to_peers(shared), [{"podSelector": {"matchLabels": {
+            "app.kubernetes.io/name": "spark-connect"}}}])
+        self.assertEqual([port_tuple(p) for p in shared["ports"]], [("TCP", 15002)])
+
+        public = rules[5]
         self.assertEqual(len(to_peers(public)), 1)
         block = to_peers(public)[0]["ipBlock"]
         self.assertEqual(block["cidr"], "0.0.0.0/0")
@@ -144,6 +153,11 @@ class ManifestTest(unittest.TestCase):
                 peer.get("podSelector", {}).get("matchExpressions"),
                 [{"key": "sparkoperator.k8s.io/connect-name", "operator": "Exists"}],
                 f"rule 3: the Spark peer must be the one named Exists expression: {peer}")
+        for peer in to_peers(rules[4]):  # the shared Spark Connect server
+            self.assertEqual(
+                peer.get("podSelector", {}).get("matchLabels"),
+                {"app.kubernetes.io/name": "spark-connect"},
+                f"rule 4: the shared server is the only peer: {peer}")
 
 
 class ChartTest(unittest.TestCase):
@@ -164,7 +178,8 @@ class ChartTest(unittest.TestCase):
         self.assertEqual(len(rendered), 1, f"expected one {NAME}, got {len(rendered)}")
         policy = rendered[0]
         self.assertEqual(policy["metadata"]["namespace"], "stardelt")
-        self.assertEqual(policy["spec"]["podSelector"]["matchLabels"], SELECTOR)
+        self.assertEqual(policy["spec"]["podSelector"],
+                         {"matchExpressions": [SELECTOR]})
         self.assertEqual(policy["spec"]["policyTypes"], ["Egress"])
 
         with open(MANIFEST, encoding="utf-8") as handle:

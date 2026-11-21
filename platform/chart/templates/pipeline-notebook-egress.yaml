@@ -1,10 +1,10 @@
 {{- if .Values.airflow.enabled }}
-# A scheduled notebook pod (app.kubernetes.io/name: pipeline-notebook) executes a person's
-# code. It reaches the query engine, the object store's S3 gateway, DNS and the public
-# internet — and no other private address (platform#1100). Without this policy it can reach
-# every database pod in the namespace. Same object the Makefile path applies from
-# manifests/pipeline-notebook-egress.yaml, and the same one the operator renders
-# (stardelt-operator#649), so the install paths agree.
+# A scheduled notebook pod (app.kubernetes.io/name: pipeline-notebook) or a `spark-pipeline`
+# task pod (pipeline-spark-pipeline) executes a person's code. It reaches the query engine, the
+# object store's S3 gateway, DNS and the public internet — and no other private address
+# (platform#1100). Without this policy it can reach every database pod in the namespace. Same
+# object the Makefile path applies from manifests/pipeline-notebook-egress.yaml, and the same
+# one the operator renders (stardelt-operator#649), so the install paths agree.
 #
 # Needs a CNI that enforces NetworkPolicy — k3s does; plain Flannel does not.
 # To debug a task that legitimately needs another private endpoint, add one `to` entry
@@ -17,8 +17,8 @@ metadata:
   labels: { app.kubernetes.io/part-of: stardelt }
 spec:
   podSelector:
-    matchLabels:
-      app.kubernetes.io/name: pipeline-notebook
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [pipeline-notebook, pipeline-spark-pipeline] }
   policyTypes: [Egress]
   egress:
     # DNS: the cluster resolver (kube-system) and the private ranges a resolver may sit in.
@@ -57,6 +57,15 @@ spec:
         - podSelector:
             matchExpressions:
               - { key: sparkoperator.k8s.io/connect-name, operator: Exists }
+      ports:
+        - protocol: TCP
+          port: 15002
+    # The shared Spark Connect server (#80 S2c-2): the graph runs there. The rule above matches
+    # a group's SparkCluster; the shared server carries no `sparkoperator.k8s.io/connect-name`.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spark-connect
       ports:
         - protocol: TCP
           port: 15002
