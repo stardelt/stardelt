@@ -77,7 +77,7 @@ pub struct StreamState {
 
 /// The body of a stream write (`nova#617` slice a). No credentials: `connectionRef` is the
 /// name of a `Connection`, and Nova never stores or forwards a secret.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamWrite {
     /// The stream's name; the `PUT` path is authoritative and a different body name is refused.
@@ -99,7 +99,7 @@ pub struct StreamWrite {
     pub viewers: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamSourceBody {
     /// Name of the `Connection` (`type: kafka`); absent means the platform's own bus.
@@ -108,7 +108,7 @@ pub struct StreamSourceBody {
     pub topic: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamSinkBody {
     pub catalog: String,
@@ -767,7 +767,7 @@ async fn update_stream(
 
 /// Create or update one stream: the body is the whole editable state, `spec.stopped` is left
 /// alone, and the answer is the stored object's view.
-async fn put_stream(
+pub(crate) async fn put_stream(
     state: &AppState,
     who: &Identity,
     namespace: &str,
@@ -832,6 +832,33 @@ async fn put_stream(
         }
         Err(other) => Err(unavailable(other)),
     }
+}
+
+/// Replay one stored `StreamApp` document, as `who`: the stream half of
+/// `POST /api/deployments/{id}/rollback`. Every rule is the write's own (`put_stream`); the
+/// answer says whether a stream was created or updated, so the replay's row can name it.
+pub(crate) async fn apply_stream_document(
+    state: &AppState,
+    who: &Identity,
+    document: &Value,
+) -> Result<&'static str, Fail> {
+    let body: StreamWrite = serde_json::from_value(document.clone()).map_err(|e| {
+        Fail::new(
+            StatusCode::BAD_REQUEST,
+            format!("the recorded document no longer fits a stream: {e}"),
+        )
+    })?;
+    let api = stream_api(state)?;
+    let existed = match api.get(&body.name).await {
+        Ok(_) => true,
+        Err(kube::Error::Api(er)) if er.code == 404 => false,
+        Err(other) => return Err(unavailable(other)),
+    };
+    // `put_stream` takes the body by value, so the name is cloned first (the pattern at
+    // `pipelines.rs:6000`): `&body.name` and a moved `body` in one call is E0505.
+    let name = body.name.clone();
+    put_stream(state, who, &crate::cluster::namespace(), &name, body).await?;
+    Ok(if existed { "updated" } else { "created" })
 }
 
 #[utoipa::path(
@@ -926,9 +953,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, put_stream,
-        remove_stream, router, stream_resource, stream_spec_digest, stream_view, streams_response,
-        visible_streams,
+        StreamSinkBody, StreamSourceBody, StreamWrite, apply_stream_document, check_write,
+        patch_stream, put_stream, remove_stream, router, stream_resource, stream_spec_digest,
+        stream_view, streams_response, visible_streams,
     };
     use crate::auth::Identity;
     use crate::pipelines::{Provenance, deployment_of};
@@ -1486,6 +1513,18 @@ mod tests {
             Ok((StatusCode::OK, Json(item)))
         }
 
+        async fn create_one(
+            State(state): State<Shared>,
+            Path(_namespace): Path<String>,
+            body: String,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            let body: Value = serde_json::from_str(&body)
+                .map_err(|_| failure(StatusCode::BAD_REQUEST, "not json"))?;
+            let mut state = state.lock().unwrap();
+            state.items.push(body.clone());
+            Ok((StatusCode::CREATED, Json(body)))
+        }
+
         pub async fn start_with_patch(items: Vec<Value>) -> (kube::Client, Shared) {
             let shared = Arc::new(Mutex::new(Fake {
                 items,
@@ -1497,7 +1536,8 @@ mod tests {
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/streamapps",
                     get(|| async {
                         Json(json!({"apiVersion":"stardelt.io/v1alpha1","kind":"StreamAppList","items":[]}))
-                    }),
+                    })
+                    .post(create_one),
                 )
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/streamapps/{name}",
@@ -1667,6 +1707,90 @@ mod tests {
         assert_eq!(
             patches[0]["metadata"]["labels"]["stardelt.io/owner-group"],
             json!("sales")
+        );
+    }
+
+    /// The shape a deployment row stores for a stream: the `StreamWrite` body plus its `kind`.
+    fn stored_document(body: StreamWrite) -> Value {
+        let mut document = serde_json::to_value(body).expect("a body serializes");
+        document["kind"] = json!("StreamApp");
+        document
+    }
+
+    #[tokio::test]
+    async fn a_stored_stream_document_on_an_empty_cluster_is_created() {
+        let (client, shared) = fake_kube::start_with_patch(vec![]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let action = apply_stream_document(
+            &state,
+            &who("u", &["sales"], false),
+            &stored_document(body_named("demo")),
+        )
+        .await
+        .expect("the document replays");
+        assert_eq!(action, "created");
+        let items = shared.lock().unwrap().items.clone();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["metadata"]["name"], json!("demo"));
+        assert_eq!(items[0]["spec"]["ownerGroup"], json!("sales"));
+    }
+
+    #[tokio::test]
+    async fn a_stored_stream_document_over_an_existing_stream_is_updated() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let action = apply_stream_document(
+            &state,
+            &who("u", &["sales"], false),
+            &stored_document(body_named("demo")),
+        )
+        .await
+        .expect("the document replays");
+        assert_eq!(action, "updated");
+        let patches = shared.lock().unwrap().patches.clone();
+        assert_eq!(patches.len(), 1, "exactly one merge body");
+        assert_eq!(
+            patches[0]["spec"]["source"]["topic"],
+            json!("pegelonline.measurements")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_stream_document_of_another_group_is_the_writes_own_400() {
+        let (client, shared) = fake_kube::start_with_patch(vec![]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let err = apply_stream_document(
+            &state,
+            &who("u", &["sales"], false),
+            &stored_document(StreamWrite {
+                owner_group: "marketing".to_string(),
+                ..body_named("demo")
+            }),
+        )
+        .await
+        .expect_err("a group the caller is not in is refused");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "you are not a member of the group marketing");
+        let shared = shared.lock().unwrap();
+        assert!(shared.items.is_empty(), "nothing may be created");
+        assert!(shared.patches.is_empty(), "nothing may be patched");
+    }
+
+    #[tokio::test]
+    async fn a_stored_stream_document_without_a_source_no_longer_fits_a_stream() {
+        let (client, _) = fake_kube::start_with_patch(vec![]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let mut document = stored_document(body_named("demo"));
+        document.as_object_mut().unwrap().remove("source");
+        let err = apply_stream_document(&state, &who("u", &["sales"], false), &document)
+            .await
+            .expect_err("a document without a source is refused");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message()
+                .starts_with("the recorded document no longer fits a stream"),
+            "the sentence names the stream: {}",
+            err.message()
         );
     }
 
