@@ -365,8 +365,52 @@ def test_a_spark_pipeline_task_validates_and_renders(tmp_path):
     assert bundle.validate(tmp_path, "prod")[0] == []
     problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
     assert (problems, mode) == ([], "production")
-    assert specs[0]["tasks"] == [{"name": "build", "sparkPipeline": {"project": "spark/shop", "refresh": "full"}}]
+    assert specs[0]["tasks"] == [
+        {
+            "name": "build",
+            "sparkPipeline": {
+                "project": "spark/shop",
+                "refresh": "full",
+                "files": {"spark-pipeline.yml": "name: shop\n"},
+            },
+        }
+    ]
     assert specs[0]["ownerGroup"] == "sales"
+
+
+def test_a_spark_pipeline_task_carries_its_graph_files(tmp_path):
+    """`spark-pipeline` (#80 S2b): every file of the graph rides the task, `spark-pipeline.yml` at the root."""
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
+        files={
+            **TASK_FILES,
+            "spark/shop/spark-pipeline.yml": "name: shop\n",
+            "spark/shop/sql/trips.sql": "select 1\n",
+        },
+    )
+    problems, _, specs = bundle.render(tmp_path, "prod", "alice")
+    assert problems == []
+    assert specs[0]["tasks"][0]["sparkPipeline"]["files"] == {
+        "spark-pipeline.yml": "name: shop\n",
+        "sql/trips.sql": "select 1\n",
+    }
+
+
+def test_a_graph_file_that_is_not_utf8_text_is_refused(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+    )
+    (tmp_path / "spark/shop/sql").mkdir()
+    (tmp_path / "spark/shop/sql/trips.sql").write_bytes(b"select \x00 1")
+    problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
+    assert specs == []
+    assert problems == [
+        ("resources/gold.yaml (prod) (build)", "the graph file sql/trips.sql is not UTF-8 text")
+    ]
+    assert said(problems).endswith("the graph file sql/trips.sql is not UTF-8 text")
 
 
 def test_a_spark_pipeline_task_needs_its_project_directory(tmp_path):
