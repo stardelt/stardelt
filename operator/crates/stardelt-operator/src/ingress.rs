@@ -119,15 +119,7 @@ pub fn superset(spec: &PlatformInstanceSpec) -> Option<Ingress> {
     if !spec.pillars.dashboards {
         return None;
     }
-    build(
-        spec,
-        "superset",
-        "superset",
-        8088,
-        "superset",
-        &["/"],
-        &[],
-    )
+    build(spec, "superset", "superset", 8088, "superset", &["/"], &[])
 }
 
 /// The Ingress of Trino, on `trino.<base domain>`: the one path outside clients (Superset,
@@ -420,7 +412,9 @@ mod tests {
         );
         assert!(paths.contains(&("/realms/stardelt".to_string(), "Prefix".to_string())));
         assert!(
-            paths.iter().all(|(path, _)| !path.contains('(') && !path.contains('\\')),
+            paths
+                .iter()
+                .all(|(path, _)| !path.contains('(') && !path.contains('\\')),
             "no regex syntax survives: {paths:?}"
         );
     }
