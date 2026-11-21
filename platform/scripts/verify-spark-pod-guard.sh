@@ -167,6 +167,47 @@ spec:
           mountPath: /probe
 EOF
 
+# 2a. A Secret as one environment variable: the same Secret, through `valueFrom.secretKeyRef`.
+deny "$SA" spark-connect-executor-pods deny-secret-env.yaml <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spark-guard-probe-secret-env
+  namespace: ${NS}
+spec:
+  serviceAccountName: spark-executor
+  automountServiceAccountToken: true
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: ${IMAGE}
+      env:
+        - name: PROBE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-admin
+              key: password
+EOF
+
+# 2b. A Secret as the whole environment: the same Secret, through `envFrom.secretRef`.
+deny "$SA" spark-connect-executor-pods deny-secret-envfrom.yaml <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spark-guard-probe-secret-envfrom
+  namespace: ${NS}
+spec:
+  serviceAccountName: spark-executor
+  automountServiceAccountToken: true
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: ${IMAGE}
+      envFrom:
+        - secretRef:
+            name: keycloak-admin
+EOF
+
 # 3. Host access: the pod would see the node's network.
 deny_or_pss "$SA" spark-connect-executor-pods deny-host-network.yaml <<EOF
 apiVersion: v1
@@ -298,5 +339,5 @@ EOF
 
 deny_configmap "$SA_CLUSTER" spark-cluster-configmaps "a foreign ConfigMap created by the SparkCluster driver"
 
-[ "$problems" -eq 0 ] && { echo "PASS (17 cases: 13 denied, 4 admitted)"; exit 0; }
+[ "$problems" -eq 0 ] && { echo "PASS (19 cases: 15 denied, 4 admitted)"; exit 0; }
 echo "FAIL ($problems problem(s))"; exit 1
