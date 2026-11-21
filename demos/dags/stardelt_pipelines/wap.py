@@ -33,15 +33,31 @@ def table_parts(table: str) -> tuple[str, str, str]:
     return catalog, schema, name
 
 
-def table_url(base_url: str, table: str) -> str:
-    """The Iceberg REST path of one table, `{base}/catalog/v1/{catalog}/namespaces/{schema}/tables/{name}`."""
+def warehouse_prefix(client, base_url: str, catalog: str) -> str:
+    """The warehouse's Iceberg REST prefix, which is its id and not its name (#1007).
+
+    Lakekeeper answers `{base}/catalog/v1/config?warehouse=<name>` with
+    `{"defaults": {"prefix": "<warehouse id>"}}`; every table route takes that id.
+    """
+    response = client.get(f"{base_url.rstrip('/')}/catalog/v1/config?warehouse={catalog}")
+    if response.status_code >= 400:
+        raise WapError(f"the catalog could not resolve warehouse `{catalog}` ({response.status_code})")
+    prefix = ((response.json() or {}).get("defaults") or {}).get("prefix")
+    if not isinstance(prefix, str) or not prefix:
+        raise WapError(f"the catalog answered no prefix for warehouse `{catalog}`")
+    return prefix
+
+
+def table_url(client, base_url: str, table: str) -> str:
+    """The Iceberg REST path of one table: `{base}/catalog/v1/{prefix}/namespaces/{schema}/tables/{name}`."""
     catalog, schema, name = table_parts(table)
-    return f"{base_url.rstrip('/')}/catalog/v1/{catalog}/namespaces/{schema}/tables/{name}"
+    prefix = warehouse_prefix(client, base_url, catalog)
+    return f"{base_url.rstrip('/')}/catalog/v1/{prefix}/namespaces/{schema}/tables/{name}"
 
 
 def refs(client, base_url: str, table: str) -> dict:
     """The table's `metadata.refs` (one GET with `?snapshots=all`)."""
-    response = client.get(table_url(base_url, table) + "?snapshots=all")
+    response = client.get(table_url(client, base_url, table) + "?snapshots=all")
     if response.status_code >= 400:
         raise WapError(f"the catalog could not load `{table}` ({response.status_code})")
     return (response.json().get("metadata") or {}).get("refs") or {}
@@ -138,7 +154,7 @@ def drop_branch(client, base_url: str, table: str, branch: str) -> None:
 def commit(client, base_url: str, table: str, requirements: list, updates: list) -> dict:
     """One catalog commit; `409` is the "main moved" rerun sentence, any other 4xx the catalog's own."""
     response = client.post(
-        table_url(base_url, table),
+        table_url(client, base_url, table),
         json={"requirements": requirements, "updates": updates},
     )
     if response.status_code == 409:
