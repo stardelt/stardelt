@@ -13,7 +13,7 @@ jobs:
           set -euo pipefail
           curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=stardelt-deploy" -o "$RUNNER_TEMP/token.json"
-          jq -r .value "$RUNNER_TEMP/token.json" > "$RUNNER_TEMP/token"
+          jq -j .value "$RUNNER_TEMP/token.json" > "$RUNNER_TEMP/token"
       - name: claims
         run: |
           set -euo pipefail
