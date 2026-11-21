@@ -321,7 +321,10 @@ def _spark_pipeline_problems(where, task, root):
     except (yaml.YAMLError, OSError) as err:
         problems.append((where, f"spark-pipeline.yml cannot be read: {str(err).splitlines()[0]}"))
         return problems
-    if isinstance(spec, dict) and any(key in spec for key in SPARK_OWNED_KEYS):
+    if not isinstance(spec, dict):
+        problems.append((where, "spark-pipeline.yml must be a mapping"))
+        return problems
+    if any(key in spec for key in SPARK_OWNED_KEYS):
         problems.append(
             (where, "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)")
         )
