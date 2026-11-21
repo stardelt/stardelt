@@ -2574,6 +2574,7 @@ mod tests {
             identity: who("sub-alice", &[], false),
             via: "session",
             access_token: Some(Secret::new("good")),
+            client_id: None,
         }
     }
 
@@ -2582,6 +2583,7 @@ mod tests {
             identity: admin(),
             via: "session",
             access_token: Some(Secret::new("good")),
+            client_id: None,
         }
     }
 

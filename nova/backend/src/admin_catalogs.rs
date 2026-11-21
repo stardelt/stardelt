@@ -1407,6 +1407,7 @@ mod tests {
                                     identity,
                                     via: "session",
                                     access_token: None,
+                                    client_id: None,
                                 });
                             }
                             next.run(req).await
@@ -1780,6 +1781,7 @@ mod tests {
                                     identity,
                                     via: "session",
                                     access_token: None,
+                                    client_id: None,
                                 });
                             }
                             next.run(req).await
@@ -2107,6 +2109,7 @@ mod tests {
                         },
                         via: "session",
                         access_token: None,
+                        client_id: None,
                     });
                     next.run(req).await
                 },
@@ -2517,6 +2520,7 @@ mod tests {
                                     identity,
                                     via: "session",
                                     access_token: None,
+                                    client_id: None,
                                 });
                             }
                             next.run(req).await

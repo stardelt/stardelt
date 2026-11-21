@@ -659,6 +659,7 @@ mod tests {
             },
             via: "session",
             access_token: token.map(Secret::new),
+            client_id: None,
         }
     }
 

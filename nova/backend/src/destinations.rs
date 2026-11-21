@@ -536,6 +536,7 @@ mod tests {
             },
             via: "session",
             access_token: None,
+            client_id: None,
         }
     }
 

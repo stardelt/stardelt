@@ -2370,6 +2370,7 @@ mod tests {
             },
             via: "session",
             access_token: Some(Secret::new("caller-token")),
+            client_id: None,
         }
     }
 

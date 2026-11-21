@@ -878,6 +878,24 @@ pub trait BearerValidator: Send + Sync {
             ))
         })
     }
+
+    /// The browser's credential check, also naming the client the token was issued to
+    /// (`azp`). The audience is the validator's own, the one [`validate`] uses — the
+    /// browser passes no audience of its own.
+    fn validate_browser_facts<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+        Box::pin(async move {
+            Ok((
+                self.validate(token).await?,
+                BearerFacts {
+                    scopes: Vec::new(),
+                    client_id: None,
+                },
+            ))
+        })
+    }
 }
 
 struct OidcBearer {
@@ -936,6 +954,26 @@ impl BearerValidator for OidcBearer {
             let claims = self
                 .provider
                 .verify(token, audiences, &self.client_id)
+                .await?;
+            let identity = identity_from_claims(&claims, &self.claims)?;
+            Ok((
+                identity,
+                BearerFacts {
+                    scopes: claim_scopes(&claims),
+                    client_id: claim_str(&claims, "azp"),
+                },
+            ))
+        })
+    }
+
+    fn validate_browser_facts<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, &self.audiences, &self.client_id)
                 .await?;
             let identity = identity_from_claims(&claims, &self.claims)?;
             Ok((
@@ -1278,6 +1316,10 @@ pub struct Principal {
     /// The token this principal presented. It is passed upstream **only** when
     /// `NOVA_FORWARD_IDENTITY` is on, and never logged or returned — `Secret` redacts.
     pub access_token: Option<Secret>,
+    /// The token's `azp`: the client it was issued to. `None` for a browser session and for
+    /// a token whose IdP sets no `azp`. A `stardelt-deploy-<stage>` value marks a deploy
+    /// principal (#57), which `deployments.rs` confines to that stage.
+    pub client_id: Option<String>,
 }
 
 /// What `/api/me` reports beyond the identity (#213): why this caller is an
@@ -1399,7 +1441,7 @@ impl AuthState {
                 }
                 _ => return Err(AuthError::Unauthenticated),
             };
-            let identity = self.bearer.validate(token).await?;
+            let (identity, token_facts) = self.bearer.validate_browser_facts(token).await?;
             // A bearer call has no session: there is nothing to end, so no session end —
             // and never the token's own `exp`.
             let facts = self.me_facts(&identity, None);
@@ -1408,6 +1450,7 @@ impl AuthState {
                     identity,
                     via: "bearer",
                     access_token: Some(Secret(token.to_string())),
+                    client_id: token_facts.client_id,
                 },
                 facts,
             ));
@@ -1422,6 +1465,7 @@ impl AuthState {
                 identity,
                 via: "session",
                 access_token,
+                client_id: None,
             },
             facts,
         ))
@@ -1475,6 +1519,7 @@ impl AuthState {
                 identity,
                 via: "bearer",
                 access_token: Some(Secret(token.to_string())),
+                client_id: facts.client_id.clone(),
             },
             facts,
         ))
@@ -2137,6 +2182,7 @@ mod tests {
             },
             via: "session",
             access_token: token.map(Secret::new),
+            client_id: None,
         }
     }
 
@@ -2204,6 +2250,7 @@ mod tests {
                                     identity,
                                     via: "session",
                                     access_token: None,
+                                    client_id: None,
                                 });
                             }
                             next.run(req).await
