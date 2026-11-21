@@ -3130,6 +3130,30 @@ pub struct LogView {
     pub truncated: bool,
 }
 
+/// `GET …/runs/{run_id}/checks`: one row per declared check of the run's `quality` tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecksResponse {
+    pub checks: Vec<CheckView>,
+}
+
+/// One check of one `quality` task. `rows` and `passed` are `None` until the task's log
+/// carries the line (the task has not run, or has not reached the check yet).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckView {
+    /// The `quality` task's name.
+    pub task: String,
+    /// The check's name, as declared in `spec.tasks[].checks[].name`.
+    pub name: String,
+    /// `error` or `warn`; `warn` never fails the run.
+    pub severity: String,
+    /// The rows the assertion returned; `0` is a pass.
+    pub rows: Option<i64>,
+    /// `Some(rows == 0)` once the log carries the line, `None` before that.
+    pub passed: Option<bool>,
+}
+
 /// The retry policy of a pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct RetriesView {
@@ -3494,6 +3518,59 @@ fn log_view(page: LogPage) -> LogView {
         next_token: page.continuation_token,
         truncated,
     }
+}
+
+/// The `quality` tasks of a Pipeline and their declared checks: `(task, [(check, severity)])`.
+/// A check without `severity` is `error`, the CRD's default.
+fn quality_tasks(pipeline: &Value) -> Vec<(String, Vec<(String, String)>)> {
+    let tasks = pipeline
+        .get("spec")
+        .and_then(|spec| spec.get("tasks"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    tasks
+        .iter()
+        .filter(|task| task.get("kind").and_then(Value::as_str) == Some("quality"))
+        .filter_map(|task| {
+            let name = task.get("name").and_then(Value::as_str)?.to_string();
+            let checks = task
+                .get("checks")
+                .and_then(Value::as_array)
+                .map(|checks| {
+                    checks
+                        .iter()
+                        .filter_map(|check| {
+                            let name = check.get("name").and_then(Value::as_str)?.to_string();
+                            let severity = check
+                                .get("severity")
+                                .and_then(Value::as_str)
+                                .unwrap_or("error")
+                                .to_string();
+                            Some((name, severity))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((name, checks))
+        })
+        .collect()
+}
+
+/// `check <name>: <error|warn>, <n> row(s)` -> `(name, severity, n)`.
+/// The marker is searched anywhere in the line: Airflow prefixes its own event text.
+fn check_result(text: &str) -> Option<(String, String, i64)> {
+    let start = text.find("check ")?;
+    let rest = &text[start + "check ".len()..];
+    let (name, rest) = rest.split_once(": ")?;
+    let (severity, rest) = rest.split_once(", ")?;
+    if severity != "error" && severity != "warn" {
+        return None;
+    }
+    let rows = rest
+        .strip_suffix(" row(s)")
+        .or_else(|| rest.strip_suffix(" row"))?;
+    Some((name.to_string(), severity.to_string(), rows.parse().ok()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -4523,6 +4600,81 @@ async fn task_logs(
         .map_err(task_lookup_fail)?;
     audit::pipeline_log_event(who, namespace, name, &run.dag_run_id, task_id);
     Ok(log_view(page))
+}
+
+/// `GET …/runs/{run_id}/checks`: every declared check of the run's quality tasks, with the
+/// verdict its log carries. Ten log pages per task at most; a check not found stays `None`.
+async fn run_checks(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<ChecksResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let (dag_id, pipeline) = load_visible(resources, who, namespace, name).await?;
+    let runs = airflow
+        .runs(&dag_id, LATEST_RUNS)
+        .await
+        .map_err(run_lookup_fail)?;
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .ok_or_else(no_such_run)?;
+    let instances = airflow
+        .task_instances(&dag_id, &run.dag_run_id)
+        .await
+        .map_err(task_lookup_fail)?;
+    let mut checks = Vec::new();
+    for (task, declared) in quality_tasks(&pipeline) {
+        let last_try = instances
+            .iter()
+            .filter(|instance| instance.task_id == task)
+            .filter_map(|instance| instance.try_number)
+            .max();
+        let mut found: std::collections::BTreeMap<String, (String, i64)> =
+            std::collections::BTreeMap::new();
+        if let Some(try_number) = last_try {
+            let mut token: Option<String> = None;
+            for _ in 0..10 {
+                let page = airflow
+                    .logs(
+                        &dag_id,
+                        &run.dag_run_id,
+                        &task,
+                        try_number,
+                        token.as_deref(),
+                    )
+                    .await
+                    .map_err(task_lookup_fail)?;
+                let view = log_view(page);
+                for line in &view.lines {
+                    if let Some((check, severity, rows)) = check_result(&line.text) {
+                        found.insert(check, (severity, rows));
+                    }
+                }
+                match view.next_token {
+                    Some(next) => token = Some(next),
+                    None => break,
+                }
+            }
+        }
+        for (check, severity) in declared {
+            let hit = found.get(&check);
+            checks.push(CheckView {
+                task: task.clone(),
+                name: check,
+                severity: hit
+                    .map(|(severity, _)| severity.clone())
+                    .unwrap_or(severity),
+                rows: hit.map(|(_, rows)| *rows),
+                passed: hit.map(|(_, rows)| *rows == 0),
+            });
+        }
+    }
+    Ok(ChecksResponse { checks })
 }
 
 /// `^\S{1,64}$` of `[A-Za-z0-9_-]`: what a task id in a run's object key can be.
@@ -6415,6 +6567,10 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
             get(run_queries),
         )
         .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/checks",
+            get(checks),
+        )
+        .route(
             "/pipelines/{namespace}/{name}/runs/{run_id}/stop",
             post(stop),
         )
@@ -7202,6 +7358,42 @@ pub(crate) async fn run_queries(
     Path((namespace, name, run_id)): Path<(String, String, String)>,
 ) -> Response {
     answer(run_queries_answer(signed, namespace, name, run_id).await)
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_checks",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/checks",
+    tag = "public",
+    description = "Every check a run's `quality` tasks declare, with its verdict: the rows the assertion returned (`0` is a pass) and the severity, read from the task's log line `check <name>: <error|warn>, <n> row(s)`. A check whose task has not run, or whose line is not in the log yet, answers `rows: null, passed: null`. `warn` checks with rows never fail the run. The same visibility rule as the run (404 for another group's pipeline).",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+    ),
+    responses(
+        (status = 200, description = "The checks of the run", body = ChecksResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such run", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn checks(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(
+        run_checks(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+        )
+        .await,
+    )
 }
 
 #[utoipa::path(
@@ -10314,6 +10506,45 @@ mod tests {
         assert_eq!(strip_ansi("grün \u{1b}[1;31mrot\u{1b}[0m"), "grün rot");
         // The ticket's pattern matches `ESC [ n` as well: the text loses those three bytes.
         assert_eq!(strip_ansi("\u{1b}[not-a-sequence"), "ot-a-sequence");
+    }
+
+    #[test]
+    fn a_check_line_carries_its_verdict() {
+        assert_eq!(
+            check_result("check no_null_ids: error, 0 row(s)"),
+            Some(("no_null_ids".to_string(), "error".to_string(), 0))
+        );
+        assert_eq!(
+            check_result("check unique_ids: warn, 3 row(s)"),
+            Some(("unique_ids".to_string(), "warn".to_string(), 3))
+        );
+        assert_eq!(
+            check_result("INFO - check a: error, 1 row"),
+            Some(("a".to_string(), "error".to_string(), 1))
+        );
+        assert_eq!(check_result("Task failed with exception"), None);
+        assert_eq!(check_result("check a: fatal, 2 row(s)"), None);
+    }
+
+    #[test]
+    fn the_quality_tasks_of_a_pipeline_carry_their_checks() {
+        let pipeline = serde_json::json!({"spec": {"tasks": [
+            {"name": "load", "kind": "notebook"},
+            {"name": "gate", "kind": "quality", "checks": [
+                {"name": "a", "sql": "SELECT 1"},
+                {"name": "b", "sql": "SELECT 2", "severity": "warn"}
+            ]}
+        ]}});
+        let tasks = quality_tasks(&pipeline);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].0, "gate");
+        assert_eq!(
+            tasks[0].1,
+            vec![
+                ("a".to_string(), "error".to_string()),
+                ("b".to_string(), "warn".to_string())
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------
