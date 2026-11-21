@@ -223,6 +223,10 @@ verify-compute: _context ## The SparkCluster CRD, runtime catalogue, Nova RBAC a
 verify-spark-cluster: _context ## One SparkCluster up and down: identity, guards, the executor path and the catalog (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-spark-cluster.sh
 
+.PHONY: verify-spark-pipeline
+verify-spark-pipeline: _context ## One spark-pipeline task pod: run a graph as the demo principal, read the table back (manual; creates and drops a schema)
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-spark-pipeline.sh
+
 verify-spark-guard: _context ## The Spark Connect driver may create executor pods only (platform#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-spark-pod-guard.sh
 
