@@ -1260,6 +1260,15 @@ export type RunQueryView = {
   sql: string
 }
 
+/** One check a run's `quality` task declares, with its verdict (stardelt#829). */
+export type RunCheckView = {
+  task: string
+  name: string
+  severity: string
+  rows: number | null
+  passed: boolean | null
+}
+
 /** One output of an executed code cell, as nbformat 4 stores it (#683). */
 export type NotebookOutput = {
   output_type: string
@@ -1919,6 +1928,9 @@ export const api = {
     jget<RunResponse>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}`),
   pipelineRunQueries: (namespace: string, name: string, runId: string) =>
     jget<{ queries: RunQueryView[] }>(`/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/queries`),
+  /** The checks the run's `quality` tasks declare (#829); `rows` is null until the task's log has the line. */
+  pipelineRunChecks: (namespace: string, name: string, runId: string) =>
+    jget<{ checks: RunCheckView[] }>(`/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/checks`),
   stopPipelineRun: (ns: string, name: string, runId: string) =>
     jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/stop`, {}),
   retryPipelineRun: (ns: string, name: string, runId: string) =>
