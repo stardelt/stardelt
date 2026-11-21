@@ -255,3 +255,58 @@ def test_a_nova_that_cannot_be_reached_is_named_in_the_error(tmp_path):
 
     code, _, err = run(["--host", NOVA, "login"], Down(), {"HOME": str(tmp_path)})
     assert code == 1 and f"cannot reach {NOVA}" in err
+
+
+FEDERATED_FORM = {
+    "grant_type": "client_credentials",
+    "client_id": "stardelt-deploy",
+    "scope": "openid",
+    "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    "client_assertion": "ci-token-1",
+}
+FEDERATED_ANSWER = FakeResponse(200, {"access_token": CANARY, "expires_in": 300})
+
+
+def test_federated_login_posts_the_assertion():
+    session = FakeSession(FakeResponse(200, META), FEDERATED_ANSWER)
+    creds = login.federated_login(session, ISSUER, "stardelt-deploy", "ci-token-1", clock=lambda: 1000)
+    assert creds == {
+        "issuer": ISSUER,
+        "client_id": "stardelt-deploy",
+        "token_endpoint": META["token_endpoint"],
+        "access_token": CANARY,
+        "refresh_token": None,
+        "expires_at": 1300,
+    }
+    assert session.calls[-1][2]["data"] == FEDERATED_FORM
+
+
+def test_login_federated_stores_the_variable_not_the_token(tmp_path):
+    environ = {"HOME": str(tmp_path), "STARDELT_CI_TOKEN": "ci-token-1"}
+    session = FakeSession(FakeResponse(200, META), FEDERATED_ANSWER)
+    code, out, err = run(["login", "--federated", "--issuer", ISSUER, "--client-id", "stardelt-deploy"], session, environ)
+    assert code == 0
+    kept = json.loads(login.credentials_path(environ).read_text())
+    assert kept["federated"] == {"env": "STARDELT_CI_TOKEN"} and kept["refresh_token"] is None
+    assert "ci-token-1" not in out and "ci-token-1" not in err and "ci-token-1" not in json.dumps(kept)
+
+
+def test_login_federated_without_the_ci_token_is_usage(tmp_path):
+    environ = {"HOME": str(tmp_path)}
+    session = FakeSession()
+    code, _, err = run(["login", "--federated", "--issuer", ISSUER, "--client-id", "stardelt-deploy"], session, environ)
+    assert (code, session.calls) == (cli.USAGE, []) and "STARDELT_CI_TOKEN" in err
+
+
+def test_fresh_token_re_mints_a_federated_sign_in(tmp_path):
+    stored(tmp_path, expires_at=1, refresh_token=None, federated={"env": "STARDELT_CI_TOKEN"})
+    session = FakeSession(FakeResponse(200, META), FEDERATED_ANSWER)
+    environ = {"HOME": str(tmp_path), "STARDELT_CI_TOKEN": "ci-token-2"}
+    assert login.fresh_token(environ, session, clock=lambda: 1000) == CANARY
+    assert login.load(environ)["federated"] == {"env": "STARDELT_CI_TOKEN"}
+
+
+def test_fresh_token_refuses_when_the_ci_token_is_gone(tmp_path):
+    stored(tmp_path, expires_at=1, refresh_token=None, federated={"env": "STARDELT_CI_TOKEN"})
+    with pytest.raises(login.LoginError, match="STARDELT_CI_TOKEN"):
+        login.fresh_token({"HOME": str(tmp_path)}, FakeSession(), clock=lambda: 1000)

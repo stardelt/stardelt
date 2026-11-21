@@ -18,6 +18,9 @@ from pathlib import Path
 
 DEFAULT_CLIENT_ID = "stardelt-dev"
 GRANT_DEVICE = "urn:ietf:params:oauth:grant-type:device_code"
+GRANT_CLIENT = "client_credentials"
+CLIENT_ASSERTION = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+ASSERTION_ENV = "STARDELT_CI_TOKEN"
 SKEW = 60
 TIMEOUT = 30
 
@@ -84,6 +87,19 @@ def discover(session, issuer):
     if not meta.get("device_authorization_endpoint") or not meta.get("token_endpoint"):
         raise LoginError(f"{issuer} does not offer the device sign-in (no device_authorization_endpoint)")
     return meta
+
+
+def token_endpoint(session, issuer):
+    """The issuer's `token_endpoint`, read from its discovery document."""
+    url = issuer.rstrip("/") + "/.well-known/openid-configuration"
+    response = session.request("GET", url, timeout=TIMEOUT)
+    try:
+        meta = response.json() if response.status_code == 200 else {}
+    except ValueError:
+        meta = {}
+    if not meta.get("token_endpoint"):
+        raise LoginError(f"{issuer} publishes no token endpoint")
+    return meta["token_endpoint"]
 
 
 def nova_sign_in(session, host):
@@ -163,6 +179,32 @@ def device_login(session, issuer, client_id, say, sleep=time.sleep, clock=time.t
     raise LoginError("the code expired: run `stardelt login` again")
 
 
+def federated_login(session, issuer, client_id, assertion, clock=time.time):
+    """Exchange the CI's own token for a realm token (federated client authentication, #830).
+
+    The CI token is the `client_assertion`; nothing is stored on the provider. The answer is a
+    5-minute realm token and carries no refresh token, so a later call needs the CI token again.
+    """
+    endpoint = token_endpoint(session, issuer)
+    status, body = _post(
+        session,
+        endpoint,
+        {
+            "grant_type": GRANT_CLIENT,
+            "client_id": client_id,
+            "scope": "openid",
+            "client_assertion_type": CLIENT_ASSERTION,
+            "client_assertion": assertion,
+        },
+    )
+    if status != 200 or not body.get("access_token"):
+        error = body.get("error")
+        raise LoginError(
+            f"the identity provider refused the CI token ({error or f'HTTP {status}'})"
+        )
+    return _creds(issuer, client_id, endpoint, body, clock())
+
+
 def fresh_token(environ, session, clock=time.time):
     """The stored access token, renewed first when it has less than a minute left."""
     creds = load(environ)
@@ -170,6 +212,17 @@ def fresh_token(environ, session, clock=time.time):
         raise LoginError("not signed in: run `stardelt login` or set STARDELT_TOKEN")
     if creds.get("expires_at", 0) - clock() > SKEW:
         return creds["access_token"]
+    federated = creds.get("federated") or {}
+    if federated:
+        name = federated.get("env") or ASSERTION_ENV
+        assertion = environ.get(name, "")
+        if not assertion:
+            raise LoginError(f"the CI token is gone: set {name} for this step")
+        renewed = federated_login(session, creds["issuer"], creds["client_id"], assertion, clock)
+        renewed["federated"] = federated
+        renewed["host"] = creds.get("host")
+        save(environ, renewed)
+        return renewed["access_token"]
     if not creds.get("refresh_token"):
         raise LoginError("the sign-in has expired: run `stardelt login` again")
     status, body = _post(
