@@ -294,6 +294,12 @@ verify-crds: _context ## The live CRD schemas match the operator checkout (needs
 verify-pins: _context ## The live Deployment images match the checked-in pins
 	@bash scripts/verify-pins.sh
 
+# verify-pins proves the live Nova image digest is the pin; this proves the document inside that
+# image is the one nova/openapi/nova.json carries at the commit the pin names (#951, #95).
+.PHONY: verify-contract
+verify-contract: _context ## The live Nova contract matches nova/openapi/nova.json at the pinned commit
+	@bash scripts/verify-contract.sh
+
 .PHONY: verify-s3-sts
 verify-s3-sts: _context ## The gateway speaks STS: identity put, an AssumeRole session at one table prefix, a sibling prefix refused
 	@NS=$(NAMESPACE) bash scripts/verify-s3-sts.sh
