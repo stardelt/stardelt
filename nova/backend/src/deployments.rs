@@ -86,7 +86,7 @@ pub struct NewDeployment {
     /// The pipelines the deploy touched, at most 200.
     #[serde(default)]
     pub pipelines: Vec<DeploymentPipeline>,
-    /// The rendered Pipeline documents this deploy applied; empty for a failed deploy.
+    /// The rendered documents this deploy applied — `Pipeline` and `StreamApp`; empty for a failed deploy.
     #[serde(default)]
     pub resources: Vec<serde_json::Value>,
     /// The files of the bundle this deploy read, at most 200; empty when the caller sent none.
@@ -376,6 +376,17 @@ pub fn deploy_refusal(
     }
 }
 
+/// The kind a stored document is replayed as. Only `StreamApp` is a second kind; a document
+/// without a `kind` (everything recorded before #940) and an unknown one replay as a Pipeline,
+/// so they are refused with the pipeline sentence rather than silently skipped.
+fn stored_document_kind(document: &serde_json::Value) -> &'static str {
+    if document.get("kind").and_then(serde_json::Value::as_str) == Some("StreamApp") {
+        "StreamApp"
+    } else {
+        "Pipeline"
+    }
+}
+
 /// The identity of a rendered set: the lowercase hex SHA-256 of the bundle, the target, the
 /// rendered documents **in the order given** and the files **sorted by path** — one line each,
 /// the form `migrations::plan_id` uses (#101). `plan` answers it and `record` recomputes it, so
@@ -659,7 +670,7 @@ pub async fn detail(
     operation_id = "deployments_record",
     path = "/api/deployments",
     tag = "public",
-    description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the pipelines it touched. Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
+    description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the rendered documents it applied (its `Pipeline`s and its `StreamApp`s). Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
     request_body(content = NewDeployment, example = json!(new_deployment_example())),
     responses(
         (status = 201, description = "The stored row", body = Deployment, example = json!(row_example())),
@@ -838,11 +849,11 @@ fn is_rule_refusal(fail: &Fail) -> bool {
     operation_id = "deployments_rollback",
     path = "/api/deployments/{id}/rollback",
     tag = "public",
-    description = "Roll back to what a recorded deployment applied: the stored rendered Pipeline documents of a row of the caller's groups are replayed as the caller — each missing one is created and each existing one updated — and the replay is recorded as a new deployment row whose `previousDeploymentId` points at the source. It needs no Git: it applies exactly what ran. Only a row with status `applied` and at least one stored resource can be replayed. A document the rules refuse stops the replay: the row is still recorded, as `failed`, and the answer is 409 with the sentence (400 when a stored document no longer fits a pipeline, 502/503 when the cluster did not answer). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the row's stage is `<stage>` and the caller is a member of the row's owner group; an administrator's credential has no such client and is unaffected.",
+    description = "Roll back to what a recorded deployment applied: the stored rendered documents of a row of the caller's groups are replayed as the caller — each missing one is created and each existing one updated — and the replay is recorded as a new deployment row whose `previousDeploymentId` points at the source. It needs no Git: it applies exactly what ran. Only a row with status `applied` and at least one stored resource can be replayed. A `StreamApp` document is replayed with the rules of `streams_put`: a stream the caller's group owns is created or updated, and a stream of another group or one Nova did not write is refused with that route's sentence. A document the rules refuse stops the replay: the row is still recorded, as `failed`, and the answer is 409 with the sentence (400 when a stored document no longer fits its kind — a pipeline or a stream, 502/503 when the cluster did not answer). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the row's stage is `<stage>` and the caller is a member of the row's owner group; an administrator's credential has no such client and is unaffected.",
     params(("id" = i64, Path, description = "The deployment's id")),
     responses(
         (status = 201, description = "The new row recording the replay", body = Deployment, example = json!(rollback_row_example())),
-        (status = 400, description = "A stored document no longer fits a pipeline", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "A stored document no longer fits its kind (a pipeline or a stream)", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
         (status = 403, description = "A deploy principal may not roll back a row of another stage or of another owner group", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such row among the ones the caller may see", body = crate::openapi::ErrorResponse),
@@ -909,17 +920,24 @@ pub async fn rollback(
     let mut touched: Vec<DeploymentPipeline> = Vec::new();
     let mut refusal: Option<Fail> = None;
     for document in &documents {
-        match crate::pipelines::apply_document(
-            resources.as_ref(),
-            s.db.as_ref(),
-            s.notebooks.as_ref(),
-            s.airflow.as_ref(),
-            &s.pipeline_creates,
-            &caller.identity,
-            document,
-        )
-        .await
-        {
+        let outcome = match stored_document_kind(document) {
+            "StreamApp" => {
+                crate::streams::apply_stream_document(&s, &caller.identity, document).await
+            }
+            _ => {
+                crate::pipelines::apply_document(
+                    resources.as_ref(),
+                    s.db.as_ref(),
+                    s.notebooks.as_ref(),
+                    s.airflow.as_ref(),
+                    &s.pipeline_creates,
+                    &caller.identity,
+                    document,
+                )
+                .await
+            }
+        };
+        match outcome {
             Ok(action) => touched.push(DeploymentPipeline {
                 namespace: crate::cluster::namespace(),
                 name: document["name"].as_str().unwrap_or_default().to_string(),
@@ -1761,5 +1779,22 @@ mod tests {
                 "an administrator answers both rows (id {id})"
             );
         }
+    }
+
+    #[test]
+    fn a_stored_document_is_replayed_as_its_kind() {
+        assert_eq!(
+            stored_document_kind(&serde_json::json!({"kind": "StreamApp"})),
+            "StreamApp"
+        );
+        assert_eq!(
+            stored_document_kind(&serde_json::json!({"kind": "Pipeline"})),
+            "Pipeline"
+        );
+        assert_eq!(stored_document_kind(&serde_json::json!({})), "Pipeline");
+        assert_eq!(
+            stored_document_kind(&serde_json::json!({"kind": "SqlMigration"})),
+            "Pipeline"
+        );
     }
 }
