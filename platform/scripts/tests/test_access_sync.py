@@ -83,6 +83,9 @@ class FakeLakekeeper:
         self.roles = {}
         self.role_assignments = {}
         self.warehouse_assignments = {}
+        self.profiles = {}
+        self.storage_updates = []
+        self.storage_refused = False
         self.project_assignments = []
         state = self
 
@@ -156,6 +159,17 @@ class FakeLakekeeper:
                         },
                     )
                     return
+                warehouse = re.fullmatch(r"/management/v1/warehouse/([^/]+)", path)
+                if warehouse:
+                    self._reply(
+                        200,
+                        {
+                            "storage-profile": state.profiles.get(
+                                warehouse.group(1), {"sts-enabled": False}
+                            )
+                        },
+                    )
+                    return
                 if path == "/management/v1/permissions/project/assignments":
                     self._reply(200, {"assignments": state.project_assignments})
                     return
@@ -176,7 +190,19 @@ class FakeLakekeeper:
                         self._reply(409, {"type": "conflict"})
                         return
                     state.warehouses[name] = "warehouse-" + str(len(state.warehouses) + 1)
+                    state.profiles[state.warehouses[name]] = body.get("storage-profile")
                     self._reply(201, {"warehouse-id": state.warehouses[name]})
+                    return
+                warehouse = re.fullmatch(
+                    r"/management/v1/warehouse/([^/]+)/storage", path
+                )
+                if warehouse:
+                    if state.storage_refused:
+                        self._reply(500, {"type": "unavailable"})
+                        return
+                    state.storage_updates.append((warehouse.group(1), body))
+                    state.profiles[warehouse.group(1)] = body.get("storage-profile")
+                    self._reply(200, {})
                     return
                 if path == "/management/v1/role":
                     name = body.get("name")
@@ -734,6 +760,37 @@ class EnsureWarehouseTest(JobTestCase):
         self.assertEqual(action, "exists")
         self.assertEqual(warehouse_id, "warehouse-raced")
         self.assertEqual(len([r for r in self.fake.requests if r[0] == "POST"]), 1)
+
+    def test_an_existing_warehouse_that_does_not_vend_is_flipped(self):
+        warehouse_id = self.fake.add_warehouse("sandbox")
+        self.fake.profiles[warehouse_id] = {"sts-enabled": False}
+        again, action = access_sync.ensure_warehouse("sandbox", {}, dict(S3))
+        self.assertEqual((again, action), (warehouse_id, "updated"))
+        self.assertEqual(len(self.fake.storage_updates), 1)
+        got_id, body = self.fake.storage_updates[0]
+        self.assertEqual(got_id, warehouse_id)
+        self.assertIs(body["storage-profile"]["sts-enabled"], True)
+        self.assertEqual(body["storage-profile"]["sts-role-arn"], access_sync.STS_ROLE_ARN)
+        self.assertEqual(body["storage-profile"]["sts-endpoint"], S3["endpoint"])
+        self.assertEqual(
+            body["storage-credential"],
+            access_sync.warehouse_body("sandbox", {}, dict(S3))["storage-credential"],
+        )
+
+    def test_an_existing_warehouse_that_vends_is_left_alone(self):
+        warehouse_id, _ = access_sync.ensure_warehouse("sandbox", {}, dict(S3))
+        self.fake.profiles[warehouse_id] = {"sts-enabled": True}
+        again, action = access_sync.ensure_warehouse("sandbox", {}, dict(S3))
+        self.assertEqual((again, action), (warehouse_id, "exists"))
+        self.assertEqual(self.fake.storage_updates, [])
+
+    def test_a_refused_storage_update_is_a_failure(self):
+        warehouse_id = self.fake.add_warehouse("sandbox")
+        self.fake.profiles[warehouse_id] = {"sts-enabled": False}
+        self.fake.storage_refused = True
+        again, action = access_sync.ensure_warehouse("sandbox", {}, dict(S3))
+        self.assertEqual((again, action), (warehouse_id, "failed"))
+        self.assertEqual(len(self.fake.storage_updates), 0)
 
 
 class PatchStatusTest(JobTestCase):
