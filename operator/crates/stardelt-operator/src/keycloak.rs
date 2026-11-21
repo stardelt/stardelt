@@ -675,7 +675,44 @@ mod tests {
             .collect();
         assert_eq!(
             realm_scopes,
-            ["stardelt:read", "stardelt:write"].into_iter().collect()
+            ["kc-admin-api", "stardelt:read", "stardelt:write"]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// Keycloak 26.8 accepts a service-account token at /admin only with the `kc-admin-api`
+    /// audience (#883). An import drops a client's reference to the built-in scope, because the
+    /// server creates that scope after the representation's clients. The realm therefore declares
+    /// the scope itself, and access-sync's client takes it by default.
+    #[test]
+    fn the_group_sync_client_gets_the_admin_api_audience() {
+        let realm = realm_config_map(&spec(Some("data.example.com")))
+            .expect("a ConfigMap")
+            .data
+            .expect("data")
+            .remove("stardelt-realm.json")
+            .expect("the realm");
+        let parsed: serde_json::Value = serde_json::from_str(&realm).expect("realm JSON");
+        let client = parsed["clients"]
+            .as_array()
+            .expect("clients")
+            .iter()
+            .find(|c| c["clientId"] == "trino-group-sync")
+            .expect("the trino-group-sync client");
+        assert_eq!(
+            client["defaultClientScopes"],
+            serde_json::json!(["kc-admin-api"])
+        );
+        let scope = parsed["clientScopes"]
+            .as_array()
+            .expect("clientScopes")
+            .iter()
+            .find(|s| s["name"] == "kc-admin-api")
+            .expect("the realm declares kc-admin-api");
+        assert_eq!(
+            scope["protocolMappers"][0]["protocolMapper"],
+            "oidc-admin-api-audience-mapper"
         );
     }
 
