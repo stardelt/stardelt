@@ -1201,6 +1201,10 @@ verify-catalog-permissions: _context ## Prove the live Catalog grants against th
 verify-catalog-workload-auth: _context ## The catalog accepts workload ServiceAccount tokens, and refuses the OIDC and API-server audiences (#492, #562)
 	@NS=$(NAMESPACE) bash scripts/verify-catalog-workload-auth.sh
 
+.PHONY: verify-workload-identity
+verify-workload-identity: _context ## Every ServicePrincipal's ServiceAccount exists, mounts no token, and its catalog principal matches (#492, #650, #684)
+	@NS=$(NAMESPACE) bash scripts/verify-workload-identity.sh
+
 # ---------------------------------------------------------------------------
 # The switch (platform#311, authz 8/8): Trino asks the OPA bridge, and the
 # engine's user becomes the Keycloak `sub`.
