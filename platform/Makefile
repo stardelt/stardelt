@@ -1524,7 +1524,7 @@ install-operator: _context ## Install the stardelt Operator (needs ../operator)
 	@# from there every time, before verify-crds proves the live schemas are this checkout's.
 	@kubectl apply --server-side --force-conflicts -f $(OPERATOR_DIR)/chart/crds/
 	@$(MAKE) --no-print-directory verify-crds
-	@echo "Operator installed. CRDs: PlatformInstance, Lakehouse, Catalog, SqlWarehouse, IngestionSource, Pipeline, Connection, ServicePrincipal, Volume."
+	@echo "Operator installed. CRDs: Catalog, Connection, DeployStage, IngestionSource, Lakehouse, ModelEndpoint, Pipeline, PlatformInstance, ServicePrincipal, SparkCluster, SqlWarehouse, StreamApp, Volume."
 
 # ---------------------------------------------------------------------------
 # Uninstall
