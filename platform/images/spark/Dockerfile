@@ -30,9 +30,10 @@ ADD --checksum=sha256:3123c3798af642dd537230923548e013ef41cc28b6626e5225808cf567
     https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.1_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.1_2.13-${ICEBERG_VERSION}.jar \
     /opt/spark/jars/iceberg-spark-runtime.jar
 
-# S3FileIO and the AWS SDK v2 it needs. The REST catalog is configured without
-# vended credentials (Lakekeeper's `allowall` dev shape), so the client signs
-# its own S3 requests with the credentials from Secret stardelt-s3-creds.
+# S3FileIO and the AWS SDK v2 it needs. The REST catalog vends a table-scoped
+# credential on every load (#75, #840) and S3FileIO signs the data request with
+# it: the shared Connect server configures no static key on its driver or its
+# executors.
 ADD --checksum=sha256:dd7e49ffa4ac9b215bed846581991259e3aec9bb2fa08d6cec029c46cd66d957 \
     https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar \
     /opt/spark/jars/iceberg-aws-bundle.jar
@@ -42,8 +43,8 @@ ADD --checksum=sha256:dd7e49ffa4ac9b215bed846581991259e3aec9bb2fa08d6cec029c46cd
 # The upstream image ships hadoop-client 3.4.2 without hadoop-aws, so
 # org.apache.hadoop.fs.s3a.S3AFileSystem does not exist. hadoop-aws must match
 # that client version exactly. S3A is pinned to the *anonymous* credentials
-# provider in manifests/spark.yaml: these jars never see the platform's S3 key —
-# that key belongs to Iceberg's S3FileIO, which is a different client.
+# provider in manifests/spark.yaml and never signs with a vended table credential —
+# that belongs to Iceberg's S3FileIO, which is a different client.
 #
 # hadoop-aws 3.4.2 needs AWS SDK v2 at the version its pom names
 # (`aws-java-sdk-v2.version` of hadoop-project 3.4.2 = 2.29.52), shipped as the

@@ -38,6 +38,23 @@ def _by_identity(path):
     return {(d["kind"], d["metadata"]["name"]): d for d in docs}
 
 
+def _pairs(policy):
+    return [(v["expression"], v.get("message")) for v in policy["validations"]]
+
+
+def _is_secret_rule(pair):
+    expression = pair[0]
+    return "secretKeyRef" in expression or "secretRef" in expression
+
+
+def _plain(policy):
+    return [pair for pair in _pairs(policy) if not _is_secret_rule(pair)]
+
+
+def _secret(policy):
+    return [pair for pair in _pairs(policy) if _is_secret_rule(pair)]
+
+
 class SparkBatchGuardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -82,19 +99,23 @@ class SparkBatchGuardTest(unittest.TestCase):
             self.assertIn(":spark-batch-driver'", conditions[0]["expression"])
 
     def test_the_executor_validations_equal_the_connect_ones(self):
-        batch = {v["expression"] for v in self.policy("spark-batch-executor-pods")["validations"]}
-        connect = {v["expression"]
-                   for v in self.connect[("ValidatingAdmissionPolicy",
-                                          "spark-connect-executor-pods")]["spec"]["validations"]}
+        batch = _plain(self.policy("spark-batch-executor-pods"))
+        connect = _plain(self.connect[("ValidatingAdmissionPolicy",
+                                       "spark-connect-executor-pods")]["spec"])
         self.assertEqual(batch, connect)
 
-    def test_the_executor_messages_equal_the_connect_ones(self):
-        batch = [(v["expression"], v.get("message"))
-                 for v in self.policy("spark-batch-executor-pods")["validations"]]
-        connect = [(v["expression"], v.get("message"))
-                   for v in self.connect[("ValidatingAdmissionPolicy",
-                                          "spark-connect-executor-pods")]["spec"]["validations"]]
-        self.assertEqual(batch, connect)
+    def test_the_secret_rules_keep_the_platform_key_on_the_batch_driver_only(self):
+        # A batch driver still reads the platform key until #494; the shared
+        # Connect driver admits no Secret at all (#75).
+        batch = _secret(self.policy("spark-batch-executor-pods"))
+        connect = _secret(self.connect[("ValidatingAdmissionPolicy",
+                                        "spark-connect-executor-pods")]["spec"])
+        self.assertEqual(len(batch), 2)
+        self.assertEqual(len(connect), 2)
+        for expression, _ in batch:
+            self.assertIn("stardelt-s3-creds", expression)
+        for expression, _ in connect:
+            self.assertNotIn("stardelt-s3-creds", expression)
 
     def test_no_batch_validation_allows_platform_pipeline_secrets(self):
         for name in ("spark-batch-executor-pods", "spark-batch-configmaps"):

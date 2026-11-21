@@ -94,9 +94,10 @@ roleRef:
 # What the batch driver may create (executor pods). A copy of
 # `spark-connect-executor-pods` in `manifests/spark-connect-pod-guard.yaml`: the batch path's
 # executor shape is the same measured one (`chart/files/spark-runtimes.json`: ServiceAccount
-# `spark-executor`, the two Secret refs on `stardelt-s3-creds`). The Connect policy's
-# validations are kept byte-identical on purpose — `scripts/tests/test_spark_batch_guard.py`
-# pins the parity.
+# `spark-executor`), except that a batch executor may still read Secret `stardelt-s3-creds`
+# until #494 — the shared Connect driver and its executors hold no key at all (#75, #841).
+# The other validations are kept byte-identical on purpose — `scripts/tests/test_spark_batch_guard.py`
+# pins the parity and the difference.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
