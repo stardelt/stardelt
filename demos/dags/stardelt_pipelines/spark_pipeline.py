@@ -5,8 +5,8 @@ flat `f00`, `f01`, … keys in path order. The loader renders the same key→pat
 Pipeline's own `files`, mounts the ConfigMap read-only, and a `python3 -c` runner copies the
 graph to /tmp, sets the three keys stardelt owns (`catalog` and `database` from the task's
 `writes`, `storage` under the group's bucket), mints the principal's token and runs
-`spark-pipelines run` as a thin Spark Connect client — the shape #957 measured (6.6 s, two
-flows, no S3 key).
+`spark-pipelines dry-run` and then `spark-pipelines run` as a thin Spark Connect client — the
+shape #957 measured (6.6 s, two flows, no S3 key).
 
 The pod holds no storage credential and creates no Spark of its own: the graph runs on the
 shared Connect server, in the principal's session. The token lives only in the pod's env and
@@ -90,17 +90,14 @@ spec.write_text(yaml.safe_dump(document, sort_keys=False))
 conf = work / "conf"
 conf.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, SPARK_CONF_DIR=str(conf), HOME="/tmp", SPARK_HOME="/opt/spark")
-refresh = os.environ.get("SPARK_REFRESH") or ""
-args = ["--full-refresh-all"] if refresh == "all" else (
-    ["--full-refresh", refresh] if refresh else []
-)
-raise SystemExit(
-    subprocess.call(
-        ["/opt/spark/bin/spark-pipelines", "run", "--spec", str(spec), *args],
+for step in json.loads(os.environ["SPARK_PROJECT_STEPS"]):
+    code = subprocess.call(
+        ["/opt/spark/bin/spark-pipelines", *step],
         cwd=str(work / "graph"),
         env=env,
     )
-)
+    if code != 0:
+        raise SystemExit(code)
 '''
 
 
@@ -119,6 +116,29 @@ def checkpoint_uri(bucket: str, owner_group: str, pipeline: str, task: str) -> s
     return f"s3a://{bucket}/pipelines/{owner_group}/{pipeline}/{task}/checkpoints"
 
 
+SPEC_PATH = "/tmp/spark-project/graph/spark-pipeline.yml"
+
+
+def steps(
+    spec_path: str, refresh: str | None, full_refresh: tuple[str, ...]
+) -> tuple[tuple[str, ...], ...]:
+    """The `spark-pipelines` calls in order: the dry run first, then the run (#80).
+
+    A graph the dry run rejects fails the task with no write; the run keeps the refresh flags
+    `pod_env` gave it before this change (`refresh: full` is `--full-refresh-all`).
+    """
+    if refresh == "full":
+        refresh_args: tuple[str, ...] = ("--full-refresh-all",)
+    elif full_refresh:
+        refresh_args = ("--full-refresh", ",".join(full_refresh))
+    else:
+        refresh_args = ()
+    return (
+        ("dry-run", "--spec", spec_path),
+        ("run", "--spec", spec_path, *refresh_args),
+    )
+
+
 def pod_env(
     *,
     paths: tuple[tuple[str, str], ...],
@@ -126,13 +146,11 @@ def pod_env(
     catalog: str,
     database: str,
     storage: str,
-    refresh: str | None,
-    full_refresh: tuple[str, ...],
+    steps: tuple[tuple[str, ...], ...],
     principal_secret: str,
     wap_branch: str | None = None,
 ) -> list[k8s.V1EnvVar]:
     """The pod's environment: the runner's contract and the principal's Secret by reference."""
-    refresh_value = "all" if refresh == "full" else ",".join(full_refresh)
     env = [
         k8s.V1EnvVar(
             name="SPARK_PROJECT_PATHS",
@@ -142,7 +160,10 @@ def pod_env(
         k8s.V1EnvVar(name="SPARK_CATALOG", value=catalog),
         k8s.V1EnvVar(name="SPARK_DATABASE", value=database),
         k8s.V1EnvVar(name="SPARK_STORAGE", value=storage),
-        k8s.V1EnvVar(name="SPARK_REFRESH", value=refresh_value),
+        k8s.V1EnvVar(
+            name="SPARK_PROJECT_STEPS",
+            value=json.dumps([list(step) for step in steps]),
+        ),
         k8s.V1EnvVar(name="PIPELINE_TOKEN_URL", value=_required("PIPELINE_TOKEN_URL")),
         _secret_env("PIPELINE_CLIENT_ID", principal_secret, "client-id"),
         _secret_env("PIPELINE_CLIENT_SECRET", principal_secret, "client-secret"),
@@ -263,8 +284,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
                 self.pipeline,
                 self.task_name,
             ),
-            refresh=self.refresh,
-            full_refresh=self.full_refresh,
+            steps=steps(SPEC_PATH, self.refresh, self.full_refresh),
             principal_secret=self.principal_secret,
             wap_branch=wap_branch,
         )
