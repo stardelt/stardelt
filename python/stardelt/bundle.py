@@ -1091,9 +1091,9 @@ def plan_files(nova, directory, target):
 def _record_at(nova, owner, stamp, target, status, touched, resources=(), files=(), previous_deployment_id=None, plan_id=None):
     """Record one deploy (``deployments_record``) for ``owner``: the row on success, or a ``not-recorded`` row.
 
-    ``resources`` is the rendered list of Pipeline documents the deploy applied, empty for a
-    failed deploy; the record keeps them so a rollback can replay them. ``files`` is the same for
-    the bundle's own files (``_digests``): which content the documents were built from.
+    ``resources`` is the rendered list of documents — the pipelines and the StreamApps — the deploy applied,
+    empty for a failed deploy; the record keeps them so a rollback can replay them. ``files`` is the same
+    for the bundle's own files (``_digests``): which content the documents were built from.
     ``previous_deployment_id`` is the deployment a rollback replayed, ``None`` for a deploy that was not one.
     ``plan_id`` is the ``planId`` of the plan the deploy followed (``deployments_plan``), ``None`` when
     there was no plan.
@@ -1151,7 +1151,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     longer names is listed as ``would-delete`` and, in a real deploy, removed (``deleted``) after everything else
     succeeded. Every pipeline carries the bundle's name, the target and the Git commit of the bundle
     directory (``provenance``), which Nova stamps on it. Every deploy is recorded once in Nova's deployment record
-    (``deployments_record``: the bundle, the target, the commit, the caller and the pipelines it wrote); the record carries
+    (``deployments_record``: the bundle, the target, the commit, the caller and the rendered documents — the
+    pipelines and the StreamApps — it wrote); the record carries
     the ``planId`` of the plan the deploy asked Nova for before writing (``deployments_plan``), so the row names the set
     that was checked. A Nova without that route (404) deploys as before and says so on stderr. A deploy whose
     record cannot be written still succeeds and prints ``{"action": "not-recorded", "reason": …}``. A write that fails
@@ -1286,6 +1287,10 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     if changed_by_hand and not accept_drift and _drift_mode(directory, target) == "block":
         return _blocked(target, changed_by_hand), done
     owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
+    # The plan and the record name the whole rendered set: the pipelines and the stream apps,
+    # in the order the deploy writes them. `render_streams` drops `kind` for `streams_put`, so
+    # the plan copies carry it back (Nova reads a document without one as a Pipeline, #940).
+    rendered = [*specs, *({**spec, "kind": "StreamApp"} for spec in stream_specs)]
     plan_id = None
     try:
         plan = nova.call("deployments_plan", body={
@@ -1293,7 +1298,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             "ownerGroup": owner,
             "target": target,
             "revision": stamp.get("revision"),
-            "resources": specs,
+            "resources": rendered,
             "files": _digests(directory),
             "prune": prune,
         })
@@ -1385,7 +1390,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         except api.StardeltApiError as err:
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
-    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), specs, plan_id=plan_id))
+    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), rendered, plan_id=plan_id))
     return [], done
 
 

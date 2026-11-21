@@ -511,6 +511,30 @@ def test_deploy_puts_the_stream_with_its_stamp(tmp_path):
     assert (method, path) == ("PUT", "https://nova.example/api/streams/stardelt/measurements")
     assert kwargs["json"]["name"] == "measurements"
     assert kwargs["json"]["provenance"] == {"bundle": "sales-etl", "target": "prod"}, "no commit outside a checkout"
+    assert kwargs["json"].get("kind") is None, "the write is what render_streams returned, without the plan's kind"
+
+
+def test_the_plan_and_the_record_name_the_stream_it_writes(tmp_path):
+    with_stream(tmp_path)
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=NO_STREAMS), FakeResponse(payload=STREAM_OK),
+        FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload={"name": "measurements"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    bodies = {path: kwargs["json"] for method, path, kwargs in session.calls if method == "POST"}
+    plan = bodies["https://nova.example/api/deployments/plan"]
+    record = bodies["https://nova.example/api/deployments"]
+    kinds = [document.get("kind", "Pipeline") for document in plan["resources"]]
+    assert kinds == ["Pipeline", "StreamApp"], "the plan's set is the rendered set, streams included"
+    assert plan["resources"][-1]["name"] == "measurements"
+    assert plan["resources"][-1]["provenance"] == {"bundle": "sales-etl", "target": "prod"}
+    assert record["resources"] == plan["resources"], "the planId names both sets"
+    assert record["planId"] == "abc", "PLAN_OK's planId"
 
 
 def test_a_deploy_with_prune_removes_a_stale_stream_app(tmp_path):
