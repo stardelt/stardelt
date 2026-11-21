@@ -11,11 +11,10 @@
   (`/v1/statement`, `/oauth2`), never its web UI or `/v1/info` (platform#181);
   Keycloak publishes the realm's public surface
   (`/realms/stardelt`, `/resources`, `/robots.txt`) plus the `stardelt` realm's
-  admin console and its REST API. Its paths are ingress-nginx regexes
-  (`regex: true` adds `use-regex`), each anchored to its exact path segment
-  (`(/|$)` or `$`), so the master-realm console is never reachable through this
-  host. A path entry is either a string (Prefix) or a mapping of `path` +
-  `pathType`.
+  admin console and its REST API. Its paths are plain prefixes (pathType Prefix)
+  so they route the same under ingress-nginx and Traefik; the master-realm
+  console is not published. A path entry is either a string (Prefix) or a
+  mapping of `path` + `pathType`.
 
   Host resolution, per service: `ingress.hosts.<name>` wins; otherwise
   `<sub>.<platform.baseDomain>`; otherwise nothing is rendered for that service
@@ -43,13 +42,13 @@
       (dict "name" "superset"   "service" "superset"           "port" 8088 "sub" "superset"   "enabled" .Values.superset.enabled)
       (dict "name" "airflow"    "service" "airflow-api-server" "port" 8080 "sub" "airflow"    "enabled" .Values.airflow.enabled)
       (dict "name" "jupyterhub" "service" "proxy-public"       "port" 80   "sub" "jupyter"    "enabled" .Values.jupyterhub.enabled)
-      (dict "name" "keycloak"   "service" "keycloak"           "port" 8080 "sub" "id"         "enabled" (eq (include "stardelt.identityMode" .) "platform") "regex" true "paths" (list
-        (dict "path" "/realms/stardelt(/|$)"        "pathType" "ImplementationSpecific")
-        (dict "path" "/resources(/|$)"              "pathType" "ImplementationSpecific")
-        (dict "path" "/robots\\.txt$"               "pathType" "ImplementationSpecific")
-        (dict "path" "/admin/stardelt(/|$)"         "pathType" "ImplementationSpecific")
-        (dict "path" "/admin/realms/stardelt(/|$)"  "pathType" "ImplementationSpecific")
-        (dict "path" "/admin/serverinfo$"           "pathType" "ImplementationSpecific")))
+      (dict "name" "keycloak"   "service" "keycloak"           "port" 8080 "sub" "id"         "enabled" (eq (include "stardelt.identityMode" .) "platform") "paths" (list
+        (dict "path" "/realms/stardelt"        "pathType" "Prefix")
+        (dict "path" "/resources"              "pathType" "Prefix")
+        (dict "path" "/robots.txt"             "pathType" "Prefix")
+        (dict "path" "/admin/stardelt"         "pathType" "Prefix")
+        (dict "path" "/admin/realms/stardelt"  "pathType" "Prefix")
+        (dict "path" "/admin/serverinfo"       "pathType" "Prefix")))
 }}
 {{- range $services }}
 {{- if and .enabled (or (not (has .name $unauthenticated)) (has .name $exposed)) }}
@@ -73,16 +72,13 @@ metadata:
   namespace: {{ $.Release.Namespace }}
   labels:
     app.kubernetes.io/part-of: stardelt
-  {{- if or $extraAnnotations (and $tls.enabled $tls.issuer) .regex $allowed }}
+  {{- if or $extraAnnotations (and $tls.enabled $tls.issuer) $allowed }}
   annotations:
     {{- with $extraAnnotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
     {{- if and $tls.enabled $tls.issuer }}
     cert-manager.io/cluster-issuer: {{ $tls.issuer | quote }}
-    {{- end }}
-    {{- if .regex }}
-    nginx.ingress.kubernetes.io/use-regex: "true"
     {{- end }}
     {{- if $allowed }}
     nginx.ingress.kubernetes.io/whitelist-source-range: {{ join "," $allowed | quote }}

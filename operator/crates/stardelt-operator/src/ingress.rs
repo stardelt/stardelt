@@ -37,21 +37,23 @@ pub fn secret_name(template: &str, host: &str) -> String {
 }
 
 /// What the identity provider publishes: the realm's public surface and the admin console and
-/// REST API of the `stardelt` realm, never the master realm. These are ingress-nginx regular
-/// expressions, each anchored to its path segment.
+/// REST API of the `stardelt` realm, never the master realm. Plain path prefixes
+/// (`pathType: Prefix`), matched segment by segment by every Ingress controller including
+/// Traefik; the ingress-nginx regexes these replaced were read as literal prefixes there and
+/// answered 404 (stardelt/stardelt#882).
 pub const KEYCLOAK_PATHS: [&str; 6] = [
-    "/realms/stardelt(/|$)",
-    "/resources(/|$)",
-    "/robots\\.txt$",
-    "/admin/stardelt(/|$)",
-    "/admin/realms/stardelt(/|$)",
-    "/admin/serverinfo$",
+    "/realms/stardelt",
+    "/resources",
+    "/robots.txt",
+    "/admin/stardelt",
+    "/admin/realms/stardelt",
+    "/admin/serverinfo",
 ];
 
 /// The Ingress of Nova, on the base domain. `None` unless `spec.ingress.enabled` and a base
 /// domain is set.
 pub fn nova(spec: &PlatformInstanceSpec) -> Option<Ingress> {
-    build(spec, nova::NAME, nova::NAME, 8080, "", &["/"], false, &[])
+    build(spec, nova::NAME, nova::NAME, 8080, "", &["/"], &[])
 }
 
 /// The Ingress of the identity provider, on `id.<base domain>`, with `identity.mode: platform`
@@ -67,7 +69,6 @@ pub fn keycloak(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         8080,
         "id",
         &KEYCLOAK_PATHS,
-        true,
         &[],
     )
 }
@@ -85,7 +86,6 @@ pub fn airflow(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         8080,
         "airflow",
         &["/"],
-        false,
         &[],
     )
 }
@@ -103,7 +103,6 @@ pub fn jupyterhub(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         80,
         "jupyter",
         &["/"],
-        false,
         &[],
     )
 }
@@ -127,7 +126,6 @@ pub fn superset(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         8088,
         "superset",
         &["/"],
-        false,
         &[],
     )
 }
@@ -153,7 +151,6 @@ pub fn trino(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         8080,
         "trino",
         &["/v1/statement", "/oauth2"],
-        false,
         &[],
     )
 }
@@ -172,7 +169,6 @@ pub fn spark(spec: &PlatformInstanceSpec) -> Option<Ingress> {
         15002,
         "spark",
         &["/"],
-        false,
         &[
             ("nginx.ingress.kubernetes.io/backend-protocol", "GRPC"),
             ("nginx.ingress.kubernetes.io/proxy-read-timeout", "3600"),
@@ -182,7 +178,7 @@ pub fn spark(spec: &PlatformInstanceSpec) -> Option<Ingress> {
 }
 
 /// The one builder every application Ingress goes through: class, TLS, extra annotations and the
-/// path list come from the instance's ingress settings. Eight arguments, one per field it copies.
+/// path list come from the instance's ingress settings. Seven arguments, one per field it copies.
 #[allow(clippy::too_many_arguments)]
 fn build(
     spec: &PlatformInstanceSpec,
@@ -191,7 +187,6 @@ fn build(
     port: i32,
     subdomain: &str,
     paths: &[&str],
-    regex: bool,
     extra: &[(&str, &str)],
 ) -> Option<Ingress> {
     let settings = &spec.ingress;
@@ -210,12 +205,6 @@ fn build(
     }
     for (key, value) in extra {
         annotations.insert((*key).to_string(), (*value).to_string());
-    }
-    if regex {
-        annotations.insert(
-            "nginx.ingress.kubernetes.io/use-regex".to_string(),
-            "true".to_string(),
-        );
     }
     if !settings.allowed_cidrs.is_empty() {
         annotations.insert(
@@ -259,12 +248,7 @@ fn build(
                         .iter()
                         .map(|path| HTTPIngressPath {
                             path: Some(path.to_string()),
-                            // A path that is a regular expression is not a prefix.
-                            path_type: if regex {
-                                "ImplementationSpecific".to_string()
-                            } else {
-                                "Prefix".to_string()
-                            },
+                            path_type: "Prefix".to_string(),
                             backend: backend(service),
                         })
                         .collect(),
@@ -420,28 +404,25 @@ mod tests {
         ))
         .expect("an Ingress");
         assert_eq!(ingress.metadata.name.as_deref(), Some("keycloak"));
-        assert_eq!(
-            ingress.metadata.annotations.as_ref().expect("annotations")["nginx.ingress.kubernetes.io/use-regex"],
-            "true"
+        assert!(
+            ingress.metadata.annotations.is_none(),
+            "no controller-specific annotation on a plain-prefix Ingress"
         );
         let (host, paths) = rule_of(&ingress);
         assert_eq!(host, "id.data.example.com");
         assert_eq!(paths.len(), 6);
-        assert!(
-            paths
-                .iter()
-                .all(|(_, kind)| kind == "ImplementationSpecific")
-        );
+        assert!(paths.iter().all(|(_, kind)| kind == "Prefix"));
         assert!(
             paths
                 .iter()
                 .all(|(path, _)| path != "/" && !path.starts_with("/admin/master")),
             "the master realm and the root stay unreachable: {paths:?}"
         );
-        assert!(paths.contains(&(
-            "/realms/stardelt(/|$)".to_string(),
-            "ImplementationSpecific".to_string()
-        )));
+        assert!(paths.contains(&("/realms/stardelt".to_string(), "Prefix".to_string())));
+        assert!(
+            paths.iter().all(|(path, _)| !path.contains('(') && !path.contains('\\')),
+            "no regex syntax survives: {paths:?}"
+        );
     }
 
     #[test]
