@@ -240,7 +240,7 @@ export default function PipelineDetail() {
             )}
             {pipeline.deployment.modified && (
               <p className="mt-0.5 text-xs text-warn break-words">
-                Changed since the last deploy. The next deploy of this bundle overwrites the change.
+                {'Changed since the last deploy. The next deploy overwrites the change.'}
               </p>
             )}
           </Fact>

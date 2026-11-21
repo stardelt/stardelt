@@ -2615,7 +2615,7 @@ test.describe('pipelines', () => {
     await expect(fact).toContainText('shop-etl · test')
     await expect(fact).not.toContainText('by ')
     await page.goto(`/pipelines/${NS}/drifted`)
-    await expect(fact).toContainText('Changed since the last deploy. The next deploy of this bundle overwrites the change.')
+    await expect(fact).toContainText('Changed since the last deploy. The next deploy overwrites the change.')
     await page.goto(`/pipelines/${NS}/by-hand`)
     await expect(page.getByRole('heading', { name: 'by-hand', exact: true })).toBeVisible()
     await expect(page.getByText('Deployed from', { exact: true })).toHaveCount(0)
