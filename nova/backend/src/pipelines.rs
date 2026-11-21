@@ -8729,6 +8729,7 @@ mod tests {
             identity,
             via: "session",
             access_token: Some(Secret::new("good")),
+            client_id: None,
         }
     }
 

@@ -813,6 +813,7 @@ mod tests {
             },
             via: "bearer",
             access_token: None,
+            client_id: None,
         }
     }
 

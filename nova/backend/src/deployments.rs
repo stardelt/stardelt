@@ -343,6 +343,39 @@ pub fn may_record(identity: &Identity, owner_group: &str) -> bool {
     identity.is_admin || identity.groups.iter().any(|g| g == owner_group)
 }
 
+/// The deploy stage a token was issued to: `stardelt-deploy-<stage>` in `azp`, else `None` (#57).
+pub fn deploy_stage(client_id: Option<&str>) -> Option<&str> {
+    client_id
+        .and_then(|id| id.strip_prefix("stardelt-deploy-"))
+        .filter(|stage| !stage.is_empty())
+}
+
+/// Why this caller may not record or plan a deployment to `target`, or `None` when it may.
+/// A deploy principal (#57) is confined to the stage its client names and to its own group;
+/// everyone else keeps the administrator-or-member rule. `verb` is `record` or `plan`.
+pub fn deploy_refusal(
+    identity: &Identity,
+    owner_group: &str,
+    target: &str,
+    client_id: Option<&str>,
+    verb: &str,
+) -> Option<String> {
+    let member = identity.groups.iter().any(|g| g == owner_group);
+    match deploy_stage(client_id) {
+        Some(stage) if stage != target => Some(format!(
+            "this token belongs to deploy stage `{stage}`; it may only {verb} a deployment to that stage"
+        )),
+        Some(_) if !member => Some(format!(
+            "a deploy principal may only {verb} a deployment of its own group"
+        )),
+        Some(_) => None,
+        None if may_record(identity, owner_group) => None,
+        None => Some(format!(
+            "only a member of the pipeline's owner group may {verb} a deployment"
+        )),
+    }
+}
+
 /// The identity of a rendered set: the lowercase hex SHA-256 of the bundle, the target, the
 /// rendered documents **in the order given** and the files **sorted by path** — one line each,
 /// the form `migrations::plan_id` uses (#101). `plan` answers it and `record` recomputes it, so
@@ -626,7 +659,7 @@ pub async fn detail(
     operation_id = "deployments_record",
     path = "/api/deployments",
     tag = "public",
-    description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the pipelines it touched. Only an administrator or a member of the owner group may record one; the caller is stored as `actor`.",
+    description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the pipelines it touched. Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
     request_body(content = NewDeployment, example = json!(new_deployment_example())),
     responses(
         (status = 201, description = "The stored row", body = Deployment, example = json!(row_example())),
@@ -654,11 +687,14 @@ pub async fn record(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
-    if !may_record(&caller.identity, &new.owner_group) {
-        return error(
-            StatusCode::FORBIDDEN,
-            "only a member of the pipeline's owner group may record a deployment",
-        );
+    if let Some(sentence) = deploy_refusal(
+        &caller.identity,
+        &new.owner_group,
+        &new.target,
+        caller.client_id.as_deref(),
+        "record",
+    ) {
+        return error(StatusCode::FORBIDDEN, &sentence);
     }
     match store(pool, &new, &caller.identity).await {
         Ok(row) => {
@@ -684,7 +720,7 @@ pub async fn record(
     operation_id = "deployments_plan",
     path = "/api/deployments/plan",
     tag = "public",
-    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes and StreamApps are not covered yet.",
+    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes and StreamApps are not covered yet. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
     request_body(content = BundlePlanRequest, example = json!(bundle_plan_request_example())),
     responses(
         (status = 200, description = "The plan, with its identity", body = BundlePlan, example = json!(bundle_plan_example())),
@@ -708,11 +744,14 @@ pub async fn plan(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
-    if !may_record(&caller.identity, &request.owner_group) {
-        return error(
-            StatusCode::FORBIDDEN,
-            "only a member of the pipeline's owner group may plan a deployment",
-        );
+    if let Some(sentence) = deploy_refusal(
+        &caller.identity,
+        &request.owner_group,
+        &request.target,
+        caller.client_id.as_deref(),
+        "plan",
+    ) {
+        return error(StatusCode::FORBIDDEN, &sentence);
     }
     let recorded =
         match last_applied(pool, &request.owner_group, &request.bundle, &request.target).await {
@@ -968,7 +1007,95 @@ mod tests {
             identity: identity(sub, groups, false),
             via: "session",
             access_token: None,
+            client_id: None,
         }
+    }
+
+    #[test]
+    fn deploy_stage_is_read_from_azp() {
+        assert_eq!(deploy_stage(Some("stardelt-deploy-prod")), Some("prod"));
+        assert_eq!(deploy_stage(Some("stardelt-deploy-")), None);
+        assert_eq!(deploy_stage(Some("nova")), None);
+        assert_eq!(deploy_stage(None), None);
+    }
+
+    #[test]
+    fn a_deploy_principal_is_confined_to_its_stage() {
+        let id = identity("gh", &["shop"], false);
+        assert_eq!(
+            deploy_refusal(&id, "shop", "prod", Some("stardelt-deploy-prod"), "record"),
+            None,
+            "the stage its client names is allowed"
+        );
+        let refused = deploy_refusal(&id, "shop", "test", Some("stardelt-deploy-prod"), "record")
+            .expect("another stage is refused");
+        assert!(refused.contains("deploy stage `prod`"), "{refused}");
+        assert!(refused.contains("to that stage"), "{refused}");
+    }
+
+    #[test]
+    fn a_deploy_principal_is_confined_to_its_own_group() {
+        for groups in [&[][..], &["visitors"][..]] {
+            let refused = deploy_refusal(
+                &identity("gh", groups, false),
+                "shop",
+                "prod",
+                Some("stardelt-deploy-prod"),
+                "record",
+            )
+            .expect("a group-less or foreign deploy principal is refused");
+            assert!(refused.contains("its own group"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_person_is_unaffected() {
+        assert_eq!(
+            deploy_refusal(
+                &identity("ada", &["shop"], false),
+                "shop",
+                "prod",
+                None,
+                "record"
+            ),
+            None,
+            "a member of the owner group records as before"
+        );
+        let refused = deploy_refusal(
+            &identity("bob", &["visitors"], false),
+            "shop",
+            "prod",
+            None,
+            "record",
+        )
+        .expect("a non-member without a client id is still refused");
+        assert!(
+            refused.contains("only a member of the pipeline's owner group may record"),
+            "{refused}"
+        );
+        assert_eq!(
+            deploy_refusal(&identity("root", &[], true), "shop", "prod", None, "record"),
+            None,
+            "an administrator still passes"
+        );
+    }
+
+    #[test]
+    fn a_session_principal_has_no_client_id() {
+        let caller = principal("ada", &["shop"]);
+        assert_eq!(caller.client_id, None, "a session carries no client id");
+        assert_eq!(
+            deploy_refusal(
+                &caller.identity,
+                "shop",
+                "prod",
+                caller.client_id.as_deref(),
+                "record"
+            ),
+            None,
+            "a session is not mistaken for a deploy principal"
+        );
+        assert!(may_record(&caller.identity, "shop"));
     }
 
     #[test]
@@ -1441,6 +1568,7 @@ mod tests {
             },
             via: "session",
             access_token: None,
+            client_id: None,
         };
         let response = record(
             State(state),
@@ -1557,6 +1685,7 @@ mod tests {
             },
             via: "session",
             access_token: None,
+            client_id: None,
         };
         for id in [own, other] {
             let response = detail(

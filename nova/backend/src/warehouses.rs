@@ -969,6 +969,7 @@ mod tests {
                 identity: who,
                 via: "session",
                 access_token: None,
+                client_id: None,
             }))
             .with_state(state);
         (router, shared)

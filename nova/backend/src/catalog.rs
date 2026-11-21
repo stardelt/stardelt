@@ -1678,6 +1678,7 @@ mod tests {
             },
             via: "session",
             access_token: Some(crate::auth::Secret::new(format!("token-{name}"))),
+            client_id: None,
         }
     }
 
