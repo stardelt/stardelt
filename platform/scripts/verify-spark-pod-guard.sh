@@ -60,6 +60,22 @@ deny() {  # <sa> <policy> <label>; the YAML to apply is on stdin
   fi
 }
 
+deny_msg() {  # <sa> <policy> <label> <message>; the YAML to apply is on stdin
+  # deny() plus the rule's own sentence: the policy's message is what tells the operator
+  # which validation answered, not the policy name that several of them print.
+  local sa="$1" policy="$2" label="$3" message="$4" out
+  out="$(mktemp)"; trap 'rm -f "$out"' RETURN
+  if kubectl -n "$NS" apply --dry-run=server --as="$sa" -f - >"$out" 2>&1; then
+    echo "✗ ${label} was admitted; the policy should deny it"; problems=$((problems + 1))
+  elif grep -qF -- "$policy" "$out" && grep -qF -- "$message" "$out"; then
+    echo "✓ ${label} denied by the policy: ${message}"
+  elif grep -qF -- "$policy" "$out"; then
+    echo "✗ ${label} was refused by ${policy} but not by \"${message}\": $(tail -1 "$out")"; problems=$((problems + 1))
+  else
+    echo "✗ ${label} was refused, but not by ${policy}: $(tail -1 "$out")"; problems=$((problems + 1))
+  fi
+}
+
 deny_or_pss() {  # <sa> <policy> <label>; the YAML to apply is on stdin.
   # In a namespace with `pod-security.kubernetes.io/enforce: baseline` Pod Security refuses
   # hostNetwork before any ValidatingAdmissionPolicy sees the pod (platform#1455), so both
@@ -145,7 +161,7 @@ spec:
 EOF
 
 # 2. A Secret volume: the pod would read a Secret the executors never need.
-deny "$SA" spark-connect-executor-pods deny-secret-volume.yaml <<EOF
+deny_msg "$SA" spark-connect-executor-pods deny-secret-volume.yaml "executor pods may mount only configMap and emptyDir volumes (no secret, hostPath, PVC, projected or csi volume)" <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -153,7 +169,6 @@ metadata:
   namespace: ${NS}
 spec:
   serviceAccountName: spark-executor
-  automountServiceAccountToken: true
   restartPolicy: Never
   volumes:
     - name: probe-secret
@@ -168,7 +183,7 @@ spec:
 EOF
 
 # 2a. A Secret as one environment variable: the same Secret, through `valueFrom.secretKeyRef`.
-deny "$SA" spark-connect-executor-pods deny-secret-env.yaml <<EOF
+deny_msg "$SA" spark-connect-executor-pods deny-secret-env.yaml "executor pods may read no Secret (secretKeyRef)" <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -176,7 +191,6 @@ metadata:
   namespace: ${NS}
 spec:
   serviceAccountName: spark-executor
-  automountServiceAccountToken: true
   restartPolicy: Never
   containers:
     - name: probe
@@ -190,7 +204,7 @@ spec:
 EOF
 
 # 2b. A Secret as the whole environment: the same Secret, through `envFrom.secretRef`.
-deny "$SA" spark-connect-executor-pods deny-secret-envfrom.yaml <<EOF
+deny_msg "$SA" spark-connect-executor-pods deny-secret-envfrom.yaml "executor pods may read no Secret (envFrom)" <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -198,7 +212,6 @@ metadata:
   namespace: ${NS}
 spec:
   serviceAccountName: spark-executor
-  automountServiceAccountToken: true
   restartPolicy: Never
   containers:
     - name: probe

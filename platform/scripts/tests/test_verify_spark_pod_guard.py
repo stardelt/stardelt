@@ -60,7 +60,21 @@ if argv[:1] == ["apply"]:
         print("Error from server (Forbidden): something else")
         sys.exit(1)
     if "name: spark-guard-probe" in stdin:
-        print(f"{prefix}-executor-pods denied by the policy")
+        if mode == "policy-only":
+            print(f"{prefix}-executor-pods denied by the policy")
+            sys.exit(1)
+        message = None
+        if "secretKeyRef" in stdin:
+            message = "executor pods may read no Secret (secretKeyRef)"
+        elif "envFrom" in stdin:
+            message = "executor pods may read no Secret (envFrom)"
+        elif "secret:" in stdin and "volumes:" in stdin:
+            message = ("executor pods may mount only configMap and emptyDir volumes "
+                       "(no secret, hostPath, PVC, projected or csi volume)")
+        if message:
+            print(f"{prefix}-executor-pods denied by the policy: {message}")
+        else:
+            print(f"{prefix}-executor-pods denied by the policy")
         sys.exit(1)
     if "keycloak-realm-probe" in stdin:
         print(f"{prefix}-configmaps denied by the policy")
@@ -106,6 +120,32 @@ class HostNetworkCase(unittest.TestCase):
             "✗ deny-host-network.yaml was refused, but by neither spark-connect-executor-pods nor Pod Security",
             done.stdout,
         )
+
+    def test_the_secret_probes_name_the_rule_that_refused_them(self):
+        done = self.run_script("pss")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for line in (
+            "✓ deny-secret-volume.yaml denied by the policy: executor pods may mount only "
+            "configMap and emptyDir volumes (no secret, hostPath, PVC, projected or csi volume)",
+            "✓ deny-secret-env.yaml denied by the policy: executor pods may read no Secret (secretKeyRef)",
+            "✓ deny-secret-envfrom.yaml denied by the policy: executor pods may read no Secret (envFrom)",
+            "PASS (19 cases: 15 denied, 4 admitted)",
+        ):
+            self.assertIn(line, done.stdout)
+
+    def test_a_refusal_that_names_only_the_policy_fails(self):
+        done = self.run_script("policy-only")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        for line in (
+            '✗ deny-secret-volume.yaml was refused by spark-connect-executor-pods but not by '
+            '"executor pods may mount only configMap and emptyDir volumes (no secret, hostPath, '
+            'PVC, projected or csi volume)"',
+            '✗ deny-secret-env.yaml was refused by spark-connect-executor-pods but not by '
+            '"executor pods may read no Secret (secretKeyRef)"',
+            '✗ deny-secret-envfrom.yaml was refused by spark-connect-executor-pods but not by '
+            '"executor pods may read no Secret (envFrom)"',
+        ):
+            self.assertIn(line, done.stdout)
 
 
 if __name__ == "__main__":
