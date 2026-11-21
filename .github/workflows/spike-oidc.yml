@@ -1,0 +1,66 @@
+name: spike-oidc
+# Spike only (#819, for #57): prints the claims of a GitHub Actions OIDC token.
+# Never merged: the draft PR is closed and the branch deleted.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ['spike/oidc-federation']
+    tags: ['spike-oidc-*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  claims-branch-or-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: request a token for the deploy audience
+        run: |
+          curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=stardelt-deploy" \
+            -o "$RUNNER_TEMP/token.json"
+      - name: decode the claims (never the token)
+        run: |
+          python3 - "$RUNNER_TEMP/token.json" <<'PY'
+          import base64, hashlib, json, sys
+
+          token = json.load(open(sys.argv[1]))["value"]
+
+          def b64(part):
+              return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+          payload = json.loads(b64(token.split(".")[1]))
+          for k in ("iss", "aud", "sub", "repository", "ref", "environment", "event_name"):
+              print(f"{k}: {json.dumps(payload.get(k))}")
+          print(f"exp - iat: {payload.get('exp', 0) - payload.get('iat', 0)}")
+          print(f"sha256[0:16]: {hashlib.sha256(token.encode()).hexdigest()[:16]}")
+          PY
+
+  claims-environment-prod:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: request a token for the deploy audience
+        run: |
+          curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=stardelt-deploy" \
+            -o "$RUNNER_TEMP/token.json"
+      - name: decode the claims (never the token)
+        run: |
+          python3 - "$RUNNER_TEMP/token.json" <<'PY'
+          import base64, hashlib, json, sys
+
+          token = json.load(open(sys.argv[1]))["value"]
+
+          def b64(part):
+              return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+          payload = json.loads(b64(token.split(".")[1]))
+          for k in ("iss", "aud", "sub", "repository", "ref", "environment", "event_name"):
+              print(f"{k}: {json.dumps(payload.get(k))}")
+          print(f"exp - iat: {payload.get('exp', 0) - payload.get('iat', 0)}")
+          print(f"sha256[0:16]: {hashlib.sha256(token.encode()).hexdigest()[:16]}")
+          PY
