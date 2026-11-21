@@ -1,7 +1,12 @@
 import logging
 
 import pytest
-from stardelt_pipelines.plan import WAP_NO_RUNTIME, PlanError, plan, refuse_unrunnable
+from stardelt_pipelines.plan import (
+    WAP_PLACEHOLDER_NEEDS_ONE_TABLE,
+    PlanError,
+    plan,
+    refuse_unrunnable,
+)
 from stardelt_pipelines.quality import Check, evaluate
 
 
@@ -160,7 +165,7 @@ def test_a_wap_plan_without_a_writing_task_is_refused():
     assert str(error.value) == "publish: wap needs a task that writes at least one table"
 
 
-def test_a_wap_plan_is_unrunnable_until_the_loader_wires_it():
+def test_a_wap_plan_is_runnable():
     p = plan(
         resource(
             publish="wap",
@@ -171,9 +176,26 @@ def test_a_wap_plan_is_unrunnable_until_the_loader_wires_it():
         "t",
         {"pipeline-analytics": principal()},
     )
+    refuse_unrunnable(p)
+
+
+def test_a_placeholder_check_with_two_written_tables_is_refused():
+    p = plan(
+        resource(
+            publish="wap",
+            ownerGroup="analytics",
+            runAs="pipeline-analytics",
+            tasks=[
+                notebook_task(writes=["gold.shop.t", "gold.shop.u"]),
+                quality(checks=[check("a", "SELECT count(*) FROM ${table}")]),
+            ],
+        ),
+        "t",
+        {"pipeline-analytics": principal()},
+    )
     with pytest.raises(PlanError) as error:
         refuse_unrunnable(p)
-    assert str(error.value) == WAP_NO_RUNTIME
+    assert str(error.value) == WAP_PLACEHOLDER_NEEDS_ONE_TABLE.format(count=2)
 
 
 def test_a_quality_task_cannot_name_a_connection():

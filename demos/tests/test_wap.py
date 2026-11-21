@@ -119,3 +119,83 @@ def test_drop_branch_posts_the_ref_removal():
         '{"requirements":[],"updates":[{"action":"remove-snapshot-ref","ref-name":"%s"}]}'
         % BRANCH
     )
+
+
+class FakeCatalog:
+    """A catalog that records every `(method, url, json)` and answers the script, in order."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def _answer(self, method, url, json=None):
+        self.calls.append((method, url, json))
+        status, body = self.answers.pop(0)
+        return httpx.Response(status, json=body)
+
+    def get(self, url):
+        return self._answer("GET", url)
+
+    def post(self, url, json=None):
+        return self._answer("POST", url, json)
+
+
+def refs_answer(snapshot_id):
+    return (200, {"metadata": {"refs": {"main": {"snapshot-id": snapshot_id}}}})
+
+
+def test_prepare_creates_each_branch_from_main():
+    catalog = FakeCatalog(
+        [
+            refs_answer(10),
+            (200, {}),
+            (200, {}),
+            refs_answer(20),
+            (200, {}),
+            (200, {}),
+        ]
+    )
+    main = wap.prepare(catalog, BASE, ["gold.shop.t", "gold.shop.u"], "audit_ab")
+    assert main == {"gold.shop.t": 10, "gold.shop.u": 20}
+    assert [call[0] for call in catalog.calls] == [
+        "GET",
+        "POST",
+        "POST",
+        "GET",
+        "POST",
+        "POST",
+    ]
+    for index, (name, snapshot) in enumerate((("t", 10), ("u", 20))):
+        get, properties, branch = catalog.calls[index * 3 : index * 3 + 3]
+        assert get[1] == f"{BASE}/catalog/v1/gold/namespaces/shop/tables/{name}?snapshots=all"
+        assert properties[2] == {
+            "requirements": [],
+            "updates": [{"action": "set-properties", "updates": {"write.wap.enabled": "true"}}],
+        }
+        assert branch[2]["updates"] == [
+            {
+                "action": "set-snapshot-ref",
+                "ref-name": "audit_ab",
+                "snapshot-id": snapshot,
+                "type": "branch",
+                "max-ref-age-ms": wap.FAILED_BRANCH_TTL_MS,
+            }
+        ]
+
+
+def test_branch_snapshot_names_a_missing_branch():
+    catalog = FakeCatalog([refs_answer(10)])
+    with pytest.raises(WapError) as error:
+        wap.branch_snapshot(catalog, BASE, TABLE, "audit_x")
+    assert str(error.value) == "`gold.shop.t` has no branch `audit_x`"
+
+
+def test_enable_branch_writes_posts_the_property():
+    catalog = FakeCatalog([(200, {})])
+    wap.enable_branch_writes(catalog, BASE, TABLE)
+    (method, url, body) = catalog.calls[0]
+    assert (method, url) == ("POST", f"{BASE}/catalog/v1/gold/namespaces/shop/tables/t")
+    assert body == {
+        "requirements": [],
+        "updates": [{"action": "set-properties", "updates": {"write.wap.enabled": "true"}}],
+    }

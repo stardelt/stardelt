@@ -24,6 +24,7 @@ from collections.abc import Mapping
 
 from kubernetes.client import models as k8s
 
+from stardelt_pipelines import wap
 from stardelt_pipelines.expand import run_values
 
 try:  # Airflow is in the loader image and on the cluster, not in the unit-test environment.
@@ -102,6 +103,7 @@ def pod_env(
     principal_secret: str,
     connection_name: str | None = None,
     connection_keys: tuple[str, ...] = (),
+    wap_branch: str | None = None,
 ) -> list[k8s.V1EnvVar]:
     """The environment of the notebook pod: the wrapper's contract, and no storage credential.
 
@@ -134,6 +136,10 @@ def pod_env(
     kernel_timeout = (os.environ.get(KERNEL_TIMEOUT_ENV) or "").strip()
     if kernel_timeout:
         env.append(k8s.V1EnvVar(name="NOTEBOOK_KERNEL_TIMEOUT", value=kernel_timeout))
+    if wap_branch is not None:
+        # The library sets `spark.wap.branch` from this: the task's Spark write targets the
+        # run's audit branch instead of `main` (#828, #820 Q1f).
+        env.append(k8s.V1EnvVar(name="STARDELT_WAP_BRANCH", value=wap_branch))
     return env
 
 
@@ -208,6 +214,7 @@ class NotebookPodOperator(KubernetesPodOperator):
         namespace: str,
         connection_name: str | None = None,
         connection_keys: tuple[str, ...] = (),
+        wap: bool = False,
         **kwargs,
     ) -> None:
         self.pipeline = pipeline
@@ -219,6 +226,7 @@ class NotebookPodOperator(KubernetesPodOperator):
         self.principal_secret = principal_secret
         self.connection_name = connection_name
         self.connection_keys = tuple(connection_keys)
+        self.wap = wap
         super().__init__(
             namespace=namespace,
             image=None,  # set in execute from PIPELINE_NOTEBOOK_IMAGE
@@ -287,6 +295,7 @@ class NotebookPodOperator(KubernetesPodOperator):
         fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
         run_date, overrides = run_values(dag_run.conf, fallback)
         run_id = dag_run.run_id
+        wap_branch = wap.branch_name(run_id) if self.wap else None
         get_key = source_key(self.owner_group, self.notebook)
         put_key = output_key(self.owner_group, self.pipeline, run_id, self.task_id)
 
@@ -307,6 +316,7 @@ class NotebookPodOperator(KubernetesPodOperator):
             principal_secret=self.principal_secret,
             connection_name=self.connection_name,
             connection_keys=self.connection_keys,
+            wap_branch=wap_branch,
         )
         self.env_vars += [
             k8s.V1EnvVar(name="NOTEBOOK_GET_URL", value=get_url),

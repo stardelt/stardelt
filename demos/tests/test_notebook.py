@@ -171,6 +171,29 @@ def test_no_kernel_timeout_variable_adds_nothing_to_the_pod(monkeypatch):
     assert "NOTEBOOK_KERNEL_TIMEOUT" not in [item.name for item in env]
 
 
+def test_pod_env_carries_the_wap_branch_only_when_asked(monkeypatch):
+    set_contract(monkeypatch)
+    env = pod_env(
+        run_date="2026-10-21",
+        run_id=RUN_ID,
+        params={},
+        principal_secret="sp-pipeline-analytics",
+        wap_branch=None,
+    )
+    assert [item.name for item in env if item.name == "STARDELT_WAP_BRANCH"] == []
+
+    env = pod_env(
+        run_date="2026-10-21",
+        run_id=RUN_ID,
+        params={},
+        principal_secret="sp-pipeline-analytics",
+        wap_branch="audit_ab",
+    )
+    branches = [item for item in env if item.name == "STARDELT_WAP_BRANCH"]
+    assert len(branches) == 1
+    assert branches[0].value == "audit_ab"
+
+
 # --- the operator -------------------------------------------------------------------------------
 
 
