@@ -85,6 +85,18 @@ class SparkPodGuardTest(unittest.TestCase):
             ["request.name.startsWith('spark-') && request.name.endsWith('-conf-map')"],
         )
 
+    def test_the_verifier_expects_the_policys_own_messages(self):
+        script = (REPO_ROOT / "scripts" / "verify-spark-pod-guard.sh").read_text()
+        messages = [v["message"] for v in self.policy["spec"]["validations"]]
+        for sentence in (
+            "executor pods may mount only configMap and emptyDir volumes "
+            "(no secret, hostPath, PVC, projected or csi volume)",
+            "executor pods may read no Secret (secretKeyRef)",
+            "executor pods may read no Secret (envFrom)",
+        ):
+            self.assertIn(f'"{sentence}"', script)
+            self.assertIn(sentence, messages)
+
     def test_the_config_map_binding_denies_in_the_platform_namespace(self):
         binding = next(d for d in self.docs
                        if d.get("kind") == "ValidatingAdmissionPolicyBinding"
