@@ -1,6 +1,6 @@
 {
   "spark-4.1-py3.13": {
-    "image": "ghcr.io/stardelt/spark:dev@sha256:1caae00f639bf5ee1a14e9ec7ef54c8e06138b94d6301d2826a3777e1c8c4d54",
+    "image": "ghcr.io/stardelt/spark:dev@sha256:eef976b4ddca8f18e626d217c6c93387e6e8bd72d5faeccc5ffccc195e6e283f",
     "sparkVersion": "4.1.4",
     "serviceAccount": "spark-executor",
     "sparkConf": {
