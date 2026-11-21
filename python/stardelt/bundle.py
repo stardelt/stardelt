@@ -30,6 +30,11 @@ USE = re.compile(r"\$\{var\.([A-Za-z0-9_]+)\}")
 NOTEBOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\.ipynb$")
 DBT_KEYS = ("project", "select", "batches", "threads", "vars")
 DBT_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
+QUALITY_KEYS = ("name", "sql", "severity")
+QUALITY_SEVERITIES = ("error", "warn")
+CHECK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
+MAX_CHECKS = 50
+MAX_CHECK_SQL = 20000
 MIGRATION = re.compile(r"^\d{3}_[a-z0-9_]+\.sql$")
 CATALOG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # A migration statement that names a table whose change can have downstream impact. Only the
@@ -201,9 +206,51 @@ def _dbt_problems(where, dbt):
     return problems
 
 
+def _quality_problems(where, quality):
+    """What a ``quality`` task's checks must say, offline — the loader's own rules and sentences."""
+    if quality is None:
+        return []
+    if not isinstance(quality, dict):
+        return [(where, "quality must be a mapping with checks")]
+    needs_checks = "a quality task needs checks (a list of 1 to 50 SQL assertions)"
+    needs_name = (
+        "a check needs a name (1 to 63 letters, digits, dashes or underscores, starting with a letter or a digit)"
+    )
+    needs_sql = "a check's sql must be a non-empty string of at most 20000 characters"
+    checks = quality.get("checks")
+    if not isinstance(checks, list) or not 1 <= len(checks) <= MAX_CHECKS:
+        return [(where, needs_checks)]
+    problems = []
+    seen = []
+    for check in checks:
+        if not isinstance(check, dict):
+            problems.append((where, needs_name))
+            continue
+        name = check.get("name")
+        if not isinstance(name, str) or not CHECK_NAME.match(name):
+            problems.append((where, needs_name))
+            continue
+        problems.extend(
+            (where, f"a check accepts only name, sql and severity (found `{key}`)")
+            for key in check
+            if key not in QUALITY_KEYS
+        )
+        if name in seen:
+            problems.append((where, "the check name is used twice"))
+        seen.append(name)
+        sql = check.get("sql")
+        if not isinstance(sql, str) or not sql or len(sql) > MAX_CHECK_SQL:
+            problems.append((where, needs_sql))
+        elif "${table}" in sql:
+            problems.append((where, "`${table}` is the audit branch of publish: wap, which has no runtime yet"))
+        if check.get("severity", "error") not in QUALITY_SEVERITIES:
+            problems.append((where, "a check's severity must be error or warn"))
+    return problems
+
+
 def _task_problems(where, tasks, files):
-    """What a ``tasks`` list must say, offline: names, one source each (``sql``, ``sqlFile``, ``notebook``
-    or ``dbt``), and the dependency graph."""
+    """What a ``tasks`` list must say, offline: names, one source each (``sql``, ``sqlFile``, ``notebook``,
+    ``dbt`` or ``quality``), and the dependency graph."""
     problems = []
     if not isinstance(tasks, list) or not tasks:
         return [(where, "tasks must be a non-empty list")]
@@ -222,10 +269,11 @@ def _task_problems(where, tasks, files):
         if name in names:
             problems.append((at, "the name is used twice"))
         names.append(name)
-        given = [k for k in ("sql", "sqlFile", "notebook", "dbt") if k in task]
+        given = [k for k in ("sql", "sqlFile", "notebook", "dbt", "quality") if k in task]
         if len(given) != 1:
-            problems.append((at, "give exactly one of sql, sqlFile, notebook or dbt"))
+            problems.append((at, "give exactly one of sql, sqlFile, notebook, dbt or quality"))
         problems.extend(_dbt_problems(at, task.get("dbt")))
+        problems.extend(_quality_problems(at, task.get("quality")))
         if "sqlFile" in task and task["sqlFile"] not in files:
             problems.append((at, f"sqlFile {task['sqlFile']!r} is not among the bundle's files"))
         problems.extend(_notebook_problems(at, task.get("notebook"), files))
