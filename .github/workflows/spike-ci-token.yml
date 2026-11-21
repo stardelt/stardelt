@@ -61,7 +61,6 @@ jobs:
           PY
           }
           at() { # $1 outfile holding a token response -> access token file
-            if [ ! -s "$1" ]; then echo ""; return 0; fi
             python3 - "$1" <<'PY'
           import sys, json
           try:
@@ -71,6 +70,20 @@ jobs:
           open(sys.argv[1] + ".at", "w").write(d.get("access_token", ""))
           PY
             echo "$1.at"
+          }
+          allclaims() { # $1 file holding a JWT: the whole payload, keys sorted
+            if [ ! -s "$1" ]; then echo "  no token to decode"; return 0; fi
+            python3 - "$1" <<'PY'
+          import sys, json, base64
+          t = open(sys.argv[1]).read().strip()
+          p = t.split(".")[1]
+          c = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+          for k in sorted(c):
+              v = c[k]
+              if k in ("jti",):
+                  v = "<present>"
+              print("    %s = %s" % (k, json.dumps(v) if not isinstance(v, str) else v))
+          PY
           }
           JB=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
 
@@ -87,6 +100,7 @@ jobs:
             --data-urlencode client_assertion@"$T"
           echo "-- issued token --"
           claims "$(at "$RUNNER_TEMP/b.json")"
+          allclaims "$(at "$RUNNER_TEMP/b.json")"
 
           echo "== (b) replay of the same assertion =="
           post "b-replay" "$RUNNER_TEMP/br.json" -X POST "$KC" \
@@ -104,6 +118,7 @@ jobs:
             --data-urlencode assertion@"$T2"
           echo "-- issued token --"
           claims "$(at "$RUNNER_TEMP/a.json")"
+          allclaims "$(at "$RUNNER_TEMP/a.json")"
 
           echo "== (a) without a user linked to the assertion sub =="
           echo "  (the linked user is spike-ci-deployer for refs/heads/spike/830-keycloak-ci)"
