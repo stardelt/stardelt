@@ -36,6 +36,15 @@ def test_a_new_name_is_created_with_the_file_as_the_body(tmp_path):
     assert session.calls[1][2]["json"] == SPEC
 
 
+def test_a_spark_pipeline_task_is_sent_as_the_body_nova_takes(tmp_path):
+    spec = {"name": "gold", "ownerGroup": "etl", "tasks": [{"name": "build", "spark-pipeline": {"project": "spark/shop"}}]}
+    code, _, _, session = run(
+        ["apply", "-f", write(tmp_path, spec)], FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "gold"})
+    )
+    assert code == 0
+    assert session.calls[1][2]["json"]["tasks"] == [{"name": "build", "sparkPipeline": {"project": "spark/shop"}}]
+
+
 def test_an_existing_name_is_updated_without_the_name_and_the_group(tmp_path):
     code, out, _, session = run(
         ["apply", "-f", write(tmp_path, SPEC)], FakeResponse(payload=EXISTING), FakeResponse(payload={"name": "daily"})

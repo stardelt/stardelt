@@ -17,6 +17,23 @@ import yaml
 CREATE_ONLY = ("name", "ownerGroup")
 SUFFIXES = (".json", ".yaml", ".yml")
 
+# The task keys Nova's body spells in camelCase; a bundle file spells them as the CRD does (#780).
+API_TASK_KEYS = {"spark-pipeline": "sparkPipeline"}
+
+
+def api_tasks(spec):
+    """Rename the task keys Nova's body spells differently, in place; every other key stays.
+
+    ``validate`` reads the document as written (it knows ``spark-pipeline``); this is applied only
+    to the body sent to Nova, in ``bundle.render`` and in ``stardelt apply``.
+    """
+    for task in spec.get("tasks") or []:
+        if isinstance(task, dict):
+            for before, after in API_TASK_KEYS.items():
+                if before in task and after not in task:
+                    task[after] = task.pop(before)
+    return spec
+
 
 class ApplyError(ValueError):
     """The file cannot be applied; the message is one sentence for the person running the command."""

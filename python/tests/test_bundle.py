@@ -324,7 +324,7 @@ def test_a_quality_task_cannot_also_give_sql(tmp_path):
 
 
 def test_a_spark_pipeline_task_validates_and_renders(tmp_path):
-    """`spark-pipeline` (#80 S1b): a declared graph in a bundle directory, written ahead of its runtime."""
+    """`spark-pipeline` (#80 S1b): a declared graph in a bundle directory, rendered as the body Nova takes."""
     make(
         tmp_path,
         resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop, refresh: full}}\n"},
@@ -333,7 +333,7 @@ def test_a_spark_pipeline_task_validates_and_renders(tmp_path):
     assert bundle.validate(tmp_path, "prod")[0] == []
     problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
     assert (problems, mode) == ([], "production")
-    assert specs[0]["tasks"] == [{"name": "build", "spark-pipeline": {"project": "spark/shop", "refresh": "full"}}]
+    assert specs[0]["tasks"] == [{"name": "build", "sparkPipeline": {"project": "spark/shop", "refresh": "full"}}]
     assert specs[0]["ownerGroup"] == "sales"
 
 

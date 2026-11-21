@@ -466,6 +466,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
         except (OSError, apply.ApplyError) as err:
             stderr.write(f"stardelt: {err}\n")
             return USAGE
+        specs = [apply.api_tasks(spec) for spec in specs]
 
     text = None
     if args.command == "sql":
