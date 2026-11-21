@@ -75,8 +75,8 @@ fi
 # 1. Every ServicePrincipal, read-only. Nothing but name, uid, status.workloadIdentity and
 #    spec.ownerGroup is taken from the object, so a Secret reference never reaches a file.
 # ---------------------------------------------------------------------------
-if ! principals="$(kubectl -n "$NS" get serviceprincipals -o json 2>&1)"; then
-  unverified "cannot read ServicePrincipals in $NS: $principals"
+if ! principals="$(kubectl -n "$NS" get serviceprincipals -o json 2>"$tmp/sp.err")"; then
+  unverified "cannot read ServicePrincipals in $NS: $(tail -n 1 "$tmp/sp.err")"
 fi
 if ! rows="$(printf '%s' "$principals" | python3 -c '
 import json, sys
@@ -171,10 +171,11 @@ owners = [
 if not owners:
     print("ServiceAccount sp-%s has no ownerReference to ServicePrincipal %s" % (name, name))
     raise SystemExit(0)
-owner = owners[0]
-if owner.get("controller") is not True:
+controllers = [ref for ref in owners if ref.get("controller") is True]
+if not controllers:
     print("ServiceAccount sp-%s ownerReference to ServicePrincipal %s is not the controller" % (name, name))
     raise SystemExit(0)
+owner = controllers[0]
 if owner.get("uid") != uid:
     print("ServiceAccount sp-%s is owned by ServicePrincipal uid %s, not %s — a deleted and recreated principal owns this ServiceAccount"
           % (name, json.dumps(owner.get("uid")), uid))

@@ -64,7 +64,7 @@ doc = {
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "ServicePrincipal",
             "name": os.environ.get("FAKE_OWNER_NAME", name),
-            "controller": True,
+            "controller": os.environ.get("FAKE_OWNER_CONTROLLER", "true") == "true",
             "uid": os.environ.get("FAKE_OWNER_UID", "uid-" + name),
         }],
     },
@@ -133,13 +133,11 @@ class ScriptText(unittest.TestCase):
 
     def test_it_never_provisions_the_principal(self):
         """`/catalog/v1/config` creates the principal (#538); a check must not call it."""
-        for line in self.text.splitlines():
+        for number, line in enumerate(self.text.splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
-            self.assertFalse(
-                "catalog/v1/config" in line and "curl" in line,
-                line,
-            )
+            self.assertNotIn("catalog/v1/config", line, "line %d" % number)
+            self.assertNotIn("catalog/v1%2Fconfig", line, "line %d" % number)
 
     def test_it_never_prints_a_token(self):
         """The only `Bearer` line writes a mode-0600 header file, never stdout."""
@@ -163,9 +161,11 @@ class ScriptText(unittest.TestCase):
         self.assertIn("kill \"$pf_pid\"", self.text)
         self.assertNotIn("delete serviceaccount", self.text.lower())
         self.assertNotIn("delete serviceprincipal", self.text.lower())
-        self.assertNotIn("kubectl", " ".join(
-            line for line in self.text.splitlines() if "delete " in line
-        ))
+        for line in self.text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            self.assertNotIn(" delete ", line, line)
+            self.assertNotRegex(line, r"create token .*delete", line)
 
 
 class Behaviour(unittest.TestCase):
@@ -243,6 +243,43 @@ class Behaviour(unittest.TestCase):
         self.assertIn(
             "FAIL (pipeline-demo: status.workloadIdentity=kubernetes~0000-other-sa "
             "does not match the ServiceAccount uid (kubernetes~sa-uid-pipeline-demo)",
+            result.stdout,
+        )
+
+    def test_a_label_mismatch_is_a_fail(self):
+        result = self.run_script(FAKE_SA_LABEL="other")
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(
+            "FAIL (pipeline-demo: ServiceAccount sp-pipeline-demo is not labelled "
+            "stardelt.io/service-principal=pipeline-demo (got \"other\"))",
+            result.stdout,
+        )
+
+    def test_a_missing_owner_reference_is_a_fail(self):
+        result = self.run_script(FAKE_OWNER_NAME="other")
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(
+            "FAIL (pipeline-demo: ServiceAccount sp-pipeline-demo has no ownerReference "
+            "to ServicePrincipal pipeline-demo)",
+            result.stdout,
+        )
+
+    def test_a_non_controller_owner_reference_is_a_fail(self):
+        result = self.run_script(FAKE_OWNER_CONTROLLER="false")
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(
+            "FAIL (pipeline-demo: ServiceAccount sp-pipeline-demo ownerReference "
+            "to ServicePrincipal pipeline-demo is not the controller)",
+            result.stdout,
+        )
+
+    def test_a_foreign_owner_uid_is_a_fail(self):
+        """The ownerReference must name the principal's uid, not the SA's."""
+        result = self.run_script(FAKE_OWNER_UID="sa-uid-pipeline-demo")
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(
+            "FAIL (pipeline-demo: ServiceAccount sp-pipeline-demo is owned by "
+            "ServicePrincipal uid \"sa-uid-pipeline-demo\", not uid-pipeline-demo",
             result.stdout,
         )
 
