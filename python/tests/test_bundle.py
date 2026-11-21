@@ -484,6 +484,35 @@ def test_a_spark_pipeline_yml_may_not_set_the_warehouse_keys(tmp_path):
     )
 
 
+@pytest.mark.parametrize("graph", ["# nothing yet\n", "[]\n", "- name: x\n"])
+def test_a_spark_pipeline_yml_that_is_not_a_mapping_is_refused(tmp_path, graph):
+    """A comment-only, empty or list graph is a problem, not an AttributeError (#972)."""
+    make(
+        tmp_path,
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": graph},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert problems[0][0].endswith("task 'build'")
+    assert "spark-pipeline.yml must be a mapping" in said(problems)
+
+
+def test_a_spark_pipeline_yml_that_is_a_mapping_but_names_no_catalog_still_says_so(tmp_path):
+    make(
+        tmp_path,
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert "spark-pipeline.yml has no `spark.sql.catalog.gold.type` under configuration" in said(problems)
+
+
 def test_a_spark_pipeline_task_needs_writes_for_its_target(tmp_path):
     make(
         tmp_path,
