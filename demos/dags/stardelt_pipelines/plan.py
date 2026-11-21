@@ -102,6 +102,10 @@ SPARK_PIPELINE_OWNS_THE_KEYS = (
     "the task's writes and the group's bucket set them at run time (#80)"
 )
 SPARK_PIPELINE_BAD_YAML = "spark-pipeline task `{task}`: spark-pipeline.yml is not a YAML map ({reason})"
+SPARK_PIPELINE_BAD_LIBRARIES = "spark-pipeline task `{task}` libraries must be a list of glob entries"
+SPARK_PIPELINE_NEEDS_GLOB = (
+    "spark-pipeline task `{task}` libraries entries need glob.include: <path or pattern>"
+)
 SPARK_PIPELINE_NEEDS_BLOCK = (
     "spark-pipeline task `{task}`: catalog `{catalog}` has no `spark.sql.catalog.{catalog}.type` "
     "under `configuration:` — the Connect session would not know the catalog"
@@ -500,6 +504,16 @@ def _spark_pipeline_config(
     owned = [key for key in ("catalog", "database", "storage") if key in document]
     if owned:
         raise PlanError(SPARK_PIPELINE_OWNS_THE_KEYS.format(task=task_name))
+    libraries = document.get("libraries")
+    if libraries is not None:
+        if not isinstance(libraries, list) or not libraries:
+            raise PlanError(SPARK_PIPELINE_BAD_LIBRARIES.format(task=task_name))
+        for entry in libraries:
+            include = None
+            if isinstance(entry, dict) and isinstance(entry.get("glob"), dict):
+                include = entry["glob"].get("include")
+            if not isinstance(include, str) or not include:
+                raise PlanError(SPARK_PIPELINE_NEEDS_GLOB.format(task=task_name))
     writes = raw.get("writes")
     if not isinstance(writes, list) or not writes:
         raise PlanError(SPARK_PIPELINE_NEEDS_WRITES.format(task=task_name))

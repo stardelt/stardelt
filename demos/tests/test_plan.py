@@ -469,6 +469,22 @@ def test_plan_accepts_a_spark_pipeline_task():
     assert build.writes == ("playground.scratch.range_ten",)
 
 
+def test_plan_refuses_a_libraries_entry_without_a_glob():
+    graph = (
+        "name: graph\n"
+        "libraries: [sql/range_ten.sql]\n"
+        "configuration:\n  spark.sql.catalog.playground.type: rest\n"
+    )
+    with pytest.raises(PlanError, match="libraries entries need glob.include"):
+        plan(
+            *owned(
+                spark(
+                    files={"spark-pipeline.yml": graph, "sql/range_ten.sql": "SELECT 1"}
+                )
+            )
+        )
+
+
 def test_a_spark_pipeline_graph_without_writes_is_refused():
     with pytest.raises(PlanError) as error:
         plan(*owned(spark(writes=())))
