@@ -42,6 +42,18 @@ def test_the_shipped_operations_are_well_formed():
         assert re.fullmatch(r"[a-z0-9]+(_[a-z0-9]+)*", op_id), op_id
 
 
+def test_the_shipped_operations_match_the_contract():
+    """operations.json is generated: a stale file fails here, not in a user's CLI."""
+    contract = ROOT.parent / "nova" / "openapi" / "nova.json"
+    if not contract.exists():
+        pytest.skip("nova/openapi/nova.json is not in this checkout")
+    expected = sync_module().operations_of(json.loads(contract.read_text(encoding="utf-8")))
+    shipped = json.loads((ROOT / "stardelt" / "operations.json").read_text(encoding="utf-8"))
+    assert shipped == expected, (
+        "operations.json is stale — run `python scripts/sync_contract.py` in python/ and commit the result"
+    )
+
+
 def test_the_sync_script_keeps_public_operations_only_and_sorts_them(tmp_path):
     out = tmp_path / "operations.json"
     code = sync_module().main(["--contract", str(ROOT / "tests" / "data" / "contract-mini.json"), "--out", str(out)])
