@@ -1092,7 +1092,7 @@ const QUALITY_CHECK_NEEDS_SQL: &str =
     "a check's sql must be a non-empty string of at most 20000 characters";
 const QUALITY_CHECK_BAD_SEVERITY: &str = "a check's severity must be error or warn";
 const QUALITY_CHECK_AUDIT_TABLE: &str =
-    "`${table}` is the audit branch of publish: wap, which has no runtime yet";
+    "`${table}` needs `publish: wap` on the pipeline: it is the audit branch of a wap run";
 
 /// A project is one directory name under the tool image's `/opt/dbt/projects`: the loader's
 /// `^[a-z][a-z0-9-]{0,38}$`.
@@ -1175,9 +1175,13 @@ struct QualityCheck {
 }
 
 /// The `quality` task's checks, checked the way `plan.py`'s `_quality_checks` checks them: 1 to
-/// 50 assertions, a unique loader-shaped name each, non-empty SQL without `${table}` (the audit
-/// branch of WAP), and `error` or `warn`. `Err` is the sentence the caller sees.
-fn quality_config(request: &QualityRequest) -> Result<Vec<QualityCheck>, String> {
+/// 50 assertions, a unique loader-shaped name each, non-empty SQL, with `${table}` only when the
+/// pipeline has `publish: wap` (the audit branch), and `error` or `warn`. `Err` is the sentence
+/// the caller sees.
+fn quality_config(
+    request: &QualityRequest,
+    publish: Option<Publish>,
+) -> Result<Vec<QualityCheck>, String> {
     if request.checks.is_empty() || request.checks.len() > MAX_QUALITY_CHECKS {
         return Err(QUALITY_NEEDS_CHECKS.into());
     }
@@ -1192,7 +1196,7 @@ fn quality_config(request: &QualityRequest) -> Result<Vec<QualityCheck>, String>
         if check.sql.is_empty() || check.sql.chars().count() > MAX_CHECK_SQL_CHARS {
             return Err(QUALITY_CHECK_NEEDS_SQL.into());
         }
-        if check.sql.contains("${table}") {
+        if check.sql.contains("${table}") && publish != Some(Publish::Wap) {
             return Err(QUALITY_CHECK_AUDIT_TABLE.into());
         }
         let severity = match check.severity.as_deref() {
@@ -1325,6 +1329,7 @@ async fn checked_statement(
     group: &str,
     quality: Option<&QualityRequest>,
     spark_pipeline: Option<&SparkPipelineRequest>,
+    publish: Option<Publish>,
 ) -> Result<Statement, ActionError> {
     let refused = |reason: &'static str, message: String| {
         ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
@@ -1339,7 +1344,7 @@ async fn checked_statement(
         (true, None, Some(dbt), None, None) => dbt_config(dbt)
             .map(Statement::Dbt)
             .map_err(|message| refused("dbt", message)),
-        (true, None, None, Some(quality), None) => quality_config(quality)
+        (true, None, None, Some(quality), None) => quality_config(quality, publish)
             .map(Statement::Quality)
             .map_err(|message| refused("quality", message)),
         (true, None, None, None, Some(graph)) => spark_pipeline_config(graph)
@@ -1505,6 +1510,7 @@ async fn checked_tasks(
     template_params: &BTreeMap<String, String>,
     notebooks: Option<&NotebookStore>,
     group: &str,
+    publish: Option<Publish>,
 ) -> Result<Vec<TaskStatement>, ActionError> {
     let refused = |reason: &'static str, message: String| {
         ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
@@ -1587,6 +1593,7 @@ async fn checked_tasks(
             group,
             task.quality.as_ref(),
             task.spark_pipeline.as_ref(),
+            publish,
         )
         .await
         .map_err(|error| error.about_task(&task.name))?;
@@ -1652,6 +1659,7 @@ async fn checked_run(
     template_params: &BTreeMap<String, String>,
     notebooks: Option<&NotebookStore>,
     group: &str,
+    publish: Option<Publish>,
 ) -> Result<Statement, ActionError> {
     match (sql.trim().is_empty(), notebook.is_some(), tasks) {
         // A body without `tasks` behaves exactly as today, sentence included. A body's own
@@ -1667,6 +1675,7 @@ async fn checked_run(
                 group,
                 None,
                 None,
+                publish,
             )
             .await
         }
@@ -1675,7 +1684,7 @@ async fn checked_run(
             validate_params(template_params).map_err(|message| {
                 ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
             })?;
-            checked_tasks(tasks, template_params, notebooks, group)
+            checked_tasks(tasks, template_params, notebooks, group, publish)
                 .await
                 .map(Statement::Tasks)
         }
@@ -5524,6 +5533,7 @@ async fn plan_pipeline(
         &body.params,
         notebooks_store,
         &body.owner_group,
+        body.publish,
     )
     .await?;
 
@@ -6234,6 +6244,7 @@ async fn update_pipeline_inner(
         &body.params,
         notebooks_store,
         &group,
+        body.publish,
     )
     .await?;
     match (stored_shape(&resource), &requested) {
@@ -13575,6 +13586,67 @@ mod tests {
             "a quality task writes no table: {}",
             stored["spec"]["tasks"][1]
         );
+    }
+
+    /// A `publish: wap` pipeline may use `${table}` in a check: it is the audit branch the
+    /// loader fills in for a wap run (#858, #881).
+    #[tokio::test]
+    async fn a_wap_create_accepts_a_table_placeholder_check() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut load = spark_pipeline_task("load", "graphs/shop", None, None, &[]);
+        load.writes = vec!["gold.shop.t".into()];
+        let mut body = create_body("shop-wap", "analytics", "");
+        body.tasks = Some(vec![
+            load,
+            quality_task(
+                "check",
+                vec![check("rows", "select count(*) from ${table}", None)],
+                &["load"],
+            ),
+        ]);
+        body.publish = Some(Publish::Wap);
+
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a wap pipeline with an audit-branch check");
+        let stored = stored_pipeline(&resources, "shop-wap")
+            .await
+            .expect("written");
+        let sql = stored["spec"]["tasks"][1]["checks"][0]["sql"]
+            .as_str()
+            .expect("the check's sql");
+        assert!(sql.contains("${table}"), "stored sql: {sql}");
+    }
+
+    /// A `publish: direct` pipeline refuses `${table}` in a check: only a wap run has an audit
+    /// branch (#881).
+    #[tokio::test]
+    async fn a_direct_create_refuses_a_table_placeholder_check() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut load = spark_pipeline_task("load", "graphs/shop", None, None, &[]);
+        load.writes = vec!["gold.shop.t".into()];
+        let mut body = create_body("shop-wap", "analytics", "");
+        body.tasks = Some(vec![
+            load,
+            quality_task(
+                "check",
+                vec![check("rows", "select count(*) from ${table}", None)],
+                &["load"],
+            ),
+        ]);
+        body.publish = Some(Publish::Direct);
+
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("a direct pipeline has no audit branch");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            format!("task `check`: {QUALITY_CHECK_AUDIT_TABLE}")
+        );
+        assert!(stored_pipeline(&resources, "shop-wap").await.is_none());
     }
 
     /// `publish: wap` without a quality task that checks and a `spark-pipeline` or `notebook`
