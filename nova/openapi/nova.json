@@ -3811,8 +3811,144 @@
               }
             }
           },
+          "409": {
+            "description": "The planId does not name the rendered set of this row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/deployments/plan": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/deployments/plan` — what the set would do, `200` with the plan, nothing written.",
+        "description": "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (today a warning, not a prune). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. `prune`, the stage modes and StreamApps are not covered yet.",
+        "operationId": "deployments_plan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BundlePlanRequest"
+              },
+              "example": {
+                "bundle": "shop-etl",
+                "files": [
+                  {
+                    "path": "shop-marts.yaml",
+                    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                  }
+                ],
+                "ownerGroup": "analytics",
+                "resources": [
+                  {
+                    "apiVersion": "stardelt.io/v1alpha1",
+                    "kind": "Pipeline",
+                    "metadata": {
+                      "name": "shop-marts"
+                    },
+                    "spec": {
+                      "ownerGroup": "analytics",
+                      "tasks": [
+                        {
+                          "kind": "sql",
+                          "name": "run",
+                          "sql": "select 1"
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "revision": "4f3c2a1",
+                "target": "production"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The plan, with its identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BundlePlan"
+                },
+                "example": {
+                  "changes": [
+                    {
+                      "action": "update",
+                      "diff": [
+                        "the schedule changed from 0 3 * * * to 0 4 * * *"
+                      ],
+                      "kind": "Pipeline",
+                      "name": "shop-marts"
+                    }
+                  ],
+                  "errors": [],
+                  "files": [
+                    {
+                      "new": true,
+                      "path": "shop-marts.yaml",
+                      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    }
+                  ],
+                  "ok": true,
+                  "planId": "a3f1c0f4b9a4ce7a7b2a0f2e8a3a3fd0c9de5c4f5e1c2b3a4958687788a9b0c1",
+                  "warnings": []
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is empty, too long or carries a `/`, or there are more than 200 resources or 200 file digests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The caller has no identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only a member of the pipeline's owner group may plan a deployment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured, or there is no cluster connection",
             "content": {
               "application/json": {
                 "schema": {
@@ -10536,6 +10672,89 @@
           }
         }
       },
+      "BundlePlan": {
+        "type": "object",
+        "description": "`POST /api/deployments/plan` answer: what applying that set would do, and its identity.",
+        "required": [
+          "ok",
+          "errors",
+          "warnings",
+          "changes",
+          "files",
+          "planId"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanChange"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanIssue"
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanFile"
+            }
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "planId": {
+            "type": "string",
+            "description": "The identity of the set this plan describes; `POST /api/deployments` answers 409 when a\n`planId` it is given does not name the set it was sent."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanIssue"
+            }
+          }
+        }
+      },
+      "BundlePlanRequest": {
+        "type": "object",
+        "description": "`POST /api/deployments/plan` body: one bundle's rendered Pipeline documents and file digests,\nfor one target. The same `resources` list the record call carries, so a `planId` names both.",
+        "required": [
+          "bundle",
+          "ownerGroup",
+          "target",
+          "resources"
+        ],
+        "properties": {
+          "bundle": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeploymentFile"
+            }
+          },
+          "ownerGroup": {
+            "type": "string"
+          },
+          "resources": {
+            "type": "array",
+            "items": {}
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit the bundle was read at; display metadata, not part of the plan's identity.\nNothing reads it yet: the record carries the revision, and a later slice shows it beside\nthe plan."
+          },
+          "target": {
+            "type": "string"
+          }
+        }
+      },
       "CatalogAccessUpdate": {
         "type": "object",
         "description": "One `PUT /api/admin/catalogs/{name}/access` body.\n\n`resourceVersion` is the value the page read: the API server rejects the merge\npatch with `409` when the object changed meanwhile, so two administrators\nediting the same catalog cannot silently overwrite each other.",
@@ -12977,6 +13196,13 @@
             },
             "description": "The pipelines the deploy touched, at most 200."
           },
+          "planId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `planId` of the plan this apply followed (`POST /api/deployments/plan`), or absent. When\ngiven, the row must describe the same rendered set the plan named; otherwise 409."
+          },
           "previousDeploymentId": {
             "type": [
               "integer",
@@ -14057,6 +14283,71 @@
           "planId": {
             "type": "string",
             "description": "The identity of this plan: what `bundle approve` takes and what apply needs."
+          }
+        }
+      },
+      "PlanChange": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`create`, `update` or `unchanged` (from `ValidatePipelineResponse::action`, with `create`\nwhen `action` is absent)."
+          },
+          "diff": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What an `update` would change, the sentences `pipelines_validate` answers."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`Pipeline` today; the bundle's other kinds are a later slice."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "PlanFile": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "new"
+        ],
+        "properties": {
+          "new": {
+            "type": "boolean",
+            "description": "`true` when the newest applied deployment of this bundle and target does not name this path\nwith this digest; every file when no deployment was recorded yet."
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        }
+      },
+      "PlanIssue": {
+        "type": "object",
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "One sentence, the same sentence the write route would refuse with."
+          },
+          "path": {
+            "type": "string",
+            "description": "Where the problem is: `resources[2] (gold)` or `resources` (the set)."
           }
         }
       },

@@ -148,7 +148,7 @@ fn is_sha256(value: &str) -> bool {
 }
 
 /// Lower-case hex, no dependency on a hex crate.
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
