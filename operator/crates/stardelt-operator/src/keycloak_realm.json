@@ -694,6 +694,27 @@
       "serviceAccountsEnabled": false
     }
   ],
+  "identityProviders": [
+    {
+      "alias": "github-actions",
+      "displayName": "GitHub Actions",
+      "providerId": "oidc",
+      "enabled": false,
+      "hideOnLogin": true,
+      "config": {
+        "issuer": "https://token.actions.githubusercontent.com",
+        "jwksUrl": "https://token.actions.githubusercontent.com/.well-known/jwks",
+        "useJwksUrl": "true",
+        "validateSignature": "true",
+        "clientId": "stardelt-deploy",
+        "clientSecret": "unused",
+        "supportsClientAssertions": "true",
+        "supportsClientAssertionReuse": "false",
+        "allowClientIdAsAudience": "true",
+        "syncMode": "IMPORT"
+      }
+    }
+  ],
   "clientScopes": [
     {
       "name": "stardelt:read",

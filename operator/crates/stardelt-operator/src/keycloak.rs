@@ -681,6 +681,37 @@ mod tests {
         );
     }
 
+    /// A DeployStage's client authenticates with `clientAuthenticatorType=federated-jwt` and
+    /// `jwt.credential.issuer=github-actions`; Keycloak resolves that alias only from a realm
+    /// identity provider. The entry is disabled and hidden, so a fresh install has it without
+    /// baking a customer's repository into a product file (#908, #57 slice 1).
+    #[test]
+    fn the_realm_offers_the_github_actions_identity_provider() {
+        let realm = realm_config_map(&spec(Some("data.example.com")))
+            .expect("a ConfigMap")
+            .data
+            .expect("data")
+            .remove("stardelt-realm.json")
+            .expect("the realm");
+        let parsed: serde_json::Value = serde_json::from_str(&realm).expect("the realm is JSON");
+        let providers = parsed["identityProviders"]
+            .as_array()
+            .expect("identityProviders");
+        assert_eq!(providers.len(), 1, "exactly one identity provider");
+        let provider = &providers[0];
+        assert_eq!(provider["alias"], "github-actions");
+        assert_eq!(provider["providerId"], "oidc");
+        assert_eq!(provider["enabled"].as_bool(), Some(false));
+        assert_eq!(provider["hideOnLogin"].as_bool(), Some(true));
+        assert_eq!(
+            provider["config"]["issuer"],
+            "https://token.actions.githubusercontent.com"
+        );
+        assert_eq!(provider["config"]["clientId"], "stardelt-deploy");
+        assert_eq!(provider["config"]["supportsClientAssertions"], "true");
+        assert_eq!(provider["config"]["allowClientIdAsAudience"], "true");
+    }
+
     /// Keycloak 26.8 accepts a service-account token at /admin only with the `kc-admin-api`
     /// audience (#883). An import drops a client's reference to the built-in scope, because the
     /// server creates that scope after the representation's clients. The realm therefore declares
