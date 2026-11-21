@@ -20,6 +20,8 @@ from collections.abc import Mapping
 
 from kubernetes.client import models as k8s
 
+from stardelt_pipelines import wap as wap_module
+
 try:  # Airflow is in the loader image and on the cluster, not in the unit-test environment.
     from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 except ImportError:  # pragma: no cover - the operator tests importorskip the provider
@@ -58,6 +60,11 @@ document["database"] = os.environ["SPARK_DATABASE"]
 document["storage"] = os.environ["SPARK_STORAGE"]
 configuration = document.get("configuration") or {}
 configuration["spark.remote"] = os.environ["SPARK_REMOTE"]
+branch = os.environ.get("SPARK_WAP_BRANCH") or ""
+if branch:
+    # `write.wap.enabled=true` on the table is what sends the write here (#820 Q3, #991 Q2);
+    # the loader's wap-prepare task sets it before this pod starts.
+    configuration["spark.wap.branch"] = branch
 for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
     os.environ.pop(name, None)
 body = urllib.parse.urlencode(
@@ -122,10 +129,11 @@ def pod_env(
     refresh: str | None,
     full_refresh: tuple[str, ...],
     principal_secret: str,
+    wap_branch: str | None = None,
 ) -> list[k8s.V1EnvVar]:
     """The pod's environment: the runner's contract and the principal's Secret by reference."""
     refresh_value = "all" if refresh == "full" else ",".join(full_refresh)
-    return [
+    env = [
         k8s.V1EnvVar(
             name="SPARK_PROJECT_PATHS",
             value=json.dumps([[key, path] for key, path in paths]),
@@ -142,6 +150,11 @@ def pod_env(
         k8s.V1EnvVar(name="SPARK_HOME", value=SPARK_HOME),
         k8s.V1EnvVar(name="PYTHONUNBUFFERED", value="1"),
     ]
+    if wap_branch is not None:
+        # The runner sets `spark.wap.branch` from this: the graph's writes target the run's audit
+        # branch instead of `main` (#996, #991 Q1).
+        env.append(k8s.V1EnvVar(name="SPARK_WAP_BRANCH", value=wap_branch))
+    return env
 
 
 def _secret_env(name: str, secret: str, key: str) -> k8s.V1EnvVar:
@@ -180,6 +193,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         full_refresh: tuple[str, ...],
         principal_secret: str,
         namespace: str,
+        wap: bool = False,
         **kwargs,
     ) -> None:
         self.pipeline = pipeline
@@ -190,6 +204,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         self.refresh = refresh
         self.full_refresh = tuple(full_refresh)
         self.principal_secret = principal_secret
+        self.wap = wap
         super().__init__(
             namespace=namespace,
             image=None,  # set in execute from PIPELINE_SPARK_IMAGE
@@ -234,6 +249,8 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         self.image_pull_secrets = [
             k8s.V1LocalObjectReference(name=os.environ.get(PULL_SECRET_ENV) or "ghcr-creds")
         ]
+        run_id = context["dag_run"].run_id
+        wap_branch = wap_module.branch_name(run_id) if self.wap else None
         self.env_vars = pod_env(
             paths=paths,
             remote=os.environ.get(REMOTE_ENV)
@@ -249,6 +266,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
             refresh=self.refresh,
             full_refresh=self.full_refresh,
             principal_secret=self.principal_secret,
+            wap_branch=wap_branch,
         )
         self.volumes = [
             k8s.V1Volume(

@@ -51,6 +51,7 @@ def values(**overrides):
         refresh=None,
         full_refresh=(),
         principal_secret="sp-pipeline-demo",
+        wap_branch=None,
     )
     base.update(overrides)
     return base
@@ -96,3 +97,18 @@ def test_the_runner_runs_on_the_images_interpreter():
     # `platform/images/spark/Dockerfile` installs PyYAML into /opt/python313 (PYSPARK_PYTHON);
     # the Ubuntu `python3` on PATH has no yaml, so the runner must not ask for it (#969).
     assert spark_pipeline.PYTHON == "/opt/python313/bin/python3"
+
+
+def test_pod_env_carries_the_wap_branch_only_when_asked(monkeypatch):
+    assert "SPARK_WAP_BRANCH" not in env(monkeypatch, wap_branch=None)
+
+    variables = env(monkeypatch, wap_branch="audit_ab")
+    branches = [name for name in variables if name == "SPARK_WAP_BRANCH"]
+    assert len(branches) == 1
+    assert variables["SPARK_WAP_BRANCH"].value == "audit_ab"
+
+
+def test_the_runner_sets_spark_wap_branch_from_the_env():
+    # The runner cannot run in the unit environment; `test_the_runner_is_valid_python` keeps it
+    # compiling, and this pins the key #991 Q1 measured as the only working place for it.
+    assert 'configuration["spark.wap.branch"] = branch' in spark_pipeline.RUNNER

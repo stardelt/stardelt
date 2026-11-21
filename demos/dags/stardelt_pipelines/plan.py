@@ -106,10 +106,6 @@ SPARK_PIPELINE_NEEDS_BLOCK = (
     "spark-pipeline task `{task}`: catalog `{catalog}` has no `spark.sql.catalog.{catalog}.type` "
     "under `configuration:` — the Connect session would not know the catalog"
 )
-WAP_SPARK_PIPELINE = (
-    "publish: wap with a spark-pipeline task is not wired yet: the audit branch is cut for "
-    "notebook writes only. Use publish: direct, or move the write into a notebook task."
-)
 # A project is one directory name under the tool image's /opt/dbt/projects.
 _DBT_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,38}$")
 # A `quality` task's checks: SQL assertions that pass when they return no rows. The bounds are
@@ -543,8 +539,6 @@ def _spark_pipeline_config(
 
 def refuse_unrunnable(p: PipelinePlan) -> None:
     """Refuse a plan the loader cannot run as declared; called by the DAG, not by `plan`."""
-    if p.publish == "wap" and any(task.kind == "spark-pipeline" for task in p.tasks):
-        raise PlanError(WAP_SPARK_PIPELINE)
     if p.publish != "wap":
         return
     tables = sorted({table for task in p.tasks for table in task.writes})

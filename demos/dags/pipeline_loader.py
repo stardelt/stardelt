@@ -382,6 +382,7 @@ def _build_dag(p) -> DAG:
                 refresh=t.refresh,
                 full_refresh=t.full_refresh,
                 principal_secret=p.principal.secret_name,
+                wap=p.publish == "wap",
                 namespace=namespace,
                 dag=dag,
             )
