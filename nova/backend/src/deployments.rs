@@ -128,6 +128,11 @@ pub struct BundlePlanRequest {
     pub resources: Vec<serde_json::Value>,
     #[serde(default)]
     pub files: Vec<DeploymentFile>,
+    /// Whether the apply that follows removes what this bundle and target own and the set no longer
+    /// names (`stardelt bundle deploy --prune`). The plan names that set as `delete` changes; the
+    /// plan itself removes nothing.
+    #[serde(default)]
+    pub prune: bool,
 }
 
 /// `POST /api/deployments/plan` answer: what applying that set would do, and its identity.
@@ -158,8 +163,9 @@ pub struct PlanChange {
     /// `Pipeline` today; the bundle's other kinds are a later slice.
     pub kind: String,
     pub name: String,
-    /// `create`, `update` or `unchanged` (from `ValidatePipelineResponse::action`, with `create`
-    /// when `action` is absent).
+    /// `create`, `update`, `unchanged` or `delete` (from `ValidatePipelineResponse::action`, with
+    /// `create` when `action` is absent). A `delete` is a pipeline this bundle and target own that
+    /// the set omits, present only when `prune` is true, and it carries no `diff`.
     pub action: String,
     /// What an `update` would change, the sentences `pipelines_validate` answers.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -254,6 +260,7 @@ fn bundle_plan_request_example() -> serde_json::Value {
         "ownerGroup": "analytics",
         "target": "production",
         "revision": "4f3c2a1",
+        "prune": true,
         "resources": [{
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Pipeline",
@@ -677,7 +684,7 @@ pub async fn record(
     operation_id = "deployments_plan",
     path = "/api/deployments/plan",
     tag = "public",
-    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (today a warning, not a prune). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. `prune`, the stage modes and StreamApps are not covered yet.",
+    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes and StreamApps are not covered yet.",
     request_body(content = BundlePlanRequest, example = json!(bundle_plan_request_example())),
     responses(
         (status = 200, description = "The plan, with its identity", body = BundlePlan, example = json!(bundle_plan_example())),
@@ -1080,6 +1087,7 @@ mod tests {
             revision: None,
             resources: vec![serde_json::json!({"kind": "Pipeline", "metadata": {"name": "p"}})],
             files: vec![file("b.yaml", &"b".repeat(64))],
+            prune: false,
         }
     }
 

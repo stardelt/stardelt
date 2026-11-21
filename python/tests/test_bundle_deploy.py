@@ -337,6 +337,8 @@ def test_deploy_with_prune_removes_them_after_everything_else_succeeded(tmp_path
     ]
     assert calls(session)[-3] == ("DELETE", "/api/pipelines/stardelt/old")
     assert [method for method, _ in calls(session)].count("DELETE") == 1
+    plan_call = next(c for c in session.calls if c[1].endswith("/deployments/plan"))
+    assert plan_call[2]["json"]["prune"] is True
 
 
 def test_a_refused_prune_delete_reports_the_sentence_and_keeps_the_earlier_rows(tmp_path):
