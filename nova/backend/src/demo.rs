@@ -530,6 +530,9 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
             duration_seconds: secs,
             triggered_by: Some("scheduler".into()),
             note: None,
+            bundle: None,
+            target: None,
+            revision: None,
         };
     PipelineListResponse {
         pipelines: vec![

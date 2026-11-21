@@ -15049,6 +15049,13 @@
           "type"
         ],
         "properties": {
+          "bundle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bundle the run's pipeline was deployed from, when it came from one."
+          },
           "durationSeconds": {
             "type": [
               "number",
@@ -15074,6 +15081,13 @@
               "null"
             ]
           },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Git revision that deployment named; absent for a dirty tree."
+          },
           "runId": {
             "type": "string"
           },
@@ -15085,6 +15099,13 @@
           },
           "state": {
             "type": "string"
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stage (target) of that deployment."
           },
           "triggeredBy": {
             "type": [
