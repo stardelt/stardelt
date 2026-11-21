@@ -86,7 +86,16 @@ fn labels(name: &str) -> BTreeMap<String, String> {
     ])
 }
 
+/// Where a `SparkCluster` driver reads its catalog token: the projected volume's mount path.
+/// The client names the file (`rest.auth.token-file`) and reads it per request, so a rotation
+/// needs no restart (#492, #769).
+pub const CATALOG_TOKEN_MOUNT: &str = "/var/run/secrets/stardelt-catalog";
+/// The audience Lakekeeper verifies (`LAKEKEEPER__OPENID_AUDIENCE` in `platform/helm-values/lakekeeper.yaml`).
+pub const CATALOG_TOKEN_AUDIENCE: &str = "lakekeeper";
+
 /// The `SparkConnect` a `SparkCluster` becomes. Pure: no client, no cluster state.
+/// The driver also carries a projected ServiceAccount token with audience `lakekeeper` at
+/// /var/run/secrets/stardelt-catalog, an identity that gives no Kubernetes rights (#492).
 pub fn spark_connect(
     name: &str,
     namespace: &str,
@@ -167,9 +176,26 @@ pub fn spark_connect(
                     "template": {
                         "spec": {
                             "serviceAccountName": crate::spark::CLUSTER_DRIVER,
+                            "volumes": [{
+                                "name": "catalog-token",
+                                "projected": {
+                                    "sources": [{
+                                        "serviceAccountToken": {
+                                            "audience": CATALOG_TOKEN_AUDIENCE,
+                                            "expirationSeconds": 3600,
+                                            "path": "token",
+                                        }
+                                    }]
+                                }
+                            }],
                             "containers": [{
                                 "name": "spark-kubernetes-driver",
                                 "env": env,
+                                "volumeMounts": [{
+                                    "name": "catalog-token",
+                                    "mountPath": CATALOG_TOKEN_MOUNT,
+                                    "readOnly": true,
+                                }],
                             }],
                         }
                     }
@@ -1251,6 +1277,38 @@ mod tests {
                 .data
                 .pointer("/spec/executor/template/spec/containers/0/env"),
             Some(&json!([{ "name": "MODE", "value": "dev" }]))
+        );
+    }
+
+    /// #493 design question 1: the driver can read its own catalog token, the executors cannot.
+    #[test]
+    fn the_driver_reads_a_projected_catalog_token_and_an_executor_does_not() {
+        let connect =
+            spark_connect("analytics", "stardelt", &spec(), &runtime(), &owner()).expect("renders");
+        let server = &connect.data["spec"]["server"]["template"]["spec"];
+        let volume = &server["volumes"][0];
+        assert_eq!(volume["name"], json!("catalog-token"));
+        assert_eq!(
+            volume["projected"]["sources"][0]["serviceAccountToken"]["audience"],
+            json!(CATALOG_TOKEN_AUDIENCE)
+        );
+        assert_eq!(
+            volume["projected"]["sources"][0]["serviceAccountToken"]["path"],
+            json!("token")
+        );
+        assert_eq!(
+            server["containers"][0]["volumeMounts"][0]["mountPath"],
+            json!(CATALOG_TOKEN_MOUNT)
+        );
+        assert_eq!(
+            server["containers"][0]["volumeMounts"][0]["readOnly"],
+            json!(true)
+        );
+
+        let executor = &connect.data["spec"]["executor"]["template"]["spec"];
+        assert!(
+            executor.get("volumes").is_none(),
+            "an executor holds no catalog token: it uses the vended storage credential"
         );
     }
 
