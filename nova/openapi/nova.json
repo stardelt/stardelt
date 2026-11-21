@@ -14315,7 +14315,8 @@
           "loaded",
           "state",
           "tasks",
-          "concurrency"
+          "concurrency",
+          "publish"
         ],
         "properties": {
           "canEdit": {
@@ -14390,6 +14391,10 @@
           },
           "paused": {
             "type": "boolean"
+          },
+          "publish": {
+            "type": "string",
+            "description": "`spec.publish`: `direct` (the default) or `wap` — a `wap` run writes an audit\nbranch, runs its checks, and only a passing run publishes (#114)."
           },
           "runAs": {
             "type": [
@@ -16728,6 +16733,13 @@
               "string",
               "null"
             ]
+          },
+          "writes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`tasks[].writes` (`catalog.schema.table`), detail route only (#114): the tables a\n`wap` run audits."
           }
         }
       },
