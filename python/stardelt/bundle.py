@@ -638,8 +638,8 @@ def render_streams(directory, target, user=None):
 
 
 def _revision(root):
-    """The commit ``root`` is at (40 hex digits, with ``-dirty`` appended when files have uncommitted changes), or
-    ``None`` when ``root`` is not in a Git checkout or ``git`` is not there."""
+    """The commit ``root`` is at (40 hex digits, with ``-dirty`` appended when files under ``root`` have uncommitted
+    changes, untracked ones included), or ``None`` when ``root`` is not in a Git checkout or ``git`` is not there."""
     def git(*args):
         done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=30, check=False)
         return done.stdout.strip() if done.returncode == 0 else None
@@ -648,7 +648,7 @@ def _revision(root):
         commit = git("rev-parse", "HEAD")
         if not commit or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
             return None
-        return commit + ("-dirty" if git("status", "--porcelain") else "")
+        return commit + ("-dirty" if git("status", "--porcelain", "--", ".") else "")
     except (OSError, subprocess.SubprocessError):
         return None
 
