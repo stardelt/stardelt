@@ -79,7 +79,7 @@ fi
 
 if [ "$DRY_RUN" = 1 ]; then
   echo "would write ${CFG} for cluster ${CLUSTER_NAME}"
-  echo "would run: hetzner-k3s create --config ${CFG} --quiet"
+  echo "would run: hetzner-k3s create --config ${CFG} --quiet --skip-current-ip-validation"
   exit 0
 fi
 
@@ -157,7 +157,11 @@ EOF
 chmod 600 "$CFG"
 
 echo "› creating cluster '${CLUSTER_NAME}' (${NODE_TYPE} @ ${LOCATION}, k3s ${K3S_VERSION})"
-hetzner-k3s create --config "$CFG" --quiet
+# The allowed SSH/API networks were resolved and validated above (ALLOW_IPV4/ALLOW_IPV6);
+# hetzner-k3s's own check repeats that with a lookup of its own (ipinfo.io) and aborts the
+# whole run when that third-party call is slow or down. Keep its network validation, drop
+# the duplicate IP discovery.
+hetzner-k3s create --config "$CFG" --quiet --skip-current-ip-validation
 
 # The kubeconfig carries cluster-admin credentials: keep it private.
 if [ -f "$KUBECONFIG_PATH" ]; then chmod 600 "$KUBECONFIG_PATH"; fi
