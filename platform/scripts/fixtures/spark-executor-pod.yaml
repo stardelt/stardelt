@@ -16,7 +16,7 @@ spec:
   containers:
     # The digest is the one in `manifests/spark.yaml`; `scripts/pin-image.sh spark` moves both.
     - name: spark-kubernetes-executor
-      image: ghcr.io/stardelt/spark:dev@sha256:692c0132683d68bd6144ba35449ffc79436f0ab03be5256b28e50a51c373fe7e
+      image: ghcr.io/stardelt/spark:dev@sha256:71635e7637593b8612f11359bcd1ff49648360d40df90706a293653721f9d128
       volumeMounts:
         - name: spark-local-dir-1
           mountPath: /tmp
