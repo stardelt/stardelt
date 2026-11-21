@@ -35,6 +35,11 @@ QUALITY_SEVERITIES = ("error", "warn")
 CHECK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
 MAX_CHECKS = 50
 MAX_CHECK_SQL = 20000
+SPARK_KEYS = ("project", "refresh", "fullRefresh")
+# The CRD's `project` pattern and 128-character limit (operator/crates/stardelt-operator/src/crd.rs).
+SPARK_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,127}$")
+# What `spark-pipeline.yml` may not set: stardelt sets them at run time (#80).
+SPARK_OWNED_KEYS = ("catalog", "database", "storage")
 MIGRATION = re.compile(r"^\d{3}_[a-z0-9_]+\.sql$")
 CATALOG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # A migration statement that names a table whose change can have downstream impact. Only the
@@ -248,9 +253,49 @@ def _quality_problems(where, quality):
     return problems
 
 
-def _task_problems(where, tasks, files):
+def _spark_pipeline_problems(where, task, root):
+    """What a ``spark-pipeline`` task must say, offline — the CRD's ``project`` rules and the file it names."""
+    if "spark-pipeline" not in task:
+        return []
+    graph = task["spark-pipeline"]
+    if not isinstance(graph, dict):
+        return [(where, "spark-pipeline must be a mapping: project, refresh and fullRefresh")]
+    problems = [
+        (where, f"unknown key {key!r} (known: project, refresh, fullRefresh)")
+        for key in graph
+        if key not in SPARK_KEYS
+    ]
+    needs_project = "a spark-pipeline task needs project (the bundle directory with spark-pipeline.yml)"
+    project = graph.get("project")
+    if not isinstance(project, str) or not project:
+        problems.append((where, needs_project))
+        return problems
+    if (
+        not SPARK_PROJECT.match(project)
+        or project.endswith("/")
+        or any(part in ("..", ".git") for part in project.split("/"))
+    ):
+        problems.append((where, "project must be a relative directory inside the bundle"))
+        return problems
+    manifest = Path(root) / project / "spark-pipeline.yml"
+    if not (Path(root) / project).is_dir() or not manifest.is_file():
+        problems.append((where, f"project {project!r} has no spark-pipeline.yml"))
+        return problems
+    try:
+        spec = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError) as err:
+        problems.append((where, f"spark-pipeline.yml cannot be read: {str(err).splitlines()[0]}"))
+        return problems
+    if isinstance(spec, dict) and any(key in spec for key in SPARK_OWNED_KEYS):
+        problems.append(
+            (where, "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)")
+        )
+    return problems
+
+
+def _task_problems(where, tasks, files, root):
     """What a ``tasks`` list must say, offline: names, one source each (``sql``, ``sqlFile``, ``notebook``,
-    ``dbt`` or ``quality``), and the dependency graph."""
+    ``dbt``, ``quality`` or ``spark-pipeline``), and the dependency graph."""
     problems = []
     if not isinstance(tasks, list) or not tasks:
         return [(where, "tasks must be a non-empty list")]
@@ -269,11 +314,12 @@ def _task_problems(where, tasks, files):
         if name in names:
             problems.append((at, "the name is used twice"))
         names.append(name)
-        given = [k for k in ("sql", "sqlFile", "notebook", "dbt", "quality") if k in task]
+        given = [k for k in ("sql", "sqlFile", "notebook", "dbt", "quality", "spark-pipeline") if k in task]
         if len(given) != 1:
-            problems.append((at, "give exactly one of sql, sqlFile, notebook, dbt or quality"))
+            problems.append((at, "give exactly one of sql, sqlFile, notebook, dbt, quality or spark-pipeline"))
         problems.extend(_dbt_problems(at, task.get("dbt")))
         problems.extend(_quality_problems(at, task.get("quality")))
+        problems.extend(_spark_pipeline_problems(at, task, root))
         if "sqlFile" in task and task["sqlFile"] not in files:
             problems.append((at, f"sqlFile {task['sqlFile']!r} is not among the bundle's files"))
         problems.extend(_notebook_problems(at, task.get("notebook"), files))
@@ -462,7 +508,7 @@ def validate(directory, target=None):
                     problems.append(
                         (f"{relative} ({tname})", "give tasks, or one of sql, sqlFile or notebook — not both")
                     )
-                problems.extend(_task_problems(f"{relative} ({tname})", doc["tasks"], files))
+                problems.extend(_task_problems(f"{relative} ({tname})", doc["tasks"], files, root))
             else:
                 given = [k for k in ("sql", "sqlFile", "notebook") if k in doc]
                 if len(given) != 1:

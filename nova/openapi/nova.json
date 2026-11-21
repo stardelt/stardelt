@@ -13839,7 +13839,7 @@
       },
       "PipelineTaskRequest": {
         "type": "object",
-        "description": "One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a\nnotebook, a dbt run and a quality run, and the tasks that must succeed first.",
+        "description": "One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement, a\nnotebook, a dbt run, a quality run and a spark-pipeline graph, and the tasks that must succeed\nfirst.",
         "required": [
           "name"
         ],
@@ -13848,7 +13848,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/DbtRequest",
-                "description": "A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the four."
+                "description": "A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the five."
               },
               {
                 "type": "null"
@@ -13881,7 +13881,18 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/QualityRequest",
-                "description": "SQL assertions instead of a statement, a notebook or a dbt run (`#114`): exactly one of\nthe four."
+                "description": "SQL assertions instead of a statement, a notebook or a dbt run (`#114`): exactly one of\nthe five."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sparkPipeline": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SparkPipelineRequest",
+                "description": "A declared Spark graph instead of a statement, a notebook, a dbt run or SQL checks\n(#80): exactly one of the five."
               },
               {
                 "type": "null"
@@ -13890,7 +13901,7 @@
           },
           "sql": {
             "type": "string",
-            "description": "The statement to run; exactly one of this, `notebook`, `dbt` and `quality` is given."
+            "description": "The statement to run; exactly one of this, `notebook`, `dbt`, `quality` and\n`sparkPipeline` is given."
           }
         }
       },
@@ -15358,6 +15369,36 @@
           }
         }
       },
+      "SparkPipelineRequest": {
+        "type": "object",
+        "description": "A `spark-pipeline` task of a task list (#80): the declared graph `spark-pipelines` runs on\nthe owner group's `SparkCluster`. `project` is a directory of the bundle.",
+        "required": [
+          "project"
+        ],
+        "properties": {
+          "fullRefresh": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Datasets to rebuild from scratch; 1 to 32 names."
+          },
+          "project": {
+            "type": "string",
+            "description": "The bundle directory that holds `spark-pipeline.yml`."
+          },
+          "refresh": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`incremental` (the default) or `full`."
+          }
+        }
+      },
       "SqlWarehouse": {
         "type": "object",
         "description": "One warehouse a caller may use, as the UI shows it.",
@@ -16133,6 +16174,16 @@
             },
             "description": "The task names this task waits for (`tasks[].dependsOn`)."
           },
+          "fullRefresh": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The datasets a full refresh rebuilds, detail route only."
+          },
           "kind": {
             "type": "string"
           },
@@ -16165,6 +16216,20 @@
               "null"
             ],
             "description": "The immutable object version a notebook task pins."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bundle directory of a `kind: \"spark-pipeline\"` task, detail route only."
+          },
+          "refresh": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`incremental` or `full` of a `kind: \"spark-pipeline\"` task, detail route only."
           },
           "sql": {
             "type": [
