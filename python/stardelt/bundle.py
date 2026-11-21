@@ -19,12 +19,14 @@ from stardelt import api, apply, lineage, runs
 
 KEYS = {"bundle", "variables", "include", "files", "migrations", "requires", "targets"}
 KINDS = ("Pipeline", "StreamApp")
-PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks")
+PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
 TASK_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 MAX_TASKS = 30
 MAX_TASK_DEPS = 8
 GROUP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# The CRD's rule for a task's `writes` (operator/crates/stardelt-operator/src/crd.rs).
+TABLE = re.compile(r"^[^ .]+\.[^ .]+\.[^ .]+$")
 VARIABLE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 CONNECTION = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 USE = re.compile(r"\$\{var\.([A-Za-z0-9_]+)\}")
@@ -323,6 +325,16 @@ def _task_problems(where, tasks, files, root):
         problems.extend(_spark_pipeline_problems(at, task, root))
         if "sqlFile" in task and task["sqlFile"] not in files:
             problems.append((at, f"sqlFile {task['sqlFile']!r} is not among the bundle's files"))
+        if "writes" in task:
+            writes = task["writes"]
+            if (
+                not isinstance(writes, list)
+                or len(writes) > 16
+                or not all(isinstance(table, str) and TABLE.match(table) for table in writes)
+            ):
+                problems.append((at, "writes must be a list of at most 16 tables, each catalog.schema.table"))
+            elif "spark-pipeline" not in task and "notebook" not in task:
+                problems.append((at, "only a spark-pipeline or notebook task declares writes"))
         problems.extend(_notebook_problems(at, task.get("notebook"), files))
         depends = task.get("dependsOn", [])
         if not isinstance(depends, list) or not all(isinstance(d, str) for d in depends):
@@ -502,6 +514,22 @@ def validate(directory, target=None):
                 ):
                     problems.append((f"{relative} ({tname})",
                                      "viewers must be a list of at most 8 group names (a published notebook's X-Stardelt-Viewers header holds 8)"))
+            if "publish" in doc and doc["publish"] not in ("direct", "wap"):
+                problems.append((f"{relative} ({tname})", "publish must be direct or wap"))
+            if doc.get("publish") == "wap":
+                tasks = doc.get("tasks") if isinstance(doc.get("tasks"), list) else []
+                checked = any(
+                    isinstance(task, dict)
+                    and isinstance(task.get("quality"), dict)
+                    and bool(task["quality"].get("checks"))
+                    for task in tasks
+                )
+                writes = any(isinstance(task, dict) and bool(task.get("writes")) for task in tasks)
+                if not (checked and writes):
+                    problems.append(
+                        (f"{relative} ({tname})",
+                         "publish: wap needs a task list with a quality task that has a check and a spark-pipeline or notebook task with writes")
+                    )
             if "dbt" in doc:
                 problems.append((f"{relative} ({tname})", "a dbt run is a task: put it under tasks: with a name"))
             if "tasks" in doc:

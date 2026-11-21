@@ -120,6 +120,7 @@ def test_a_stream_file_validates_and_is_not_a_pipeline_name(tmp_path):
 def test_a_stream_file_that_is_a_pipeline_or_names_another_group_is_refused(tmp_path):
     for extra, sentence in (
         ("sql: select 1\n", "a StreamApp is not a pipeline: remove sql"),
+        ("publish: wap\n", "a StreamApp is not a pipeline: remove publish"),
         ("sink: {catalog: c, table: no-dot}\n", "sink.table is schema.table"),
     ):
         stream = f"kind: StreamApp\nname: measurements\nsource: {{topic: t}}\nsink: {{catalog: c, table: bronze.m}}\n{extra}"
@@ -371,6 +372,87 @@ def test_a_spark_pipeline_yml_may_not_set_the_warehouse_keys(tmp_path):
         "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)"
         in said(problems)
     )
+
+
+def test_a_wap_pipeline_with_a_check_and_a_spark_writer_validates_and_renders(tmp_path):
+    """`publish: wap` (#114, #797): a quality check and a Spark task that names the tables it writes."""
+    make(
+        tmp_path,
+        resources={
+            "gold.yaml": "name: shop-gold\npublish: wap\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.daily]}\n"
+            "  - {name: gate, quality: {checks: [{name: no_null_ids, sql: 'SELECT 1 WHERE 1=0'}]}}\n"
+        },
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+    )
+    assert bundle.validate(tmp_path, "prod")[0] == []
+    problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
+    assert (problems, mode) == ([], "production")
+    assert specs[0]["publish"] == "wap"
+    assert specs[0]["tasks"][0]["writes"] == ["gold.shop.daily"]
+
+
+def test_publish_wap_needs_a_check_and_a_writer(tmp_path):
+    sentence = (
+        "publish: wap needs a task list with a quality task that has a check "
+        "and a spark-pipeline or notebook task with writes"
+    )
+    rows = [
+        # no quality task at all
+        "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.daily]}\n",
+        # a quality task without a check
+        "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.daily]}\n"
+        "  - {name: gate, quality: {checks: []}}\n",
+        # a check but no task that writes
+        "  - {name: gate, quality: {checks: [{name: c, sql: 'select 1'}]}}\n",
+    ]
+    for index, tasks in enumerate(rows):
+        directory = tmp_path / f"row{index}"
+        directory.mkdir()
+        make(
+            directory,
+            resources={"gold.yaml": "name: shop-gold\npublish: wap\ntasks:\n" + tasks},
+            files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+        )
+        assert sentence in said(bundle.validate(directory)[0]), tasks
+
+
+def test_publish_must_be_direct_or_wap(tmp_path):
+    task_bundle(tmp_path, ["{name: build, sql: select 1}"], extra="publish: maybe\n")
+    assert "resources/gold.yaml (dev): publish must be direct or wap" in said(bundle.validate(tmp_path)[0])
+    only = tmp_path / "direct"
+    only.mkdir()
+    task_bundle(only, ["{name: build, sql: select 1}"], extra="publish: direct\n")
+    assert bundle.validate(only, "prod")[0] == []
+
+
+def test_writes_are_up_to_16_catalog_schema_tables_of_a_spark_or_notebook_task(tmp_path):
+    bad_table = tmp_path / "bad-table"
+    bad_table.mkdir()
+    task_bundle(bad_table, ["{name: build, notebook: {file: notebooks/explore.ipynb}, writes: [gold.shop]}"])
+    assert "writes must be a list of at most 16 tables, each catalog.schema.table" in said(bundle.validate(bad_table)[0])
+
+    too_many = tmp_path / "too-many"
+    too_many.mkdir()
+    task_bundle(
+        too_many,
+        [
+            "{name: build, notebook: {file: notebooks/explore.ipynb}, writes: ["
+            + ", ".join(f"gold.shop.t{index}" for index in range(17))
+            + "]}"
+        ],
+    )
+    assert "writes must be a list of at most 16 tables, each catalog.schema.table" in said(bundle.validate(too_many)[0])
+
+    sql_task = tmp_path / "sql-task"
+    sql_task.mkdir()
+    task_bundle(sql_task, ["{name: build, sql: select 1, writes: [gold.shop.daily]}"])
+    assert "only a spark-pipeline or notebook task declares writes" in said(bundle.validate(sql_task)[0])
+
+    notebook = tmp_path / "notebook"
+    notebook.mkdir()
+    task_bundle(notebook, ["{name: build, notebook: {file: notebooks/explore.ipynb}, writes: [gold.shop.daily]}"])
+    assert bundle.validate(notebook, "prod")[0] == []
 
 
 def test_dbt_task_rules_are_reported(tmp_path):
