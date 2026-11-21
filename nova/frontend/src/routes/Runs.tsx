@@ -173,6 +173,18 @@ export default function Runs() {
                     <span className="block text-xs text-text-mute">
                       {row.ownerGroup ?? 'administrators'}
                     </span>
+                    {row.bundle && (
+                      <span
+                        className="block text-xs text-text-mute"
+                        title={
+                          row.revision
+                            ? `deployed from ${row.bundle} at ${row.revision}`
+                            : `deployed from ${row.bundle}`
+                        }
+                      >
+                        {row.bundle}@{row.revision ? row.revision.slice(0, 7) : 'no commit'}
+                      </span>
+                    )}
                   </td>
                   <td className="td px-3">{kindWord(row.kind)}</td>
                   <td className="td px-3">

@@ -2795,6 +2795,15 @@ pub struct RunView {
     pub duration_seconds: Option<f64>,
     pub triggered_by: Option<String>,
     pub note: Option<String>,
+    /// The bundle the run's pipeline was deployed from, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    /// The stage (target) of that deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The Git revision that deployment named; absent for a dirty tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 /// The body of `POST …/runs`: a run date and parameter values for this run only (nova#817).
@@ -2950,7 +2959,42 @@ pub struct RunQueriesResponse {
     pub queries: Vec<RunQueryView>,
 }
 
+/// The note Nova writes when it starts a run. A deployed pipeline names its bundle, target and
+/// revision in a suffix the run view reads back (#105); a hand-made one keeps the plain sentence.
+fn run_note(who: &Identity, deployment: Option<&DeploymentView>) -> String {
+    let mut note = format!("Started from Nova by {}", who.display_name);
+    if let Some(deployment) = deployment {
+        note.push_str(&format!(
+            " [stardelt bundle={} target={}",
+            deployment.bundle, deployment.target
+        ));
+        if let Some(revision) = &deployment.revision {
+            note.push_str(&format!(" revision={revision}"));
+        }
+        note.push(']');
+    }
+    note
+}
+
+/// `run_note`'s suffix, read back: `(bundle, target, revision)`, `None` for a note without one.
+fn run_provenance(note: &str) -> Option<(String, String, Option<String>)> {
+    let start = note.rfind("[stardelt ")?;
+    let inner = note[start + "[stardelt ".len()..].strip_suffix(']')?;
+    let (mut bundle, mut target, mut revision) = (None, None, None);
+    for part in inner.split_whitespace() {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "bundle" => bundle = Some(value.to_string()),
+            "target" => target = Some(value.to_string()),
+            "revision" => revision = Some(value.to_string()),
+            _ => return None,
+        }
+    }
+    Some((bundle?, target?, revision))
+}
+
 fn run_view(run: &DagRun) -> RunView {
+    let provenance = run_provenance(run.note.as_deref().unwrap_or_default());
     RunView {
         run_id: run.dag_run_id.clone(),
         state: run.state.clone().unwrap_or_default(),
@@ -2961,6 +3005,9 @@ fn run_view(run: &DagRun) -> RunView {
         duration_seconds: duration_seconds(run.start_date.as_deref(), run.end_date.as_deref()),
         triggered_by: run.triggered_by.clone(),
         note: run.note.clone(),
+        bundle: provenance.as_ref().map(|(bundle, _, _)| bundle.clone()),
+        target: provenance.as_ref().map(|(_, target, _)| target.clone()),
+        revision: provenance.and_then(|(_, _, revision)| revision),
     }
 }
 
@@ -4389,7 +4436,7 @@ async fn run_now_inner(
     // Always now, whole seconds, UTC: Airflow accepts any date and makes a run with no tasks for
     // one that is not now (#255). The date the person asked for travels as `conf`, which the
     // loader reads (`dag_run.conf`, nova#817), never as the logical date.
-    let note = format!("Started from Nova by {}", who.display_name);
+    let note = run_note(who, deployment_of_with(&resource, spec_digest).as_ref());
     let conf = run_conf(start);
     match airflow
         .trigger(&dag_id, &now_rfc3339(), Some(&note), conf.as_ref())
@@ -10214,6 +10261,88 @@ mod tests {
                 .any(|call| call == "POST /api/v2/dags/stardelt__smoke/dagRuns"),
             "Airflow was asked to trigger: {:?}",
             fake.calls
+        );
+    }
+
+    /// The run's note names the deployment it came from, read back as the run view's fields
+    /// (#105).
+    #[tokio::test]
+    async fn run_now_carries_the_deploy_provenance_in_its_note() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        stamp_provenance(
+            &mut smoke,
+            &Provenance {
+                bundle: "shop-etl".into(),
+                target: "prod".into(),
+                revision: Some("9f3c2a1".into()),
+                repository: None,
+            },
+            "alex",
+        );
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &member,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("the run starts");
+
+        assert_eq!(run.bundle.as_deref(), Some("shop-etl"));
+        assert_eq!(run.target.as_deref(), Some("prod"));
+        assert_eq!(run.revision.as_deref(), Some("9f3c2a1"));
+        assert_eq!(
+            run.note.as_deref(),
+            Some(
+                "Started from Nova by sub-ada [stardelt bundle=shop-etl target=prod revision=9f3c2a1]"
+            )
+        );
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let note = fake.trigger_bodies[0]["note"]
+            .as_str()
+            .expect("the trigger carries a note");
+        assert!(note.contains("bundle=shop-etl"), "the bundle: {note}");
+        assert!(note.contains("target=prod"), "the target: {note}");
+        assert!(note.contains("revision=9f3c2a1"), "the revision: {note}");
+    }
+
+    /// A note with the provenance suffix answers its parts; anything else answers nothing (#105).
+    #[test]
+    fn run_provenance_reads_the_note_suffix() {
+        assert_eq!(
+            run_provenance(
+                "Started from Nova by Ada [stardelt bundle=shop-etl target=prod revision=9f3c2a1]"
+            ),
+            Some((
+                "shop-etl".to_string(),
+                "prod".to_string(),
+                Some("9f3c2a1".to_string())
+            ))
+        );
+        assert_eq!(
+            run_provenance("Started from Nova by Ada [stardelt bundle=shop-etl target=prod]"),
+            Some(("shop-etl".to_string(), "prod".to_string(), None)),
+            "a deployment with no revision names none"
+        );
+        assert_eq!(
+            run_provenance("Started from Nova by Ada"),
+            None,
+            "a note without a suffix answers nothing"
+        );
+        assert_eq!(
+            run_provenance("Started from Nova by Ada [stardelt bundle=shop-etl"),
+            None,
+            "an unterminated suffix answers nothing"
         );
     }
 

@@ -961,6 +961,10 @@ export type RunView = {
   durationSeconds: number | null
   triggeredBy: string | null
   note: string | null
+  /** The deployment a run came from: its bundle, target and Git revision (#105). */
+  bundle?: string
+  target?: string
+  revision?: string
 }
 
 /** One run in the cross-pipeline list (`GET /api/runs`). `RunView`'s fields are flat in the row. */
