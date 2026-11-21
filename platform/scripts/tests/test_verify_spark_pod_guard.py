@@ -90,7 +90,9 @@ class HostNetworkCase(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("✓ deny-host-network.yaml refused by Pod Security (hostNetwork) before the policy",
                       done.stdout)
-        self.assertIn("PASS (17 cases: 13 denied, 4 admitted)", done.stdout)
+        self.assertIn("✓ deny-secret-env.yaml denied by the policy", done.stdout)
+        self.assertIn("✓ deny-secret-envfrom.yaml denied by the policy", done.stdout)
+        self.assertIn("PASS (19 cases: 15 denied, 4 admitted)", done.stdout)
 
     def test_an_admitted_host_network_probe_fails(self):
         done = self.run_script("admitted")
