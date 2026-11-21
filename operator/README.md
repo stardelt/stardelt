@@ -30,6 +30,7 @@ the transitional dev install until the operator path is proven on a fresh node
 | `ServicePrincipal` | namespaced | a non-human identity (client credentials) for pipelines, maintenance and collectors |
 | `StreamApp` | namespaced | a streaming app: a Kafka topic in, an Iceberg table out (D42) |
 | `ModelEndpoint` | namespaced | the customer's own OpenAI-compatible model endpoint: URL, model, key reference, where it runs, purposes and token quota; the resource is validated, nothing reconciles it yet |
+| `DeployStage` | namespaced | one deploy stage: the bundle target is the object's name, and `spec.subject` is the exact CI subject (a GitHub Actions `sub`) allowed to deploy to it; the resource is validated, nothing renders it yet |
 
 The ML plugs (`ModelRegistry`, `ModelService`) are planned (see the master spec §5).
 

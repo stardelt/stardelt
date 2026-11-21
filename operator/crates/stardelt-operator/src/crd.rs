@@ -3700,6 +3700,72 @@ pub struct ModelEndpointStatus {
     pub conditions: Vec<Condition>,
 }
 
+fn default_deploy_audience() -> String {
+    "stardelt-deploy".into()
+}
+
+/// One deploy stage: the bundle target is the object's name and `spec.subject` is the exact CI subject allowed to deploy to it (#57).
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[kube(
+    group = "stardelt.io",
+    version = "v1alpha1",
+    kind = "DeployStage",
+    namespaced,
+    shortname = "dstage",
+    doc = "One deploy stage: the bundle target names the object, and spec.subject is the exact CI subject (a GitHub Actions `sub`) allowed to deploy to that stage (#57). The operator renders one Keycloak client per object; Nova authorizes a deploy whose token was issued to that client."
+)]
+pub struct DeployStageSpec {
+    /// The exact CI subject as the identity provider receives it: `repo:<owner>/<name>:ref:refs/heads/<branch>` or `repo:<owner>/<name>:environment:<name>` (with GitHub's immutable ids: `repo:<owner>@<id>/<name>@<id>:ref:refs/heads/<branch>`).
+    #[schemars(
+        length(min = 8, max = 512),
+        regex(pattern = r"^repo:[^\s]+:(ref:refs/heads/[^\s]+|environment:[a-z0-9][a-z0-9-]*)$")
+    )]
+    pub subject: String,
+    /// The GitHub `environment` the token was issued for, when the subject names one. Pinning an environment drops the `ref` part of the subject (#819), so the two are either/or.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[a-z0-9][a-z0-9-]*$"))]
+    pub environment: Option<String>,
+    /// The audience the realm client's mapper puts in the token this stage accepts. Default `stardelt-deploy`.
+    #[serde(default = "default_deploy_audience")]
+    #[schemars(
+        length(min = 1, max = 128),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    )]
+    pub audience: String,
+}
+
+impl DeployStageSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        // The audience rule the schema's `pattern` and length enforce, repeated so an offline
+        // `validate` refuses what admission would (D33/D34), as the other `validate()`s here do.
+        let audience = self.audience.as_bytes();
+        let audience_ok = !audience.is_empty()
+            && audience.len() <= 128
+            && audience[0].is_ascii_alphanumeric()
+            && audience[1..]
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+        if !audience_ok {
+            return Err(
+                "spec.audience must be 1 to 128 letters, digits and `.`, `_`, `:`, `-`, starting with a letter or digit".into(),
+            );
+        }
+        if self.subject.contains(":pull_request") {
+            return Err("a pull_request token names no branch and cannot be pinned to a stage; pin :ref:refs/heads/<branch> or :environment:<name>".into());
+        }
+        match &self.environment {
+            Some(env) if !self.subject.ends_with(&format!(":environment:{env}")) => {
+                Err(format!("spec.environment {env} does not match spec.subject"))
+            }
+            None if self.subject.contains(":environment:") => Err(
+                "name the environment in spec.environment too, so the object says what the token carries"
+                    .into(),
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct ComponentStatus {
     pub name: String,
@@ -3756,6 +3822,7 @@ pub fn crd_documents() -> Vec<CustomResourceDefinition> {
         SqlWarehouse::crd(),
         SparkCluster::crd(),
         ModelEndpoint::crd(),
+        DeployStage::crd(),
     ]
 }
 
@@ -3820,6 +3887,52 @@ mod tests {
     }
 
     #[test]
+    fn deploy_stage_validates_the_subject() {
+        let accepted = [
+            serde_json::json!({"subject": "repo:stardelt/stardelt:ref:refs/heads/main"}),
+            serde_json::json!({"subject": "repo:stardelt@285991931/stardelt@1453997446:ref:refs/heads/main"}),
+            serde_json::json!({"subject": "repo:stardelt/stardelt:environment:production", "environment": "production"}),
+        ];
+        for case in &accepted {
+            let spec: DeployStageSpec =
+                serde_json::from_value(case.clone()).expect("deserialize DeployStageSpec");
+            assert!(spec.validate().is_ok(), "accepted: {case}");
+        }
+        let default: DeployStageSpec =
+            serde_json::from_value(accepted[0].clone()).expect("deserialize DeployStageSpec");
+        assert_eq!(default.audience, "stardelt-deploy");
+
+        let refused = [
+            serde_json::json!({"subject": "repo:stardelt/stardelt:ref:refs/heads/main:pull_request"}),
+            serde_json::json!({"subject": "repo:stardelt/stardelt:environment:production", "environment": "prod"}),
+            serde_json::json!({"subject": "repo:stardelt/stardelt:environment:production"}),
+            serde_json::json!({"subject": "repo:stardelt/stardelt:ref:refs/heads/main", "audience": ""}),
+        ];
+        for (index, case) in refused.iter().enumerate() {
+            let outcome = serde_json::from_value::<DeployStageSpec>(case.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|spec| spec.validate());
+            assert!(outcome.is_err(), "refused case {index}: {case}");
+        }
+    }
+
+    #[test]
+    fn deploy_stage_carries_the_ci_subject_schema() {
+        let crd = serde_json::to_value(DeployStage::crd()).expect("the DeployStage CRD serialises");
+        assert_eq!(crd["spec"]["names"]["kind"], "DeployStage");
+        assert_eq!(crd["spec"]["names"]["plural"], "deploystages");
+        assert_eq!(
+            crd["spec"]["names"]["shortNames"],
+            serde_json::json!(["dstage"])
+        );
+        assert_structural(
+            "#",
+            &serde_json::to_value(schemars::schema_for!(DeployStage))
+                .expect("the DeployStage schema serialises"),
+        );
+    }
+
+    #[test]
     fn model_endpoint_schema_has_the_rules() {
         let crd = ModelEndpoint::crd();
         let schema = serde_json::to_value(
@@ -3864,6 +3977,7 @@ mod tests {
             [
                 "catalogs.stardelt.io",
                 "connections.stardelt.io",
+                "deploystages.stardelt.io",
                 "ingestionsources.stardelt.io",
                 "lakehouses.stardelt.io",
                 "modelendpoints.stardelt.io",
