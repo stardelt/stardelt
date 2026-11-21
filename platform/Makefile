@@ -1336,6 +1336,10 @@ sync-dev-client: _context ## Converge the live realm's stardelt-dev client (devi
 sync-mcp-client: _context ## Converge the live realm's stardelt-mcp client (MCP audience, PKCE, loopback redirects; idempotent)
 	@NAMESPACE=$(NAMESPACE) MCP_AUDIENCE=$(MCP_AUDIENCE) bash scripts/keycloak-sync-mcp-client.sh
 
+.PHONY: sync-github-idp
+sync-github-idp: _context ## Converge the realm's GitHub Actions identity provider a DeployStage names (#57; idempotent)
+	@NAMESPACE=$(NAMESPACE) bash scripts/keycloak-sync-github-idp.sh
+
 # The audience `openbao` on the tokens of Nova, the notebook hub and the developer client, so the
 # secret store's JWT sign-in accepts them (platform#160, decision D27).
 .PHONY: sync-store-audience
@@ -1476,6 +1480,8 @@ install-identity: deps _context ## Install the platform IdP (Keycloak) at id.$(B
 	@$(MAKE) --no-print-directory sync-dev-client
 	@echo "› [11/11] The MCP client for AI agents"
 	@$(MAKE) --no-print-directory sync-mcp-client
+	@echo "› [11/11] Sync the realm's GitHub Actions identity provider (a DeployStage's CI sign-in, #57)"
+	@$(MAKE) --no-print-directory sync-github-idp
 	@echo "› [9/11] Sync the live realm's secret-store audience (platform#160)"
 	@$(MAKE) --no-print-directory sync-store-audience
 	@echo "› [10/11] guard: every client secret must authenticate at the token endpoint"
