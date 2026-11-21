@@ -366,8 +366,9 @@ extraEnv: |
         name: stardelt-identity
         key: trinoUrl
         optional: true
+  # The catalog's base URL without `/catalog` (#858); a short name, as everywhere in this file.
   - name: PIPELINE_CATALOG_URL
-    value: http://lakekeeper.stardelt.svc.cluster.local:8181
+    value: http://lakekeeper:8181
   - name: PIPELINE_TOKEN_URL
     valueFrom:
       configMapKeyRef:
