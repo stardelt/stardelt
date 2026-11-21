@@ -397,6 +397,19 @@ def test_a_spark_pipeline_task_carries_its_graph_files(tmp_path):
     }
 
 
+def test_a_graph_file_symlink_is_refused(tmp_path):
+    make(
+        tmp_path,
+        resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: build, spark-pipeline: {project: spark/shop}}\n"},
+        files={**TASK_FILES, "spark/shop/spark-pipeline.yml": "name: shop\n"},
+    )
+    (tmp_path / "secret.txt").write_text("x")
+    (tmp_path / "spark/shop/linked.sql").symlink_to(tmp_path / "secret.txt")
+    problems, mode, specs = bundle.render(tmp_path, "prod", "alice")
+    assert specs == []
+    assert "a symbolic link is not allowed: linked.sql" in said(problems)
+
+
 def test_a_graph_file_that_is_not_utf8_text_is_refused(tmp_path):
     make(
         tmp_path,

@@ -336,12 +336,18 @@ def _spark_pipeline_files(root, project):
     """
     base = Path(root) / project
     contents = {}
+    total = 0
     for path in sorted(base.rglob("*")):
-        if not path.is_file():
-            continue
         relative = path.relative_to(base).as_posix()
         if any(part in SPARK_SKIPPED_DIRS for part in relative.split("/")):
             continue
+        # The graph is sent to the server, so it may not reach outside the bundle through a link.
+        if _linked(root, path):
+            raise apply.ApplyError(f"a symbolic link is not allowed: {relative}")
+        if not path.is_file():
+            continue
+        if path.stat().st_size > MAX_SPARK_FILE_BYTES:
+            raise apply.ApplyError(f"{relative} is larger than 64 KiB")
         try:
             data = path.read_bytes()
         except OSError:
@@ -354,14 +360,12 @@ def _spark_pipeline_files(root, project):
             contents[relative] = data.decode("utf-8")
         except UnicodeDecodeError:
             raise apply.ApplyError(f"the graph file {relative} is not UTF-8 text") from None
+        total += len(data)
     if "spark-pipeline.yml" not in contents:
         raise apply.ApplyError("the graph has no spark-pipeline.yml")
     if len(contents) > MAX_SPARK_FILES:
         raise apply.ApplyError("a spark-pipeline graph is at most 64 files")
-    for relative, text in contents.items():
-        if len(text.encode("utf-8")) > MAX_SPARK_FILE_BYTES:
-            raise apply.ApplyError(f"{relative} is larger than 64 KiB")
-    if sum(len(text.encode("utf-8")) for text in contents.values()) > MAX_SPARK_GRAPH_BYTES:
+    if total > MAX_SPARK_GRAPH_BYTES:
         raise apply.ApplyError("a spark-pipeline graph is at most 256 KiB")
     return contents
 

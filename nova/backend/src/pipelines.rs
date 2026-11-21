@@ -14043,7 +14043,8 @@ mod tests {
             "kind": "spark-pipeline",
             "project": "spark/shop",
             "refresh": "incremental",
-            "fullRefresh": ["gold.report"]
+            "fullRefresh": ["gold.report"],
+            "files": { "spark-pipeline.yml": "name: shop\n", "sql/trips.sql": "select 1\n" }
         }]);
         let resources = memory_with(&[("shop-graph", stored)], &analytics_principal());
         let ada = who("sub-ada", &["analytics"], false);
@@ -14065,7 +14066,10 @@ mod tests {
                     "project": "spark/shop",
                     "refresh": "incremental",
                     "fullRefresh": ["gold.report"],
-                    "files": {}
+                    "files": {
+                        "spark-pipeline.yml": "name: shop\n",
+                        "sql/trips.sql": "select 1\n"
+                    }
                 }
             }])
         );
@@ -14173,6 +14177,60 @@ mod tests {
             "task `build`: a spark-pipeline task's files must hold spark-pipeline.yml at the project root"
         );
         assert!(stored_pipeline(&resources, "shop-graph").await.is_none());
+    }
+
+    /// The graph's own bounds (#80 S2b): at most 64 files, paths relative to the project directory,
+    /// and 64 KiB per file and 256 KiB for the whole graph.
+    #[test]
+    fn a_spark_pipeline_graph_is_bounded() {
+        let graph = |files: BTreeMap<String, String>| SparkPipelineRequest {
+            project: "spark/shop".into(),
+            refresh: None,
+            full_refresh: None,
+            files,
+        };
+        let with = |extra: &[(String, String)]| {
+            let mut files =
+                BTreeMap::from([("spark-pipeline.yml".to_string(), "name: shop\n".into())]);
+            for (path, text) in extra {
+                files.insert(path.clone(), text.clone());
+            }
+            files
+        };
+
+        let many: Vec<(String, String)> = (0..64)
+            .map(|at| (format!("sql/{at}.sql"), "select 1\n".to_string()))
+            .collect();
+        assert_eq!(
+            spark_pipeline_config(&graph(with(&many))).unwrap_err(),
+            "a spark-pipeline graph is at most 64 files"
+        );
+        for path in ["../outside.sql", "/abs.sql", "sql/a b.sql"] {
+            assert_eq!(
+                spark_pipeline_config(&graph(with(&[(
+                    path.to_string(),
+                    "select 1\n".to_string()
+                )])))
+                .unwrap_err(),
+                "a graph file path is relative to the project directory",
+                "{path}"
+            );
+        }
+        assert_eq!(
+            spark_pipeline_config(&graph(with(&[(
+                "sql/big.sql".to_string(),
+                "x".repeat(65537)
+            )])))
+            .unwrap_err(),
+            "a spark-pipeline graph is at most 256 KiB"
+        );
+        let large: Vec<(String, String)> = (0..5)
+            .map(|at| (format!("sql/{at}.sql"), "x".repeat(60000)))
+            .collect();
+        assert_eq!(
+            spark_pipeline_config(&graph(with(&large))).unwrap_err(),
+            "a spark-pipeline graph is at most 256 KiB"
+        );
     }
 
     #[test]
