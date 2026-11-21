@@ -1531,11 +1531,11 @@ async fn checked_tasks(
                 format!("task `{}` cannot depend on itself", task.name),
             ));
         }
-        if !task.writes.is_empty() && task.sql.is_empty() {
+        if !task.writes.is_empty() && task.spark_pipeline.is_none() && task.notebook.is_none() {
             return Err(refused(
                 "task-writes",
                 format!(
-                    "task `{}` is not a sql task: only a sql task declares writes",
+                    "task `{}` cannot write a table: only a spark-pipeline or notebook task declares writes",
                     task.name
                 ),
             ));
@@ -1601,8 +1601,8 @@ async fn checked_tasks(
 }
 
 /// `publish: wap` moves `main` only after a `quality` task's checks passed, and only for the
-/// tables a `sql` task wrote: a body that asks for it without both is refused here, the same
-/// rule the CRD's CEL carries (#114).
+/// tables a `spark-pipeline` or `notebook` task writes: a body that asks for it without both is
+/// refused here, the same rule the CRD's CEL carries (#114).
 fn check_publish(
     publish: Option<Publish>,
     tasks: Option<&[PipelineTaskRequest]>,
@@ -1624,7 +1624,7 @@ fn check_publish(
         "publish",
         Fail::new(
             StatusCode::BAD_REQUEST,
-            "publish: wap needs a task list with a quality task that has a check and a sql task that writes a table",
+            "publish: wap needs a task list with a quality task that has a check and a spark-pipeline or notebook task that writes a table",
         ),
     ))
 }
@@ -2675,8 +2675,8 @@ pub struct PipelineTaskRequest {
     /// (#80): exactly one of the five.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spark_pipeline: Option<SparkPipelineRequest>,
-    /// The tables this task writes, as `catalog.schema.table`; only a `sql` task may name them,
-    /// and at most 16. `spec.publish: wap` audits exactly these tables (#114).
+    /// The tables a `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`; at most 16.
+    /// `spec.publish: wap` audits exactly these tables (#114).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writes: Vec<String>,
     /// Names of the tasks that must succeed first; at most 8, each a task of this list.
@@ -13289,12 +13289,13 @@ mod tests {
         );
     }
 
-    /// A `wap` create writes the branch decision and the tables its `sql` task publishes (#114).
+    /// A `wap` create writes the branch decision and the tables its `spark-pipeline` task
+    /// publishes (#114).
     #[tokio::test]
     async fn a_create_with_publish_wap_writes_the_branch_and_the_tables() {
         let resources = analytics_ready();
         let ada = who("sub-ada", &["analytics"], false);
-        let mut load = pipeline_task("load", "insert into gold.shop.t select 1", &[]);
+        let mut load = spark_pipeline_task("load", "graphs/shop", None, None, &[]);
         load.writes = vec!["gold.shop.t".into()];
         let mut body = create_body("shop-wap", "analytics", "");
         body.tasks = Some(vec![
@@ -13318,13 +13319,13 @@ mod tests {
         );
     }
 
-    /// `publish: wap` without a quality task that checks and a `sql` task that writes is refused
-    /// with the ticket's sentence, and nothing is written (#114).
+    /// `publish: wap` without a quality task that checks and a `spark-pipeline` or `notebook`
+    /// task that writes is refused with the ticket's sentence, and nothing is written (#114).
     #[tokio::test]
     async fn a_wap_create_without_a_quality_check_and_a_written_table_is_refused() {
         let resources = analytics_ready();
         let ada = who("sub-ada", &["analytics"], false);
-        let mut load = pipeline_task("load", "insert into gold.shop.t select 1", &[]);
+        let mut load = spark_pipeline_task("load", "graphs/shop", None, None, &[]);
         load.writes = vec!["gold.shop.t".into()];
         let mut body = create_body("shop-wap", "analytics", "");
         body.tasks = Some(vec![load]);
@@ -13336,20 +13337,24 @@ mod tests {
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             error.message(),
-            "publish: wap needs a task list with a quality task that has a check and a sql task that writes a table"
+            "publish: wap needs a task list with a quality task that has a check and a spark-pipeline or notebook task that writes a table"
         );
         assert!(stored_pipeline(&resources, "shop-wap").await.is_none());
     }
 
-    /// `writes` belongs to a `sql` task only: a notebook task that names one is refused (#114).
+    /// `writes` belongs to a `spark-pipeline` or `notebook` task; a `sql` task that names one is
+    /// refused (#114).
     #[tokio::test]
-    async fn a_notebook_task_with_writes_is_refused() {
+    async fn a_spark_or_notebook_task_declares_writes() {
         let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/smoke.ipynb", b"{\"nbformat\":4}", "ada");
+        let store = notebook_store(&s3.base);
         let ada = who("sub-ada", &["analytics"], false);
         let mut task = pipeline_task("extract", "", &[]);
         task.notebook = Some(NotebookRequest {
             name: "smoke.ipynb".into(),
-            object_version: "v3".into(),
+            object_version: version,
             params: BTreeMap::new(),
             connection: None,
         });
@@ -13357,15 +13362,39 @@ mod tests {
         let mut body = create_body("shop-writes", "analytics", "");
         body.tasks = Some(vec![task]);
 
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("a notebook task declares writes");
+        let stored = stored_pipeline(&resources, "shop-writes")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["writes"], json!(["gold.shop.t"]));
+
+        let mut load = pipeline_task("load", "select 1", &[]);
+        load.writes = vec!["gold.shop.t".into()];
+        let mut body = create_body("shop-sql-writes", "analytics", "");
+        body.tasks = Some(vec![load]);
+
         let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
             .await
-            .expect_err("a notebook task cannot write a table");
+            .expect_err("a sql task cannot write a table");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             error.message(),
-            "task `extract` is not a sql task: only a sql task declares writes"
+            "task `load` cannot write a table: only a spark-pipeline or notebook task declares writes"
         );
-        assert!(stored_pipeline(&resources, "shop-writes").await.is_none());
+        assert!(
+            stored_pipeline(&resources, "shop-sql-writes")
+                .await
+                .is_none()
+        );
     }
 
     /// `Some(Direct)` removes `spec.publish`, `None` keeps what the resource says (#114).
