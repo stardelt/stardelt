@@ -533,6 +533,17 @@
       "query_params": [],
       "body": false
     },
+    "pipelines_run_checks": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}/checks",
+      "path_params": [
+        "namespace",
+        "name",
+        "run_id"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "pipelines_run_get": {
       "method": "GET",
       "path": "/api/pipelines/{namespace}/{name}/runs/{run_id}",
