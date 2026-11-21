@@ -10,7 +10,7 @@
 # cluster name that is not `stardelt-fresh-*`. It never reads or writes cluster.yaml
 # (platform#1018).
 #
-# Environment: FRESH_NAME, FRESH_CONFIG, FRESH_KUBECONFIG, FRESH_NODE_TYPE,
+# Environment: FRESH_NAME, FRESH_CONFIG, FRESH_VOLUMES, FRESH_KUBECONFIG, FRESH_NODE_TYPE,
 # FRESH_WAIT_SECONDS, FRESH_INGRESS, FRESH_DOMAIN, LOCATION, KEEP_ON_FAILURE, NO_WAIT,
 # DRY_RUN (passed through to provision.sh).
 set -euo pipefail
@@ -25,6 +25,11 @@ FRESH_KUBECONFIG_GIVEN=0; if [ -n "${FRESH_KUBECONFIG+x}" ]; then FRESH_KUBECONF
 
 FRESH_NAME="${FRESH_NAME:-stardelt-fresh-$(date -u +%Y%m%d%H%M%S)}"
 FRESH_CONFIG="${FRESH_CONFIG:-$HERE/.fresh-${FRESH_NAME}.yaml}"
+# The Hetzner volume ids of this run's PVs, written before teardown and read after the
+# cluster is gone (cloud_cleanup / delete_volumes).
+FRESH_VOLUMES="${FRESH_VOLUMES:-${FRESH_CONFIG%.yaml}.volumes}"
+FRESH_VOLUME_TRIES="${FRESH_VOLUME_TRIES:-12}"
+FRESH_VOLUME_SLEEP="${FRESH_VOLUME_SLEEP:-10}"
 FRESH_KUBECONFIG="${FRESH_KUBECONFIG:-$HOME/.kube/${FRESH_NAME}.yaml}"
 # 16 GB: the `demo` profile (Airflow + Superset) does not fit an 8 GB node (cpx32).
 FRESH_NODE_TYPE="${FRESH_NODE_TYPE:-cpx42}"
@@ -53,8 +58,9 @@ refuse_foreign_name() {
 }
 
 # Teardown in the order the cloud controller needs: the load balancer (a Service) first,
-# then the volumes (PVs the CSI driver deletes), then this run's DNS record, then the
-# cluster itself — then the network/firewall a failed `up` can leave behind (issue #86).
+# then the volume ids are recorded, then this run's DNS record, then the cluster itself —
+# the volumes and placement groups are deleted after the cluster (`delete_volumes`), and
+# the network/firewall a failed `up` can leave behind (issue #86).
 cloud_cleanup() {
   local kc="$FRESH_KUBECONFIG"
   if [ ! -f "$kc" ] || ! kubectl --kubeconfig "$kc" get nodes >/dev/null 2>&1; then
@@ -65,20 +71,13 @@ cloud_cleanup() {
   helm --kubeconfig "$kc" uninstall traefik -n traefik --wait --ignore-not-found \
     || echo "  traefik uninstall failed (continuing)" >&2
 
-  echo "› deleting PVCs and waiting for the CSI driver to delete the volumes"
-  kubectl --kubeconfig "$kc" delete pvc --all -A --wait=true --timeout=5m \
-    || echo "  PVC delete did not finish (continuing)" >&2
-  local pvs=""
-  for _ in $(seq 1 30); do
-    pvs="$(kubectl --kubeconfig "$kc" get pv -o name 2>/dev/null || true)"
-    if [ -z "$pvs" ]; then break; fi
-    sleep 10
-  done
-  if [ -n "$pvs" ]; then
-    echo "warning: PersistentVolumes outlived the 5-minute wait — delete these volumes in the Hetzner console:" >&2
-    # shellcheck disable=SC2086 # kubectl -o name prints one name per line
-    printf '  %s\n' $pvs >&2
-  fi
+  # The PVCs cannot go while the platform's pods mount them (pvc-protection), so this
+  # does not wait: the volume ids are recorded and deleted once the server is gone.
+  echo "› recording the Hetzner volumes of this run (${FRESH_VOLUMES})"
+  kubectl --kubeconfig "$kc" get pv \
+    -o jsonpath='{range .items[?(@.spec.csi.driver=="csi.hetzner.cloud")]}{.spec.csi.volumeHandle}{"\n"}{end}' \
+    >"$FRESH_VOLUMES" 2>/dev/null || echo "  could not list PVs (continuing)" >&2
+  kubectl --kubeconfig "$kc" delete pvc --all -A --wait=false >/dev/null 2>&1 || true
 
   local domain_file="$HERE/.fresh-${FRESH_NAME}.domain" domain
   if [ -f "$domain_file" ]; then
@@ -90,6 +89,41 @@ cloud_cleanup() {
     fi
     rm -f "$domain_file"
   fi
+}
+
+# After the server is gone Hetzner detaches its volumes within a minute or so; until
+# then `hcloud volume delete` fails, so each id is retried. Only ids recorded from this
+# cluster's own PVs are deleted, never a volume found by listing.
+delete_volumes() {
+  local name="$1" id left=""
+  if ! command -v hcloud >/dev/null 2>&1; then
+    if [ -s "$FRESH_VOLUMES" ]; then
+      echo "warning: hcloud not found — delete these Hetzner volumes by hand:" >&2
+      sed 's/^/  /' "$FRESH_VOLUMES" >&2
+    fi
+    return 0
+  fi
+  if [ -s "$FRESH_VOLUMES" ]; then
+    echo "› deleting $(grep -c . "$FRESH_VOLUMES") Hetzner volume(s) of this run"
+    while read -r id; do
+      [ -n "$id" ] || continue
+      local ok=0
+      for _ in $(seq 1 "$FRESH_VOLUME_TRIES"); do
+        if hcloud volume delete "$id" >/dev/null 2>&1; then ok=1; break; fi
+        sleep "$FRESH_VOLUME_SLEEP"
+      done
+      if [ "$ok" != 1 ]; then left="${left} ${id}"; fi
+    done <"$FRESH_VOLUMES"
+  fi
+  local pg
+  for pg in $(hcloud placement-group list -o noheader -o columns=name 2>/dev/null | grep "^${name}" || true); do
+    hcloud placement-group delete "$pg" >/dev/null 2>&1 || true
+  done
+  if [ -n "$left" ]; then
+    echo "warning: these Hetzner volumes are still there — delete them by hand: hcloud volume delete${left}" >&2
+    return 0
+  fi
+  rm -f "$FRESH_VOLUMES"
 }
 
 do_down() {
@@ -144,6 +178,7 @@ do_down() {
       hcloud network delete "$name" >/dev/null 2>&1 || true
       hcloud firewall delete "$name" >/dev/null 2>&1 || true
     fi
+    delete_volumes "$name"
     rm -f "$FRESH_CONFIG" "$FRESH_KUBECONFIG"
   fi
 }

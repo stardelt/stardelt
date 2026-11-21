@@ -131,5 +131,51 @@ class FreshNode(unittest.TestCase):
         self.assertTrue(self.config.exists(), "a dry run removed the config")
 
 
+    # -- teardown -----------------------------------------------------------
+    def test_down_deletes_the_recorded_volumes_after_the_cluster(self):
+        fake_bin = self.tmp / "bin"
+        fake_bin.mkdir()
+        calls = self.tmp / "calls.log"
+        for name in ("kubectl", "helm", "hcloud", "hetzner-k3s"):
+            script = fake_bin / name
+            if name == "kubectl":
+                script.write_text(
+                    "#!/usr/bin/env bash\n"
+                    'printf "%s %s\\n" "kubectl" "$*" >> "{calls}"\n'
+                    'case " $* " in\n'
+                    '  *" get pv "*) printf "101\\n102\\n" ;;\n'
+                    "esac\n"
+                    "exit 0\n".format(calls=calls)
+                )
+            else:
+                script.write_text(
+                    "#!/usr/bin/env bash\n"
+                    'printf "%s %s\\n" "{name}" "$*" >> "{calls}"\n'
+                    "exit 0\n".format(name=name, calls=calls)
+                )
+            script.chmod(0o755)
+        self.kubeconfig.write_text("fake\n")
+        self.write_config("stardelt-fresh-test")
+
+        result = self.run_script(
+            "down",
+            DRY_RUN="0",
+            PATH="{}:{}".format(fake_bin, os.environ.get("PATH", "/usr/bin:/bin")),
+            FRESH_VOLUME_SLEEP="0",
+            FORCE="1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = calls.read_text().splitlines()
+        self.assertIn("hcloud volume delete 101", lines)
+        self.assertIn("hcloud volume delete 102", lines)
+        cluster_at = next(i for i, l in enumerate(lines) if l.startswith("hetzner-k3s delete"))
+        volume_at = next(i for i, l in enumerate(lines) if l.startswith("hcloud volume delete"))
+        self.assertLess(cluster_at, volume_at, "the volumes were deleted before the server")
+        self.assertFalse([l for l in lines if "--wait=true" in l])
+        self.assertFalse((self.tmp / "fresh.volumes").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
+
