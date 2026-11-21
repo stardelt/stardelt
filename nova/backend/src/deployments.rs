@@ -838,12 +838,13 @@ fn is_rule_refusal(fail: &Fail) -> bool {
     operation_id = "deployments_rollback",
     path = "/api/deployments/{id}/rollback",
     tag = "public",
-    description = "Roll back to what a recorded deployment applied: the stored rendered Pipeline documents of a row of the caller's groups are replayed as the caller — each missing one is created and each existing one updated — and the replay is recorded as a new deployment row whose `previousDeploymentId` points at the source. It needs no Git: it applies exactly what ran. Only a row with status `applied` and at least one stored resource can be replayed. A document the rules refuse stops the replay: the row is still recorded, as `failed`, and the answer is 409 with the sentence (400 when a stored document no longer fits a pipeline, 502/503 when the cluster did not answer).",
+    description = "Roll back to what a recorded deployment applied: the stored rendered Pipeline documents of a row of the caller's groups are replayed as the caller — each missing one is created and each existing one updated — and the replay is recorded as a new deployment row whose `previousDeploymentId` points at the source. It needs no Git: it applies exactly what ran. Only a row with status `applied` and at least one stored resource can be replayed. A document the rules refuse stops the replay: the row is still recorded, as `failed`, and the answer is 409 with the sentence (400 when a stored document no longer fits a pipeline, 502/503 when the cluster did not answer). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the row's stage is `<stage>` and the caller is a member of the row's owner group; an administrator's credential has no such client and is unaffected.",
     params(("id" = i64, Path, description = "The deployment's id")),
     responses(
         (status = 201, description = "The new row recording the replay", body = Deployment, example = json!(rollback_row_example())),
         (status = 400, description = "A stored document no longer fits a pipeline", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "A deploy principal may not roll back a row of another stage or of another owner group", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such row among the ones the caller may see", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The row is not `applied`, it recorded no rendered resources, or a document was refused", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster or the notebook store did not answer", body = crate::openapi::ErrorResponse),
@@ -879,6 +880,17 @@ pub async fn rollback(
                 row.status
             ),
         );
+    }
+    // A deploy principal (#57) replays nothing outside its own stage or group: a rollback
+    // applies the stored documents and records a new row, so it is a deploy to `row.target`.
+    if let Some(sentence) = deploy_refusal(
+        &caller.identity,
+        &row.owner_group,
+        &row.target,
+        caller.client_id.as_deref(),
+        "roll back",
+    ) {
+        return error(StatusCode::FORBIDDEN, &sentence);
     }
     // The rendered documents this deploy applied; `validate` capped them at 200 when it was
     // recorded.
@@ -1554,6 +1566,55 @@ mod tests {
                 "deployment {id} recorded no rendered resources: deploy it again and roll that back"
             )
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_deploy_principal_may_not_roll_back_another_stage() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let id = insert_row(
+            &pool,
+            "analytics",
+            "applied",
+            serde_json::json!([{"name": "daily", "ownerGroup": "analytics", "sql": "select 1"}]),
+        )
+        .await;
+        let caller = |client_id: Option<&str>| {
+            Some(Extension(Principal {
+                client_id: client_id.map(str::to_string),
+                ..principal("gh", &["analytics"])
+            }))
+        };
+
+        // The deploy principal's client names `test`; the row is a `prod` deploy.
+        let response = rollback(
+            State(state.clone()),
+            Path(id),
+            caller(Some("stardelt-deploy-test")),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a deploy principal may not roll back another stage's row"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the refusal is a body");
+        let answer: serde_json::Value = serde_json::from_slice(&body).expect("one error");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("deploy stage `test`"),
+            "{answer}"
+        );
+
+        // A member of the owner group without a deploy client still gets past the rule (the
+        // row then stops at the cluster, which this test does not have).
+        let response = rollback(State(state.clone()), Path(id), caller(None)).await;
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
