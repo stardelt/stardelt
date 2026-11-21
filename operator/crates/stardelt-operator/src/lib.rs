@@ -11,6 +11,7 @@ pub mod conditions;
 pub mod connection;
 pub mod controller;
 pub mod crd;
+pub mod deploy_stage_keycloak;
 pub mod helm;
 pub mod identity;
 pub mod identity_checklist;

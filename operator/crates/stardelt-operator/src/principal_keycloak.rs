@@ -271,7 +271,7 @@ fn url_encode_component(value: &str) -> String {
 
 /// A master-realm token for the built-in administrator: Secret `keycloak-admin`,
 /// keys `username` and `password`, `client_id=admin-cli`, `grant_type=password`.
-async fn admin_token(ctx: &Context, namespace: &str) -> Result<String, String> {
+pub(crate) async fn admin_token(ctx: &Context, namespace: &str) -> Result<String, String> {
     let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
     let admin = secrets
         .get_opt("keycloak-admin")
@@ -310,7 +310,7 @@ async fn admin_token(ctx: &Context, namespace: &str) -> Result<String, String> {
 /// One request to Keycloak. `token` is the administrator's bearer token (absent only for the
 /// token endpoint). `KC_HOSTNAME` still travels as `X-Forwarded-Host` because Keycloak runs
 /// with `KC_PROXY_HEADERS=xforwarded`; the transport adds it.
-async fn keycloak_request(
+pub(crate) async fn keycloak_request(
     ctx: &Context,
     namespace: &str,
     method: &str,
