@@ -95,8 +95,9 @@ preflight() {
   fi
 }
 
-# collect_diagnostics keeps what a person needs after the first failed phase. It reads no
-# Secret, and every call is `|| true`: diagnostics never replace the real failure.
+# collect_diagnostics keeps what a person needs after the first failed phase: the pods, events,
+# the two custom resources, the operator's log, and the logs of every unhealthy pod (pod-logs/).
+# It reads no Secret, and every call is `|| true`: diagnostics never replace the real failure.
 collect_diagnostics() {
   if [ "$diagnostics_done" = 1 ]; then
     return 0
@@ -109,6 +110,40 @@ collect_diagnostics() {
     kubectl -n "$NAMESPACE" logs "deploy/${OPERATOR_DEPLOY}" --tail=500 --all-containers 2>&1 || true
     kubectl -n "$NAMESPACE" logs "deploy/${OPERATOR_DEPLOY}" --tail=500 --all-containers --previous 2>&1 || true
   } >"$RUN_DIR/operator.log"
+  # The logs of every pod that is not healthy: the server is deleted after the run, so these
+  # files are the only place a crash-looping or failed pod's reason survives (#48 run #3).
+  # Not ready first (Pending, Failed, a container not ready, an init container still running or
+  # waiting), then the ready ones that restarted. Succeeded pods (finished Jobs) are skipped.
+  mkdir -p "$RUN_DIR/pod-logs"
+  local pod
+  for pod in $(kubectl -n "$NAMESPACE" get pods -o json 2>/dev/null | python3 -c '
+import json, sys
+broken, restarted = [], []
+for p in json.load(sys.stdin).get("items", []):
+    st = p.get("status", {})
+    phase = st.get("phase")
+    if phase == "Succeeded":
+        continue
+    main = st.get("containerStatuses", [])
+    init = st.get("initContainerStatuses", [])
+    name = p["metadata"]["name"]
+    if (phase in ("Pending", "Failed")
+            or any(not c.get("ready") for c in main)
+            or any("running" in c.get("state", {}) or "waiting" in c.get("state", {}) for c in init)):
+        broken.append(name)
+    elif any(c.get("restartCount", 0) > 0 for c in main + init):
+        restarted.append(name)
+print("\n".join(broken + restarted))
+' 2>/dev/null | head -n 20); do
+    {
+      echo "=== kubectl logs ${pod} --all-containers --tail=300"
+      kubectl -n "$NAMESPACE" logs "$pod" --all-containers --prefix --tail=300 2>&1 || true
+      echo "=== previous"
+      kubectl -n "$NAMESPACE" logs "$pod" --all-containers --prefix --tail=300 --previous 2>&1 || true
+      echo "=== status"
+      kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{range .status.initContainerStatuses[*]}{"init "}{.name}{" "}{.state}{" restarts="}{.restartCount}{"\n"}{end}{range .status.containerStatuses[*]}{.name}{" "}{.state}{" last="}{.lastState}{" restarts="}{.restartCount}{"\n"}{end}' 2>&1 || true
+    } >"$RUN_DIR/pod-logs/${pod}.log"
+  done
   helm -n "$NAMESPACE" history "$OPERATOR_RELEASE" >"$RUN_DIR/helm.txt" 2>&1 || true
 }
 
