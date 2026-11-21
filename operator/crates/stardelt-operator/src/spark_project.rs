@@ -3,8 +3,8 @@
 //! The run pod of a `spark-pipeline` task cannot read a `Pipeline` object; spike #894 measured
 //! that a read-only ConfigMap mount carries the graph (`items[].path` maps `sql/mv_one.sql` back
 //! to a nested path, which a ConfigMap key cannot hold). One ConfigMap per `spark-pipeline` task,
-//! named `spark-project-<pipeline>-<task>`, with `files` as its `data`; the pod mounts it at
-//! `/opt/spark-project`. A task without files, and every other kind, renders nothing, so a
+//! named `spark-project-<pipeline>-<task>`, whose `data` holds the files under flat `f00`, `f01`, …
+//! keys with the paths in the [`PATHS_ANNOTATION`] map; the pod mounts it at `/opt/spark-project`. A task without files, and every other kind, renders nothing, so a
 //! `Pipeline` written before S2b reconciles to silence.
 
 use std::collections::BTreeMap;
@@ -32,6 +32,9 @@ pub const PROJECT_LABEL: &str = "stardelt.io/spark-project";
 pub const TASK_LABEL: &str = "stardelt.io/spark-task";
 /// The annotation holding the graph's digest, so a reader can tell two graphs apart.
 pub const DIGEST_ANNOTATION: &str = "stardelt.io/graph-digest";
+/// The annotation carrying the graph's key→path map: a ConfigMap key cannot hold `/`, so a
+/// consumer (the run pod, S2c-2) mounts `items: [{key, path}]` from this map.
+pub const PATHS_ANNOTATION: &str = "stardelt.io/spark-project-paths";
 
 /// The ConfigMap a task's graph lives in: `spark-project-<pipeline>-<task>`.
 pub fn config_map_name(pipeline: &str, task: &str) -> String {
@@ -55,6 +58,21 @@ pub fn graph_digest(files: &BTreeMap<String, String>) -> String {
         .collect()
 }
 
+/// The graph's bytes under API-server-legal keys, and the key→path map that names them back.
+/// Keys are `f00`, `f01`, … in the `BTreeMap`'s (path-sorted) order, so the same graph renders
+/// the same ConfigMap twice and two paths can never collide on a key.
+pub fn flat_data(files: &BTreeMap<String, String>) -> (BTreeMap<String, String>, String) {
+    let mut data = BTreeMap::new();
+    let mut paths = BTreeMap::new();
+    for (index, (path, content)) in files.iter().enumerate() {
+        let key = format!("f{index:02}");
+        data.insert(key.clone(), content.clone());
+        paths.insert(key, path.clone());
+    }
+    let map = serde_json::to_string(&paths).expect("a string map serializes");
+    (data, map)
+}
+
 /// The ConfigMap a task wants, or `None` when it carries no graph: not a `spark-pipeline` task,
 /// or a `spark-pipeline` task whose `files` is empty.
 pub fn config_map_for(pipeline: &Pipeline, task: &PipelineTask) -> Option<ConfigMap> {
@@ -71,7 +89,10 @@ pub fn config_map_for(pipeline: &Pipeline, task: &PipelineTask) -> Option<Config
         (PROJECT_LABEL.to_string(), pipeline_name),
         (TASK_LABEL.to_string(), task.name.clone()),
     ]);
-    let annotations = BTreeMap::from([(DIGEST_ANNOTATION.to_string(), graph_digest(&task.files))]);
+    let (data, paths) = flat_data(&task.files);
+    let mut annotations =
+        BTreeMap::from([(DIGEST_ANNOTATION.to_string(), graph_digest(&task.files))]);
+    annotations.insert(PATHS_ANNOTATION.to_string(), paths);
     Some(ConfigMap {
         metadata: kube::core::ObjectMeta {
             name: Some(name),
@@ -81,7 +102,7 @@ pub fn config_map_for(pipeline: &Pipeline, task: &PipelineTask) -> Option<Config
             owner_references: pipeline.controller_owner_ref(&()).map(|owner| vec![owner]),
             ..Default::default()
         },
-        data: Some(task.files.clone()),
+        data: Some(data),
         ..Default::default()
     })
 }
@@ -90,6 +111,9 @@ pub fn config_map_for(pipeline: &Pipeline, task: &PipelineTask) -> Option<Config
 /// count (#274 rule 1: a quiet reconcile writes nothing).
 fn needs_write(existing: &ConfigMap, wanted: &ConfigMap) -> bool {
     if existing.data != wanted.data {
+        return true;
+    }
+    if existing.annotations().get(PATHS_ANNOTATION) != wanted.annotations().get(PATHS_ANNOTATION) {
         return true;
     }
     ["app.kubernetes.io/managed-by", PROJECT_LABEL, TASK_LABEL]
@@ -308,6 +332,103 @@ mod tests {
         );
     }
 
+    #[test]
+    fn flat_data_uses_legal_keys_and_names_the_paths_back() {
+        let files: BTreeMap<String, String> = serde_json::from_value(two_files()).expect("graph");
+        let (data, paths) = flat_data(&files);
+
+        assert_eq!(
+            data.keys().cloned().collect::<Vec<_>>(),
+            vec!["f00".to_string(), "f01".to_string()],
+            "keys are f00 and f01 in path order"
+        );
+        let paths: BTreeMap<String, String> = serde_json::from_str(&paths).expect("a json map");
+        assert_eq!(
+            paths.get("f00").map(String::as_str),
+            Some("spark-pipeline.yml")
+        );
+        assert_eq!(paths.get("f01").map(String::as_str), Some("sql/mv_one.sql"));
+        assert_eq!(
+            data.get("f01"),
+            files.get("sql/mv_one.sql"),
+            "the bytes ride under the flat key"
+        );
+    }
+
+    #[test]
+    fn a_graph_with_a_directory_holds_no_slash_in_its_config_map_keys() {
+        let p = pipeline(json!([graph(two_files())]));
+        let config_map = config_map_for(&p, &p.spec.tasks[0]).expect("a ConfigMap");
+
+        let data = config_map.data.as_ref().expect("data");
+        assert!(
+            data.keys().all(|key| !key.contains('/')),
+            "a ConfigMap key cannot hold `/`: {:?}",
+            data.keys().collect::<Vec<_>>()
+        );
+        let paths: BTreeMap<String, String> = serde_json::from_str(
+            config_map
+                .annotations()
+                .get(PATHS_ANNOTATION)
+                .expect("paths"),
+        )
+        .expect("a json map");
+        assert_eq!(
+            paths.get("f00").map(String::as_str),
+            Some("spark-pipeline.yml")
+        );
+        assert_eq!(paths.get("f01").map(String::as_str), Some("sql/mv_one.sql"));
+    }
+
+    #[test]
+    fn a_changed_path_map_is_a_rewrite() {
+        let existing = ConfigMap {
+            data: Some(BTreeMap::from([("f00".to_string(), "a\n".to_string())])),
+            metadata: kube::core::ObjectMeta {
+                annotations: Some(BTreeMap::from([
+                    (
+                        PATHS_ANNOTATION.to_string(),
+                        r#"{"f00":"a.sql"}"#.to_string(),
+                    ),
+                    (DIGEST_ANNOTATION.to_string(), "digest".to_string()),
+                ])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let same = ConfigMap {
+            data: existing.data.clone(),
+            metadata: kube::core::ObjectMeta {
+                annotations: Some(BTreeMap::from([
+                    (
+                        PATHS_ANNOTATION.to_string(),
+                        r#"{"f00":"a.sql"}"#.to_string(),
+                    ),
+                    (DIGEST_ANNOTATION.to_string(), "digest".to_string()),
+                ])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!needs_write(&existing, &same), "an identical map is quiet");
+
+        let renamed = ConfigMap {
+            data: existing.data.clone(),
+            metadata: kube::core::ObjectMeta {
+                annotations: Some(BTreeMap::from([(
+                    PATHS_ANNOTATION.to_string(),
+                    r#"{"f00":"b.sql"}"#.to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            needs_write(&existing, &renamed),
+            "the same bytes under another path is a rewrite"
+        );
+    }
+
     #[tokio::test]
     async fn a_two_file_graph_is_created_once() {
         let created: Arc<Mutex<Option<Value>>> = Arc::default();
@@ -350,13 +471,55 @@ mod tests {
             .clone()
             .expect("a POST body");
         assert_eq!(created["metadata"]["name"], "spark-project-demo-build");
+        assert_eq!(created["data"]["f00"], two_files()["spark-pipeline.yml"]);
+        assert_eq!(created["data"]["f01"], two_files()["sql/mv_one.sql"]);
         assert_eq!(
-            created["data"]["spark-pipeline.yml"],
-            two_files()["spark-pipeline.yml"]
+            created["metadata"]["annotations"][PATHS_ANNOTATION],
+            r#"{"f00":"spark-pipeline.yml","f01":"sql/mv_one.sql"}"#
         );
-        assert_eq!(
-            created["data"]["sql/mv_one.sql"],
-            two_files()["sql/mv_one.sql"]
+    }
+
+    #[tokio::test]
+    async fn the_create_body_holds_no_slash_in_its_data_keys() {
+        let (client, requests) = mock_client(move |method, path, body| {
+            if method == "GET" && path.ends_with("/configmaps/spark-project-demo-build") {
+                return (404, NOT_FOUND.to_string());
+            }
+            if method == "POST" && path.ends_with("/configmaps") {
+                return (201, body.to_string());
+            }
+            if method == "GET" && path.ends_with("/configmaps") {
+                return (
+                    200,
+                    json!({"apiVersion": "v1", "kind": "ConfigMapList", "items": []}).to_string(),
+                );
+            }
+            (
+                200,
+                r#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#.to_string(),
+            )
+        });
+        let p = pipeline(json!([graph(two_files())]));
+
+        reconcile_spark_project(Arc::new(p), context(client))
+            .await
+            .expect("reconcile");
+
+        let requests = requests.lock().expect("requests poisoned");
+        let post = requests
+            .iter()
+            .find(|(method, path, _)| method == "POST" && path.ends_with("/configmaps"))
+            .expect("a create");
+        let body: Value = serde_json::from_str(&post.2).expect("a json body");
+        let keys = body["data"]
+            .as_object()
+            .expect("data")
+            .keys()
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["f00", "f01"], "the keys are flat");
+        assert!(
+            keys.iter().all(|key| !key.contains('/')),
+            "the API server would refuse a key with `/`: {keys:?}"
         );
     }
 
