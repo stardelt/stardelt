@@ -324,6 +324,22 @@ def _spark_pipeline_problems(where, task, root):
     if not isinstance(spec, dict):
         problems.append((where, "spark-pipeline.yml must be a mapping"))
         return problems
+    # Spark's CLI reads every entry as `{glob: {include: …}}`; a bare string passes every later
+    # check and dies in the pod with `TypeError: string indices must be integers` (#1006).
+    libraries = spec.get("libraries")
+    if libraries is not None:
+        if not isinstance(libraries, list) or not libraries:
+            problems.append((where, "spark-pipeline.yml libraries must be a list of glob entries"))
+        else:
+            for entry in libraries:
+                include = None
+                if isinstance(entry, dict) and isinstance(entry.get("glob"), dict):
+                    include = entry["glob"].get("include")
+                if not isinstance(include, str) or not include:
+                    problems.append(
+                        (where, "spark-pipeline.yml libraries entries need glob.include: <path or pattern>")
+                    )
+                    break
     if any(key in spec for key in SPARK_OWNED_KEYS):
         problems.append(
             (where, "spark-pipeline.yml must not set catalog, database or storage: stardelt sets them at run time (#80)")

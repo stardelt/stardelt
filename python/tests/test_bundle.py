@@ -484,6 +484,25 @@ def test_a_spark_pipeline_yml_may_not_set_the_warehouse_keys(tmp_path):
     )
 
 
+def test_a_spark_pipeline_libraries_entry_needs_a_glob(tmp_path):
+    """The CLI reads `{glob: {include: …}}`; a bare string passed every check and died in the pod (#1006)."""
+    make(
+        tmp_path,
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
+        files={
+            **TASK_FILES,
+            "spark/shop/spark-pipeline.yml": "name: shop\nlibraries: [tables.sql]\n"
+            "configuration:\n  spark.sql.catalog.gold.type: rest\n",
+        },
+    )
+    problems = bundle.validate(tmp_path)[0]
+    assert problems[0][0] == "resources/gold.yaml (dev), task 'build'"
+    assert "libraries entries need glob.include" in said(problems)
+
+
 @pytest.mark.parametrize("graph", ["# nothing yet\n", "[]\n", "- name: x\n"])
 def test_a_spark_pipeline_yml_that_is_not_a_mapping_is_refused(tmp_path, graph):
     """A comment-only, empty or list graph is a problem, not an AttributeError (#972)."""
