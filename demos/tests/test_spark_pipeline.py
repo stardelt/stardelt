@@ -90,3 +90,9 @@ def test_the_graph_map_is_the_json_pair_list(monkeypatch):
         ["f00", "notes.md"],
         ["f01", "spark-pipeline.yml"],
     ]
+
+
+def test_the_runner_runs_on_the_images_interpreter():
+    # `platform/images/spark/Dockerfile` installs PyYAML into /opt/python313 (PYSPARK_PYTHON);
+    # the Ubuntu `python3` on PATH has no yaml, so the runner must not ask for it (#969).
+    assert spark_pipeline.PYTHON == "/opt/python313/bin/python3"

@@ -31,6 +31,10 @@ PULL_SECRET_ENV = "PIPELINE_SPARK_PULL_SECRET"
 BUCKET_ENV = "PIPELINE_SPARK_BUCKET"
 GRAPH_DIR = "/opt/graph"
 SPARK_HOME = "/opt/spark"
+# The image's own interpreter, the one `platform/images/spark/Dockerfile` installs PyYAML into
+# and names as PYSPARK_PYTHON. The Ubuntu `python3` on PATH is 3.10 without yaml, so the runner
+# dies on `import yaml` there (measured 2026-11-21, #969).
+PYTHON = "/opt/python313/bin/python3"
 
 # The pod's runner: copy the graph under its paths, set the three keys stardelt owns, put the
 # principal's token into the catalog block, then run the CLI. `SPARK_CONF_DIR` is an empty
@@ -189,7 +193,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         super().__init__(
             namespace=namespace,
             image=None,  # set in execute from PIPELINE_SPARK_IMAGE
-            cmds=["python3", "-c", RUNNER],
+            cmds=[PYTHON, "-c", RUNNER],
             labels={
                 "app.kubernetes.io/name": "pipeline-spark-pipeline",
                 "stardelt.io/pipeline": pipeline,
