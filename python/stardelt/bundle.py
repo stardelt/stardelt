@@ -565,6 +565,7 @@ def render(directory, target, user=None):
         for task in doc.get("tasks") or []:
             if isinstance(task, dict) and "sqlFile" in task:
                 task["sql"] = (root / task.pop("sqlFile")).read_text(encoding="utf-8")
+        apply.api_tasks(doc)
         if mode == "development":
             doc["name"] = f"dev-{_slug(user)}-{doc['name']}"
             doc.pop("schedule", None)
