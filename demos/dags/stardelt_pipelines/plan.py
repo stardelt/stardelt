@@ -22,6 +22,7 @@ import json
 import re
 from dataclasses import dataclass, replace
 
+from stardelt_pipelines import wap
 from stardelt_pipelines.quality import SEVERITIES, Check
 
 _DURATION = re.compile(r"^(\d+)([smhd])$")
@@ -108,8 +109,22 @@ QUALITY_CHECK_BAD_SEVERITY = (
     "check '{check}' in quality task '{task}': severity must be error or warn (found `{severity}`)"
 )
 QUALITY_CHECK_AUDIT_TABLE = (
-    "check '{check}' in quality task '{task}' uses ${{table}}: that placeholder is the audit "
-    "branch (publish: wap), which has no runtime yet"
+    "check '{check}' in quality task '{task}' uses ${{table}}, which needs publish: wap in the "
+    "pipeline"
+)
+# `publish: wap` (#114): the run writes an `audit_<hash>` branch, the quality task checks that
+# branch and `main` moves only when the checks pass. The plan carries it; the DAG refuses it until
+# the loader has the audit-branch runtime.
+PUBLISH_VALUES = ("direct", "wap")
+PUBLISH_BAD = "publish must be direct or wap (found `{publish}`)"
+WRITES_NOT_TABLE = "task `{task}` writes `{table}`, which is not catalog.schema.table"
+WRITES_ONLY_NOTEBOOK = (
+    "task `{task}` cannot write a table: only a spark-pipeline or notebook task declares writes"
+)
+WAP_NEEDS_WRITER = "publish: wap needs a task that writes at least one table"
+WAP_NO_RUNTIME = (
+    "publish: wap has no audit-branch runtime in the loader yet: the run would write main "
+    "directly (#114)"
 )
 
 
@@ -149,6 +164,9 @@ class TaskPlan:
     # `quality` tasks only: the SQL assertions the run is gated on. Defaults keep every other kind
     # unchanged.
     checks: tuple[Check, ...] = ()
+    # The tables a `notebook` task writes, as `catalog.schema.table`; the audit branch of WAP
+    # (`publish: wap`) is cut for each of them.
+    writes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +182,7 @@ class PipelinePlan:
     params: dict[str, str]
     run_as: str | None
     owner_group: str | None
+    publish: str
     principal: PrincipalRef | None
     tasks: tuple[TaskPlan, ...]
 
@@ -198,6 +217,9 @@ def plan(
     if not name:
         raise PlanError("the resource has no name")
     spec = resource.get("spec") or {}
+    publish = spec.get("publish") or "direct"
+    if publish not in PUBLISH_VALUES:
+        raise PlanError(PUBLISH_BAD.format(publish=publish))
 
     raw_tasks = spec.get("tasks") or []
     if not raw_tasks:
@@ -238,7 +260,10 @@ def plan(
             dbt_project, dbt_select, dbt_threads, dbt_vars = _dbt_config(raw.get("config"))
         checks: tuple[Check, ...] = ()
         if kind == "quality":
-            checks = _quality_checks(task_name, raw.get("checks"))
+            checks = _quality_checks(task_name, raw.get("checks"), publish)
+        writes: tuple[str, ...] = ()
+        if raw.get("writes"):
+            writes = _writes(task_name, kind, raw.get("writes"))
         connection = raw.get("connection")
         connection_keys: tuple[str, ...] = ()
         if connection is not None:
@@ -282,6 +307,7 @@ def plan(
                         dbt_threads=dbt_threads,
                         dbt_vars=dbt_vars,
                         checks=(),
+                        writes=(),
                     )
                 )
             last_batch[task_name] = names[-1]
@@ -303,6 +329,7 @@ def plan(
                 dbt_threads=dbt_threads,
                 dbt_vars=dbt_vars,
                 checks=checks,
+                writes=writes,
             )
         )
     for index, task in enumerate(tasks):
@@ -320,6 +347,8 @@ def plan(
                     f"task `{task.name}` depends on `{dep}`, which is not another task of this pipeline"
                 )
     _reject_cycles(tasks)
+    if publish == "wap" and not any(task.writes for task in tasks):
+        raise PlanError(WAP_NEEDS_WRITER)
 
     schedule = spec.get("schedule") or {}
     retries = spec.get("retries") or {}
@@ -335,6 +364,7 @@ def plan(
         params=dict(spec.get("params") or {}),
         run_as=spec.get("runAs"),
         owner_group=spec.get("ownerGroup"),
+        publish=publish,
         principal=_principal(spec, principals or {}),
         tasks=tuple(tasks),
     )
@@ -400,12 +430,34 @@ def _dbt_config(config: dict | None) -> tuple[str, tuple[str, ...], str, str | N
     return project, selectors, threads, vars_text
 
 
-def _quality_checks(task_name: str, raw) -> tuple[Check, ...]:
+def refuse_unrunnable(p: PipelinePlan) -> None:
+    """Refuse a plan the loader cannot run as declared; called by the DAG, not by `plan`."""
+    if p.publish == "wap":
+        raise PlanError(WAP_NO_RUNTIME)
+
+
+def _writes(task_name: str, kind: str, raw) -> tuple[str, ...]:
+    """The tables a task declares it writes, or a `PlanError`.
+
+    Only a `notebook` task writes a table today (the CRD also allows `spark-pipeline`, which has
+    no runtime yet), and every table is `catalog.schema.table`.
+    """
+    if kind != "notebook":
+        raise PlanError(WRITES_ONLY_NOTEBOOK.format(task=task_name))
+    if not isinstance(raw, list):
+        raise PlanError(WRITES_NOT_TABLE.format(task=task_name, table=raw))
+    for table in raw:
+        if not isinstance(table, str) or not wap.TABLE.match(table):
+            raise PlanError(WRITES_NOT_TABLE.format(task=task_name, table=table))
+    return tuple(raw)
+
+
+def _quality_checks(task_name: str, raw, publish: str) -> tuple[Check, ...]:
     """The SQL assertions of a `quality` task, or a `PlanError`.
 
     One to 50 mappings, each only `name`, `sql` and `severity` (absent is `error`); a name is
-    unique within the task, the statement non-empty, and `${table}` is refused: it is the audit
-    branch of WAP, which has no runtime yet.
+    unique within the task, the statement non-empty, and `${table}` is accepted only with
+    `publish: wap`: it is the run's audit branch.
     """
     if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_CHECKS:
         raise PlanError(QUALITY_NEEDS_CHECKS.format(task=task_name))
@@ -430,7 +482,7 @@ def _quality_checks(task_name: str, raw) -> tuple[Check, ...]:
         sql = item.get("sql")
         if not isinstance(sql, str) or not sql or len(sql) > MAX_CHECK_SQL:
             raise PlanError(QUALITY_CHECK_NEEDS_SQL.format(check=name, task=task_name))
-        if "${table}" in sql:
+        if "${table}" in sql and publish != "wap":
             raise PlanError(QUALITY_CHECK_AUDIT_TABLE.format(check=name, task=task_name))
         severity = item.get("severity", "error")
         if severity not in SEVERITIES:

@@ -49,7 +49,7 @@ from stardelt_pipelines.access import dag_access  # noqa: E402
 from stardelt_pipelines.dbt import DbtPodOperator  # noqa: E402
 from stardelt_pipelines.expand import expand, run_values  # noqa: E402
 from stardelt_pipelines.notebook import NotebookPodOperator  # noqa: E402
-from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan  # noqa: E402
+from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan, refuse_unrunnable  # noqa: E402
 from stardelt_pipelines.principal import principal_pod_override  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -213,6 +213,7 @@ def _quality_failure_sentence(failed: list[tuple[str, int]]) -> str:
 
 
 def _build_dag(p) -> DAG:
+    refuse_unrunnable(p)
     access = dag_access(p.owner_group)
     dag = DAG(
         dag_id=p.dag_id,
