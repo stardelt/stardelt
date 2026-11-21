@@ -27,6 +27,20 @@ jobs:
                   "repository_owner_id", "repository_id", "job_workflow_ref")
           print(json.dumps({k: claims.get(k) for k in keys}, indent=1))
           PY
+      - name: shape
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/token" <<'PY'
+          import re, sys
+          raw = open(sys.argv[1], "rb").read()
+          token = raw.decode().strip()
+          parts = token.split(".")
+          print("bytes=%d parts=%d" % (len(raw), len(parts)))
+          for i, part in enumerate(parts):
+              bad = sorted({c for c in part if not re.match(r"[A-Za-z0-9_-]", c)})
+              print("part%d len=%d len%%4=%d padding=%d unusual=%r" % (
+                  i, len(part), len(part) % 4, part.count("="), bad))
+          PY
       - name: exchange
         run: |
           set -uo pipefail
