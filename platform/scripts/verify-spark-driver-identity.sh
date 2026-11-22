@@ -82,7 +82,7 @@ fi
 if ! clusters="$(kubectl -n "$NS" get sparkclusters -o json 2>"$tmp/sc.err")"; then
   unverified "cannot list SparkClusters in $NS: $(tail -n 1 "$tmp/sc.err")"
 fi
-rows="$(printf '%s' "$clusters" | python3 -c '
+if ! rows="$(printf '%s' "$clusters" | python3 -c '
 import json, sys
 for item in (json.load(sys.stdin).get("items") or []):
     meta = item.get("metadata") or {}
@@ -97,7 +97,9 @@ for item in (json.load(sys.stdin).get("items") or []):
         status.get("driverServiceAccount") or "",
         status.get("workloadIdentity") or "",
     )))
-')"
+')"; then
+  unverified "cannot parse the SparkCluster list in $NS"
+fi
 unset clusters
 
 [ -n "$rows" ] || unverified "no group-owned SparkCluster in $NS"
@@ -153,11 +155,16 @@ while IFS='|' read -r name group driver workload; do
   fi
   pass "$name: ServiceAccount $sa exists"
 
-  role="$(kubectl -n "$NS" get rolebinding "$sa" -o jsonpath='{.roleRef.name}' 2>/dev/null || true)"
-  if [ "$role" = spark-cluster-driver ]; then
+  binding="$(kubectl -n "$NS" get rolebinding "$sa" -o jsonpath='{.roleRef.kind}{"|"}{.roleRef.name}{"|"}{range .subjects[*]}{.kind}{"/"}{.name}{" "}{end}' 2>/dev/null || true)"
+  IFS='|' read -r role_kind role_name subject_list <<<"$binding"
+  case " ${subject_list:-}" in
+    *" ServiceAccount/$sa "*) subject_ok=1 ;;
+    *) subject_ok=0 ;;
+  esac
+  if [ "${role_kind:-}" = Role ] && [ "${role_name:-}" = spark-cluster-driver ] && [ "$subject_ok" -eq 1 ]; then
     pass "$name: $sa is bound to the shared spark-cluster-driver Role"
   else
-    fail "$name: the RoleBinding of $sa names '${role:-nothing}' (want spark-cluster-driver) — the driver cannot create its executors"
+    fail "$name: the RoleBinding of $sa is ${role_kind:-nothing}/${role_name:-nothing} for '${subject_list:-no subject}' (want Role/spark-cluster-driver for ServiceAccount/$sa) — the driver cannot create its executors"
   fi
 
   if [ "$driver" = "$sa" ]; then
@@ -166,10 +173,12 @@ while IFS='|' read -r name group driver workload; do
     fail "$name: status.driverServiceAccount is '${driver:-<unset>}' (want $sa) — an operator older than #1102, or a status that names another identity"
   fi
 
-  sa_uid="$(printf '%s' "$sa_json" | python3 -c '
+  if ! sa_uid="$(printf '%s' "$sa_json" | python3 -c '
 import json, sys
 sys.stdout.write(str((json.load(sys.stdin).get("metadata") or {}).get("uid") or ""))
-')"
+')"; then
+    unverified "cannot parse ServiceAccount $sa"
+  fi
   [ -n "$sa_uid" ] || unverified "ServiceAccount $sa has no uid"
   want="kubernetes~$sa_uid"
   if [ "$workload" = "$want" ]; then
@@ -182,6 +191,10 @@ sys.stdout.write(str((json.load(sys.stdin).get("metadata") or {}).get("uid") or 
   if ! kubectl -n "$NS" create token "$sa" --audience="$AUDIENCE" \
       --duration="$TOKEN_DURATION" >"$token_file" 2>"$tmp/token.err"; then
     fail "$name: cannot mint a token for ServiceAccount $sa: $(tail -n 1 "$tmp/token.err")"
+    continue
+  fi
+  if [ ! -s "$token_file" ]; then
+    fail "$name: the API server minted an empty token for ServiceAccount $sa"
     continue
   fi
   token="$(cat "$token_file")"

@@ -67,14 +67,39 @@ class SparkDriverIdentityVerifier(unittest.TestCase):
         for number, line in enumerate(self.text.splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
-            for forbidden in ("catalog/v1/config", "-X DELETE", "-X PUT", "-X POST"):
+            for forbidden in ("catalog/v1/config", "-X DELETE", "-X PUT", "-X POST", "-X PATCH",
+                              "--request", "--data"):
                 self.assertNotIn(forbidden, line,
                                  f"line {number}: {forbidden} writes or provisions a principal")
+            if "curl" in line:
+                self.assertIsNone(re.search(r"(^|\s)-d(\s|=)", line),
+                                  f"line {number}: -d sends a body to the catalog")
+            if "/management/" in line:
+                self.assertIn("/management/v1/whoami", line,
+                              f"line {number}: only whoami is read-only in /management")
 
     def test_every_exit_3_path_exists(self):
         self.assertIn("unverified \"$cmd not found\"", self.text)
         self.assertIn('unverified "port $PORT is already in use', self.text)
         self.assertIn('unverified "no group-owned SparkCluster in $NS"', self.text)
+
+    def test_a_failed_parse_is_unverified_not_fail(self):
+        """Exit 3 promises "could not see the subject"; a traceback exits 1 (#1132 item 1)."""
+        self.assertIn('if ! rows="$(printf', self.text)
+        self.assertIn('unverified "cannot parse the SparkCluster list in $NS"', self.text)
+        self.assertIn('if ! sa_uid="$(printf', self.text)
+        self.assertIn('unverified "cannot parse ServiceAccount $sa"', self.text)
+
+    def test_an_empty_minted_token_is_named_not_a_401(self):
+        """An empty token file is a Bearer with no token: the 401 names the wrong cause (#1132)."""
+        self.assertIn('[ ! -s "$token_file" ]', self.text)
+        self.assertIn("the API server minted an empty token for ServiceAccount", self.text)
+
+    def test_the_rolebinding_claim_checks_the_kind_and_the_subject(self):
+        """A binding named after the ServiceAccount but bound to another subject passed (#1132)."""
+        self.assertIn(".roleRef.kind", self.text)
+        self.assertIn(".roleRef.name", self.text)
+        self.assertIn("ServiceAccount/$sa", self.text)
 
     def test_the_cleanup_kills_the_forward_and_removes_the_tmp_dir(self):
         self.assertIn("trap cleanup EXIT", self.text)
