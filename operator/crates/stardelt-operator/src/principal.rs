@@ -787,11 +787,13 @@ mod tests {
         }
         writer.apply_watcher_event(&kube::runtime::watcher::Event::InitDone);
         drop(writer);
+        let (identity, _identity_writer) = kube::runtime::reflector::store();
         Context {
             client,
             helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
             keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
             platforms: store,
+            identity,
         }
     }
 

@@ -607,6 +607,7 @@ mod tests {
         });
         let client = kube::Client::new(service, "stardelt");
         let (platforms, _writer) = kube::runtime::reflector::store::<PlatformInstance>();
+        let (identity, _identity_writer) = kube::runtime::reflector::store();
         let ctx = Arc::new(Context {
             client,
             helm: Arc::new(RecordingRunner::default()),
@@ -615,6 +616,7 @@ mod tests {
                 requests: requests.clone(),
             }),
             platforms,
+            identity,
         });
         (ctx, requests)
     }

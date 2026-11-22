@@ -11,6 +11,7 @@ use kube::api::{
     DeleteParams, DynamicObject, ListParams, ObjectMeta, Patch, PatchParams, TypeMeta,
 };
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::ObjectRef;
 use kube::{Api, ResourceExt};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -711,10 +712,10 @@ pub async fn reconcile_stream_app(
             return Ok(Action::requeue(Duration::from_secs(5)));
         }
     }
-    let identity: Option<ConfigMap> = Api::<ConfigMap>::namespaced(ctx.client.clone(), &namespace)
-        .get_opt(crate::identity::CONFIGMAP_NAME)
-        .await?;
-    let token_endpoint = crate::maintenance::token_endpoint(identity.as_ref());
+    let identity = ctx
+        .identity
+        .get(&ObjectRef::new(crate::identity::CONFIGMAP_NAME).within(&namespace));
+    let token_endpoint = crate::maintenance::token_endpoint(identity.as_deref());
     let spark = spark_application(
         &namespace,
         &name,
@@ -1715,23 +1716,6 @@ mod tests {
                     .lock()
                     .expect("requests poisoned")
                     .push(format!("{method} {path}?{query} {body}"));
-                // The reconciler reads the identity contract to build the catalog token
-                // endpoint; without a `provider` key that is the platform realm (#611).
-                if method == "GET" && path.ends_with(crate::identity::CONFIGMAP_NAME) {
-                    return Ok::<_, std::convert::Infallible>(
-                        http::Response::builder()
-                            .status(200)
-                            .header("content-type", "application/json")
-                            .body(kube::client::Body::from(
-                                format!(
-                                    r#"{{"apiVersion":"v1","kind":"ConfigMap","metadata":{{"name":"{}","namespace":"data"}}}}"#,
-                                    crate::identity::CONFIGMAP_NAME
-                                )
-                                .into_bytes(),
-                            ))
-                            .expect("valid mock response"),
-                    );
-                }
                 let (status, document) = handler(&method, &path, &body);
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
