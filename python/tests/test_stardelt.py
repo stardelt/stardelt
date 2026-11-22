@@ -812,6 +812,39 @@ def test_sets_catalog_conf_for_visible_names_only(fake_spark, visible_catalogs):
     assert session.catalog.current == "warehouse"
 
 
+def test_a_named_cluster_names_the_drivers_projected_token(fake_spark, visible_catalogs, monkeypatch):
+    # The named-cluster path asks Nova for the endpoint (`compute.get`); the fixture stops at the
+    # socket, so name the endpoint here. No token file in the developer's env may decide the default.
+    monkeypatch.setattr(
+        stardelt, "_remote_for_cluster", lambda cluster: f"sc://{cluster}.spark.example:15002"
+    )
+    monkeypatch.delenv("STARDELT_CATALOG_TOKEN_FILE", raising=False)
+    session = stardelt.spark("app", cluster="trial")
+    for name in ("warehouse", "bronze"):
+        assert (
+            session.configs[f"spark.sql.catalog.{name}.rest.auth.type"]
+            == "io.stardelt.iceberg.TokenFileAuthManager"
+        )
+        assert (
+            session.configs[f"spark.sql.catalog.{name}.rest.auth.token-file"]
+            == stardelt.CATALOG_TOKEN_FILE_DEFAULT
+        )
+        assert f"spark.sql.catalog.{name}.token" not in session.configs, (
+            "a group server must not be given the person's token (#493)"
+        )
+
+
+def test_the_group_token_file_is_configurable(fake_spark, visible_catalogs, monkeypatch):
+    monkeypatch.setattr(
+        stardelt, "_remote_for_cluster", lambda cluster: f"sc://{cluster}.spark.example:15002"
+    )
+    monkeypatch.setenv("STARDELT_CATALOG_TOKEN_FILE", "/tmp/other-token")
+    session = stardelt.spark("app", cluster="trial")
+    assert (
+        session.configs["spark.sql.catalog.warehouse.rest.auth.token-file"] == "/tmp/other-token"
+    )
+
+
 def test_hidden_and_invalid_names_skipped(fake_spark, monkeypatch):
     monkeypatch.setattr(
         stardelt,

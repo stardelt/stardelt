@@ -92,6 +92,10 @@ WAP_BRANCH_ENV = "STARDELT_WAP_BRANCH"
 CATALOG_URI_DEFAULT = "http://lakekeeper.stardelt.svc.cluster.local:8181/catalog"
 S3_ENDPOINT_DEFAULT = "http://seaweedfs-s3.stardelt.svc.cluster.local:8333"
 
+# A group SparkCluster's driver carries a projected catalog token, not a Secret (#493, #1112);
+# a session names this path and the driver reads it. STARDELT_CATALOG_TOKEN_FILE overrides it.
+CATALOG_TOKEN_FILE_DEFAULT = "/var/run/secrets/stardelt-catalog/token"
+
 # Catalogs that belong to an engine, not to a person: Trino's system catalog,
 # its metadata views, Spark's in-memory catalogs and the sample connectors.
 HIDDEN_CATALOGS = frozenset({"system", "information_schema", "memory", "tpch", "tpcds", "jmx"})
@@ -911,9 +915,15 @@ def _session(app_name="stardelt-notebook", cluster=None):
 
     The session is built from what Trino's ``SHOW CATALOGS`` returns for the
     person (engine-only names removed) and receives one Iceberg REST catalog per
-    name, each with ``token=_token()``. Lakekeeper — the authority — then refuses
+    name, each with ``token=_token()`` on the shared server (a named cluster is
+    different: see below). Lakekeeper — the authority — then refuses
     a catalog the person has no grant on. ``STARDELT_CATALOG_URI`` and
     ``STARDELT_S3_ENDPOINT`` override the in-cluster catalog and S3 endpoints.
+
+    A named cluster (``cluster=…``) acts as its **owner group**, not as you: its driver runs as
+    ``spark-cluster-driver-<group>`` and the catalog sees that ServiceAccount's principal. The
+    session names the driver's projected token file instead of sending your token; the shared server
+    keeps acting as the person. See ``stardelt.compute`` for the clusters you may use.
 
     The session sets ``rest-catalog-purge=true`` per catalog: the catalog purges on the
     server, so a drop (with or without ``PURGE``) removes the files once and cannot race
@@ -962,6 +972,8 @@ def _session(app_name="stardelt-notebook", cluster=None):
 
     catalog_uri = os.environ.get("STARDELT_CATALOG_URI", CATALOG_URI_DEFAULT).strip()
     s3_endpoint = os.environ.get("STARDELT_S3_ENDPOINT", S3_ENDPOINT_DEFAULT).strip()
+    token_file = (os.environ.get("STARDELT_CATALOG_TOKEN_FILE") or "").strip()
+    token_file = token_file or CATALOG_TOKEN_FILE_DEFAULT
 
     session = None
     try:
@@ -989,7 +1001,18 @@ def _session(app_name="stardelt-notebook", cluster=None):
                 ("rest-catalog-purge", "true"),
                 ("uri", catalog_uri),
                 ("warehouse", name),
-                ("token", token),
+                # The shared server acts as the person: the token decides the catalog identity. A group
+                # server acts as its owner group: the driver carries a projected token at `token_file`, and
+                # naming the file-auth class makes the driver read it and ignore any token in this set
+                # (#493, #1169: file-auth=365 as spark-cluster-driver-<group>).
+                *(
+                    (("token", token),)
+                    if cluster is None
+                    else (
+                        ("rest.auth.type", "io.stardelt.iceberg.TokenFileAuthManager"),
+                        ("rest.auth.token-file", token_file),
+                    )
+                ),
                 ("io-impl", "org.apache.iceberg.aws.s3.S3FileIO"),
                 # Ask Lakekeeper for the table-scoped credential on every load (#75, #840).
                 # Without this header the catalog returns none, and S3FileIO — which holds
