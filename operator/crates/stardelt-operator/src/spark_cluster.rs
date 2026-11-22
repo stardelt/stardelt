@@ -11,6 +11,7 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, Event, EventSource, ObjectReference, Pod, ServiceAccount,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{OwnerReference, Time};
 use kube::ResourceExt;
 use kube::api::{
@@ -250,6 +251,50 @@ fn is_not_found(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(r) if r.code == 404)
 }
 
+/// Remove a group's driver identity once nothing uses it (#493, #1112).
+///
+/// `spark-cluster-driver-<group>` and its RoleBinding are applied per cluster and no object
+/// owns them, so a cluster whose owner group changes — and a deleted cluster — would leave
+/// them behind. Only the group driver is ever removed: the shared `spark-cluster-driver`
+/// belongs to every person-owned cluster. Another live `SparkCluster` of the same group keeps
+/// the identity, because both run as it.
+async fn prune_driver_identity(
+    client: &kube::Client,
+    clusters: &Api<SparkCluster>,
+    namespace: &str,
+    cluster: &str,
+    group: &str,
+) -> Result<(), kube::Error> {
+    let driver = crate::spark::cluster_driver_for(group);
+    if driver == crate::spark::CLUSTER_DRIVER {
+        return Ok(());
+    }
+    let users = clusters.list(&Default::default()).await?;
+    if users.items.iter().any(|other| {
+        other.name_any() != cluster && other.spec.owner.group.as_deref() == Some(group)
+    }) {
+        return Ok(());
+    }
+    match Api::<ServiceAccount>::namespaced(client.clone(), namespace)
+        .delete(&driver, &Default::default())
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(e),
+    }
+    match Api::<RoleBinding>::namespaced(client.clone(), namespace)
+        .delete(&driver, &Default::default())
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(e),
+    }
+    tracing::info!(cluster = %cluster, %namespace, driver = %driver, "spark cluster driver identity removed");
+    Ok(())
+}
+
 /// The `status` half of the merge patch. Absent values are written as JSON `null` so a merge
 /// patch clears them instead of leaving the previous value (see operator#362).
 fn status_value(
@@ -472,6 +517,14 @@ pub async fn reconcile_spark_cluster(
     ctx: Arc<Context>,
 ) -> Result<Action, kube::Error> {
     if cluster.metadata.deletion_timestamp.is_some() {
+        // No finalizer runs for a deleted cluster, so its driver identity is pruned here, while
+        // `spec.owner.group` is still readable (#493, #1112).
+        let name = cluster.name_any();
+        let namespace = cluster.namespace().unwrap_or_else(|| "default".into());
+        if let Some(group) = cluster.spec.owner.group.as_deref() {
+            let clusters: Api<SparkCluster> = Api::namespaced(ctx.client.clone(), &namespace);
+            prune_driver_identity(&ctx.client, &clusters, &namespace, &name, group).await?;
+        }
         return Ok(Action::await_change());
     }
     let name = cluster.name_any();
@@ -627,6 +680,22 @@ pub async fn reconcile_spark_cluster(
             tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
             return Ok(action_after_failure(&e));
         }
+    }
+
+    // The owner group changed: the identity the last reconcile applied is nobody's now, unless
+    // another cluster of that group is live (#493, #1112).
+    let current_driver = spec
+        .owner
+        .group
+        .as_deref()
+        .map(crate::spark::cluster_driver_for)
+        .unwrap_or_else(|| crate::spark::CLUSTER_DRIVER.to_string());
+    if let Some(stale) = previous.and_then(|status| status.driver_service_account.as_deref())
+        && stale != current_driver
+        && let Some(group) = stale.strip_prefix(&format!("{}-", crate::spark::CLUSTER_DRIVER))
+        && !group.is_empty()
+    {
+        prune_driver_identity(&ctx.client, &clusters, &namespace, &name, group).await?;
     }
 
     // The driver runs the group's own code, so the two admission policies that bound what it may
@@ -1530,6 +1599,163 @@ mod tests {
             body["status"]["driverServiceAccount"],
             json!("spark-cluster-driver-mobility-analytics"),
             "{log}"
+        );
+    }
+
+    /// The fixture cluster with the owner group and the driver identity a previous reconcile
+    /// left in `status` (#1102).
+    fn cluster_with_status(
+        state: SparkClusterState,
+        group: Option<&str>,
+        driver: &str,
+    ) -> SparkCluster {
+        let mut object = cluster(state);
+        object.spec.owner.group = group.map(str::to_string);
+        object.status = Some(crate::crd::SparkClusterStatus {
+            driver_service_account: Some(driver.into()),
+            ..Default::default()
+        });
+        object
+    }
+
+    fn listed_cluster(name: &str, group: &str) -> Value {
+        json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "SparkCluster",
+            "metadata": { "name": name, "namespace": "data" },
+            "spec": {
+                "owner": { "group": group },
+                "runtime": "spark-4.0-py3.12",
+                "state": "Running"
+            }
+        })
+    }
+
+    fn cluster_list(items: Vec<Value>) -> String {
+        json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "SparkClusterList",
+            "items": items,
+        })
+        .to_string()
+    }
+
+    /// The answers a reconcile needs once it is past the driver identity: the namespace's
+    /// clusters (the prune guard's LIST), the runtime catalogue, the SparkConnect, the ingress
+    /// policy and the status write. The DELETE answers come from `identity_response`, which
+    /// echoes the ServiceAccount and the RoleBinding the request names.
+    fn prune_mock(list: String) -> (Client, Arc<Mutex<Vec<String>>>) {
+        mock_client(move |method, path, _body| {
+            if method == "GET" && path.ends_with("/sparkclusters") {
+                return (200, list.clone());
+            }
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/sparkconnects/spc-trial") {
+                return (
+                    200,
+                    r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    200,
+                    r#"{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"spc-trial-ingress","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/sparkclusters/trial/status") {
+                return (
+                    200,
+                    r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"new"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Starting"}}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"}}"#.into(),
+            )
+        })
+    }
+
+    /// The LIST of the prune guard, as recorded in the request log.
+    fn lists_clusters(log: &str) -> bool {
+        log.lines()
+            .any(|line| line.starts_with("GET") && line.contains("/sparkclusters"))
+    }
+
+    /// Whether the reconcile deleted any object: the pod guard's policy bodies carry `DELETE`
+    /// among their allowed operations, so only a request line counts.
+    fn deletes_anything(log: &str) -> bool {
+        log.lines().any(|line| line.starts_with("DELETE"))
+    }
+
+    #[tokio::test]
+    async fn a_changed_owner_group_prunes_the_previous_driver_identity() {
+        let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "new")]));
+        let cluster = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver-old",
+        );
+        reconcile_spark_cluster(Arc::new(cluster), ctx(client))
+            .await
+            .expect("reconcile");
+        let log = requests.lock().expect("requests").join("\n");
+        for path in [
+            "/serviceaccounts/spark-cluster-driver-old",
+            "/rolebindings/spark-cluster-driver-old",
+        ] {
+            assert!(
+                log.lines()
+                    .any(|line| line.starts_with("DELETE") && line.contains(path)),
+                "{path} is pruned: {log}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shared_driver_identity_is_never_pruned() {
+        let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "new")]));
+        // The shared driver belongs to every person-owned cluster: a cluster that becomes
+        // group-owned must not delete it.
+        let cluster = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver",
+        );
+        reconcile_spark_cluster(Arc::new(cluster), ctx(client))
+            .await
+            .expect("reconcile");
+        let log = requests.lock().expect("requests").join("\n");
+        assert!(!deletes_anything(&log), "nothing is deleted: {log}");
+        assert!(
+            !lists_clusters(&log),
+            "a shared driver needs no LIST: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_cluster_of_the_old_group_keeps_the_driver_identity() {
+        let (client, requests) = prune_mock(cluster_list(vec![
+            listed_cluster("trial", "new"),
+            listed_cluster("other", "old"),
+        ]));
+        let cluster = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver-old",
+        );
+        reconcile_spark_cluster(Arc::new(cluster), ctx(client))
+            .await
+            .expect("reconcile");
+        let log = requests.lock().expect("requests").join("\n");
+        assert!(lists_clusters(&log), "the guard lists the namespace: {log}");
+        assert!(
+            !deletes_anything(&log),
+            "another cluster of the group still runs as the identity: {log}"
         );
     }
 
