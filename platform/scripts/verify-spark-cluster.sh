@@ -6,7 +6,8 @@
 #
 # Creates one `small` SparkCluster named `verify-spark-cluster`, polls its phase and asserts the
 # eleven things the phase alone has lied about before (operator#774): the endpoint, the server
-# pod's readiness and identity, the driver's ServiceAccount/Role/RoleBinding, the two admission
+# pod's readiness and identity, the driver's ServiceAccount/Role/RoleBinding (the group's own
+# driver ServiceAccount bound to the shared Role), the two admission
 # policies with their bindings, the ingress NetworkPolicy, a TLS-clean server log, the executor
 # path, the catalogue and the token's audience.
 # The CR and the objects it owns are deleted on every exit path — the trap is the contract.
@@ -18,6 +19,8 @@ NP="spc-${NAME}-ingress"
 POD="spc-${NAME}-server"
 EXEC="verify-spark-cluster-exec"
 RUNTIME=spark-4.1-py3.13
+GROUP=visitors
+DRIVER="spark-cluster-driver-${GROUP}"
 CATALOGUE=stardelt-spark-runtimes
 problems=0
 command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
@@ -74,7 +77,7 @@ metadata:
   namespace: ${NS}
 spec:
   owner:
-    group: visitors
+    group: ${GROUP}
   size: small
   runtime: ${RUNTIME}
   state: Running
@@ -120,23 +123,30 @@ else
   bad "the server pod $POD is Ready (it says '${ready:-absent}')"
 fi
 
-# 4. The driver's own identity: the executors' token-less ServiceAccount cannot create pods.
+# 4. The driver's own identity: a cluster owned by a group runs as the group's own driver
+#    (operator#1100), so the executors' token-less ServiceAccount cannot create pods.
 sa="$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.serviceAccountName}' 2>/dev/null || true)"
-if [ "$sa" = spark-cluster-driver ]; then
-  ok "the server pod runs as spark-cluster-driver"
+if [ "$sa" = "$DRIVER" ]; then
+  ok "the server pod runs as $DRIVER"
 else
-  bad "the server pod's serviceAccountName is spark-cluster-driver (it is '${sa:-absent}')"
+  bad "the server pod's serviceAccountName is the owner group's driver $DRIVER (it is '${sa:-absent}')"
 fi
 
-# 5. ... which exists, with the Role it needs and its binding.
+# 5. ... which exists, with the shared Role it needs and its binding.
 missing=""
 for kind in serviceaccount role rolebinding; do
   kubectl -n "$NS" get "$kind" spark-cluster-driver >/dev/null 2>&1 || missing="$missing $kind"
 done
+for kind in serviceaccount rolebinding; do
+  kubectl -n "$NS" get "$kind" "$DRIVER" >/dev/null 2>&1 || missing="$missing $kind/$DRIVER"
+done
+if [ "$(kubectl -n "$NS" get rolebinding "$DRIVER" -o jsonpath='{.roleRef.name}' 2>/dev/null || true)" != spark-cluster-driver ]; then
+  missing="$missing rolebinding/$DRIVER->spark-cluster-driver"
+fi
 if [ -z "$missing" ]; then
-  ok "ServiceAccount, Role and RoleBinding spark-cluster-driver exist"
+  ok "ServiceAccount, Role and RoleBinding spark-cluster-driver exist, and $DRIVER binds that Role"
 else
-  bad "ServiceAccount, Role and RoleBinding spark-cluster-driver exist (missing:${missing})"
+  bad "ServiceAccount, Role and RoleBinding spark-cluster-driver exist, and $DRIVER binds that Role (missing:${missing})"
 fi
 
 # 6. The two admission guards (operator#775) and a binding that enforces each of them. The
