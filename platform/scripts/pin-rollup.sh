@@ -275,12 +275,20 @@ git push --force-with-lease origin "$branch"
 if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then
   echo "the roll moved a pin the operator embeds; rebuilding the operator from $branch (#746)"
   # The dispatch must use GITHUB_TOKEN: PIN_TOKEN has no Actions permission (#1026 probe 403).
+  # Every run of this script leaves a `workflow_dispatch` run on `$branch` in the Actions
+  # history, so `--limit 1` right after the dispatch can still answer the *previous* build:
+  # remember that id and accept only a new one (#1035 review finding 1).
+  previous_run="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
+    --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""' || true)"
   GH_TOKEN="$GITHUB_TOKEN" gh workflow run operator-image.yml --ref "$branch"
   run_id=""
   for _ in $(seq 1 12); do
-    run_id="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
-      --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
-    [ -n "$run_id" ] && break
+    candidate="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
+      --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""' || true)"
+    if [ -n "$candidate" ] && [ "$candidate" != "$previous_run" ]; then
+      run_id="$candidate"
+      break
+    fi
     sleep 5
   done
   [ -n "$run_id" ] || { echo "no dispatched operator build appeared for $branch" >&2; exit 1; }

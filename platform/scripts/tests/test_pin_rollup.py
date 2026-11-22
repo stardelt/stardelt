@@ -95,14 +95,41 @@ class PinRollupStagesEveryFilePinImageWritesTest(unittest.TestCase):
         self.assertIn("chart/files/spark-runtimes.json", staged)
 
 
+def dispatch_block(text: str) -> str:
+    """The rebuild block: from the dispatch's `if … embedded_changed` to its closing `fi`."""
+    start = text.index('if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then')
+    end = text.index("\nfi\n", start)
+    return text[start:end]
+
+
 class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
     def test_the_dispatch_follows_the_branch_push_and_uses_github_token(self):
         text = ROLLUP.read_text()
-        push = text.index('git push --force-with-lease origin "$branch"')
-        dispatch = text.index('gh workflow run operator-image.yml --ref "$branch"')
-        self.assertLess(push, dispatch)
-        self.assertIn('GH_TOKEN="$GITHUB_TOKEN" gh workflow run', text)
-        self.assertIn('embedded_changed=yes', text)
+        block = dispatch_block(text)
+        # The post-amend push is the last one; `index` would find the pre-dispatch push.
+        post_amend = text.rindex('git push --force-with-lease origin "$branch"')
+        self.assertLess(text.rindex("git commit --amend --no-edit"), post_amend,
+                        "the rebuilt digest is committed, then the branch is re-pushed")
+        self.assertLess(block.rindex('git push --force-with-lease origin "$branch"'),
+                        text.index("fi\n\n# Reuse the open PR only."), "the re-push closes the block")
+        self.assertLess(text.index('git push --force-with-lease origin "$branch"'),
+                        text.index('gh workflow run operator-image.yml --ref "$branch"'))
+        self.assertIn("embedded_changed=yes", text)
+        self.assertIn('gh workflow run operator-image.yml --ref "$branch"', block,
+                      "the dispatch must be gated on OPEN_PR and embedded_changed")
+        # Every `gh` call in the block runs on the Actions-capable token, not PIN_TOKEN.
+        for line in block.splitlines():
+            if "gh " in line and "gh workflow run" not in line and "gh run " in line:
+                self.assertIn('GH_TOKEN="$GITHUB_TOKEN"', line,
+                              f"a gh call in the rebuild block does not force GITHUB_TOKEN: {line}")
+
+    def test_a_previous_run_on_the_branch_is_not_taken_for_the_new_one(self):
+        block = dispatch_block(ROLLUP.read_text())
+        previous = block.index("previous_run=")
+        dispatch = block.index("gh workflow run")
+        self.assertLess(previous, dispatch,
+                        "the previous run's id must be read before the dispatch")
+        self.assertIn('[ "$candidate" != "$previous_run" ]', block)
 
     def test_the_digest_is_resolved_from_the_branch_tag_not_dev(self):
         self.assertIn('TAG="${branch//\\//-}"', ROLLUP.read_text())
@@ -112,7 +139,10 @@ class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
         text = wf.read_text()
         self.assertIn("actions: write", text)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", text)
-        self.assertIn("github.event.workflow_run.head_branch == 'main'", text)
+        # The guard must sit on the job's `if:` line, not in a comment.
+        if_lines = [line for line in text.splitlines() if re.match(r"^\s+if: ", line)]
+        self.assertEqual(len(if_lines), 1, f"expected one job-level if:, found {if_lines}")
+        self.assertIn("github.event.workflow_run.head_branch == 'main'", if_lines[0])
 
 
 if __name__ == "__main__":
