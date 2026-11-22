@@ -26,10 +26,11 @@ use crate::{
     access_sync, airflow,
     controller::Context,
     crd::{
-        CatalogImpl, ComponentStatus, IdentityMode, Lakehouse, ModelEndpoint, PlatformInstanceSpec,
-        PrincipalAudience, PrincipalPurpose, SecretsMode, ServicePrincipal, StorageImpl,
+        CatalogImpl, ComponentStatus, IdentityMode, IngressMode, Lakehouse, ModelEndpoint,
+        PlatformInstanceSpec, PrincipalAudience, PrincipalPurpose, SecretsMode, ServicePrincipal,
+        StorageImpl,
     },
-    identity, ingress, kafka, keycloak, network_policy, nova,
+    http_route, identity, ingress, kafka, keycloak, network_policy, nova,
     objects::{
         apply, apply_cluster, apply_dynamic, apply_dynamic_cluster, barman_object_store_resource,
         cert_manager_certificate_resource, cert_manager_issuer_resource, cnpg_cluster_resource,
@@ -931,8 +932,14 @@ pub async fn ensure_spark(
                 return Some(status(NAME, false, e.to_string()));
             }
             // The public name comes from the instance's ingress settings; `ingress::spark`
-            // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`.
-            if let Some(route) = ingress::spark(&instance.spec)
+            // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`. With
+            // `spec.ingress.mode: gateway` no Ingress is rendered at all, and Spark Connect
+            // gets no HTTPRoute in this slice: an HTTPRoute carries neither the backend
+            // protocol nor the per-route timeouts a gRPC front needs (`GRPCRoute` is a later
+            // slice), so the public name waits for that slice instead of falling back to an
+            // Ingress that would honour the ignored `className`/`allowedCidrs`/`tls`.
+            if instance.spec.ingress.mode != IngressMode::Gateway
+                && let Some(route) = ingress::spark(&instance.spec)
                 && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
             {
                 return Some(status(NAME, false, e.to_string()));
@@ -2674,6 +2681,9 @@ pub async fn ensure_ingress(
     if !spec.ingress.enabled {
         return None;
     }
+    if spec.ingress.mode == IngressMode::Gateway {
+        return ensure_http_routes(ctx, spec, owner).await;
+    }
     let mut objects = Vec::new();
     if spec.pillars.lakehouse {
         objects.extend(ingress::nova(spec));
@@ -2714,6 +2724,58 @@ pub async fn ensure_ingress(
         ));
     }
     Some(status(NAME, true, format!("applied: {}", names.join(", "))))
+}
+
+/// The `mode: gateway` arm of [`ensure_ingress`]: one `HTTPRoute` per published application,
+/// attached to the Gateway in `spec.ingress.gateway`. No `Ingress` is rendered in this mode, and
+/// `className`, `allowedCidrs` and `tls` are ignored — the Gateway's listeners own TLS and source
+/// filtering.
+async fn ensure_http_routes(
+    ctx: &Context,
+    spec: &PlatformInstanceSpec,
+    owner: &OwnerReference,
+) -> Option<ComponentStatus> {
+    const NAME: &str = "ingress";
+    if spec.ingress.gateway.is_none() {
+        return Some(status(
+            NAME,
+            false,
+            "spec.ingress.gateway is required when spec.ingress.mode is gateway",
+        ));
+    }
+    let objects = http_route::all(spec);
+    if objects.is_empty() {
+        return Some(status(
+            NAME,
+            false,
+            "nothing to publish: ingress needs baseDomain and an application that has a host",
+        ));
+    }
+    let resource = http_route::resource();
+    let namespace = &spec.namespace;
+    let mut names = Vec::new();
+    for mut object in objects {
+        http_route::own(&mut object, owner);
+        let name = object.name_any();
+        if let Err(e) =
+            apply_dynamic(&ctx.client, namespace, &resource, &object, spec.dry_run).await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+        names.push(name);
+    }
+    if spec.dry_run {
+        return Some(status(
+            NAME,
+            false,
+            format!("planned (dry-run): HTTPRoute {}", names.join(", ")),
+        ));
+    }
+    Some(status(
+        NAME,
+        true,
+        format!("applied: HTTPRoute {}", names.join(", ")),
+    ))
 }
 
 /// Publish the identity contract (ConfigMap `stardelt-identity`, decision D20) in the platform
@@ -3460,6 +3522,29 @@ mod tests {
             client,
             Arc::new(crate::helm::testing::RecordingRunner::default()),
         )
+    }
+
+    /// A context whose platform store holds one `PlatformInstance` for `spec.namespace`, for the
+    /// code paths that read the instance of a namespace instead of listing it (#274 rule 5).
+    fn context_with_platform(client: kube::Client, spec: &PlatformInstanceSpec) -> Context {
+        let (platforms, mut writer) = kube::runtime::reflector::store();
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Init);
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitApply(
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "PlatformInstance",
+                "metadata": { "name": "cluster" },
+                "spec": spec,
+            }))
+            .expect("deserialize PlatformInstance"),
+        ));
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitDone);
+        Context {
+            client,
+            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
+            keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
+            platforms,
+        }
     }
 
     fn lakehouse() -> Lakehouse {
@@ -4638,6 +4723,105 @@ mod tests {
         assert_eq!(nova["spec"]["rules"][0]["host"], "example.com");
         let keycloak = body("keycloak");
         assert_eq!(keycloak["spec"]["rules"][0]["host"], "id.example.com");
+    }
+
+    /// A platform spec with `mode: gateway`, the given Gateway (or none) and the lakehouse pillar.
+    fn platform_with_gateway(
+        gateway: Option<(&str, Option<&str>)>,
+        lakehouse: bool,
+        dry_run: bool,
+    ) -> PlatformInstanceSpec {
+        let mut ingress = serde_json::json!({ "enabled": true, "mode": "gateway" });
+        if let Some((name, namespace)) = gateway {
+            ingress["gateway"] = match namespace {
+                Some(namespace) => serde_json::json!({ "name": name, "namespace": namespace }),
+                None => serde_json::json!({ "name": name }),
+            };
+        }
+        let instance: crate::crd::PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {
+                "namespace": "stardelt",
+                "baseDomain": "example.com",
+                "dryRun": dry_run,
+                "identity": { "mode": "platform" },
+                "pillars": { "lakehouse": lakehouse },
+                "ingress": ingress,
+            }
+        }))
+        .expect("deserialize PlatformInstance");
+        instance.spec
+    }
+
+    const HTTP_ROUTES: &str = "/apis/gateway.networking.k8s.io/v1/namespaces/stardelt/httproutes";
+
+    #[tokio::test]
+    async fn gateway_mode_without_a_gateway_reports_the_sentence_and_renders_nothing() {
+        let (client, requests) = keycloak_client(&[], None);
+        let status = ensure_ingress(
+            &context(client),
+            &platform_with_gateway(None, true, true),
+            &owner(),
+        )
+        .await
+        .expect("a status");
+        assert_eq!(status.name, "ingress");
+        assert!(!status.ready);
+        assert_eq!(
+            status.message.as_deref(),
+            Some("spec.ingress.gateway is required when spec.ingress.mode is gateway")
+        );
+        assert!(applied_paths(&requests).is_empty());
+    }
+
+    #[tokio::test]
+    async fn gateway_mode_plans_http_routes_instead_of_ingresses() {
+        let (client, requests) = keycloak_client(&[], None);
+        let status = ensure_ingress(
+            &context(client),
+            &platform_with_gateway(Some(("platform", None)), true, true),
+            &owner(),
+        )
+        .await
+        .expect("a status");
+        assert_eq!(status.name, "ingress");
+        assert!(!status.ready);
+        assert_eq!(
+            status.message.as_deref(),
+            Some("planned (dry-run): HTTPRoute nova, trino, keycloak")
+        );
+        assert_eq!(
+            applied_paths(&requests),
+            [
+                format!("{HTTP_ROUTES}/nova"),
+                format!("{HTTP_ROUTES}/trino"),
+                format!("{HTTP_ROUTES}/keycloak")
+            ]
+        );
+        let requests = requests.lock().expect("requests poisoned");
+        let body = serde_json::from_str::<serde_json::Value>(
+            &requests
+                .iter()
+                .find(|(method, path, _)| method == "PATCH" && path.ends_with("/httproutes/nova"))
+                .expect("an applied HTTPRoute")
+                .2,
+        )
+        .expect("JSON body");
+        assert_eq!(body["kind"], "HTTPRoute");
+        assert_eq!(body["spec"]["parentRefs"], json!([{ "name": "platform" }]));
+        assert_eq!(body["spec"]["hostnames"], json!(["example.com"]));
+        assert_eq!(
+            body["metadata"]["ownerReferences"][0]["kind"],
+            "PlatformInstance"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, path, _)| !path.contains("/ingresses/")),
+            "mode: gateway renders no Ingress"
+        );
     }
 
     #[tokio::test]
@@ -5831,6 +6015,48 @@ mod tests {
             "/apis/apps/v1/namespaces/data/deployments/spark-connect",
         ];
         assert_eq!(paths, expected);
+    }
+
+    /// The `PlatformInstance` in namespace `data` that `ensure_spark` reads for the public name.
+    fn spark_platform(ingress: serde_json::Value) -> PlatformInstanceSpec {
+        serde_json::from_value(serde_json::json!({
+            "namespace": "data",
+            "baseDomain": "example.com",
+            "identity": { "mode": "platform" },
+            "ingress": ingress,
+        }))
+        .expect("a PlatformInstanceSpec")
+    }
+
+    #[tokio::test]
+    async fn the_spark_connect_ingress_is_not_rendered_in_gateway_mode() {
+        let mut lh = lakehouse();
+        lh.spec.compute.spark.enabled = true;
+        let ingress = "/apis/networking.k8s.io/v1/namespaces/data/ingresses/spark-connect";
+
+        let (client, requests) = mock_client(true);
+        let spec = spark_platform(serde_json::json!({ "enabled": true }));
+        let _ = ensure_spark(&context_with_platform(client, &spec), &lh, "data").await;
+        assert!(
+            applied_paths(&requests).iter().any(|path| path == ingress),
+            "mode: ingress publishes the gRPC front: {:?}",
+            applied_paths(&requests)
+        );
+
+        let (client, requests) = mock_client(true);
+        let spec = spark_platform(serde_json::json!({
+            "enabled": true,
+            "mode": "gateway",
+            "gateway": { "name": "platform" },
+        }));
+        let _ = ensure_spark(&context_with_platform(client, &spec), &lh, "data").await;
+        assert!(
+            !applied_paths(&requests)
+                .iter()
+                .any(|path| path.contains("/ingresses/")),
+            "mode: gateway renders no Ingress, Spark Connect included: {:?}",
+            applied_paths(&requests)
+        );
     }
 
     #[tokio::test]

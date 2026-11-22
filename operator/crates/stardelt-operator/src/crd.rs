@@ -327,6 +327,30 @@ impl Default for IdentitySpec {
     }
 }
 
+/// How the applications are reached: Ingress objects (default) or Gateway API HTTPRoutes.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IngressMode {
+    /// One `Ingress` per application, written for the cluster's Ingress controller. The default.
+    #[default]
+    Ingress,
+    /// One `HTTPRoute` per application, attached to the `Gateway` in `ingress.gateway`. No
+    /// `Ingress` is rendered; `className`, `allowedCidrs` and `tls` are ignored.
+    Gateway,
+}
+
+/// The Gateway a `mode: gateway` instance attaches its HTTPRoutes to.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct GatewayRef {
+    /// Name of the Gateway in the cluster.
+    #[schemars(length(min = 1, max = 253))]
+    pub name: String,
+    /// Namespace of the Gateway; absent means the instance's namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 253))]
+    pub namespace: Option<String>,
+}
+
 /// How the applications are reached from outside the cluster. Off by default: a cluster without an
 /// ingress controller installs as it is, and an administrator brings their own ingress or uses a
 /// port-forward. The Services stay `ClusterIP` either way.
@@ -351,7 +375,17 @@ pub struct IngressSettings {
     /// JupyterHub on `jupyter.` with `notebooks`.
     #[serde(default)]
     pub enabled: bool,
+    /// How the applications are reached; see [`IngressMode`]. Defaults to `ingress`.
+    /// With `gateway`, one `HTTPRoute` per application is rendered instead of Ingresses, and
+    /// `className`, `allowedCidrs` and `tls` are ignored.
+    #[serde(default)]
+    pub mode: IngressMode,
+    /// The Gateway the HTTPRoutes attach to; required by `mode: gateway`, ignored by
+    /// `mode: ingress`. Its listeners own TLS, the host name and source filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayRef>,
     /// IngressClass name, for example `nginx` or `traefik`. Absent: the cluster default.
+    /// Ignored when `mode: gateway`.
     #[serde(default, rename = "className", skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 253))]
     pub class_name: Option<String>,
@@ -362,6 +396,8 @@ pub struct IngressSettings {
     /// Always include the cluster's own egress address: pods that call the public names
     /// arrive through it.
     ///
+    /// Ignored when `mode: gateway`: source filtering belongs to the Gateway's listener.
+    ///
     /// The bounds are not cosmetic: the API server's CEL cost estimator treats an
     /// unbounded array under a `matches()` rule as unbounded, and refuses the whole
     /// CRD ("estimated rule cost exceeds budget by factor of more than 100x",
@@ -369,7 +405,8 @@ pub struct IngressSettings {
     #[serde(default, rename = "allowedCidrs")]
     #[schemars(length(max = 64), inner(length(min = 1, max = 64)))]
     pub allowed_cidrs: Vec<String>,
-    /// TLS through cert-manager.
+    /// TLS through cert-manager on the Ingresses. Ignored when `mode: gateway`: TLS belongs to
+    /// the Gateway's listeners and their certificate references.
     #[serde(default)]
     pub tls: IngressTls,
 }
@@ -4426,6 +4463,52 @@ mod tests {
         assert_eq!(
             cidrs["items"]["maxLength"], 64,
             "allowedCidrs schema: {cidrs}"
+        );
+    }
+
+    #[test]
+    fn the_ingress_mode_defaults_to_ingress() {
+        let spec: PlatformInstanceSpec =
+            serde_json::from_value(serde_json::json!({ "namespace": "stardelt" }))
+                .expect("a PlatformInstanceSpec");
+        assert_eq!(spec.ingress.mode, IngressMode::Ingress);
+        assert!(spec.ingress.gateway.is_none());
+    }
+
+    #[test]
+    fn gateway_mode_and_its_gateway_round_trip() {
+        let spec: PlatformInstanceSpec = serde_json::from_value(serde_json::json!({
+            "namespace": "stardelt",
+            "ingress": { "enabled": true, "mode": "gateway", "gateway": { "name": "platform" } }
+        }))
+        .expect("a PlatformInstanceSpec");
+        assert_eq!(spec.ingress.mode, IngressMode::Gateway);
+        assert_eq!(
+            spec.ingress.gateway,
+            Some(GatewayRef {
+                name: "platform".to_string(),
+                namespace: None,
+            })
+        );
+        let rendered = serde_json::to_value(&spec.ingress).expect("serialize");
+        assert_eq!(rendered["mode"], "gateway");
+        assert_eq!(
+            rendered["gateway"],
+            serde_json::json!({ "name": "platform" })
+        );
+
+        let with_namespace: PlatformInstanceSpec = serde_json::from_value(serde_json::json!({
+            "namespace": "stardelt",
+            "ingress": { "mode": "gateway",
+                "gateway": { "name": "edge", "namespace": "gateway-system" } }
+        }))
+        .expect("a PlatformInstanceSpec");
+        assert_eq!(
+            with_namespace.ingress.gateway,
+            Some(GatewayRef {
+                name: "edge".to_string(),
+                namespace: Some("gateway-system".to_string()),
+            })
         );
     }
 
