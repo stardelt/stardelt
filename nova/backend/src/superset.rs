@@ -20,9 +20,16 @@
 //!   base as the **public https URL** when the platform has a base domain (see
 //!   `AppState::superset_api_url`); that certificate is public, so no CA is added for it.
 //!
-//! The token lives a short while, so [`SupersetClient::export`] and [`SupersetClient::import`]
-//! repeat once after a `401` with a fresh sign-in (measured: the expired token answers `401`,
-//! a new one works).
+//! The client uses five Superset routes: `login`, the dashboard `export`, the dashboard
+//! `import`, the database list (`GET /api/v1/database/`) and the database export
+//! (`GET /api/v1/database/export/`). The import route rewrites an exported dashboard so that
+//! every dataset points at the target's own `Trino <catalog>` database (#1216): the list finds
+//! that database by name, its export carries the uuid the rewrite writes (#115 a/3b).
+//!
+//! The token lives a short while, so every GET the client sends ([`SupersetClient::export`],
+//! [`SupersetClient::databases`], [`SupersetClient::database_export`]) and
+//! [`SupersetClient::import`] repeat once after a `401` with a fresh sign-in (measured: the
+//! expired token answers `401`, a new one works).
 //!
 //! Nova acts as its own Superset service user ([`SERVICE_USER`]): it could export or import
 //! any dashboard, so the routes are administrator-only. The bundle's own rules — the owner
@@ -171,6 +178,16 @@ pub struct SupersetClient {
     user: ServiceUser,
 }
 
+/// One database the target Superset knows, as the import route needs it: the id to export and
+/// the name (`Trino Gold`) to match a dataset's catalog against.
+// The import route that reads this is #115 a/3b2.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupersetDatabase {
+    pub id: i64,
+    pub name: String,
+}
+
 impl SupersetClient {
     /// `base` is the public https URL (see the module doc); a trailing slash is dropped.
     pub fn new(base: &str, user: ServiceUser) -> Self {
@@ -261,6 +278,104 @@ impl SupersetClient {
             return Err(SupersetError::Status(
                 404,
                 format!("Superset has no dashboard {id}"),
+            ));
+        }
+        Err(self.status_error(status, response, &token).await)
+    }
+
+    /// `GET /api/v1/database/?q=(page_size:200)`: every database the target Superset knows, as
+    /// `(id, database_name)`. A row without a numeric `id` or a string `database_name` is
+    /// skipped; an answer without a `result` array is `Transport`.
+    ///
+    /// A `401` means the token from this call expired; Nova signs in once more and repeats the
+    /// GET once. Every other non-`200` is Superset's status and message.
+    // The import route that calls this is #115 a/3b2.
+    #[allow(dead_code)]
+    pub async fn databases(&self) -> Result<Vec<SupersetDatabase>, SupersetError> {
+        let url = format!("{}/api/v1/database/?q=(page_size:200)", self.base);
+        let mut token = self.login().await?;
+        let mut response = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            token = self.login().await?;
+            response = self
+                .http
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        }
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(self.status_error(status, response, &token).await);
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        let Some(rows) = body["result"].as_array() else {
+            return Err(SupersetError::Transport(
+                "Superset's database list carries no result".into(),
+            ));
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                Some(SupersetDatabase {
+                    id: row["id"].as_i64()?,
+                    name: row["database_name"].as_str()?.to_string(),
+                })
+            })
+            .collect())
+    }
+
+    /// `GET /api/v1/database/export/?q=[{id}]`: the ZIP Superset exports for one database
+    /// (a `databases` member inside). A `404` names the id; every other non-`200` is
+    /// Superset's status and message.
+    ///
+    /// A `401` means the token from this call expired; Nova signs in once more and repeats the
+    /// GET once.
+    // The import route that calls this is #115 a/3b2.
+    #[allow(dead_code)]
+    pub async fn database_export(&self, id: i64) -> Result<Vec<u8>, SupersetError> {
+        let url = format!("{}/api/v1/database/export/?q=[{id}]", self.base);
+        let mut token = self.login().await?;
+        let mut response = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            token = self.login().await?;
+            response = self
+                .http
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        }
+        let status = response.status();
+        if status == StatusCode::OK {
+            return response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|e| SupersetError::Transport(e.to_string()));
+        }
+        if status == StatusCode::NOT_FOUND {
+            // The caller knows the id; the answer must name it.
+            return Err(SupersetError::Status(
+                404,
+                format!("Superset has no database {id}"),
             ));
         }
         Err(self.status_error(status, response, &token).await)
@@ -479,7 +594,7 @@ pub async fn export_dashboard(State(state): State<Arc<AppState>>, Path(id): Path
 
 #[cfg(test)]
 mod fake {
-    //! The three Superset routes the client uses. The password it accepts and the token it
+    //! The five Superset routes the client uses. The password it accepts and the token it
     //! hands out are canaries: neither may ever show up in an error.
 
     use std::collections::BTreeMap;
@@ -502,6 +617,7 @@ mod fake {
     pub(super) const TOKEN: &str = "tok-canary-4e7b";
     pub(super) const CSRF: &str = "csrf-canary";
     pub(super) const ARCHIVE: &[u8] = b"PK\x03\x04canary";
+    pub(super) const DATABASE_ARCHIVE: &[u8] = b"PK\x03\x04database-canary";
 
     #[derive(Default)]
     pub(super) struct Fake {
@@ -651,6 +767,76 @@ mod fake {
             .into_response()
     }
 
+    async fn list_databases(State(s): State<Shared>, headers: HeaderMap) -> Response {
+        let mut state = s.lock().unwrap();
+        if state.unauthorized > 0 {
+            state.unauthorized -= 1;
+            return refused();
+        }
+        if state.failing {
+            // Deliberately chatty, like `export_one`: it repeats what was sent.
+            let sent = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": format!("boom for {sent} {PASSWORD}") })),
+            )
+                .into_response();
+        }
+        if !has_bearer(&headers) {
+            return refused();
+        }
+        (
+            StatusCode::OK,
+            Json(json!({
+                "count": 1,
+                "result": [{ "id": 3, "database_name": "Trino Gold" }],
+            })),
+        )
+            .into_response()
+    }
+
+    async fn export_database(
+        State(s): State<Shared>,
+        Query(query): Query<BTreeMap<String, String>>,
+        headers: HeaderMap,
+    ) -> Response {
+        let mut state = s.lock().unwrap();
+        if state.unauthorized > 0 {
+            state.unauthorized -= 1;
+            return refused();
+        }
+        if state.failing {
+            let sent = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": format!("boom for {sent} {PASSWORD}") })),
+            )
+                .into_response();
+        }
+        if !has_bearer(&headers) {
+            return refused();
+        }
+        if query.get("q").map(String::as_str) != Some("[3]") {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Not found" })),
+            )
+                .into_response();
+        }
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/zip")],
+            Body::from(DATABASE_ARCHIVE),
+        )
+            .into_response()
+    }
+
     /// Start the fake and a client signed in against it.
     pub(super) async fn start() -> (SupersetClient, Shared) {
         let shared: Shared = Arc::new(Mutex::new(Fake::default()));
@@ -659,6 +845,8 @@ mod fake {
             .route("/api/v1/security/csrf_token/", get(csrf_token))
             .route("/api/v1/dashboard/export/", get(export_one))
             .route("/api/v1/dashboard/import/", post(import_dashboard))
+            .route("/api/v1/database/", get(list_databases))
+            .route("/api/v1/database/export/", get(export_database))
             .with_state(Arc::clone(&shared));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -678,7 +866,7 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::StatusCode;
 
-    use super::fake::{self, ARCHIVE, PASSWORD, TOKEN};
+    use super::fake::{self, ARCHIVE, DATABASE_ARCHIVE, PASSWORD, TOKEN};
     use super::*;
 
     /// Serialises the tests that set/remove `NOVA_SUPERSET_*`: the environment is
@@ -690,6 +878,77 @@ mod tests {
         let (client, _fake) = fake::start().await;
         let bytes = client.export(7).await.unwrap();
         assert_eq!(bytes, ARCHIVE);
+    }
+
+    #[tokio::test]
+    async fn databases_lists_the_names_and_ids() {
+        let (client, _fake) = fake::start().await;
+        let databases = client.databases().await.unwrap();
+        assert_eq!(
+            databases,
+            vec![SupersetDatabase {
+                id: 3,
+                name: "Trino Gold".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn database_export_returns_the_archive_bytes() {
+        let (client, _fake) = fake::start().await;
+        let bytes = client.database_export(3).await.unwrap();
+        assert_eq!(bytes, DATABASE_ARCHIVE);
+    }
+
+    #[tokio::test]
+    async fn the_database_list_refreshes_an_expired_token_once() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().unauthorized = 1;
+        let databases = client.databases().await.unwrap();
+        assert_eq!(
+            databases,
+            vec![SupersetDatabase {
+                id: 3,
+                name: "Trino Gold".to_string(),
+            }]
+        );
+        assert_eq!(
+            fake.lock().unwrap().logins,
+            2,
+            "the 401 costs exactly one new sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_database_is_named() {
+        let (client, _fake) = fake::start().await;
+        match client.database_export(9).await {
+            Err(SupersetError::Status(404, message)) => assert_eq!(
+                message, "Superset has no database 9",
+                "the answer names the id it asked for"
+            ),
+            other => panic!("expected a named 404, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_database_error_never_contains_the_password_or_the_token() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().failing = true;
+        let list_error = client.databases().await.unwrap_err();
+        let export_error = client.database_export(3).await.unwrap_err();
+        for error in [&list_error, &export_error] {
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            for text in [&display, &debug] {
+                assert!(!text.contains(PASSWORD), "the password reached: {text}");
+                assert!(!text.contains(TOKEN), "the token reached: {text}");
+            }
+            assert!(
+                display.contains("500"),
+                "the upstream status stays in the sentence: {display}"
+            );
+        }
     }
 
     #[tokio::test]
