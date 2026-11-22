@@ -3252,8 +3252,9 @@ pub struct LogView {
 #[serde(rename_all = "camelCase")]
 pub struct ChecksResponse {
     pub checks: Vec<CheckView>,
-    /// The audit branch this run wrote, when the pipeline publishes with `wap` (#114); `None` for
-    /// a `direct` pipeline. Deterministic from the run id, so a failed run can be inspected.
+    /// The audit branch this run left for inspection: `Some` when the pipeline publishes with
+    /// `wap` and the run has not published it (`wap-prepare` succeeded, `wap-publish` did not).
+    /// A passing run publishes and drops its branch, so it answers `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_branch: Option<String>,
     /// The tables the run wrote (`spec.tasks[].writes`), sorted; empty for a `direct` pipeline.
@@ -4773,6 +4774,21 @@ async fn task_logs(
     Ok(log_view(page))
 }
 
+/// Whether the run still has an audit branch to inspect: `publish: wap`, `wap-prepare` succeeded
+/// and `wap-publish` did not. A passing run publishes and drops its branch
+/// (`demos/dags/pipeline_loader.py`, `_wap_publish`), so it has none.
+fn wap_branch_present(publish: Option<&str>, instances: &[crate::airflow::TaskInstance]) -> bool {
+    let state = |task: &str| {
+        instances
+            .iter()
+            .find(|instance| instance.task_id == task)
+            .and_then(|instance| instance.state.as_deref())
+    };
+    publish == Some("wap")
+        && state("wap-prepare") == Some("success")
+        && state("wap-publish") != Some("success")
+}
+
 /// `GET …/runs/{run_id}/checks`: every declared check of the run's quality tasks, with the
 /// verdict its log carries. Ten log pages per task at most; a check not found stays `None`.
 async fn run_checks(
@@ -4845,14 +4861,14 @@ async fn run_checks(
             });
         }
     }
-    let wap = pipeline
+    let publish = pipeline
         .get("spec")
         .and_then(|s| s.get("publish"))
-        .and_then(Value::as_str)
-        == Some("wap");
+        .and_then(Value::as_str);
+    let wap = publish == Some("wap");
     Ok(ChecksResponse {
         checks,
-        audit_branch: wap.then(|| audit_branch(run_id)),
+        audit_branch: wap_branch_present(publish, &instances).then(|| audit_branch(run_id)),
         audited_tables: if wap {
             audited_tables(&pipeline)
         } else {
@@ -10955,6 +10971,46 @@ mod tests {
             audit_branch("manual__2026-11-22T01:00:00+00:00"),
             "audit_49229452c902639d"
         );
+    }
+
+    #[test]
+    fn a_passing_wap_run_has_no_audit_branch_to_inspect() {
+        let instance = |task: &str, state: &str| crate::airflow::TaskInstance {
+            task_id: task.to_string(),
+            state: Some(state.to_string()),
+            try_number: Some(1),
+            start_date: None,
+            end_date: None,
+            duration: None,
+            operator: None,
+            map_index: None,
+        };
+        assert!(wap_branch_present(
+            Some("wap"),
+            &[
+                instance("wap-prepare", "success"),
+                instance("wap-publish", "upstream_failed"),
+            ],
+        ));
+        assert!(wap_branch_present(
+            Some("wap"),
+            &[instance("wap-prepare", "success")],
+        ));
+        assert!(!wap_branch_present(
+            Some("wap"),
+            &[
+                instance("wap-prepare", "success"),
+                instance("wap-publish", "success"),
+            ],
+        ));
+        assert!(!wap_branch_present(
+            Some("wap"),
+            &[instance("wap-prepare", "failed")],
+        ));
+        assert!(!wap_branch_present(
+            Some("direct"),
+            &[instance("wap-prepare", "success")],
+        ));
     }
 
     #[test]
