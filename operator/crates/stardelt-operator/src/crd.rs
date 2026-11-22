@@ -3596,6 +3596,23 @@ pub struct SparkClusterStatus {
         skip_serializing_if = "Option::is_none"
     )]
     pub observed_generation: Option<i64>,
+    /// `metadata.name` of the ServiceAccount the driver runs as (`spark-cluster-driver` until
+    /// #1100, then `spark-cluster-driver-<group>`).
+    #[serde(
+        default,
+        rename = "driverServiceAccount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub driver_service_account: Option<String>,
+    /// The catalog principal the driver's projected token becomes: `kubernetes~<ServiceAccount
+    /// uid>` (#538, #493), the same form a ServicePrincipal records. Absent until the operator
+    /// has applied the ServiceAccount.
+    #[serde(
+        default,
+        rename = "workloadIdentity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workload_identity: Option<String>,
 }
 
 /// Where a model endpoint runs: in the customer's network, or at a cloud provider (prompts leave the cluster).
