@@ -80,13 +80,12 @@ def test_deploy_of_an_unchanged_notebook_publishes_nothing(tmp_path):
     make(tmp_path, resources=RESOURCES, files=FILES)
     listing = FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt", "ownerGroup": "sales"}]})
     code, out, _, session = run(
-        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update()), FakeResponse(payload=DEPLOY_PLAN), listing, FakeResponse(payload={}),
-        FakeResponse(payload={"pipelines": [{"name": "explore", "namespace": "stardelt"}]}),
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update()), FakeResponse(payload=DEPLOY_PLAN), listing,
         FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
     )
     assert code == 0
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"action": "updated", "name": "explore", "kind": "Pipeline"},
+        {"action": "unchanged", "name": "explore", "kind": "Pipeline"},
         {"action": "recorded", "id": 7},
     ]
     assert sum(1 for method, url in urls(session) if (method, url) == ("PUT", "/api/notebooks/sales/explore.ipynb")) == 1
