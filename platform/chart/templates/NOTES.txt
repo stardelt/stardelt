@@ -32,3 +32,13 @@ Using the pre-existing Secret {{ .Values.s3Credentials.name }} for S3 credential
 Next steps:
   make pf                     # port-forward Nova :8080, Trino :8081, Lakekeeper :8181, Superset :8089
   helm get manifest stardelt -n {{ .Release.Namespace }}   # what is actually deployed
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.mode | default "ingress") "gateway") }}
+
+Published as Gateway API HTTPRoutes attached to Gateway {{ .Values.ingress.gateway.name | quote }}{{ with .Values.ingress.gateway.namespace }} in namespace {{ . | quote }}{{ end }}.
+That Gateway must exist and the Gateway API v1 CRDs must be installed; TLS, the listener
+hostname and source filtering belong to it, not to this chart.
+{{- if .Values.ingress.allowedCidrs }}
+WARNING: ingress.allowedCidrs is set, but gateway mode renders no source filter; configure
+it on the Gateway (the operator reports AllowListNotEnforced in this situation).
+{{- end }}
+{{- end }}
