@@ -302,6 +302,39 @@ pub fn cluster_driver_role_binding(namespace: &str) -> RoleBinding {
     }
 }
 
+/// The driver identity of a cluster owned by `group` (#493): a group's cluster runs the
+/// group's own code, so its driver has its own ServiceAccount. The shared [`CLUSTER_DRIVER`]
+/// stays for a cluster owned by a person.
+pub fn cluster_driver_for(group: &str) -> String {
+    format!("{CLUSTER_DRIVER}-{group}")
+}
+
+pub fn group_cluster_driver_service_account(namespace: &str, group: &str) -> ServiceAccount {
+    ServiceAccount {
+        metadata: meta_part_of_only(&cluster_driver_for(group), namespace),
+        ..ServiceAccount::default()
+    }
+}
+
+/// The group driver's RoleBinding: the shared driver's Role, so the two cannot drift.
+pub fn group_cluster_driver_role_binding(namespace: &str, group: &str) -> RoleBinding {
+    let name = cluster_driver_for(group);
+    RoleBinding {
+        metadata: meta_part_of_only(&name, namespace),
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".into(),
+            name: name.clone(),
+            namespace: Some(namespace.into()),
+            ..Subject::default()
+        }]),
+        role_ref: RoleRef {
+            api_group: Some("rbac.authorization.k8s.io".into()),
+            kind: "Role".into(),
+            name: CLUSTER_DRIVER.into(),
+        },
+    }
+}
+
 /// The identity a `StreamApp`'s driver runs as (platform#1210 option B): its own, so the
 /// admission policies can tell stardelt's `stream_job.py` apart from user code in the shared
 /// Connect driver. It keeps the default `automountServiceAccountToken`: the driver creates pods.
@@ -1034,7 +1067,7 @@ pub fn cluster_pod_guard_policy() -> ValidatingAdmissionPolicy {
             }),
             match_conditions: Some(vec![MatchCondition {
                 name: "created-by-spark-cluster-driver".into(),
-                expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':spark-cluster-driver'".into(),
+                expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':spark-cluster-driver' || request.userInfo.username.startsWith('system:serviceaccount:' + request.namespace + ':spark-cluster-driver-')".into(),
             }]),
             validations: Some(vec![
                 validation("object.spec.serviceAccountName == 'spark-executor'", "a pod created by the Spark Connect driver must run as ServiceAccount spark-executor"),
@@ -1098,7 +1131,7 @@ pub fn cluster_config_map_guard_policy() -> ValidatingAdmissionPolicy {
             }),
             match_conditions: Some(vec![MatchCondition {
                 name: "created-by-spark-cluster-driver".into(),
-                expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':spark-cluster-driver'".into(),
+                expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':spark-cluster-driver' || request.userInfo.username.startsWith('system:serviceaccount:' + request.namespace + ':spark-cluster-driver-')".into(),
             }]),
             validations: Some(vec![validation(
                 "request.name.startsWith('spark-') && request.name.endsWith('-conf-map')",
@@ -1639,6 +1672,32 @@ mod tests {
     }
 
     #[test]
+    fn the_group_cluster_driver_binds_the_shared_role() {
+        assert_eq!(cluster_driver_for("demo"), "spark-cluster-driver-demo");
+        let sa = group_cluster_driver_service_account("stardelt", "demo");
+        assert_eq!(
+            sa.metadata.name.as_deref(),
+            Some("spark-cluster-driver-demo")
+        );
+        assert_eq!(sa.metadata.namespace.as_deref(), Some("stardelt"));
+        let labels = sa.metadata.labels.as_ref().expect("labels");
+        assert_eq!(labels["app.kubernetes.io/part-of"], "stardelt");
+        assert_eq!(sa.automount_service_account_token, None);
+        let binding = group_cluster_driver_role_binding("stardelt", "demo");
+        assert_eq!(
+            binding.metadata.name.as_deref(),
+            Some("spark-cluster-driver-demo")
+        );
+        assert_eq!(binding.role_ref.kind, "Role");
+        assert_eq!(binding.role_ref.name, "spark-cluster-driver");
+        let subjects = binding.subjects.expect("subjects");
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].kind, "ServiceAccount");
+        assert_eq!(subjects[0].name, "spark-cluster-driver-demo");
+        assert_eq!(subjects[0].namespace.as_deref(), Some("stardelt"));
+    }
+
+    #[test]
     fn the_stream_policy_matches_only_the_stream_driver() {
         let policy = stream_pod_guard_policy();
         assert_eq!(
@@ -1795,6 +1854,7 @@ mod tests {
         assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].name, "created-by-spark-cluster-driver");
         assert!(conditions[0].expression.contains(":spark-cluster-driver'"));
+        assert!(conditions[0].expression.contains(":spark-cluster-driver-"));
         assert!(!conditions[0].expression.contains(":spark-connect'"));
         assert!(!conditions[0].expression.contains(":spark-batch-driver'"));
         assert!(!conditions[0].expression.contains(":spark-stream-driver'"));
@@ -1821,6 +1881,7 @@ mod tests {
         assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].name, "created-by-spark-cluster-driver");
         assert!(conditions[0].expression.contains(":spark-cluster-driver'"));
+        assert!(conditions[0].expression.contains(":spark-cluster-driver-"));
         assert!(!conditions[0].expression.contains(":spark-connect'"));
         assert!(!conditions[0].expression.contains(":spark-batch-driver'"));
         assert!(!conditions[0].expression.contains(":spark-stream-driver'"));
