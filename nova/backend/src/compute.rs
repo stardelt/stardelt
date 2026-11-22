@@ -104,6 +104,14 @@ pub struct ComputeCluster {
     pub message: Option<String>,
     pub endpoint: Option<String>,
     pub started_at: Option<String>,
+    /// `metadata.name` of the ServiceAccount the driver runs as: `spark-cluster-driver` for a
+    /// person-owned cluster, `spark-cluster-driver-<group>` for a group's (#1100, #1102).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver_service_account: Option<String>,
+    /// The catalog principal the driver's projected token becomes, `kubernetes~<uid>` (#1102,
+    /// #493). It is the identity `access-sync` adds to the owner group's catalog role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_identity: Option<String>,
     pub last_activity_at: Option<String>,
     pub idle_stop_minutes: i64,
     pub can_use: bool,
@@ -300,6 +308,8 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             None
         },
         started_at: text(status.get("startedAt")),
+        driver_service_account: text(status.get("driverServiceAccount")),
+        workload_identity: text(status.get("workloadIdentity")),
         last_activity_at: text(status.get("lastActivityAt")),
         idle_stop_minutes: spec
             .get("idleStopMinutes")
@@ -466,6 +476,8 @@ fn platform_view(
         message: None,
         endpoint: None,
         started_at: None,
+        driver_service_account: None,
+        workload_identity: None,
         last_activity_at: None,
         idle_stop_minutes: 0,
         can_use: true,
@@ -562,6 +574,8 @@ fn demo_clusters() -> Vec<ComputeCluster> {
         message: None,
         endpoint: None,
         started_at: None,
+        driver_service_account: None,
+        workload_identity: None,
         last_activity_at: None,
         idle_stop_minutes: 0,
         can_use: true,
@@ -708,7 +722,7 @@ async fn set_state(
     operation_id = "compute_list",
     path = "/api/compute",
     tag = "public",
-    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs (`endpoint` is absent when the caller reaches the cluster only through `spec.viewers`: such a server acts with its owner group's rights, so Nova issues a viewer no channel — #493), `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse`, `canAct`, whether the caller may start, stop or edit the cluster, and `shared`. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
+    description = "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise) and `message`, the operator's reason while a cluster is `Failed` (a refused `SparkConnect`, a runtime that is not in the catalogue, a driver that cannot start), the Connect `endpoint` and `startedAt` while it runs (`endpoint` is absent when the caller reaches the cluster only through `spec.viewers`: such a server acts with its owner group's rights, so Nova issues a viewer no channel — #493), `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse`, `canAct`, whether the caller may start, stop or edit the cluster, and `shared`. Each `cluster` also carries `driverServiceAccount` and `workloadIdentity`, the ServiceAccount its driver runs as and the catalog principal its projected token becomes (`kubernetes~<uid>`); both are absent on a `platform` server. Next to them the Spark servers the platform's own manifests install appear with `kind: platform` — the shared server and the public demo's sandbox — carrying `mode` (`kubernetes` or `local`), the container `limits`, who shares it (`audience`), when it is restarted (`resetsAt`) and `yours`, whether it is the Spark the caller's own notebook uses. A visitor of the public demo sees the sandbox only: their `spark` is not the shared server. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's clusters, sorted by name", body = ComputeResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -1409,6 +1423,32 @@ mod tests {
         // A cluster the operator reports as Running carries no reason.
         assert_eq!(views[1].phase, "Running");
         assert!(views[1].message.is_none());
+    }
+
+    #[test]
+    fn the_view_carries_the_drivers_catalog_identity() {
+        let mut group = cluster("sales-spark", json!({"owner": {"group": "sales"}}));
+        group["status"] = json!({
+            "phase": "Running",
+            "driverServiceAccount": "spark-cluster-driver-sales",
+            "workloadIdentity": "kubernetes~0b7f6a0e-3f0e-4a1f-9c1d-2f6f0e4b8c11"
+        });
+        let mut person = cluster("zed-spark", json!({"owner": {"user": "ada"}}));
+        person["status"] = json!({"phase": "Stopped"});
+        let views = visible_clusters(&[group, person], &who("ada", &["sales"], false));
+        let group_view = views.iter().find(|v| v.name == "sales-spark").unwrap();
+        assert_eq!(
+            group_view.driver_service_account.as_deref(),
+            Some("spark-cluster-driver-sales")
+        );
+        assert_eq!(
+            group_view.workload_identity.as_deref(),
+            Some("kubernetes~0b7f6a0e-3f0e-4a1f-9c1d-2f6f0e4b8c11")
+        );
+        // A cluster whose operator has not written the status yet shows nothing, not a guess.
+        let person_view = views.iter().find(|v| v.name == "zed-spark").unwrap();
+        assert!(person_view.driver_service_account.is_none());
+        assert!(person_view.workload_identity.is_none());
     }
 
     #[test]
