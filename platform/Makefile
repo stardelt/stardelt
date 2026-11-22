@@ -364,6 +364,10 @@ check-spark-runtimes-live: _context ## The live Spark runtime catalogue matches 
 verify-operator-values: _context ## The running operator carries the golden values the pins were merged with
 	@bash scripts/verify-operator-values.sh
 
+.PHONY: verify-superset-nova-identity
+verify-superset-nova-identity: _context ## The Superset user Nova acts as: the Secret, its role and one real export (#115)
+	@NS=$(NAMESPACE) bash scripts/verify-superset-nova-identity.sh
+
 verify-operator-quiet: _context ## The operator is quiet on an idle cluster: no status write, <2 reconciles per object, <50 m CPU, <50 KB/s (#274 rule 7)
 	@NS=$(NAMESPACE) bash scripts/verify-operator-quiet.sh
 
@@ -611,6 +615,7 @@ step-superset: ## Superset
 	  $(HELM_FLAGS) \
 	  -f helm-values/superset.yaml \
 	  --set-file "extraConfigs.superset-analyst-role\.py=scripts/superset-analyst-role.py" \
+	  --set-file "extraConfigs.superset-nova-user\.py=scripts/superset-nova-user.py" \
 	  --set-file "extraConfigs.superset-group-roles\.py=scripts/superset-group-roles.py"
 
 step-pgdump: ## The daily logical dumps of the Airflow and Superset databases
