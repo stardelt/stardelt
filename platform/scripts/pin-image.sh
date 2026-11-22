@@ -341,6 +341,32 @@ if app == "spark":
     open(fixture, "w").write(ftext)
     print(f"› {fixture}: image pinned to {repo}:…@{digest[:19]}…")
 
+    # A `spark-pipeline` task's own pod runs the same image (`PIPELINE_SPARK_IMAGE` in
+    # helm-values/airflow.yaml). `scripts/check-spark-image-pin.sh` refuses the two when they
+    # differ, and the rollup only sees this copy through this writer, so a spark roll that
+    # skips it fails its own lint (#1083).
+    loader = "helm-values/airflow.yaml"
+    lines = open(loader).read().splitlines(keepends=True)
+    for at, line in enumerate(lines):
+        if re.search(r"name: PIPELINE_SPARK_IMAGE$", line):
+            for below in range(at + 1, len(lines)):
+                if re.match(r"^\s*value:", lines[below]):
+                    lines[below], ln = re.subn(
+                        r"sha256:[0-9a-f]{64}", digest, lines[below]
+                    )
+                    if ln != 1:
+                        sys.exit(
+                            f"expected one digest on {loader}:{below + 1}, found {ln}"
+                        )
+                    open(loader, "w").writelines(lines)
+                    print(f"› {loader}: PIPELINE_SPARK_IMAGE pinned to {repo}:…@{digest[:19]}…")
+                    break
+            else:
+                sys.exit(f"no value line after PIPELINE_SPARK_IMAGE in {loader}")
+            break
+    else:
+        sys.exit(f"no PIPELINE_SPARK_IMAGE marker in {loader}")
+
 if replaced:
     open(path, "w").write(text)
     print(f"› {path}: image pinned to {repo}:…@{digest[:19]}…")
