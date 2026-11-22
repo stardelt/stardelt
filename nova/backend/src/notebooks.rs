@@ -3937,6 +3937,7 @@ mod tests {
             client_secret: Secret::new("client-secret"),
             scopes: "openid profile email".into(),
             audiences: vec![CLIENT_ID.into()],
+            deploy_audiences: vec!["stardelt-deploy".into()],
             public_url: "http://localhost:8080".into(),
             claims: ClaimConfig::default(),
             session_secret: Secret::new("x".repeat(48)),
