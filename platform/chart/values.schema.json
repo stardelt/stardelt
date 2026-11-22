@@ -1,6 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
+  "properties": {
+    "ingress": {
+      "type": "object",
+      "description": "How the public surfaces are published (#24).",
+      "properties": {
+        "mode": {
+          "enum": ["ingress", "gateway"],
+          "description": "ingress renders Ingress objects; gateway renders Gateway API HTTPRoutes (see ingress.gateway)."
+        },
+        "gateway": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "namespace": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
   "if": {
     "required": ["superset"],
     "properties": { "superset": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } }

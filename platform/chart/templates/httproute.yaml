@@ -1,0 +1,70 @@
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.mode | default "ingress") "gateway") }}
+{{- /*
+  One Gateway API HTTPRoute per installed component (#24). The service list, the host
+  resolution and the paths are the same as the Ingress template's (see `_ingress.tpl`), so
+  the two install shapes publish the same surfaces.
+
+  TLS, the listener hostname and source filtering belong to the customer's Gateway.
+  `ingress.className`, `ingress.allowedCidrs` and `ingress.tls` are ignored in this mode;
+  NOTES.txt warns when a source list is set and silently would not apply.
+*/}}
+{{- $gateway := .Values.ingress.gateway | default dict }}
+{{- if not $gateway.name }}
+{{- fail "ingress.gateway.name is required when ingress.mode is gateway" }}
+{{- end }}
+{{- $base := .Values.platform.baseDomain | default "" }}
+{{- $overrides := .Values.ingress.hosts | default dict }}
+{{- $unauthenticated := list "trino" "lakekeeper" "superset" "airflow" "jupyterhub" }}
+{{- $exposed := .Values.ingress.exposeUnauthenticated | default list }}
+{{- $services := fromYamlArray (include "stardelt.ingress.services" .) }}
+{{- range $services }}
+{{- if and .enabled (or (not (has .name $unauthenticated)) (has .name $exposed)) }}
+{{- $host := "" }}
+{{- $overridden := index $overrides .name | default "" }}
+{{- if $overridden }}
+{{- $host = $overridden }}
+{{- else if $base }}
+{{- if .sub }}
+{{- $host = printf "%s.%s" .sub $base }}
+{{- else }}
+{{- $host = $base }}
+{{- end }}
+{{- end }}
+{{- if $host }}
+{{- $service := . }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: stardelt
+spec:
+  parentRefs:
+    - name: {{ $gateway.name | quote }}
+      {{- with $gateway.namespace }}
+      namespace: {{ . | quote }}
+      {{- end }}
+  hostnames:
+    - {{ $host | quote }}
+  rules:
+    - matches:
+        {{- range (.paths | default (list "/")) }}
+        {{- if kindIs "string" . }}
+        - path:
+            type: PathPrefix
+            value: {{ . | quote }}
+        {{- else }}
+        - path:
+            type: {{ eq (.pathType | default "Prefix") "Exact" | ternary "Exact" "PathPrefix" }}
+            value: {{ .path | quote }}
+        {{- end }}
+        {{- end }}
+      backendRefs:
+        - name: {{ $service.service }}
+          port: {{ $service.port }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

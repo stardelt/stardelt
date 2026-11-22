@@ -45,7 +45,19 @@ ingress:
   # stay ClusterIP either way.
   enabled: false
   # IngressClass name, e.g. nginx, traefik, alb. Empty = the cluster default.
+  # Ignored when `mode` is gateway.
   className: ""
+  # How the public surfaces are published (#24):
+  #   ingress — Ingress objects (the default; needs an Ingress controller).
+  #   gateway — Gateway API HTTPRoute objects attached to `gateway` below. No Ingress is
+  #             rendered. TLS, the listener hostname and source filtering belong to the
+  #             Gateway; `className`, `allowedCidrs` and `tls` are ignored. Requires the
+  #             Gateway API v1 CRDs.
+  mode: ingress
+  # The Gateway the HTTPRoutes attach to when mode=gateway; `namespace` defaults to this release.
+  gateway:
+    name: ""
+    namespace: ""
   # Extra annotations on every rendered Ingress. ingress-nginx, for one, allows a request body of
   # 1 MiB unless told otherwise; Nova's notebook publish route takes up to 5 MiB, so give that
   # path `nginx.ingress.kubernetes.io/proxy-body-size: "6m"` (a second Ingress for
