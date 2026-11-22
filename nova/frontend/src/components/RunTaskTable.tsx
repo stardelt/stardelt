@@ -7,7 +7,7 @@ import { formatBytes, formatDurationMs, relativeTime } from '../format'
 import { RunStateBadge, formatWhen, runDuration } from '../routes/Pipelines'
 
 /**
- * The table of a run's tasks (Task, State, Try, Started, Duration, Kind, log, notebook) and,
+ * The table of a run's tasks (Task, State, Try, Started, Duration, Kind, Tables, log, notebook) and,
  * when the run sent statements, their table slowest first. The pipeline page shows it under a
  * run; the run page shows it below the graph (stardelt-nova#1111) — one copy, so the two
  * cannot drift.
@@ -20,6 +20,8 @@ export default function RunTaskTable({
   queries,
   notebookTasks,
   taskKinds,
+  taskWrites,
+  taskRefresh,
 }: {
   namespace: string
   name: string
@@ -28,6 +30,8 @@ export default function RunTaskTable({
   queries: RunQueryView[]
   notebookTasks: string[]
   taskKinds: Record<string, string>
+  taskWrites?: Record<string, string[]>
+  taskRefresh?: Record<string, string | null>
 }) {
   const [log, setLog] = useState<{ taskId: string; tryNumber: number } | null>(null)
 
@@ -47,6 +51,7 @@ export default function RunTaskTable({
                 <th scope="col" className="th px-3 py-2">Started</th>
                 <th scope="col" className="th px-3 py-2">Duration</th>
                 <th scope="col" className="th px-3 py-2">Kind</th>
+                <th scope="col" className="th px-3 py-2">Tables</th>
                 <th scope="col" className="th px-3 py-2">
                   <span className="sr-only">Log</span>
                 </th>
@@ -67,6 +72,21 @@ export default function RunTaskTable({
                       {runDuration(task.durationSeconds)}
                     </td>
                     <td className="td px-3 text-text-dim">{taskKinds[task.taskId] ?? '—'}</td>
+                    <td className="td px-3">
+                      {(() => {
+                        const writes = taskWrites?.[task.taskId] ?? []
+                        if (writes.length === 0) return <span className="text-text-dim">—</span>
+                        const refresh = taskRefresh?.[task.taskId]
+                        return (
+                          <div className="space-y-0.5" title="The tables this task declares; row counts are not reported yet.">
+                            {writes.map((table) => (
+                              <div key={table} className="font-mono text-xs whitespace-nowrap">{table}</div>
+                            ))}
+                            {refresh && <div className="text-[11px] text-text-dim">{refresh} refresh</div>}
+                          </div>
+                        )
+                      })()}
+                    </td>
                     <td className="td px-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <button
