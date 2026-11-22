@@ -1789,7 +1789,7 @@ pub async fn require_auth(
                 {
                     Ok(group) => group,
                     Err(message) => {
-                        warn!(target: "audit", stage, %message, "the deploy stage's group could not be read; the principal keeps no group");
+                        warn!(target: "audit", stage, %message, "the deploy stage's group could not be read; the principal acts with the groups the token carries");
                         None
                     }
                 };
@@ -4183,15 +4183,23 @@ mod tests {
             display_name: "service-account-stardelt-deploy-dev".into(),
             email: None,
             name: None,
-            groups: Vec::new(),
+            groups: vec!["visitors".into()],
             roles: Vec::new(),
             groups_overage: false,
             is_admin: false,
         };
         let with = with_deploy_group(identity.clone(), Some("demo".into()));
-        assert_eq!(with.groups, vec!["demo".to_string()]);
+        assert_eq!(
+            with.groups,
+            vec!["demo".to_string()],
+            "the stage's group replaces the token's groups"
+        );
         let without = with_deploy_group(identity.clone(), None);
-        assert!(without.groups.is_empty(), "no stage group changes nothing");
+        assert_eq!(
+            without.groups,
+            vec!["visitors".to_string()],
+            "no stage group leaves the token's groups alone"
+        );
     }
 
     /// `aud: stardelt-deploy` alone is not a credential: the `azp` must name a stage.
