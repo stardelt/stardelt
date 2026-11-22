@@ -914,9 +914,8 @@ pub struct IngestionSourceStatus {
 
 /// What a pipeline task does — the task contract behind `Pipeline`
 /// (master spec §5, plugs 6, 7 and 12). `sql`, `notebook` (scheduled jobs
-/// phases J0 and J1), `dbt` and `quality` run today; `python` and
-/// `spark-pipeline` are accepted so manifests can be written ahead of their
-/// runtimes.
+/// phases J0 and J1), `dbt`, `quality` and `spark-pipeline` run today;
+/// `python` alone is accepted so a manifest can be written ahead of its runtime.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskKind {
@@ -932,8 +931,8 @@ pub enum TaskKind {
     /// Data-quality gate: the SQL assertions in `checks` (a check passes when its
     /// query returns no rows). Runs as a task; dbt tests run inside a `dbt` task.
     Quality,
-    /// A declared graph run by `spark-pipelines` on the owner group's `SparkCluster`.
-    /// Accepted; no runtime yet (#80). `project` is the bundle directory that holds
+    /// A declared graph run by `spark-pipelines` on the owner group's `SparkCluster`: `dry-run`
+    /// first, then `run` (#80). `project` is the bundle directory that holds
     /// `spark-pipeline.yml` and its sources.
     #[serde(rename = "spark-pipeline")]
     SparkPipeline,
