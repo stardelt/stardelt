@@ -16,7 +16,8 @@ use k8s_openapi::api::networking::v1::{
 use kube::api::ObjectMeta;
 
 use crate::{
-    crd::{IdentityMode, PlatformInstanceSpec},
+    conditions::set_condition,
+    crd::{Condition, IdentityMode, IngressMode, PlatformInstanceSpec},
     keycloak, nova,
 };
 
@@ -250,6 +251,35 @@ fn build(
         }),
         ..Ingress::default()
     })
+}
+
+/// `AllowListNotEnforced` (#24 item 3, option (a)): `spec.ingress.allowedCidrs` is honoured
+/// only by the ingress-nginx annotations. In gateway mode the Gateway's listener owns source
+/// filtering, so a non-empty list is ignored — and that must be visible on the resource, not
+/// only in the CRD's doc comment.
+pub fn allow_list_condition(
+    spec: &PlatformInstanceSpec,
+    generation: Option<i64>,
+    previous: Option<&Condition>,
+    now: &str,
+) -> Option<Condition> {
+    if !spec.ingress.enabled
+        || spec.ingress.mode != IngressMode::Gateway
+        || spec.ingress.allowed_cidrs.is_empty()
+    {
+        return None;
+    }
+    Some(set_condition(
+        previous.map(std::slice::from_ref).unwrap_or(&[]),
+        "AllowListNotEnforced",
+        "True",
+        "GatewayOwnsSourceFiltering",
+        Some(
+            "spec.ingress.allowedCidrs is ignored in gateway mode: the Gateway's listener owns source filtering; configure it there or add a NetworkPolicy".to_string(),
+        ),
+        generation,
+        now,
+    ))
 }
 
 #[cfg(test)]
@@ -597,5 +627,84 @@ mod tests {
             "identity": {"mode": "platform"}
         }));
         assert!(spark(&no_domain).is_none(), "no base domain, no host");
+    }
+
+    fn gateway_spec(allowed_cidrs: serde_json::Value) -> PlatformInstanceSpec {
+        spec(serde_json::json!({
+            "ingress": {
+                "enabled": true,
+                "mode": "gateway",
+                "gateway": { "name": "platform" },
+                "allowedCidrs": allowed_cidrs,
+            }
+        }))
+    }
+
+    #[test]
+    fn allow_list_condition_needs_gateway_mode_and_a_non_empty_list() {
+        let ingress_mode = spec(serde_json::json!({
+            "ingress": { "enabled": true, "allowedCidrs": ["10.0.0.0/8"] }
+        }));
+        assert!(
+            allow_list_condition(&ingress_mode, Some(1), None, "2026-11-01T00:00:00Z").is_none(),
+            "ingress mode writes the annotation, so nothing is ignored"
+        );
+
+        let no_list = gateway_spec(serde_json::json!([]));
+        assert!(
+            allow_list_condition(&no_list, Some(1), None, "2026-11-01T00:00:00Z").is_none(),
+            "an empty list is open, nowhere to be ignored"
+        );
+
+        let gateway = gateway_spec(serde_json::json!(["10.0.0.0/8"]));
+        let condition = allow_list_condition(&gateway, Some(7), None, "2026-11-01T00:00:00Z")
+            .expect("a condition");
+        assert_eq!(condition.type_, "AllowListNotEnforced");
+        assert_eq!(condition.status, "True");
+        assert_eq!(
+            condition.reason.as_deref(),
+            Some("GatewayOwnsSourceFiltering")
+        );
+        assert!(
+            condition
+                .message
+                .as_deref()
+                .expect("a message")
+                .contains("allowedCidrs"),
+            "{:?}",
+            condition.message
+        );
+        assert_eq!(condition.observed_generation, Some(7));
+
+        let disabled = spec(serde_json::json!({
+            "ingress": {
+                "enabled": false,
+                "mode": "gateway",
+                "gateway": { "name": "platform" },
+                "allowedCidrs": ["10.0.0.0/8"],
+            }
+        }));
+        assert!(
+            allow_list_condition(&disabled, Some(1), None, "2026-11-01T00:00:00Z").is_none(),
+            "no routing, no condition"
+        );
+    }
+
+    #[test]
+    fn allow_list_condition_keeps_its_transition_time() {
+        let gateway = gateway_spec(serde_json::json!(["10.0.0.0/8"]));
+        let first = allow_list_condition(&gateway, Some(2), None, "2026-11-01T00:00:00Z")
+            .expect("a condition");
+        assert_eq!(
+            first.last_transition_time.as_deref(),
+            Some("2026-11-01T00:00:00Z")
+        );
+        let second = allow_list_condition(&gateway, Some(3), Some(&first), "2026-11-02T00:00:00Z")
+            .expect("a condition");
+        assert_eq!(
+            second.last_transition_time.as_deref(),
+            Some("2026-11-01T00:00:00Z"),
+            "a repeated reconcile keeps the time it first became True"
+        );
     }
 }
