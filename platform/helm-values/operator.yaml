@@ -14,7 +14,7 @@
 # the one in the `Pin it:` line (and no other way to tell them apart from the log).
 image:
   repository: ghcr.io/stardelt/stardelt-operator
-  tag: dev@sha256:6d8212e8d4296312864b6388da9a00f19f108e79f9680790428604bb147f1206
+  tag: dev@sha256:75e131e74aecb58ef7a25e0c6f0265c86ab3111a221043bf645bdf4a34c9d934
   pullPolicy: IfNotPresent
 
 # One replica reconciles at a time (it holds the Lease stardelt-operator-leader); the second
