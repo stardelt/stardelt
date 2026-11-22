@@ -2,7 +2,13 @@
 # The visitor's whole path, measured through Nova's API as the person `demo`
 # (stardelt/stardelt#929, #98 item 4 — the read half and the visitor's run half).
 #
-#   make verify-product-path      (STARDELT_NOVA_URL=…, ISSUER=… to override)
+#   make verify-product-path              (STARDELT_NOVA_URL=…, ISSUER=… to override)
+#   make verify-product-path-create       the create half (#98 item 4)
+#   bash scripts/verify-product-path.sh [--create]
+#
+# `--create` acts as the person `product-path`, a member of the group `demo`. It reads that
+# person's password from Secret `product-path-user` at runtime, never prints it, and deletes
+# the pipeline it creates on every exit.
 #
 # `verify-demo-visitor.sh` (#527) checks one page at a time. This walks the path a person
 # actually takes, as the visitor, without a write and without a new identity:
@@ -33,10 +39,27 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+CREATE=0
+case "${1:-}" in
+  "") ;;
+  --create) CREATE=1 ;;
+  *) echo "usage: verify-product-path.sh [--create]" >&2; exit 2 ;;
+esac
+
 NOVA="${STARDELT_NOVA_URL:-https://alpha.dev.stardelt.io}"
 NOVA="${NOVA%/}"
 ISSUER="${ISSUER:-https://id.alpha.dev.stardelt.io/realms/stardelt}"
 ISSUER="${ISSUER%/}"
+
+PIPELINES_NS=stardelt
+if [ "$CREATE" = 1 ]; then
+  PERSON=product-path
+  PIPELINE="product-path-$(date +%s)"
+  RUN_PIPELINE="$PIPELINE"
+else
+  PERSON=demo
+  RUN_PIPELINE=shop-1-bronze
+fi
 
 PASSWORD_FILE="$(mktemp)"
 TOKEN_FILE="$(mktemp)"
@@ -44,10 +67,25 @@ BODY_FILE="$(mktemp)"
 RUN_FILE="$(mktemp)"
 chmod 600 "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE" "$RUN_FILE"
 # `mint-user-token.py` strips the trailing newline; the realm compares the exact string.
-printf 'demo\n' > "$PASSWORD_FILE"
+if [ "$CREATE" = 1 ]; then
+  command -v kubectl >/dev/null 2>&1 || { echo "verify-product-path: FAIL (create) kubectl not found: --create reads Secret product-path-user"; exit 1; }
+  if ! kubectl -n stardelt get secret product-path-user -o jsonpath='{.data.password}' 2>/dev/null | base64 -d >"$PASSWORD_FILE" \
+     || [ ! -s "$PASSWORD_FILE" ]; then
+    echo "verify-product-path: FAIL (create) cannot read Secret product-path-user: run make public-demo YES=1"
+    exit 1
+  fi
+else
+  printf 'demo\n' > "$PASSWORD_FILE"
+fi
 
 CURRENT_ROW=startup
-cleanup() { rm -f "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE" "$RUN_FILE"; }
+cleanup() {
+  if [ "$CREATE" = 1 ] && [ -s "$TOKEN_FILE" ]; then
+    curl -fsS -X DELETE -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+      "$NOVA/api/pipelines/$PIPELINES_NS/$PIPELINE" >/dev/null || true
+  fi
+  rm -f "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE" "$RUN_FILE"
+}
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -82,12 +120,12 @@ row() { # row <id> <function>: one line of output, `✓ …`, or the first FAIL 
 }
 
 row_sign_in() {
-  if ! out="$(ISSUER="$ISSUER" USER=demo PASSWORD_FILE="$PASSWORD_FILE" TOKEN_FILE="$TOKEN_FILE" \
+  if ! out="$(ISSUER="$ISSUER" USER="$PERSON" PASSWORD_FILE="$PASSWORD_FILE" TOKEN_FILE="$TOKEN_FILE" \
         python3 scripts/mint-user-token.py 2>&1)"; then
-    printf 'FAIL cannot mint a token for demo: %s\n' "$(printf '%s\n' "$out" | head -n 1)"
+    printf 'FAIL cannot mint a token for %s: %s\n' "$PERSON" "$(printf '%s\n' "$out" | head -n 1)"
     return 1
   fi
-  echo "✓ sign-in demo"
+  echo "✓ sign-in $PERSON"
 }
 
 row_search() {
@@ -287,8 +325,8 @@ row_pipeline_run() {
   local verdict
   if ! curl -fsS -X POST -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
       -H 'Content-Type: application/json' -d '{}' \
-      "$NOVA/api/pipelines/stardelt/shop-1-bronze/runs" >"$BODY_FILE"; then
-    echo "FAIL POST /api/pipelines/stardelt/shop-1-bronze/runs did not answer: a viewer may run it"
+      "$NOVA/api/pipelines/$PIPELINES_NS/$RUN_PIPELINE/runs" >"$BODY_FILE"; then
+    echo "FAIL POST /api/pipelines/$PIPELINES_NS/$RUN_PIPELINE/runs did not answer: a viewer may run $RUN_PIPELINE"
     return 1
   fi
   verdict="$(python3 - "$BODY_FILE" "$RUN_FILE" <<'PY'
@@ -313,7 +351,7 @@ row_pipeline_log() {
   run="$(tr -d '\n' < "$RUN_FILE")"
   # shop-1-bronze finished in ~35 s on 2026-11-22; 180 s is the budget for a loaded host.
   for i in $(seq 1 36); do
-    api "/api/pipelines/stardelt/shop-1-bronze/runs/$run"
+    api "/api/pipelines/$PIPELINES_NS/$RUN_PIPELINE/runs/$run"
     state="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("run") or {}).get("state"))' "$BODY_FILE")"
     case "$state" in
       success) break ;;
@@ -331,7 +369,7 @@ row_pipeline_log() {
     return 1
   fi
   if ! curl -fsS -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
-      "$NOVA/api/pipelines/stardelt/shop-1-bronze/runs/$run/tasks/$task/logs" >"$BODY_FILE"; then
+      "$NOVA/api/pipelines/$PIPELINES_NS/$RUN_PIPELINE/runs/$run/tasks/$task/logs" >"$BODY_FILE"; then
     echo "FAIL the log route did not answer for the viewer"
     return 1
   fi
@@ -352,12 +390,110 @@ PY
   case "$verdict" in "✓ "*) return 0 ;; *) return 1 ;; esac
 }
 
-row sign-in row_sign_in
-row search row_search
-row table row_table
-row query row_query
-row query-log row_query_log
-row run row_pipeline_run
-row log row_pipeline_log
+row_pipeline_create() {
+  local verdict
+  if ! curl -fsS -X POST -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+      -H 'Content-Type: application/json' \
+      -d "{\"name\":\"$PIPELINE\",\"ownerGroup\":\"demo\",\"sql\":\"SELECT 1 AS one\",\"schedule\":{\"cron\":\"0 5 * * *\",\"timezone\":\"UTC\"}}" \
+      "$NOVA/api/pipelines" >"$BODY_FILE"; then
+    echo "FAIL POST /api/pipelines did not answer for $PERSON"
+    return 1
+  fi
+  verdict="$(python3 - "$BODY_FILE" "$PIPELINE" <<'PY'
+import json, sys
 
-echo "verify-product-path: PASS"
+try:
+    view = json.load(open(sys.argv[1]))
+except ValueError:
+    print("FAIL the create answer is not JSON")
+    raise SystemExit
+if view.get("name") != sys.argv[2]:
+    print("FAIL the created pipeline is %r, not %s" % (view.get("name"), sys.argv[2]))
+elif view.get("ownerGroup") != "demo":
+    print("FAIL the created pipeline is owned by %r, not demo" % (view.get("ownerGroup"),))
+elif view.get("schedule") != "0 5 * * * (UTC)":
+    print("FAIL the created pipeline's schedule is %r" % (view.get("schedule"),))
+elif view.get("canEdit") is not True:
+    print("FAIL the creator cannot edit its own pipeline")
+else:
+    print("✓ create %s (ownerGroup demo, 0 5 * * * (UTC))" % sys.argv[2])
+PY
+)" || true
+  [ -n "$verdict" ] || verdict="FAIL the create answer is not JSON"
+  printf '%s\n' "$verdict"
+  case "$verdict" in "✓ "*) return 0 ;; *) return 1 ;; esac
+}
+
+row_pipeline_schedule() {
+  local i verdict
+  for i in $(seq 1 12); do
+    api "/api/pipelines/$PIPELINES_NS/$PIPELINE"
+    verdict="$(python3 - "$BODY_FILE" <<'PY'
+import json, sys
+
+try:
+    view = json.load(open(sys.argv[1]))
+except ValueError:
+    print("FAIL the pipeline view is not JSON")
+    raise SystemExit
+next_run = view.get("nextRun")
+if isinstance(next_run, str) and next_run:
+    print("✓ schedule reached the scheduler (next run %s)" % next_run)
+elif view.get("loaded") is True:
+    print("FAIL the scheduler loaded the pipeline but computed no next run")
+else:
+    print("WAIT")
+PY
+)"
+    case "$verdict" in
+      "✓ "*) printf '%s\n' "$verdict"; return 0 ;;
+      WAIT) [ "$i" -eq 12 ] && break; sleep 5 ;;
+      *) printf '%s\n' "$verdict"; return 1 ;;
+    esac
+  done
+  echo "FAIL the pipeline is not loaded after 60 s, so the cron reached no scheduler"
+  return 1
+}
+
+row_pipeline_delete() {
+  local code verdict
+  code="$(curl -sS -o "$BODY_FILE" -w '%{http_code}' -X DELETE \
+    -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+    "$NOVA/api/pipelines/$PIPELINES_NS/$PIPELINE")" || {
+    echo "FAIL DELETE /api/pipelines/$PIPELINES_NS/$PIPELINE did not answer"
+    return 1
+  }
+  if [ "$code" != 204 ]; then
+    echo "FAIL DELETE answered $code, not 204"
+    return 1
+  fi
+  code="$(curl -sS -o "$BODY_FILE" -w '%{http_code}' -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+    "$NOVA/api/pipelines/$PIPELINES_NS/$PIPELINE")"
+  if [ "$code" != 404 ]; then
+    echo "FAIL the deleted pipeline still answers $code"
+    return 1
+  fi
+  echo "✓ delete $PIPELINE (then 404)"
+}
+
+row sign-in row_sign_in
+if [ "$CREATE" = 1 ]; then
+  row create row_pipeline_create
+  row schedule row_pipeline_schedule
+  row run row_pipeline_run
+  row log row_pipeline_log
+  row delete row_pipeline_delete
+else
+  row search row_search
+  row table row_table
+  row query row_query
+  row query-log row_query_log
+  row run row_pipeline_run
+  row log row_pipeline_log
+fi
+
+if [ "$CREATE" = 1 ]; then
+  echo "verify-product-path --create: PASS"
+else
+  echo "verify-product-path: PASS"
+fi
