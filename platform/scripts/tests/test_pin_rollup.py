@@ -144,6 +144,13 @@ class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
         self.assertEqual(len(if_lines), 1, f"expected one job-level if:, found {if_lines}")
         self.assertIn("github.event.workflow_run.head_branch == 'main'", if_lines[0])
 
+    def test_a_waiting_run_is_never_cancelled_by_the_next_one(self):
+        wf = REPO.parent / ".github" / "workflows" / "platform-pin-rollup.yml"
+        text = wf.read_text()
+        self.assertIn("group: platform-pin-rollup", text)
+        self.assertIn("cancel-in-progress: false", text)
+        self.assertNotIn("cancel-in-progress: true", text)
+
 
 if __name__ == "__main__":
     unittest.main()
