@@ -13,6 +13,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # #746: the rollup dispatches `operator / Image` from the rolling branch when it moved a pin
+  # the operator embeds (GITHUB_TOKEN with actions: write; PIN_TOKEN has no Actions permission).
+  actions: write
 concurrency: { group: platform-pin-rollup, cancel-in-progress: true }
 defaults:
   run:
@@ -24,7 +27,11 @@ jobs:
     # Image run both push one, so both roll: a dispatched rebuild that moves a digest would
     # otherwise wait for the next cron — the same delay this trigger exists to remove
     # (platform#1013). The guard is per workflow, so it covers all four Image/push workflows.
-    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+    # #746 adds the head-branch guard: the rollup dispatches `operator / Image` from
+    # `chore/pin-rollup`, and without this the completion of that build would fire a second
+    # rollup and `concurrency.cancel-in-progress` would cancel the waiting one. A build of a
+    # tag or any other non-default branch moved no `dev` tag either, so nothing is lost.
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -53,3 +60,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PIN_TOKEN || github.token }}
           PIN_TOKEN_SET: ${{ secrets.PIN_TOKEN != '' }}
+          # #746: the dispatch needs an Actions-capable token, and `gh` would otherwise fall
+          # back to GH_TOKEN (PIN_TOKEN), which answers 403.
+          GITHUB_TOKEN: ${{ github.token }}

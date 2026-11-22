@@ -127,6 +127,14 @@ changes=()
 [ "$old_superset" != "$superset_digest" ] && changes+=("superset $(short "$old_superset") → $(short "$superset_digest")")
 [ "$old_jupyter" != "$jupyter_digest" ] && changes+=("jupyter $(short "$old_jupyter") → $(short "$jupyter_digest")")
 
+# #746: a rollup that moves a pin the operator embeds writes that pin into the operator's golden
+# values, but the operator image it pins was built from the previous commit. Rebuild it from this
+# branch and pin that digest instead (#1026 measured the dispatch, the token and the 34 s-5 min).
+embedded_changed=yes
+if [ "${#changes[@]}" -eq 1 ] && [[ "${changes[0]}" == operator\ * ]]; then
+  embedded_changed=no
+fi
+
 if [ "${#changes[@]}" -eq 0 ]; then
   echo "pins current (operator $(short "$operator_digest"), nova $(short "$nova_digest"), spark $(short "$spark_digest"), superset $(short "$superset_digest"), airflow $(short "$airflow_digest"), jupyter $(short "$jupyter_digest"))"
   exit 0
@@ -263,6 +271,47 @@ if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
   git fetch --quiet origin "$branch"
 fi
 git push --force-with-lease origin "$branch"
+
+if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then
+  echo "the roll moved a pin the operator embeds; rebuilding the operator from $branch (#746)"
+  # The dispatch must use GITHUB_TOKEN: PIN_TOKEN has no Actions permission (#1026 probe 403).
+  # Every run of this script leaves a `workflow_dispatch` run on `$branch` in the Actions
+  # history, so `--limit 1` right after the dispatch can still answer the *previous* build:
+  # remember that id and accept only a new one (#1035 review finding 1). This read must succeed
+  # — with a `set -e` abort a failed read cannot leave the guard silently empty.
+  previous_run="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
+    --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
+  GH_TOKEN="$GITHUB_TOKEN" gh workflow run operator-image.yml --ref "$branch"
+  run_id=""
+  for _ in $(seq 1 12); do
+    candidate="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
+      --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""' || true)"
+    if [ -n "$candidate" ] && [ "$candidate" != "$previous_run" ]; then
+      run_id="$candidate"
+      break
+    fi
+    sleep 5
+  done
+  [ -n "$run_id" ] || { echo "no dispatched operator build appeared for $branch" >&2; exit 1; }
+  GH_TOKEN="$GITHUB_TOKEN" gh run watch "$run_id" --interval 15 --exit-status
+  # A branch name's `/` becomes `-` in the published tag, never `dev` (#1026 row 4).
+  operator_branch_digest="$(TAG="${branch//\//-}" WRITE_MANIFEST=0 PRINT_DIGEST=1 \
+    ./scripts/pin-image.sh stardelt-operator | tr -d '[:space:]')"
+  [ -n "$operator_branch_digest" ] || { echo "the branch build's digest did not resolve" >&2; exit 1; }
+  # rewrite_files keeps the tag name (`dev`) and swaps only the digest.
+  rewrite_files "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" \
+    "$operator_branch_digest" "$nova_digest" "$spark_digest"
+  git add "$OP_FILE"
+  git commit --amend --no-edit
+  git push --force-with-lease origin "$branch"
+  {
+    echo ""
+    echo "## Operator image rebuilt from this branch (#746)"
+    echo ""
+    echo "A pin the operator embeds moved, so the operator was built from \`$branch\` (run $run_id) and"
+    echo "its digest pinned: \`$(short "$operator_branch_digest")\`. \`dev\` was not moved by that build."
+  } >> "$body_file"
+fi
 
 # Reuse the open PR only. A merged or closed one for the same branch must not be
 # edited: after a merge the branch is deleted and the next run opens a new PR.
