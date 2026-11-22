@@ -4,13 +4,14 @@ The operator renders the graph as the ConfigMap `spark-project-<pipeline>-<task>
 flat `f00`, `f01`, … keys in path order. The loader renders the same key→path map from the
 Pipeline's own `files`, mounts the ConfigMap read-only, and a `python3 -c` runner copies the
 graph to /tmp, sets the three keys stardelt owns (`catalog` and `database` from the task's
-`writes`, `storage` under the group's bucket), mints the principal's token and runs
+`writes`, `storage` under the group's bucket), reads the projected catalog token and runs
 `spark-pipelines dry-run` and then `spark-pipelines run` as a thin Spark Connect client — the
 shape #957 measured (6.6 s, two flows, no S3 key).
 
-The pod holds no storage credential and creates no Spark of its own: the graph runs on the
-shared Connect server, in the principal's session. The token lives only in the pod's env and
-in its copy of the spec under /tmp, never in the pod spec, the log or the ConfigMap.
+The pod runs as the principal's ServiceAccount (`sp-<name>`), holds no storage credential and
+creates no Spark of its own: the graph runs on the shared Connect server, in the principal's
+session. The catalog token is the kubelet's projected file, a mount of its own; it is copied only
+into the spec under /tmp, never into the pod spec, the env, the log or the ConfigMap.
 """
 from __future__ import annotations
 
@@ -33,6 +34,10 @@ PULL_SECRET_ENV = "PIPELINE_SPARK_PULL_SECRET"
 BUCKET_ENV = "PIPELINE_SPARK_BUCKET"
 GRAPH_DIR = "/opt/graph"
 SPARK_HOME = "/opt/spark"
+# The projected ServiceAccount token the kubelet writes for the catalog audience (#492). The
+# graph's token comes from this file; the pod carries no client secret.
+CATALOG_TOKEN_DIR = "/var/run/secrets/stardelt-catalog"
+CATALOG_TOKEN_AUDIENCE = "stardelt-catalog-workload"
 # The image's own interpreter, the one `platform/images/spark/Dockerfile` installs PyYAML into
 # and names as PYSPARK_PYTHON. The Ubuntu `python3` on PATH is 3.10 without yaml, so the runner
 # dies on `import yaml` there (measured 2026-11-21, #969).
@@ -42,11 +47,12 @@ PYTHON = "/opt/python313/bin/python3"
 # principal's token into the catalog block, then run the CLI. `SPARK_CONF_DIR` is an empty
 # directory: the image ships no /opt/spark/conf, so there is nothing to strip (#957 Q1).
 RUNNER = r'''
-import json, os, ssl, subprocess, sys, urllib.parse, urllib.request
+import json, os, subprocess, sys
 from pathlib import Path
 import yaml
 
 graph = Path("/opt/graph")
+TOKEN_DIR = "/var/run/secrets/stardelt-catalog"
 work = Path("/tmp/spark-project")
 for key, path in json.loads(os.environ["SPARK_PROJECT_PATHS"]):
     target = work / "graph" / path
@@ -67,20 +73,9 @@ if branch:
     configuration["spark.wap.branch"] = branch
 for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
     os.environ.pop(name, None)
-body = urllib.parse.urlencode(
-    {
-        "grant_type": "client_credentials",
-        "client_id": os.environ["PIPELINE_CLIENT_ID"],
-        "client_secret": os.environ["PIPELINE_CLIENT_SECRET"],
-    }
-).encode()
-request = urllib.request.Request(
-    os.environ["PIPELINE_TOKEN_URL"],
-    data=body,
-    headers={"Content-Type": "application/x-www-form-urlencoded"},
-)
-with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context()) as answer:
-    token = json.load(answer)["access_token"]
+# The kubelet writes the projected ServiceAccount token to
+# /var/run/secrets/stardelt-catalog/token; it is the only catalog credential in the pod.
+token = Path(f"{TOKEN_DIR}/token").read_text().strip()
 catalog = document["catalog"]
 configuration[f"spark.sql.catalog.{catalog}.token"] = token
 configuration[f"spark.sql.catalog.{catalog}.header.X-Iceberg-Access-Delegation"] = "vended-credentials"
@@ -147,10 +142,9 @@ def pod_env(
     database: str,
     storage: str,
     steps: tuple[tuple[str, ...], ...],
-    principal_secret: str,
     wap_branch: str | None = None,
 ) -> list[k8s.V1EnvVar]:
-    """The pod's environment: the runner's contract and the principal's Secret by reference."""
+    """The pod's environment: the runner's contract, no credential of the principal's."""
     env = [
         k8s.V1EnvVar(
             name="SPARK_PROJECT_PATHS",
@@ -164,9 +158,6 @@ def pod_env(
             name="SPARK_PROJECT_STEPS",
             value=json.dumps([list(step) for step in steps]),
         ),
-        k8s.V1EnvVar(name="PIPELINE_TOKEN_URL", value=_required("PIPELINE_TOKEN_URL")),
-        _secret_env("PIPELINE_CLIENT_ID", principal_secret, "client-id"),
-        _secret_env("PIPELINE_CLIENT_SECRET", principal_secret, "client-secret"),
         k8s.V1EnvVar(name="HOME", value="/tmp"),
         k8s.V1EnvVar(name="SPARK_HOME", value=SPARK_HOME),
         k8s.V1EnvVar(name="PYTHONUNBUFFERED", value="1"),
@@ -176,15 +167,6 @@ def pod_env(
         # branch instead of `main` (#996, #991 Q1).
         env.append(k8s.V1EnvVar(name="SPARK_WAP_BRANCH", value=wap_branch))
     return env
-
-
-def _secret_env(name: str, secret: str, key: str) -> k8s.V1EnvVar:
-    return k8s.V1EnvVar(
-        name=name,
-        value_from=k8s.V1EnvVarSource(
-            secret_key_ref=k8s.V1SecretKeySelector(name=secret, key=key)
-        ),
-    )
 
 
 def _required(name: str) -> str:
@@ -212,7 +194,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         writes: tuple[str, ...],
         refresh: str | None,
         full_refresh: tuple[str, ...],
-        principal_secret: str,
+        principal_sa: str,
         namespace: str,
         wap: bool = False,
         **kwargs,
@@ -224,7 +206,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         self.catalog, self.database = writes[0].rsplit(".", 1)[0].split(".", 1)
         self.refresh = refresh
         self.full_refresh = tuple(full_refresh)
-        self.principal_secret = principal_secret
+        self.principal_sa = principal_sa
         self.wap = wap
         super().__init__(
             namespace=namespace,
@@ -247,6 +229,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
                 allow_privilege_escalation=False,
                 capabilities=k8s.V1Capabilities(drop=["ALL"]),
             ),
+            service_account_name=principal_sa,
             automount_service_account_token=False,
             container_resources=k8s.V1ResourceRequirements(
                 requests={"cpu": "250m", "memory": "1Gi"},
@@ -285,7 +268,6 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
                 self.task_name,
             ),
             steps=steps(SPEC_PATH, self.refresh, self.full_refresh),
-            principal_secret=self.principal_secret,
             wap_branch=wap_branch,
         )
         self.volumes = [
@@ -296,9 +278,26 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
                 ),
             ),
             k8s.V1Volume(name="tmp", empty_dir=k8s.V1EmptyDirVolumeSource()),
+            k8s.V1Volume(
+                name="catalog-token",
+                projected=k8s.V1ProjectedVolumeSource(
+                    sources=[
+                        k8s.V1VolumeProjection(
+                            service_account_token=k8s.V1ServiceAccountTokenProjection(
+                                audience=CATALOG_TOKEN_AUDIENCE,
+                                expiration_seconds=3600,
+                                path="token",
+                            )
+                        )
+                    ]
+                ),
+            ),
         ]
         self.volume_mounts = [
             k8s.V1VolumeMount(name="graph", mount_path=GRAPH_DIR, read_only=True),
             k8s.V1VolumeMount(name="tmp", mount_path="/tmp"),
+            k8s.V1VolumeMount(
+                name="catalog-token", mount_path=CATALOG_TOKEN_DIR, read_only=True
+            ),
         ]
         return super().execute(context)

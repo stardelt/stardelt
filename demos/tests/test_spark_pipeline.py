@@ -51,7 +51,6 @@ def values(**overrides):
         database="scratch",
         storage="s3a://lakehouse/pipelines/demo/shop/build/checkpoints",
         steps=steps(SPEC_PATH, None, ()),
-        principal_secret="sp-pipeline-demo",
         wap_branch=None,
     )
     base.update(overrides)
@@ -59,7 +58,6 @@ def values(**overrides):
 
 
 def env(monkeypatch, **overrides):
-    monkeypatch.setenv("PIPELINE_TOKEN_URL", "https://id.example/token")
     return {var.name: var for var in pod_env(**values(**overrides))}
 
 
@@ -94,17 +92,16 @@ def test_the_runner_runs_the_steps_it_is_given():
     assert 'spark-pipelines", *step' in spark_pipeline.RUNNER
 
 
-def test_the_principal_credentials_are_secret_refs_not_values(monkeypatch):
+def test_the_pod_carries_no_client_credentials(monkeypatch):
     variables = env(monkeypatch)
-    for name, key in (
-        ("PIPELINE_CLIENT_ID", "client-id"),
-        ("PIPELINE_CLIENT_SECRET", "client-secret"),
-    ):
-        variable = variables[name]
-        assert variable.value is None
-        assert isinstance(variable.value_from, k8s.V1EnvVarSource)
-        assert variable.value_from.secret_key_ref.name == "sp-pipeline-demo"
-        assert variable.value_from.secret_key_ref.key == key
+    for name in ("PIPELINE_TOKEN_URL", "PIPELINE_CLIENT_ID", "PIPELINE_CLIENT_SECRET"):
+        assert name not in variables, name
+
+
+def test_the_runner_reads_the_projected_catalog_token():
+    assert "TOKEN_DIR" in spark_pipeline.RUNNER
+    assert "/var/run/secrets/stardelt-catalog/token" in spark_pipeline.RUNNER
+    assert "PIPELINE_CLIENT_SECRET" not in spark_pipeline.RUNNER
 
 
 def test_the_graph_map_is_the_json_pair_list(monkeypatch):

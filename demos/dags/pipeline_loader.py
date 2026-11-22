@@ -381,7 +381,9 @@ def _build_dag(p) -> DAG:
                 writes=t.writes,
                 refresh=t.refresh,
                 full_refresh=t.full_refresh,
-                principal_secret=p.principal.secret_name,
+                # The ServiceAccount the operator creates for the principal
+                # (`crd.rs::principal_client_id`: `sp-<name>`); the worker may `use` it (#1260).
+                principal_sa=f"sp-{p.principal.name}",
                 wap=p.publish == "wap",
                 namespace=namespace,
                 dag=dag,
