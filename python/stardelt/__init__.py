@@ -875,6 +875,16 @@ def _remote_for_cluster(cluster):
         raise RuntimeError(f"{cluster} is {phase}; wait until it is Running")
     endpoint = view.get("endpoint")
     if not endpoint:
+        # A viewer of a `SparkCluster` gets no endpoint on purpose: the server acts with its
+        # owner group's rights (#493). Say that instead of asking for a retry that cannot work.
+        if view.get("kind", "cluster") == "cluster" and view.get("can_use") and not view.get(
+            "can_act"
+        ):
+            raise RuntimeError(
+                f"{cluster} runs its work as its owner group's identity and you are only a viewer "
+                "of it, so your notebook gets no connection — use %sql (it applies your own "
+                "grants) or ask the cluster's group to add you to it"
+            )
         raise RuntimeError(f"{cluster} is {phase} but Nova reports no endpoint; retry in a moment")
     return endpoint
 

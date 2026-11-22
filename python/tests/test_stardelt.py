@@ -405,6 +405,22 @@ def test_remote_for_a_starting_cluster_raises_runtime_error(monkeypatch):
         stardelt._remote_for_cluster("trial")
 
 
+def test_remote_for_a_viewer_only_cluster_names_the_viewer_rule(monkeypatch):
+    view = _view("Running", endpoint=None)
+    view.update(kind="cluster", can_use=True, can_act=False)
+    monkeypatch.setattr(stardelt.compute, "get", lambda name: view)
+    with pytest.raises(RuntimeError, match="only a viewer"):
+        stardelt._remote_for_cluster("trial")
+
+
+def test_remote_for_a_running_cluster_without_an_endpoint_still_says_retry(monkeypatch):
+    view = _view("Running", endpoint=None)
+    view.update(kind="cluster", can_use=True, can_act=True)
+    monkeypatch.setattr(stardelt.compute, "get", lambda name: view)
+    with pytest.raises(RuntimeError, match="Nova reports no endpoint; retry in a moment"):
+        stardelt._remote_for_cluster("trial")
+
+
 def test_cached_session_is_not_reused_for_another_remote(monkeypatch):
     monkeypatch.setattr(stardelt, "_SPARK_TOKEN", "token-317")
     monkeypatch.setattr(stardelt, "_SPARK_REMOTE", "sc://shared:15002")
