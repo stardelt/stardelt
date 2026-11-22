@@ -51,7 +51,7 @@ pub fn client_payload(stage: &DeployStage) -> serde_json::Value {
         "standardFlowEnabled": false,
         "implicitFlowEnabled": false,
         "directAccessGrantsEnabled": false,
-        "serviceAccountsEnabled": false,
+        "serviceAccountsEnabled": true,
         "redirectUris": [],
         "webOrigins": [],
         "attributes": {
@@ -94,6 +94,11 @@ fn mapper_audience(value: &serde_json::Value) -> Option<&str> {
 /// reconcile writes nothing). A missing `aud-…` mapper counts as a difference.
 pub fn needs_update(existing: &serde_json::Value, desired: &serde_json::Value) -> bool {
     if existing.get("clientAuthenticatorType") != desired.get("clientAuthenticatorType") {
+        return true;
+    }
+    // A client rendered before #1024 carries `serviceAccountsEnabled: false`; without this the
+    // stage keeps answering `unauthorized_client` for ever (#1009).
+    if existing.get("serviceAccountsEnabled") != desired.get("serviceAccountsEnabled") {
         return true;
     }
     for key in ["jwt.credential.issuer", "jwt.credential.sub"] {
@@ -372,7 +377,15 @@ mod tests {
             payload["protocolMappers"][0]["config"]["included.custom.audience"],
             "stardelt-deploy"
         );
-        assert_eq!(payload["serviceAccountsEnabled"], false);
+        assert_eq!(payload["serviceAccountsEnabled"], true);
+    }
+
+    #[test]
+    fn a_client_without_a_service_account_needs_a_write() {
+        let payload = client_payload(&stage());
+        let mut old = payload.clone();
+        old["serviceAccountsEnabled"] = json!(false);
+        assert!(needs_update(&old, &payload));
     }
 
     #[test]

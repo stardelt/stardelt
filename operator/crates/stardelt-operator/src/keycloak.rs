@@ -683,8 +683,10 @@ mod tests {
 
     /// A DeployStage's client authenticates with `clientAuthenticatorType=federated-jwt` and
     /// `jwt.credential.issuer=github-actions`; Keycloak resolves that alias only from a realm
-    /// identity provider. The entry is disabled and hidden, so a fresh install has it without
-    /// baking a customer's repository into a product file (#908, #57 slice 1).
+    /// identity provider. The entry is enabled and hidden: Keycloak does not validate an
+    /// assertion through a disabled provider (#1009), and `hideOnLogin` keeps it off the login
+    /// page because it is reached by a client assertion, never by a person. A fresh install
+    /// ships it without baking a customer's repository into a product file (#908, #57 slice 1).
     #[test]
     fn the_realm_offers_the_github_actions_identity_provider() {
         let realm = realm_config_map(&spec(Some("data.example.com")))
@@ -701,7 +703,7 @@ mod tests {
         let provider = &providers[0];
         assert_eq!(provider["alias"], "github-actions");
         assert_eq!(provider["providerId"], "oidc");
-        assert_eq!(provider["enabled"].as_bool(), Some(false));
+        assert_eq!(provider["enabled"].as_bool(), Some(true));
         assert_eq!(provider["hideOnLogin"].as_bool(), Some(true));
         assert_eq!(
             provider["config"]["issuer"],
