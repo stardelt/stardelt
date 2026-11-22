@@ -39,6 +39,11 @@ if "set" in args and "image" in args:
     print([a for a in args if "=" in a and not a.startswith("-")][-1])
     sys.exit(0)
 
+if "set" in args and "env" in args:
+    names = [a.split("/", 1)[1] for a in args if a.startswith("deploy/")]
+    print("deployment.apps/" + " updated, deployment.apps/".join(names) + " updated")
+    sys.exit(0)
+
 if "rollout" in args:
     print('deployment "app" successfully rolled out')
     sys.exit(0)
@@ -333,6 +338,27 @@ class PinImageTest(unittest.TestCase):
             self.assertGreater(calls.index("set image deploy/" + name), api_server)
         self.assertIn(DIGEST, values.read_text())
         self.assertIn(DIGEST, roles.read_text())
+
+    def test_airflow_moves_the_task_pod_image_too(self):
+        self.airflow_fixtures()
+        self.run_pin(
+            "airflow",
+            current="ghcr.io/stardelt/airflow:demo@sha256:" + "00" * 32,
+            container="airflow",
+        )
+        lines = [line for line in self.calls().splitlines() if "set env" in line]
+        self.assertEqual(len(lines), 1, self.calls())
+        env_line = lines[0]
+        self.assertIn(
+            "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG=demo@" + DIGEST, env_line
+        )
+        for name in (
+            "airflow-api-server",
+            "airflow-scheduler",
+            "airflow-dag-processor",
+            "airflow-triggerer",
+        ):
+            self.assertIn("deploy/" + name, env_line)
 
     def test_superset_moves_the_worker_and_the_group_roles_job(self):
         zero = "00" * 32
