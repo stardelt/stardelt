@@ -380,7 +380,10 @@ pub fn deploy_refusal(
 
 /// `spec.group` of the `DeployStage` the token's `azp` names (#1038). `Ok(None)` when the object
 /// has no group; `Err` is the sentence for a 502 when the cluster cannot answer.
-async fn stage_owner_group(state: &AppState, stage: &str) -> Result<Option<String>, String> {
+pub(crate) async fn stage_owner_group(
+    state: &AppState,
+    stage: &str,
+) -> Result<Option<String>, String> {
     let Some(client) = state.kube.clone() else {
         return Err("the cluster is not reachable: no deploy stage could be read".into());
     };

@@ -1739,6 +1739,17 @@ pub(crate) fn deploy_route(path: &str) -> bool {
         || path == "/api/pipelines/validate"
 }
 
+/// A deploy principal's identity carries its stage's group (#57): the routes it may call —
+/// `/api/pipelines/validate` above all — check the owner group against `identity.groups`, and
+/// the token itself carries no group (it is a Keycloak service account, not a person).
+/// `None` leaves the identity alone: no deploy client, no stage object, or a stage without a group.
+fn with_deploy_group(mut identity: Identity, group: Option<String>) -> Identity {
+    if let Some(group) = group {
+        identity.groups = vec![group];
+    }
+    identity
+}
+
 /// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
 pub async fn require_auth(
     State(ctx): State<AuthContext>,
@@ -1746,7 +1757,7 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     match ctx.auth.authenticate(req.headers()).await {
-        Ok((principal, facts)) => {
+        Ok((mut principal, facts)) => {
             // A deploy principal (#57) holds a token for its stage and nothing else: it may
             // plan, record and read deployments, and confirm its sign-in, no more.
             if let Some(stage) = deploy_stage(principal.client_id.as_deref())
@@ -1769,6 +1780,20 @@ pub async fn require_auth(
                     })),
                 )
                     .into_response();
+            }
+            // A deploy principal's token carries no group (#57); its stage names the one it acts for,
+            // and `/api/pipelines/validate` checks the owner group against it.
+            if let Some(stage) = deploy_stage(principal.client_id.as_deref()) {
+                let group = match crate::deployments::stage_owner_group(ctx.app.as_ref(), stage)
+                    .await
+                {
+                    Ok(group) => group,
+                    Err(message) => {
+                        warn!(target: "audit", stage, %message, "the deploy stage's group could not be read; the principal keeps no group");
+                        None
+                    }
+                };
+                principal.identity = with_deploy_group(principal.identity, group);
             }
             // The directory is best effort and must not add latency to the request: the
             // token's identity is copied into a task and the request goes on.
@@ -4147,6 +4172,26 @@ mod tests {
         ] {
             assert!(!deploy_route(path), "{path} must be refused");
         }
+    }
+
+    /// A deploy principal's identity carries its stage's group (#57): the validate route checks
+    /// the owner group against it, and the token itself carries none.
+    #[test]
+    fn a_deploy_principal_takes_its_stages_group() {
+        let identity = Identity {
+            sub: "service-account-stardelt-deploy-dev".into(),
+            display_name: "service-account-stardelt-deploy-dev".into(),
+            email: None,
+            name: None,
+            groups: Vec::new(),
+            roles: Vec::new(),
+            groups_overage: false,
+            is_admin: false,
+        };
+        let with = with_deploy_group(identity.clone(), Some("demo".into()));
+        assert_eq!(with.groups, vec!["demo".to_string()]);
+        let without = with_deploy_group(identity.clone(), None);
+        assert!(without.groups.is_empty(), "no stage group changes nothing");
     }
 
     /// `aud: stardelt-deploy` alone is not a credential: the `azp` must name a stage.
