@@ -827,7 +827,7 @@ pub async fn plan(
             resources.as_ref(),
             s.db.as_ref(),
             s.notebooks.as_ref(),
-            &caller.identity,
+            &identity,
             files.as_deref(),
             request,
         )
@@ -922,7 +922,11 @@ pub async fn rollback(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
-    let row = match visible(pool, id, &caller.identity).await {
+    let identity = match deploy_identity(&s, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
+    };
+    let row = match visible(pool, id, &identity).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return error(
@@ -943,10 +947,6 @@ pub async fn rollback(
     }
     // A deploy principal (#57) replays nothing outside its own stage or group: a rollback
     // applies the stored documents and records a new row, so it is a deploy to `row.target`.
-    let identity = match deploy_identity(&s, caller).await {
-        Ok(identity) => identity,
-        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
-    };
     if let Some(sentence) = deploy_refusal(
         &identity,
         &row.owner_group,
@@ -974,9 +974,7 @@ pub async fn rollback(
     let mut refusal: Option<Fail> = None;
     for document in &documents {
         let outcome = match stored_document_kind(document) {
-            "StreamApp" => {
-                crate::streams::apply_stream_document(&s, &caller.identity, document).await
-            }
+            "StreamApp" => crate::streams::apply_stream_document(&s, &identity, document).await,
             _ => {
                 crate::pipelines::apply_document(
                     resources.as_ref(),
@@ -984,7 +982,7 @@ pub async fn rollback(
                     s.notebooks.as_ref(),
                     s.airflow.as_ref(),
                     &s.pipeline_creates,
-                    &caller.identity,
+                    &identity,
                     document,
                 )
                 .await
