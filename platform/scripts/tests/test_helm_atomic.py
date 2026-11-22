@@ -87,5 +87,56 @@ class HelmAtomicTest(unittest.TestCase):
         self.assertEqual(offenders, [], "these targets switch --wait off but keep --atomic")
 
 
+# --- the shell scripts, not only the Makefile ----------------------------------------------
+# A `helm upgrade` past the Makefile is still an upgrade: `sync-operator-chart.sh` (called by
+# pin-image.sh) and `catalog-authz-bootstrap.sh` both wait on the operator's and the catalog's
+# release. The same pending-* trap applies, so the same rule does.
+SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
+
+
+def script_upgrades():
+    """Every `helm upgrade` command in `scripts/*.sh`, with the file it belongs to."""
+    found = []
+    for path in sorted(SCRIPTS.glob("*.sh")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if re.match(r"^\s*helm upgrade\b", line):
+                block = [line]
+                while lines[i].rstrip().endswith("\\") and i + 1 < len(lines):
+                    i += 1
+                    block.append(lines[i])
+                found.append((path.name, "\n".join(block)))
+            i += 1
+    return found
+
+
+def script_helm_flags(path_name):
+    """The `HELM_FLAGS=` default a script passes to its upgrades, or an empty string."""
+    match = re.search(r"^HELM_FLAGS=.*$", (SCRIPTS / path_name).read_text(encoding="utf-8"),
+                      re.MULTILINE)
+    return match.group(0) if match else ""
+
+
+class ScriptUpgradeTest(unittest.TestCase):
+    def test_the_walker_finds_the_scripts_that_upgrade(self):
+        names = {name for name, _ in script_upgrades()}
+        for expected in ("sync-operator-chart.sh", "catalog-authz-bootstrap.sh"):
+            self.assertIn(expected, names, "the script walker lost a `helm upgrade`")
+
+    def test_every_script_upgrade_waiting_on_a_release_is_atomic(self):
+        offenders = []
+        for name, block in script_upgrades():
+            if "--wait=false" in block:
+                continue
+            if "--atomic" in block:
+                continue
+            if re.search(r"\$\{?HELM_FLAGS\}?", block) and "--atomic" in script_helm_flags(name):
+                continue
+            offenders.append(name)
+        self.assertEqual(offenders, [], "these scripts upgrade without --atomic")
+
+
 if __name__ == "__main__":
     unittest.main()

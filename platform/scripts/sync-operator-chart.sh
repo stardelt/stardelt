@@ -59,5 +59,5 @@ helm upgrade --install stardelt-operator "$op_dir/chart" \
   -f helm-values/operator.yaml \
   --set-string "image.tag=dev@$digest" \
   --set 'imagePullSecrets[0].name=ghcr-creds' \
-  --wait --timeout "${HELM_TIMEOUT:-5m}"
+  --wait --atomic --timeout "${HELM_TIMEOUT:-5m}"
 echo "› chart stardelt-operator rendered at dev@${digest:0:19}…"

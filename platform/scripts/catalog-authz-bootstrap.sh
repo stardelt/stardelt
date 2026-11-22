@@ -17,7 +17,7 @@ set -euo pipefail
 
 NAMESPACE=${NAMESPACE:-stardelt}
 LAKEKEEPER_VERSION=${LAKEKEEPER_VERSION:-0.11.0}
-HELM_FLAGS=${HELM_FLAGS:---namespace "$NAMESPACE" --create-namespace --wait --timeout 10m}
+HELM_FLAGS=${HELM_FLAGS:---namespace "$NAMESPACE" --create-namespace --wait --atomic --timeout 10m}
 BASE=http://127.0.0.1:18181
 # The probe image is pinned by digest: a check that runs different code tomorrow is not a check.
 PROBE_IMAGE=${PROBE_IMAGE:-curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b}
