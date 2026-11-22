@@ -40,6 +40,8 @@ declare -A recipe=(
   [verify-wap]='bash scripts/verify-wap.sh'
   [verify-product-path]='bash scripts/verify-product-path.sh'
   [verify-spark-pipeline]='bash scripts/verify-spark-pipeline.sh'
+  [verify-spark-no-platform-key]='bash scripts/verify-spark-no-platform-key.sh'
+  [verify-spark-guard]='bash scripts/verify-spark-pod-guard.sh'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -53,7 +55,7 @@ verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-c
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query
-verify-wap verify-product-path verify-spark-pipeline"
+verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
