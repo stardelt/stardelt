@@ -95,5 +95,25 @@ class PinRollupStagesEveryFilePinImageWritesTest(unittest.TestCase):
         self.assertIn("chart/files/spark-runtimes.json", staged)
 
 
+class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
+    def test_the_dispatch_follows_the_branch_push_and_uses_github_token(self):
+        text = ROLLUP.read_text()
+        push = text.index('git push --force-with-lease origin "$branch"')
+        dispatch = text.index('gh workflow run operator-image.yml --ref "$branch"')
+        self.assertLess(push, dispatch)
+        self.assertIn('GH_TOKEN="$GITHUB_TOKEN" gh workflow run', text)
+        self.assertIn('embedded_changed=yes', text)
+
+    def test_the_digest_is_resolved_from_the_branch_tag_not_dev(self):
+        self.assertIn('TAG="${branch//\\//-}"', ROLLUP.read_text())
+
+    def test_the_workflow_grants_actions_write_and_ignores_non_main_builds(self):
+        wf = REPO.parent / ".github" / "workflows" / "platform-pin-rollup.yml"
+        text = wf.read_text()
+        self.assertIn("actions: write", text)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", text)
+        self.assertIn("github.event.workflow_run.head_branch == 'main'", text)
+
+
 if __name__ == "__main__":
     unittest.main()
