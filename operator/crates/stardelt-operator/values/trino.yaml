@@ -211,14 +211,21 @@ worker:
   # kills one. The chart renders `shutdown.grace-period=120s` into the worker's config, adds
   # the preStop hook that sends the shutdown request as `user: admin`, and merges the
   # `write system information` permission for that user into the worker's file rules
-  # (`trino` chart 1.45.0, `trino.workerAccessControlRules`). The chart refuses a
-  # `terminationGracePeriodSeconds` below 2x the grace period.
+  # (`trino` chart 1.45.0, `trino.workerAccessControlRules`).
   # The twin of stardelt-platform helm-values/trino.yaml.
+  #
+  # The pod grace must outlast Trino's own shutdown, which is 2 x `shutdown.grace-period`
+  # plus task time (platform#1205, measured on Trino 484): the worker waits one grace period
+  # for the coordinator to notice the shutdown, waits for the tasks it is running, then waits
+  # the same grace again for every task state to be observed. The chart refuses a
+  # `terminationGracePeriodSeconds` below 2 x the grace period — that minimum is the
+  # protocol with no room for a task — so a 240 s pod grace ended every drain in a SIGKILL
+  # and a `FailedPreStopHook`. 300 s leaves the task phase 55 s of headroom.
   gracefulShutdown:
     enabled: true
     gracePeriodSeconds: 120
     user: admin
-  terminationGracePeriodSeconds: 240
+  terminationGracePeriodSeconds: 300
   jvm:
     maxHeapSize: 2G
   config:
