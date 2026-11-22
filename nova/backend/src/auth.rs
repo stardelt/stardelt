@@ -1743,7 +1743,7 @@ pub async fn require_auth(
             // A deploy principal (#57) holds a token for its stage and nothing else: it may
             // plan, record and read deployments, and confirm its sign-in, no more.
             if let Some(stage) = deploy_stage(principal.client_id.as_deref())
-                && !deploy_route(req.uri().path())
+                && !deploy_route(&crate::audit::original_path(&req))
             {
                 warn!(
                     target: "audit",
@@ -4160,5 +4160,82 @@ mod tests {
             .expect("the audience half succeeds");
         assert_eq!(claim_str(&verified, "azp"), None);
         assert_eq!(deploy_stage(None), None, "a missing azp is refused");
+    }
+
+    /// The middleware reads the *public* path: the API router is nested at `/api`, so
+    /// `uri().path()` is `/me` and `/deployments/plan` inside `require_auth` (#1051).
+    #[tokio::test]
+    async fn a_deploy_principal_is_admitted_on_the_deployments_routes_behind_the_nested_router() {
+        struct DeployValidator;
+        impl BearerValidator for DeployValidator {
+            fn validate<'a>(
+                &'a self,
+                _token: &'a str,
+            ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+                Box::pin(async move {
+                    identity_from_claims(&json!({ "sub": "ci" }), &ClaimConfig::default())
+                })
+            }
+            fn validate_browser_facts<'a>(
+                &'a self,
+                token: &'a str,
+            ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
+                Box::pin(async move {
+                    Ok((
+                        self.validate(token).await?,
+                        BearerFacts {
+                            scopes: Vec::new(),
+                            client_id: Some("stardelt-deploy-dev".into()),
+                        },
+                    ))
+                })
+            }
+        }
+
+        let Ok(AuthMode::Oidc(cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!("the test configuration is an oidc one")
+        };
+        let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
+        let auth = AuthState::with_validator(*cfg, provider, Arc::new(DeployValidator), None);
+        let context = AuthContext {
+            auth,
+            app: crate::router_tests::test_state(),
+        };
+        // The shape `main` builds: routes without `/api`, the layer on them, then the nest.
+        let protected = Router::new()
+            .route("/me", get(|| async { "me" }))
+            .route(
+                "/deployments/plan",
+                axum::routing::post(|| async { "plan" }),
+            )
+            .route("/pipelines", get(|| async { "pipelines" }))
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth));
+        let app = Router::new().nest("/api", protected);
+        async fn ask(app: &Router, method: &str, uri: &str) -> (StatusCode, String) {
+            let request = HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, "Bearer t")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(request).await.unwrap();
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+
+        assert_eq!(ask(&app, "GET", "/api/me").await.0, StatusCode::OK);
+        assert_eq!(
+            ask(&app, "POST", "/api/deployments/plan").await.0,
+            StatusCode::OK
+        );
+        let (status, body) = ask(&app, "GET", "/api/pipelines").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body.contains("a deploy principal may only use the deployments routes (stage `dev`)"),
+            "{body}"
+        );
     }
 }
