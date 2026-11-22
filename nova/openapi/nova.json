@@ -11295,7 +11295,7 @@
               "string",
               "null"
             ],
-            "description": "The audit branch this run wrote, when the pipeline publishes with `wap` (#114); `None` for\na `direct` pipeline. Deterministic from the run id, so a failed run can be inspected."
+            "description": "The audit branch this run left for inspection: `Some` when the pipeline publishes with\n`wap` and the run has not published it (`wap-prepare` succeeded, `wap-publish` did not).\nA passing run publishes and drops its branch, so it answers `None`."
           },
           "auditedTables": {
             "type": "array",
