@@ -11,6 +11,7 @@ use kube::api::{
     DeleteParams, DynamicObject, ListParams, ObjectMeta, Patch, PatchParams, TypeMeta,
 };
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::ObjectRef;
 use kube::{Api, ResourceExt};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -426,6 +427,15 @@ pub fn recovery_must_wait(app_missing: bool, old_pods: usize) -> bool {
     app_missing && old_pods > 0
 }
 
+/// The `StreamApp` a Spark pod belongs to. The Spark operator labels every driver and executor
+/// pod with its application name (`sparkoperator.k8s.io/app-name`), and the application is
+/// named after the `StreamApp` (`spark_application(&namespace, &name, …)`), so the label value
+/// is the object's name.
+pub(crate) fn stream_of_pod(pod: &Pod) -> Option<ObjectRef<StreamApp>> {
+    let app = pod.labels().get("sparkoperator.k8s.io/app-name")?;
+    Some(ObjectRef::new(app).within(pod.namespace().as_deref()?))
+}
+
 /// The scheduler's sentence for a pod it cannot place, or `None` when the pod is
 /// schedulable or has already run. A driver can be `RUNNING` while every executor waits
 /// like this (for example "0/1 nodes are available: 1 Insufficient cpu"), and Spark
@@ -691,7 +701,9 @@ pub async fn reconcile_stream_app(
                 Err(e) if is_not_found(&e) => {}
                 Err(e) => return Err(e),
             }
-            return Ok(Action::requeue(Duration::from_secs(5)));
+            // The delete and the pod's termination are watched now (#274 rule 4), so 30 s is the
+            // fallback for a missed event, not the wait.
+            return Ok(Action::requeue(Duration::from_secs(30)));
         }
     } else {
         let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &namespace);
@@ -708,7 +720,8 @@ pub async fn reconcile_stream_app(
         // still exists while it carries a `deletionTimestamp`.
         let driver = pods.get_opt(&format!("{name}-driver")).await?;
         if recovery_must_wait(true, old_pods) || driver.is_some() {
-            return Ok(Action::requeue(Duration::from_secs(5)));
+            // The same fallback: the pod watch wakes the reconcile when the old pod goes away.
+            return Ok(Action::requeue(Duration::from_secs(30)));
         }
     }
     let identity: Option<ConfigMap> = Api::<ConfigMap>::namespaced(ctx.client.clone(), &namespace)
@@ -1104,7 +1117,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(
             log.contains(
@@ -1171,7 +1184,7 @@ mod tests {
         let action = reconcile_stream_app(Arc::new(stream_app(false)), ctx)
             .await
             .expect("reconcile");
-        assert_eq!(action, Action::requeue(Duration::from_secs(5)));
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
         let log = requests.lock().expect("requests").join("\n");
         assert!(
             !log.contains("POST /apis/sparkoperator.k8s.io/")
@@ -2037,6 +2050,32 @@ mod tests {
             !recovery_must_wait(false, 1),
             "a live app is never held back"
         );
+    }
+
+    #[test]
+    fn a_pod_label_maps_it_to_its_stream() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "orders-driver",
+                "namespace": "data",
+                "labels": {"sparkoperator.k8s.io/app-name": "orders"},
+            },
+        }))
+        .expect("pod");
+        assert_eq!(
+            stream_of_pod(&pod),
+            Some(ObjectRef::new("orders").within("data"))
+        );
+
+        let unlabelled: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "orders-driver", "namespace": "data"},
+        }))
+        .expect("pod");
+        assert_eq!(stream_of_pod(&unlabelled), None);
     }
 
     #[test]
