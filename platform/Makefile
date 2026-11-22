@@ -227,6 +227,10 @@ verify-spark-cluster: _context ## One SparkCluster up and down: identity, guards
 verify-spark-pipeline: _context ## One spark-pipeline task pod: run a graph as the demo principal, read the table back (manual; creates and drops a schema)
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-spark-pipeline.sh
 
+.PHONY: verify-wap
+verify-wap: _context ## A publish: wap run publishes on a passing check and publishes nothing on a failing one (#114)
+	@NS=$(NAMESPACE) bash scripts/verify-wap.sh
+
 verify-spark-guard: _context ## The Spark Connect driver may create executor pods only (platform#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-spark-pod-guard.sh
 
