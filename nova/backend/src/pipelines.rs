@@ -1223,6 +1223,13 @@ const SPARK_BAD_REFRESH: &str = "refresh must be incremental or full";
 const SPARK_BAD_FULL_REFRESH: &str = "fullRefresh is 1 to 32 dataset names of 1 to 128 characters";
 const SPARK_REFRESH_TWICE: &str =
     "a spark-pipeline task sets refresh: full or fullRefresh, not both";
+/// `plan.py::SPARK_PIPELINE_NEEDS_WRITES`: a graph's catalog and database come from the task's
+/// writes, so a graph without one dies in the pod (#80).
+const SPARK_GRAPH_NEEDS_WRITES: &str = "spark-pipeline task `{task}` needs writes: the catalog and schema the graph writes, as \
+     catalog.schema.table — stardelt sets the graph's catalog and database from it";
+/// `plan.py::SPARK_PIPELINE_TWO_TARGETS`.
+const SPARK_GRAPH_ONE_TARGET: &str = "spark-pipeline task `{task}` writes into more than one catalog/schema ({targets}): a graph \
+     has one target; split the task";
 const SPARK_NEEDS_GRAPH_FILE: &str =
     "a spark-pipeline task's files must hold spark-pipeline.yml at the project root";
 const SPARK_TOO_MANY_FILES: &str = "a spark-pipeline graph is at most 64 files";
@@ -1309,6 +1316,81 @@ fn spark_pipeline_config(request: &SparkPipelineRequest) -> Result<SparkPipeline
         full_refresh,
         files: request.files.clone(),
     })
+}
+
+/// The graph's own `spark-pipeline.yml`, checked the way `plan.py::_spark_pipeline_config`
+/// checks it (#80): the three keys stardelt owns, the `libraries` glob form, and the catalog
+/// block the Connect session needs. `None` means it is a graph the loader accepts.
+fn spark_graph_problems(files: &BTreeMap<String, String>, writes: &[String]) -> Option<String> {
+    let text = files.get("spark-pipeline.yml")?;
+    let document: serde_yaml::Value = match serde_yaml::from_str(text) {
+        Ok(document) => document,
+        Err(error) => {
+            return Some(format!(
+                "spark-pipeline.yml is not YAML: {}",
+                error.to_string().lines().next().unwrap_or("")
+            ));
+        }
+    };
+    let Some(map) = document.as_mapping() else {
+        return Some("spark-pipeline.yml is not a YAML map".into());
+    };
+    // `serde_yaml::Mapping::get`/`contains_key` take `str` (its `Index` impl) — never `&Value`.
+    if ["catalog", "database", "storage"]
+        .iter()
+        .any(|key| map.contains_key(*key))
+    {
+        return Some(
+            "spark-pipeline.yml must not set catalog, database or storage — the task's writes \
+             and the group's bucket set them at run time (#80)"
+                .into(),
+        );
+    }
+    if let Some(libraries) = map.get("libraries") {
+        let Some(list) = libraries.as_sequence().filter(|list| !list.is_empty()) else {
+            return Some("spark-pipeline.yml libraries must be a list of glob entries".into());
+        };
+        for entry in list {
+            let include = entry
+                .as_mapping()
+                .and_then(|entry| entry.get("glob"))
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(|glob| glob.get("include"))
+                .and_then(serde_yaml::Value::as_str)
+                .filter(|include| !include.is_empty());
+            let Some(include) = include else {
+                return Some(
+                    "spark-pipeline.yml libraries entries need glob.include: <path or pattern>"
+                        .into(),
+                );
+            };
+            let folder = include.ends_with("/**")
+                && include.matches('*').count() == 2
+                && include.len() > "/**".len();
+            if !folder && (include.contains('*') || include.ends_with('/')) {
+                return Some(format!(
+                    "spark-pipeline.yml libraries glob.include must be a file path or a folder \
+                     ending in /**: {include}"
+                ));
+            }
+        }
+    }
+    let catalog = writes
+        .first()
+        .and_then(|table| table.split('.').next())
+        .unwrap_or_default();
+    let block = format!("spark.sql.catalog.{catalog}.type");
+    let known = map
+        .get("configuration")
+        .and_then(serde_yaml::Value::as_mapping)
+        .is_some_and(|configuration| configuration.contains_key(block.as_str()));
+    if !known {
+        return Some(format!(
+            "catalog `{catalog}` has no `{block}` under `configuration:` — the Connect session \
+             would not know the catalog"
+        ));
+    }
+    None
 }
 
 /// A graph file's path is relative to the project directory: segments of letters, digits, `.`,
@@ -1631,6 +1713,43 @@ async fn checked_tasks(
                     ),
                 ));
             }
+        }
+        if task.spark_pipeline.is_some() {
+            if task.writes.is_empty() {
+                return Err(refused(
+                    "task-writes",
+                    SPARK_GRAPH_NEEDS_WRITES.replace("{task}", &task.name),
+                ));
+            }
+            let targets: std::collections::BTreeSet<&str> = task
+                .writes
+                .iter()
+                .map(|table| {
+                    table
+                        .rsplit_once('.')
+                        .map_or(table.as_str(), |(target, _)| target)
+                })
+                .collect();
+            if targets.len() > 1 {
+                return Err(refused(
+                    "task-writes",
+                    SPARK_GRAPH_ONE_TARGET
+                        .replace("{task}", &task.name)
+                        .replace(
+                            "{targets}",
+                            &targets.into_iter().collect::<Vec<_>>().join(", "),
+                        ),
+                ));
+            }
+        }
+        if let Some(graph) = task.spark_pipeline.as_ref()
+            && !graph.files.is_empty()
+            && let Some(message) = spark_graph_problems(&graph.files, &task.writes)
+        {
+            return Err(refused(
+                "task-graph",
+                format!("task `{}`: {message}", task.name),
+            ));
         }
         // The same rules the single `run` task gets (#821, #237); `checked_run` has already
         // validated the pipeline-level parameter table, so a refusal here is the task's own.
@@ -12549,7 +12668,7 @@ mod tests {
                     .map(|names| names.iter().map(|name| (*name).to_string()).collect()),
                 files: BTreeMap::new(),
             }),
-            writes: Vec::new(),
+            writes: vec!["gold.shop.t".into()],
             depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
@@ -14343,7 +14462,8 @@ mod tests {
                 "kind": "spark-pipeline",
                 "project": "spark/shop",
                 "refresh": "incremental",
-                "fullRefresh": ["gold.report"]
+                "fullRefresh": ["gold.report"],
+                "writes": ["gold.shop.t"],
             })
         );
     }
@@ -14398,6 +14518,79 @@ mod tests {
         );
         // Nothing was written by any of the refusals.
         assert!(stored_pipeline(&resources, "shop-graph").await.is_none());
+    }
+
+    /// The graph's document as the loader reads it: writes, one target, and the file (#80).
+    #[tokio::test]
+    async fn a_spark_pipeline_task_needs_writes_and_one_target_and_a_checked_graph() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let graph = |text: &str, writes: &[&str]| {
+            let mut task = spark_pipeline_task("build", "spark/shop", None, None, &[]);
+            task.writes = writes.iter().map(|table| (*table).to_string()).collect();
+            task.spark_pipeline
+                .as_mut()
+                .expect("a graph task")
+                .files
+                .insert("spark-pipeline.yml".into(), text.into());
+            task
+        };
+        let refused = |task: PipelineTaskRequest| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                let mut body = create_body("shop-graph", "analytics", "");
+                body.tasks = Some(vec![task]);
+                let error =
+                    create_pipeline(Some(resources), None, None, &create_limiter(), ada, body)
+                        .await
+                        .expect_err("refused");
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+                error.message().to_string()
+            }
+        };
+        let ok = "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n";
+
+        assert_eq!(
+            refused(graph(ok, &[])).await,
+            "spark-pipeline task `build` needs writes: the catalog and schema the graph writes, \
+             as catalog.schema.table — stardelt sets the graph's catalog and database from it"
+        );
+        assert_eq!(
+            refused(graph(ok, &["gold.a.t1", "silver.a.t2"])).await,
+            "spark-pipeline task `build` writes into more than one catalog/schema (gold.a, \
+             silver.a): a graph has one target; split the task"
+        );
+        assert_eq!(
+            refused(graph("name: shop\ncatalog: gold\n", &["gold.shop.t"])).await,
+            "task `build`: spark-pipeline.yml must not set catalog, database or storage — the \
+             task's writes and the group's bucket set them at run time (#80)"
+        );
+        assert_eq!(
+            refused(graph(
+                "name: shop\nlibraries:\n  - glob:\n      include: '*.sql'\n\
+                 configuration:\n  spark.sql.catalog.gold.type: rest\n",
+                &["gold.shop.t"],
+            ))
+            .await,
+            "task `build`: spark-pipeline.yml libraries glob.include must be a file path or a \
+             folder ending in /**: *.sql"
+        );
+        assert_eq!(
+            refused(graph("name: shop\n", &["gold.shop.t"])).await,
+            "task `build`: catalog `gold` has no `spark.sql.catalog.gold.type` under \
+             `configuration:` — the Connect session would not know the catalog"
+        );
+        // The accepted twin, so a rule that refuses everything fails here.
+        let mut body = create_body("shop-graph", "analytics", "");
+        body.tasks = Some(vec![graph(
+            "name: shop\nlibraries:\n  - glob:\n      include: sql/**\n\
+             configuration:\n  spark.sql.catalog.gold.type: rest\n",
+            &["gold.shop.t"],
+        )]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a graph the loader accepts");
     }
 
     #[tokio::test]
@@ -14517,7 +14710,8 @@ mod tests {
                 "kind": "spark-pipeline",
                 "project": "spark/shop",
                 "refresh": "full",
-                "dependsOn": ["load"]
+                "dependsOn": ["load"],
+                "writes": ["gold.shop.t"],
             })
         );
     }
@@ -14530,9 +14724,10 @@ mod tests {
         let mut body = create_body("shop-graph", "analytics", "");
         let mut build = spark_pipeline_task("build", "spark/shop", None, None, &[]);
         let graph = build.spark_pipeline.as_mut().expect("a graph task");
-        graph
-            .files
-            .insert("spark-pipeline.yml".into(), "name: shop\n".into());
+        graph.files.insert(
+            "spark-pipeline.yml".into(),
+            "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n".into(),
+        );
         graph
             .files
             .insert("sql/trips.sql".into(), "select 1\n".into());
@@ -14545,7 +14740,9 @@ mod tests {
             .expect("stored");
         assert_eq!(
             stored["spec"]["tasks"][0]["files"],
-            json!({ "spark-pipeline.yml": "name: shop\n", "sql/trips.sql": "select 1\n" })
+            json!({ "spark-pipeline.yml":
+                "name: shop\nconfiguration:\n  spark.sql.catalog.gold.type: rest\n",
+                "sql/trips.sql": "select 1\n" })
         );
         assert_eq!(stored["spec"]["tasks"][0]["project"], json!("spark/shop"));
     }

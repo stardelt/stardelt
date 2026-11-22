@@ -14,6 +14,7 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.7", features = ["cors", "trace", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 kube = { version = "5.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.29", features = ["latest"] }
