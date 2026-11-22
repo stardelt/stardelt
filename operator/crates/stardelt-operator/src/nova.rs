@@ -378,6 +378,14 @@ fn env(namespace: &str, base_domain: Option<&str>, airflow: bool, mcp: &McpSpec)
             false,
         ));
     }
+    // Nova's Superset service account for dashboard bundles (#115): the Secret
+    // `scripts/app-secrets.sh` writes. Optional, so an install without it keeps running.
+    env.push(secret_env(
+        "NOVA_SUPERSET_PASSWORD",
+        "superset-nova",
+        "password",
+        true,
+    ));
     // The hosted MCP endpoint (operator#69 slice 1). Nothing is rendered when it is off.
     if mcp.enabled {
         let audience = mcp
@@ -944,6 +952,7 @@ mod tests {
                 "NOVA_JUPYTERHUB_API_TOKEN",
                 "NOVA_WORKSPACE_IDLE_SECONDS",
                 "RUST_LOG",
+                "NOVA_SUPERSET_PASSWORD",
             ]
         );
     }
@@ -1018,6 +1027,11 @@ mod tests {
         assert_eq!(
             secret("NOVA_S3_SECRET_KEY"),
             ("stardelt-s3-creds".to_string(), "secret-key".to_string())
+        );
+        assert_eq!(
+            secret("NOVA_SUPERSET_PASSWORD"),
+            ("superset-nova".to_string(), "password".to_string()),
+            "the dashboard-bundle service user reads the Secret app-secrets.sh writes"
         );
         let config = |name: &str| {
             let selector = named(&env, name)

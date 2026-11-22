@@ -359,6 +359,90 @@
         }
       }
     },
+    "/api/admin/dashboards/{id}/export": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`GET /api/admin/dashboards/{id}/export`: the ZIP Superset exports for one dashboard,\nexactly as Superset sends it (including its `databases/` folder). Administrator-only.\nNova acts as its own Superset service user (`stardelt-nova`).",
+        "description": "The ZIP archive Superset exports for one dashboard, exactly as Superset sends it (including its `databases/` folder). Administrator-only. Nova acts as its own Superset service user (`stardelt-nova`).",
+        "operationId": "export_dashboard",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Superset's numeric dashboard id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ZIP archive Superset exports for one dashboard",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Superset has no such dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Superset answered an error, or could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance has no Superset service user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/mcp-audit": {
       "get": {
         "tags": [
