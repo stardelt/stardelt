@@ -3749,6 +3749,15 @@ pub struct DeployStageSpec {
         regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     )]
     pub audience: String,
+    /// The owner group this stage deploys (#57): Nova lets a deploy principal whose client is this
+    /// stage's act on a bundle of this group only. Optional; without it the deploy principal gets
+    /// the "own group" refusal, which is the behaviour before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    )]
+    pub group: Option<String>,
 }
 
 impl DeployStageSpec {
@@ -3766,6 +3775,17 @@ impl DeployStageSpec {
             return Err(
                 "spec.audience must be 1 to 128 letters, digits and `.`, `_`, `:`, `-`, starting with a letter or digit".into(),
             );
+        }
+        if let Some(group) = &self.group {
+            let ok = !group.is_empty()
+                && group.len() <= 64
+                && group.as_bytes()[0].is_ascii_alphanumeric()
+                && group
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            if !ok {
+                return Err("spec.group must be 1 to 64 letters, digits and `.`, `_`, `-`, starting with a letter or digit".into());
+            }
         }
         if self.subject.contains(":pull_request") {
             return Err("a pull_request token names no branch and cannot be pinned to a stage; pin :ref:refs/heads/<branch> or :environment:<name>".into());
@@ -3909,6 +3929,7 @@ mod tests {
             serde_json::json!({"subject": "repo:stardelt/stardelt:ref:refs/heads/main"}),
             serde_json::json!({"subject": "repo:stardelt@285991931/stardelt@1453997446:ref:refs/heads/main"}),
             serde_json::json!({"subject": "repo:stardelt/stardelt:environment:production", "environment": "production"}),
+            serde_json::json!({"subject": "repo:o/n:ref:refs/heads/main", "group": "demo"}),
         ];
         for case in &accepted {
             let spec: DeployStageSpec =
@@ -3918,12 +3939,17 @@ mod tests {
         let default: DeployStageSpec =
             serde_json::from_value(accepted[0].clone()).expect("deserialize DeployStageSpec");
         assert_eq!(default.audience, "stardelt-deploy");
+        assert_eq!(default.group, None, "a stage without a group names none");
+        let grouped: DeployStageSpec =
+            serde_json::from_value(accepted[3].clone()).expect("deserialize DeployStageSpec");
+        assert_eq!(grouped.group.as_deref(), Some("demo"));
 
         let refused = [
             serde_json::json!({"subject": "repo:stardelt/stardelt:ref:refs/heads/main:pull_request"}),
             serde_json::json!({"subject": "repo:stardelt/stardelt:environment:production", "environment": "prod"}),
             serde_json::json!({"subject": "repo:stardelt/stardelt:environment:production"}),
             serde_json::json!({"subject": "repo:stardelt/stardelt:ref:refs/heads/main", "audience": ""}),
+            serde_json::json!({"subject": "repo:o/n:ref:refs/heads/main", "group": "-bad"}),
         ];
         for (index, case) in refused.iter().enumerate() {
             let outcome = serde_json::from_value::<DeployStageSpec>(case.clone())
@@ -3931,6 +3957,14 @@ mod tests {
                 .and_then(|spec| spec.validate());
             assert!(outcome.is_err(), "refused case {index}: {case}");
         }
+        let sentence = serde_json::from_value::<DeployStageSpec>(refused[4].clone())
+            .expect("deserialize DeployStageSpec")
+            .validate()
+            .expect_err("a group starting with `-` is refused");
+        assert_eq!(
+            sentence,
+            "spec.group must be 1 to 64 letters, digits and `.`, `_`, `-`, starting with a letter or digit"
+        );
     }
 
     #[test]

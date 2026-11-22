@@ -33,6 +33,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use kube::Api;
+use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
@@ -369,6 +371,52 @@ pub fn deploy_refusal(
     }
 }
 
+/// `spec.group` of the `DeployStage` the token's `azp` names (#1038). `Ok(None)` when the object
+/// has no group; `Err` is the sentence for a 502 when the cluster cannot answer.
+async fn stage_owner_group(state: &AppState, stage: &str) -> Result<Option<String>, String> {
+    let Some(client) = state.kube.clone() else {
+        return Err("the cluster is not reachable: no deploy stage could be read".into());
+    };
+    let api: Api<DynamicObject> = Api::namespaced_with(
+        client,
+        &crate::cluster::namespace(),
+        &ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "stardelt.io",
+            "v1alpha1",
+            "DeployStage",
+        )),
+    );
+    let stage = api.get(stage).await.map_err(|e| match e {
+        kube::Error::Api(a) if a.code == 404 => {
+            format!("deploy stage `{stage}` is not on the cluster")
+        }
+        other => format!("the cluster did not answer for deploy stage `{stage}`: {other}"),
+    })?;
+    Ok(stage_group_of(&stage.data))
+}
+
+/// The group one `DeployStage`'s JSON names, if any; the parsing half of `stage_owner_group`.
+fn stage_group_of(data: &serde_json::Value) -> Option<String> {
+    data.get("spec")
+        .and_then(|s| s.get("group"))
+        .and_then(|g| g.as_str())
+        .map(str::to_string)
+        .filter(|g| !g.is_empty())
+}
+
+/// The identity a deploy principal acts with: its own groups replaced by the stage's group, so
+/// `deploy_refusal` reads "its own group" from the object (#1038). A person's identity is
+/// returned unchanged.
+async fn deploy_identity(state: &AppState, caller: &Principal) -> Result<Identity, String> {
+    let mut identity = caller.identity.clone();
+    if let Some(stage) = deploy_stage(caller.client_id.as_deref())
+        && let Some(group) = stage_owner_group(state, stage).await?
+    {
+        identity.groups = vec![group];
+    }
+    Ok(identity)
+}
+
 /// The kind a stored document is replayed as. Only `StreamApp` is a second kind; a document
 /// without a `kind` (everything recorded before #940) and an unknown one replay as a Pipeline,
 /// so they are refused with the pipeline sentence rather than silently skipped.
@@ -691,8 +739,12 @@ pub async fn record(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
+    let identity = match deploy_identity(&s, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
+    };
     if let Some(sentence) = deploy_refusal(
-        &caller.identity,
+        &identity,
         &new.owner_group,
         &new.target,
         caller.client_id.as_deref(),
@@ -748,8 +800,12 @@ pub async fn plan(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
+    let identity = match deploy_identity(&s, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
+    };
     if let Some(sentence) = deploy_refusal(
-        &caller.identity,
+        &identity,
         &request.owner_group,
         &request.target,
         caller.client_id.as_deref(),
@@ -887,8 +943,12 @@ pub async fn rollback(
     }
     // A deploy principal (#57) replays nothing outside its own stage or group: a rollback
     // applies the stored documents and records a new row, so it is a deploy to `row.target`.
+    let identity = match deploy_identity(&s, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
+    };
     if let Some(sentence) = deploy_refusal(
-        &caller.identity,
+        &identity,
         &row.owner_group,
         &row.target,
         caller.client_id.as_deref(),
@@ -1093,6 +1153,43 @@ mod tests {
             None,
             "an administrator still passes"
         );
+    }
+
+    #[test]
+    fn stage_group_of_reads_the_spec() {
+        assert_eq!(
+            stage_group_of(&serde_json::json!({"spec": {"group": "demo"}})).as_deref(),
+            Some("demo")
+        );
+        assert_eq!(stage_group_of(&serde_json::json!({"spec": {}})), None);
+        assert_eq!(
+            stage_group_of(&serde_json::json!({"spec": {"group": ""}})),
+            None,
+            "an empty group names none"
+        );
+        assert_eq!(stage_group_of(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_stage_group_makes_the_group_rule_pass() {
+        let mut identity = identity("gh", &[], false);
+        identity.groups = vec!["demo".to_string()];
+        assert_eq!(
+            deploy_refusal(
+                &identity,
+                "demo",
+                "dev",
+                Some("stardelt-deploy-dev"),
+                "plan"
+            ),
+            None,
+            "the stage's group is the deploy principal's own group"
+        );
+        let mut without = identity.clone();
+        without.groups = Vec::new();
+        let refused = deploy_refusal(&without, "demo", "dev", Some("stardelt-deploy-dev"), "plan")
+            .expect("no group means the own-group sentence");
+        assert!(refused.contains("its own group"), "{refused}");
     }
 
     #[test]
