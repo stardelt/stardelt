@@ -189,6 +189,8 @@ STS_ROLE_ARN = "arn:aws:iam::000000000000:role/stardelt"
 CATALOG_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/catalogs" % NAMESPACE
 SQLWAREHOUSE_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/sqlwarehouses" % NAMESPACE
 SERVICEPRINCIPAL_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/serviceprincipals" % NAMESPACE
+SPARKCLUSTER_PATH = "/apis/stardelt.io/v1alpha1/namespaces/%s/sparkclusters" % NAMESPACE
+SERVICEACCOUNT_PATH = "/api/v1/namespaces/%s/serviceaccounts/%s" % (NAMESPACE, "%s")
 CONFIGMAP_PATH = "/api/v1/namespaces/%s/configmaps" % NAMESPACE
 
 # The two ConfigMaps the warehouse half writes (platform#312). Both are created
@@ -680,6 +682,51 @@ def workload_identities():
         if not isinstance(identity, str) or not identity.startswith("kubernetes~"):
             continue
         index.setdefault(group, set()).add(identity)
+    return index
+
+
+def driver_identities():
+    """`{"<ownerGroup>": set("kubernetes~<uid>")}` from every `SparkCluster`'s driver
+    ServiceAccount (#493, #1100).
+
+    A group's cluster runs its driver as `spark-cluster-driver-<group>`; the catalog
+    principal of that token is `kubernetes~<ServiceAccount uid>` (#538). The name is
+    deterministic, so no status field is read. An install whose Role predates this read
+    answers 403 and returns None (the caller keeps every `kubernetes~` assignee, the
+    rule of #693); a missing CRD (404) returns {}; a cluster whose driver SA does not
+    exist yet answers 404 for that SA and is skipped. An identity is a principal id and
+    is never printed.
+    """
+    status, listing = k8s_request("GET", SPARKCLUSTER_PATH)
+    if status == 403:
+        print(
+            "access-sync: no SparkCluster read (HTTP 403); driver identities kept as they are"
+        )
+        return None
+    if status == 404:
+        print("access-sync: no SparkCluster CRD (HTTP 404); no driver identities")
+        return {}
+    if status != 200 or listing is None:
+        fail("cannot list SparkClusters (HTTP %s)" % status)
+    index = {}
+    for item in listing.get("items") or []:
+        group = ((item.get("spec") or {}).get("owner") or {}).get("group")
+        if not isinstance(group, str) or not group:
+            continue
+        status, account = k8s_request(
+            "GET", SERVICEACCOUNT_PATH % ("spark-cluster-driver-%s" % group)
+        )
+        if status == 403:
+            print(
+                "access-sync: no ServiceAccount read (HTTP 403); driver identities kept as they are"
+            )
+            return None
+        if status != 200 or account is None:
+            continue
+        uid = (account.get("metadata") or {}).get("uid")
+        if not isinstance(uid, str) or not uid:
+            continue
+        index.setdefault(group, set()).add("kubernetes~" + uid)
     return index
 
 
@@ -1904,9 +1951,12 @@ def main():
     catalogs = list_catalogs()
     warehouses = warehouse_pairs(list_warehouses())
     static = static_assignees()
-    workloads = workload_identities()
-    workloads_read = workloads is not None
-    workloads = workloads or {}
+    principals = workload_identities()
+    drivers = driver_identities()
+    workloads_read = principals is not None and drivers is not None
+    workloads = {group: set(identities) for group, identities in (principals or {}).items()}
+    for group, identities in (drivers or {}).items():
+        workloads.setdefault(group, set()).update(identities)
     groups = managed_groups(catalogs) | warehouse_groups(warehouses)
 
     # 1. Keycloak, read-only, before any write: a realm that refuses this client
