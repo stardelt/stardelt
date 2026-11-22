@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
-# Does a session on a group SparkCluster read Iceberg as its group? (#493, #492)
-#   bash scripts/spike-spark-cluster-read.sh
-# Prints R1-R5 (what is installed), S1-S3 (what a session does), then deletes its client pod.
+# A session on a group SparkCluster reads Iceberg as the group (#493 point 1, #1169).
+#
+#   make verify-spark-group-read
+#
+# The driver of a group SparkCluster runs as `spark-cluster-driver-<group>` and carries a
+# projected catalog token (audience `stardelt-catalog-workload`). A session that names
+# `rest.auth.type=io.stardelt.iceberg.TokenFileAuthManager` and `rest.auth.token-file` reads
+# Iceberg with that token, not with the caller's; this checks the audience, the mount, the
+# catalog's answer and 365 real rows. Read-only in the catalog: `whoami` only, no
+# `/catalog/v1/config`, no grant, no SparkCluster created — the cluster must already exist.
+#
+# Environment: NS default stardelt, CLUSTER default demo, ROWS default 365,
+# TIMEOUT default 300s. Exit 0 = PASS, 1 = FAIL, 3 = UNVERIFIED (no group cluster, no
+# kubectl/python3, the client pod did not finish).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
@@ -16,13 +27,18 @@ trap 'kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1 || t
 
 TIMEOUT="${TIMEOUT:-300s}"
 
-command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
-command -v python3 >/dev/null 2>&1 || { echo "UNVERIFIED (python3 not found)"; exit 3; }
+ROWS="${ROWS:-365}"
+failures=0
+unverified() { echo "UNVERIFIED ($*)"; exit 3; }
+fail() { failures=$((failures + 1)); printf '✗ %s\n' "$*"; }
+pass() { printf '✓ %s\n' "$*"; }
+
+command -v kubectl >/dev/null 2>&1 || unverified "kubectl not found"
+command -v python3 >/dev/null 2>&1 || unverified "python3 not found"
 
 # R1 — the cluster: phase, endpoint, driver ServiceAccount.
 if ! cluster_json="$(kubectl -n "$NS" get sparkcluster "$CLUSTER" -o json 2>&1)"; then
-  echo "UNVERIFIED (SparkCluster ${CLUSTER} in ${NS}: $(printf '%s\n' "$cluster_json" | tail -n 1))"
-  exit 3
+  unverified "SparkCluster ${CLUSTER} in ${NS}: $(printf '%s\n' "$cluster_json" | tail -n 1)"
 fi
 printf '%s' "$cluster_json" | python3 -c '
 import json, sys
@@ -102,6 +118,13 @@ else
   printf '%s\n' "$whoami_out" | grep -m1 '^R4 ' || echo "R4 principal=UNVERIFIED (no answer)"
 fi
 
+expected_principal="system:serviceaccount:${NS}:spark-cluster-driver-${CLUSTER}"
+if printf '%s\n' "$whoami_out" | grep -Fqx "R4 principal=${expected_principal}"; then
+  pass "R4 the driver's token is ${expected_principal}"
+else
+  fail "R4 the driver's token is not ${expected_principal}: $(printf '%s' "$whoami_out" | grep -F 'R4 ' | tail -1)"
+fi
+
 # R5 — the client image is the notebook image from helm-values/jupyterhub.yaml, never a literal
 # (scripts/check-notebook-image-pin.sh keeps it in step, as verify-spark-demo-query.sh reads it).
 client_digest="$(grep -m1 -E '^[[:space:]]*tag:[[:space:]]*"dev@sha256:[0-9a-f]{64}"' helm-values/jupyterhub.yaml | sed -E 's/.*"dev@(sha256:[0-9a-f]{64})".*/\1/')"
@@ -164,8 +187,7 @@ spec:
               print("S3 file-auth=refused", type(e).__name__, str(e)[:200], flush=True)
 EOF
 )"; then
-  echo "UNVERIFIED (the client pod could not be created: $(printf '%s\n' "$out" | tail -n 1))"
-  exit 3
+  unverified "the client pod could not be created: $(printf '%s\n' "$out" | tail -n 1)"
 fi
 
 phase=""
@@ -181,6 +203,27 @@ done
 logs="$(kubectl -n "$NS" logs "$POD" 2>&1 || true)"
 printf '%s\n' "$logs" | grep -E '^S[123] ' || true
 case "$phase" in
-  Succeeded|Failed) exit 0 ;;
-  *) echo "UNVERIFIED (the client pod ended in phase ${phase:-Unknown} within ${TIMEOUT}: the session did not finish)"; exit 3 ;;
+  Succeeded) ;;
+  *) unverified "the client pod ended in phase ${phase:-Unknown} within ${TIMEOUT}" ;;
 esac
+if printf '%s\n' "$logs" | grep -Fqx 'S1 range10= 10'; then
+  pass "S1 a session on the group server answers range(10) = 10"
+else
+  fail "S1 the session did not answer range(10) = 10"
+fi
+if printf '%s\n' "$logs" | grep -Fqx 'S2 no-config=refused AnalysisException'; then
+  pass "S2 a session that names no catalog is refused (the runtime names none)"
+else
+  fail "S2 a session that names no catalog was not refused with AnalysisException"
+fi
+if printf '%s\n' "$logs" | grep -Fqx "S3 file-auth= ${ROWS}"; then
+  pass "S3 the file-auth session reads ${ROWS} rows as the group"
+else
+  fail "S3 the file-auth session did not read ${ROWS} rows: $(printf '%s\n' "$logs" | grep -F 'S3 ' | tail -1)"
+fi
+if [ "$failures" -eq 0 ]; then
+  echo "verify-spark-cluster-read: PASS (4 checks)"
+  exit 0
+fi
+echo "verify-spark-cluster-read: FAIL (${failures})"
+exit 1

@@ -231,6 +231,10 @@ verify-spark-cluster: _context ## One SparkCluster up and down: identity, guards
 verify-spark-driver-identity: _context ## Every group SparkCluster's driver ServiceAccount, its status identity and the catalog audience (#493, #1100, #1102)
 	@NS=$(NAMESPACE) bash scripts/verify-spark-driver-identity.sh
 
+.PHONY: verify-spark-group-read
+verify-spark-group-read: _context ## A session on a group SparkCluster reads Iceberg as the group (#493, #1169)
+	@NS=$(NAMESPACE) bash scripts/verify-spark-cluster-read.sh
+
 .PHONY: verify-spark-pipeline
 verify-spark-pipeline: _context ## One spark-pipeline task pod: run a graph as the demo principal, read the table back (manual; creates and drops a schema)
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-spark-pipeline.sh
