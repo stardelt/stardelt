@@ -95,3 +95,8 @@ ensure_secret airflow-nova-api username=nova-api password=@rand
 ensure_secret superset-secret-key secret-key=@rand
 ensure_secret superset-admin username=admin password=@rand \
   firstname=stardelt lastname=Admin email=admin@stardelt.local
+
+# Nova's Superset service account for dashboard bundles (#115, spike #1210): Nova
+# imports as this user, and the Superset init Job converges the user from this same
+# key. Generated once and kept, like the rest.
+ensure_secret superset-nova username=stardelt-nova password=@rand

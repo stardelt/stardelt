@@ -59,6 +59,15 @@ extraEnvRaw:
         name: trino-password-db
         key: password
         optional: true
+  # Nova's Superset service account (#115, spike #1210). The init Job converges the
+  # user from this key; Nova reads the same key as NOVA_SUPERSET_PASSWORD. Optional
+  # so an install that never ran scripts/app-secrets.sh still starts its init Job.
+  - name: STARDELT_SUPERSET_NOVA_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: superset-nova
+        key: password
+        optional: true
   - name: STARDELT_PUBLIC_URL
     valueFrom:
       configMapKeyRef:
@@ -161,6 +170,8 @@ init:
     # import_datasources.yaml above created. Idempotent: converges the exact permission set.
     echo "Converging the analyst role..."
     python "{{ .Values.extraConfigMountPath }}/superset-analyst-role.py"
+    echo "Converging Nova's Superset user..."
+    python "{{ .Values.extraConfigMountPath }}/superset-nova-user.py"
   loadExamples: false
 
 supersetNode:
