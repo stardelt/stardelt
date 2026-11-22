@@ -142,7 +142,8 @@ fi
 
 rewrite_files "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" "$operator_digest" "$nova_digest" "$spark_digest"
 
-# Spark is pinned in two files; its writer lives in pin-image.sh so the manual
+# Spark is pinned in three files (manifest, runtime catalogue, the loader's task pod);
+# its writer lives in pin-image.sh so the manual
 # and the rollup path cannot drift.
 if [ "$old_spark" != "$spark_digest" ]; then
   APP=spark WRITE_MANIFEST_ONLY=1 ./scripts/pin-image.sh >/dev/null
