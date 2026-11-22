@@ -38,9 +38,9 @@
 #     warehouse — and nothing broader. Its secret is read from the API, never mounted
 #     and never logged.
 #   * Kubernetes: ServiceAccount `access-sync` may only `get` those three Secrets,
-#     `get/list` catalogs, sqlwarehouses and serviceprincipals, `patch` their `status`
-#     subresource, and `get/update/patch` the two ConfigMaps it converges. No
-#     create/delete anywhere:
+#     `get/list` catalogs, sqlwarehouses, serviceprincipals and sparkclusters, `get`
+#     serviceaccounts (the driver's uid, #493), `patch` their `status` subresource, and
+#     `get/update/patch` the two ConfigMaps it converges. No create/delete anywhere:
 #     the CronJob never removes a warehouse or data, a Catalog deleted by a person
 #     leaves its warehouse behind (design §2.5) — the job then logs `orphan warehouse
 #     <name>` — and the ConfigMaps are the Makefile's to create.
@@ -80,12 +80,18 @@ rules:
     resources: ["secrets"]
     resourceNames: ["svc-catalog-operator", "stardelt-s3-creds", "stardelt-oidc-clients"]
     verbs: ["get"]
-  # Read every Catalog, SqlWarehouse and ServicePrincipal; the names are chosen by
-  # users, so no resourceNames here. The ServicePrincipal read gives a workload its
-  # owner group's role as `kubernetes~<uid>` (#492).
+  # Read every Catalog, SqlWarehouse, ServicePrincipal and SparkCluster; the names are
+  # chosen by users, so no resourceNames here. The ServicePrincipal read gives a
+  # workload its owner group's role as `kubernetes~<uid>` (#492), and the SparkCluster
+  # read gives a group's driver its own (#493).
   - apiGroups: ["stardelt.io"]
-    resources: ["catalogs", "sqlwarehouses", "serviceprincipals"]
+    resources: ["catalogs", "sqlwarehouses", "serviceprincipals", "sparkclusters"]
     verbs: ["get", "list"]
+  # The driver ServiceAccount's uid: a group's SparkCluster runs as
+  # `spark-cluster-driver-<group>` (#493, #1100).
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
   # Status only: the sync never edits a spec (a spec is a person's input). It owns
   # the SqlWarehouse status (`phase`, `renderedGroup`, `engine`, `Rendered`) and the
   # Catalog status.
