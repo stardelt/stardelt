@@ -704,6 +704,8 @@ pub fn service_principals() -> crate::pipelines::ServicePrincipalsResponse {
         audiences: vec!["lakekeeper".into()],
         ready: true,
         message: None,
+        workload_identity: None,
+        client_id: None,
     };
     ServicePrincipalsResponse {
         principals: vec![

@@ -9098,7 +9098,7 @@
         "tags": [
           "public"
         ],
-        "description": "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
+        "description": "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `workloadIdentity` is `status.workloadIdentity` — the catalog principal `kubernetes~<ServiceAccount uid>` (#492) — and `clientId` is `status.clientId`; both are absent until the operator has written them. `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
         "operationId": "service_principals_list",
         "responses": {
           "200": {
@@ -16364,6 +16364,13 @@
               "type": "string"
             }
           },
+          "clientId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`status.clientId`: the identity provider's client (`sp-<name>`); `null` until written."
+          },
           "message": {
             "type": [
               "string",
@@ -16382,6 +16389,13 @@
           },
           "ready": {
             "type": "boolean"
+          },
+          "workloadIdentity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`status.workloadIdentity`: the catalog principal this principal's workloads become,\n`kubernetes~<ServiceAccount uid>` (#492, #650). `null` until the operator has written it."
           }
         }
       },
