@@ -153,6 +153,7 @@ mod shared_accounts;
 mod stages;
 mod statements;
 mod streams;
+mod superset;
 mod trino;
 mod user_settings;
 mod verified_queries;
@@ -186,6 +187,14 @@ pub struct AppState {
     /// Superset and JupyterHub are embedded in Nova's own UI; Nova reads their
     /// headers (and probes them) where they actually run.
     pub superset_url: String,
+    /// The Superset API base for dashboard bundles (#115): the public https URL when the
+    /// platform has a base domain, because Superset's session cookie is `Secure` and the
+    /// import slice needs a session. `superset_url` above stays the in-cluster probe and
+    /// frame target.
+    pub superset_api_url: String,
+    /// Nova's Superset service user (`superset.rs`, #115). `None` unless
+    /// `NOVA_SUPERSET_PASSWORD` is set: the export route then answers 503 and says so.
+    pub superset: Option<superset::ServiceUser>,
     pub jupyterhub_url: String,
     pub warehouse_name: String,
     pub stage_name: Option<String>,
@@ -911,6 +920,13 @@ fn admin_router() -> Router<Arc<AppState>> {
         // round (#263). The same administrator gate as `/api/apps` above; a non-admin
         // answers its 403 sentence.
         .route("/catalog/metrics/refresh", post(catalog_metrics::refresh))
+        // The ZIP Superset exports for one dashboard (#115), for dashboard bundles. The
+        // admin table is mounted behind `auth::require_admin`: administrator-only, so
+        // Nova's service-user export cannot be reached by a bundle author.
+        .route(
+            "/admin/dashboards/{id}/export",
+            get(superset::export_dashboard),
+        )
 }
 
 #[tokio::main]
@@ -1150,6 +1166,23 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    let superset_url =
+        std::env::var("NOVA_SUPERSET_URL").unwrap_or_else(|_| "http://superset:8088".into());
+    // The API base for dashboard bundles (#115) is the public https URL, the one a browser
+    // uses: Superset's session cookie is `Secure`, so a session POST needs TLS. Its
+    // certificate is public, so no CA is added. `NOVA_SUPERSET_API_URL` overrides it; without
+    // a base domain the in-cluster URL stays (GETs work there, the import slice does not).
+    let superset_api_url = std::env::var("NOVA_SUPERSET_API_URL")
+        .ok()
+        .map(|url| url.trim().trim_end_matches('/').to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            let domain = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
+            let domain = domain.trim();
+            (!domain.is_empty()).then(|| format!("https://superset.{domain}"))
+        })
+        .unwrap_or_else(|| superset_url.clone());
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
@@ -1157,8 +1190,9 @@ async fn main() -> anyhow::Result<()> {
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
             .unwrap_or_else(|_| "http://lakekeeper.stardelt.svc.cluster.local:8181".into()),
         catalog_token,
-        superset_url: std::env::var("NOVA_SUPERSET_URL")
-            .unwrap_or_else(|_| "http://superset:8088".into()),
+        superset_url,
+        superset_api_url,
+        superset: superset::service_user(),
         jupyterhub_url: std::env::var("NOVA_JUPYTERHUB_URL")
             .unwrap_or_else(|_| "http://proxy-public:80".into()),
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
@@ -1446,6 +1480,8 @@ mod router_tests {
             shared_accounts: vec![],
             catalog_token,
             superset_url: "http://127.0.0.1:1".into(),
+            superset_api_url: "http://127.0.0.1:1".into(),
+            superset: None,
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
             stage_name,

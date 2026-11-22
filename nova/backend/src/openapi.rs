@@ -175,6 +175,7 @@ pub struct ErrorResponse {
         crate::statements::chunk,
         crate::statements::cancel,
         crate::admin_catalogs::list,
+        crate::superset::export_dashboard,
         crate::mcp_audit::list,
         crate::model_usage::list,
         crate::admin_catalogs::update_access,

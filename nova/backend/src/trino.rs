@@ -673,6 +673,8 @@ mod tests {
             // No catalog client in these tests: Lakekeeper is called as before (#222).
             catalog_token: None,
             superset_url: "http://superset:8088".into(),
+            superset_api_url: "http://superset:8088".into(),
+            superset: None,
             jupyterhub_url: "http://proxy-public:80".into(),
             warehouse_name: "warehouse".into(),
             stage_name: None,

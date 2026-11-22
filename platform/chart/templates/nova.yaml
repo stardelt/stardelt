@@ -381,6 +381,11 @@ spec:
                   name: {{ .Values.nova.airflow.passwordSecret.name }}
                   key: {{ .Values.nova.airflow.passwordSecret.key }}
             {{- end }}
+            # Nova's Superset service account for dashboard bundles (#115). Optional: an
+            # install without scripts/app-secrets.sh runs without dashboard bundling.
+            - name: NOVA_SUPERSET_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: superset-nova, key: password, optional: true }
             {{- if .Values.jupyterhub.enabled }}
             # Notebook servers (stardelt-nova#652 W3): Nova is the JupyterHub service
             # `nova` — read the person's server state, start it, stop it. Never
