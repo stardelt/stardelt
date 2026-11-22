@@ -139,6 +139,24 @@ pub fn needs_update(existing: &serde_json::Value, desired: &serde_json::Value) -
         || has_trino_audience(existing) != has_trino_audience(desired)
 }
 
+/// The stage that owns `stage`'s subject when it is not `stage` itself: the oldest stage in
+/// the namespace that pins the same `spec.subject` (creationTimestamp, then name). Keycloak
+/// cannot tell two federated clients with one (issuer, sub) apart and refuses the second (#1163).
+pub fn subject_holder(stage: &DeployStage, all: &[DeployStage]) -> Option<String> {
+    let key = |s: &DeployStage| {
+        (
+            s.metadata.creation_timestamp.clone().map(|t| t.0),
+            s.name_any(),
+        )
+    };
+    let holder = all
+        .iter()
+        .filter(|s| s.spec.subject == stage.spec.subject && s.metadata.deletion_timestamp.is_none())
+        .min_by_key(|s| key(s))?;
+    let name = holder.name_any();
+    (name != stage.name_any()).then_some(name)
+}
+
 /// Whether this namespace owns a Keycloak: ConfigMap `keycloak-env` carries `KC_HOSTNAME` and
 /// Secret `keycloak-admin` exists. A dev-mode install has neither, and the operator never
 /// writes to an identity provider it does not own.
@@ -358,6 +376,18 @@ pub async fn reconcile_deploy_stage(
             .await?;
     }
 
+    let stages: Api<DeployStage> = Api::namespaced(ctx.client.clone(), &namespace);
+    let all = stages.list(&kube::api::ListParams::default()).await?.items;
+    if let Some(holder) = subject_holder(&stage, &all) {
+        tracing::warn!(stage = %name, %namespace, %holder,
+            "stage {holder} already pins this subject; no deploy client rendered (#1163)");
+        if let Err(message) = delete_deploy_stage_client(&ctx, &namespace, &name).await {
+            tracing::warn!(stage = %name, %namespace, %message, "cannot remove the duplicate client");
+            return Ok(Action::requeue(Duration::from_secs(30)));
+        }
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+
     match ensure_deploy_stage_client(&ctx, &namespace, &stage).await {
         Err(message) => {
             tracing::warn!(stage = %name, %namespace, %message, "deploy client not rendered");
@@ -385,6 +415,56 @@ mod tests {
             "spec": { "subject": "repo:stardelt/stardelt:ref:refs/heads/main" }
         }))
         .expect("DeployStage")
+    }
+
+    fn stage_named(name: &str, subject: &str, created: &str) -> DeployStage {
+        serde_json::from_value(json!({
+            "metadata": {
+                "name": name,
+                "namespace": "stardelt",
+                "creationTimestamp": created
+            },
+            "spec": { "subject": subject }
+        }))
+        .expect("DeployStage")
+    }
+
+    #[test]
+    fn the_older_stage_keeps_the_subject() {
+        let subject = "repo:stardelt/stardelt:ref:refs/heads/main";
+        let dev = stage_named("dev", subject, "2026-11-22T02:46:00Z");
+        let demo_ci = stage_named("demo-ci", subject, "2026-11-22T12:20:00Z");
+        let all = vec![dev.clone(), demo_ci.clone()];
+        assert_eq!(subject_holder(&demo_ci, &all), Some("dev".to_string()));
+        assert_eq!(subject_holder(&dev, &all), None);
+    }
+
+    #[test]
+    fn different_subjects_do_not_conflict() {
+        let dev = stage_named(
+            "dev",
+            "repo:stardelt/stardelt:ref:refs/heads/main",
+            "2026-11-22T02:46:00Z",
+        );
+        let staging = stage_named(
+            "staging",
+            "repo:stardelt/stardelt:ref:refs/heads/staging",
+            "2026-11-22T12:20:00Z",
+        );
+        let all = vec![dev.clone(), staging.clone()];
+        assert_eq!(subject_holder(&dev, &all), None);
+        assert_eq!(subject_holder(&staging, &all), None);
+    }
+
+    #[test]
+    fn a_stage_being_deleted_does_not_hold_the_subject() {
+        let subject = "repo:stardelt/stardelt:ref:refs/heads/main";
+        let mut dev = stage_named("dev", subject, "2026-11-22T02:46:00Z");
+        dev.metadata.deletion_timestamp =
+            Some(serde_json::from_str("\"2026-11-22T12:30:00Z\"").expect("timestamp"));
+        let demo_ci = stage_named("demo-ci", subject, "2026-11-22T12:20:00Z");
+        let all = vec![dev, demo_ci.clone()];
+        assert_eq!(subject_holder(&demo_ci, &all), None);
     }
 
     #[test]
@@ -585,6 +665,24 @@ mod tests {
         }
         if uri.contains("/proxy/realms/master/protocol/openid-connect/token") {
             return Some((200, json!({"access_token": "tok"})));
+        }
+        // The subject-holder lookup (#1163): only the stage under test pins this subject.
+        if method == "GET" && uri.contains("/deploystages") {
+            return Some((
+                200,
+                json!({
+                    "apiVersion": "stardelt.io/v1alpha1",
+                    "kind": "DeployStageList",
+                    "items": [{
+                        "metadata": {
+                            "name": "prod",
+                            "namespace": "stardelt",
+                            "creationTimestamp": "2026-11-22T02:46:00Z"
+                        },
+                        "spec": { "subject": "repo:stardelt/stardelt:ref:refs/heads/main" }
+                    }]
+                }),
+            ));
         }
         None
     }
