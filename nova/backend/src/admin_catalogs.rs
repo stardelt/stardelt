@@ -208,6 +208,7 @@ pub struct NewTeamResponse {
         (status = 200, description = "One row per catalog, medallion layers first, then by name", body = [AdminCatalog]),
         (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer, or Nova may not list catalogs", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
@@ -239,6 +240,7 @@ pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
         (status = 429, description = "More than 30 changes this hour", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer, or Nova may not patch catalogs", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Nova has no cluster client", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn update_access(
@@ -367,6 +369,7 @@ pub(crate) async fn update_access(
         (status = 429, description = "More than ten team spaces this hour", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer, or Nova may not create the resources", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Nova has no cluster client", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn create_team(

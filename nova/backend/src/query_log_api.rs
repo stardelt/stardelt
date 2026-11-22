@@ -342,6 +342,7 @@ pub struct QueryLogPage {
         (status = 400, description = "A parameter is not valid; the message names it", body = crate::openapi::ErrorResponse),
         (status = 403, description = "scope=all by somebody who is not an administrator", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list(
@@ -611,6 +612,7 @@ impl UsagePage {
         (status = 400, description = "A parameter is not valid; the message names it", body = crate::openapi::ErrorResponse),
         (status = 403, description = "scope=all by somebody who is not an administrator", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn usage(
@@ -860,6 +862,7 @@ pub struct QueryLogDetail {
         (status = 200, description = "The stored query", body = QueryLogDetail),
         (status = 404, description = "No such query, or it is not the caller's to see", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn detail(
@@ -981,6 +984,7 @@ pub async fn detail(
         (status = 200, description = "The stored profile: plan, operators, spill and split counts, inputs", body = Object),
         (status = 404, description = "No such query, it is not the caller's to see, or it has no profile", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn profile(
@@ -1089,6 +1093,7 @@ struct HistoryRow {
         (status = 200, description = "The runs of the same statement, newest first", body = QueryHistory),
         (status = 404, description = "No such query, or it is not the caller's to see", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn history(

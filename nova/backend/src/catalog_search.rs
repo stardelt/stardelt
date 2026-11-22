@@ -170,6 +170,7 @@ fn matches_words(namespace: &str, table: &str, words: &[String]) -> bool {
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "A `tag`, `owner` or `domain` filter was given and the state store is disabled", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn search(

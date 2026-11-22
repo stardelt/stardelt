@@ -804,6 +804,7 @@ pub async fn first_writable_catalog(
         (status = 200, description = "The browsable catalogs and the default one", body = CatalogsResponse),
         (status = 502, description = "The query engine or the catalog is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "A catalog the engine lists has no warehouse", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list_catalogs(
@@ -904,6 +905,7 @@ pub async fn list_catalogs(
         (status = 200, description = "Warehouse name and id", body = WarehouseInfo),
         (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The configured warehouse does not exist", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
@@ -934,6 +936,7 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The configured warehouse does not exist", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list_namespaces(
@@ -967,6 +970,7 @@ pub async fn list_namespaces(
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn create_namespace(
@@ -1025,6 +1029,7 @@ pub async fn create_namespace(
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list_tables(
@@ -1091,6 +1096,7 @@ pub async fn list_tables(
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn table_metadata(
@@ -1229,6 +1235,7 @@ fn stringify_snapshot_ids(mut r: crate::trino::QueryResult) -> crate::trino::Que
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn table_history(
@@ -1272,6 +1279,7 @@ pub async fn table_history(
         (status = 403, description = "Only the catalog owner group or administrators may roll back", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn table_rollback(

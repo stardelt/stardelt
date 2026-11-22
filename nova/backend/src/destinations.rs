@@ -183,6 +183,7 @@ pub fn may_see(destination: &Destination, principal: Option<&Principal>, _dev_us
         (status = 200, description = "The caller's groups' destinations", body = Vec<Destination>),
         (status = 403, description = "The caller is not a member of the requested group", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list(
@@ -242,6 +243,7 @@ pub async fn list(
         (status = 403, description = "The caller is not a member of the owner group", body = crate::openapi::ErrorResponse),
         (status = 409, description = "A destination with this name already exists in the group", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn create(
@@ -306,6 +308,7 @@ pub async fn create(
         (status = 404, description = "No such destination, or it is not the caller's", body = crate::openapi::ErrorResponse),
         (status = 400, description = "The id is not a number", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn remove(
@@ -451,6 +454,7 @@ const INSERT_DELIVERY: &str = "INSERT INTO destination_delivery \
         (status = 400, description = "An email destination, or a config without a usable url", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such destination, or it is not the caller's", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn test(

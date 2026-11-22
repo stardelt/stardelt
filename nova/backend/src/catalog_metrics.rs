@@ -757,6 +757,7 @@ fn demo_numbers(state: &AppState) -> CatalogStats {
         (status = 200, description = "One entry per browsable catalog, medallion layers first, then by name, with the totals", body = MetricsResponse),
         (status = 403, description = "No catalog is open to the caller", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable, so the catalogs cannot be named", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Principal>>) -> Response {
@@ -850,6 +851,7 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
         (status = 202, description = "The round is running; the numbers follow on the next read", body = RefreshAccepted),
         (status = 403, description = "Not an administrator", body = crate::openapi::ErrorResponse),
         (status = 429, description = "The numbers were refreshed less than a minute ago", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn refresh(State(s): State<Arc<AppState>>) -> Response {

@@ -1079,6 +1079,7 @@ async fn catalog_or_error(
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn read(
@@ -1154,6 +1155,7 @@ pub(crate) async fn documentation_for(
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable, did not answer, or stayed busy", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn update(
@@ -1208,6 +1210,7 @@ pub async fn update(
         (status = 404, description = "No such catalog, no such table or no such column in the current schema", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn update_column(

@@ -923,6 +923,7 @@ pub(crate) async fn put(
         (status = 404, description = "No such stream, another namespace, or the caller may not act on it", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn remove(

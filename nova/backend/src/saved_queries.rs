@@ -153,6 +153,7 @@ const SHARED_COLUMN: &str = "COALESCE(array_agg(q.group_name ORDER BY q.group_na
     responses(
         (status = 200, description = "The caller's saved queries", body = Vec<SavedQuery>),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list(
@@ -199,6 +200,7 @@ pub async fn list(
         (status = 201, description = "The stored row", body = SavedQuery),
         (status = 400, description = "The title or the SQL is empty or too long", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn create(
@@ -249,6 +251,7 @@ pub async fn create(
         (status = 204, description = "Deleted"),
         (status = 404, description = "No such saved query, or it is not the caller's", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn remove(
@@ -293,6 +296,7 @@ pub async fn remove(
         (status = 400, description = "The group name is not valid", body = crate::openapi::ErrorResponse),
         (status = 404, description = "The id is not a number", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn share(
@@ -346,6 +350,7 @@ pub async fn share(
         (status = 204, description = "The share is gone"),
         (status = 404, description = "No such share, or the query is not the caller's", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn unshare(

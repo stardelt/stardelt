@@ -596,7 +596,8 @@ pub(crate) fn build_graph(
     ),
     responses(
         (status = 200, description = "Lineage graph", body = LineageGraph),
-        (status = 403, description = "Not visible", body = crate::openapi::ErrorResponse)
+        (status = 403, description = "Not visible", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn graph(
@@ -758,7 +759,8 @@ pub struct ReadTablesQuery {
     ),
     responses(
         (status = 200, description = "The tables the caller read most, newest read first", body = ReadTables),
-        (status = 503, description = "No state store", body = crate::openapi::ErrorResponse)
+        (status = 503, description = "No state store", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn read_tables(
@@ -1119,7 +1121,8 @@ const COLUMNS_SQL: &str = "SELECT payload->'ioMetadata'->'output'->'columns', to
     responses(
         (status = 200, description = "Where each column comes from", body = ColumnLineage),
         (status = 400, description = "catalog/schema/table required", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Not visible", body = crate::openapi::ErrorResponse)
+        (status = 403, description = "Not visible", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn columns(
@@ -1214,7 +1217,8 @@ fn demo_columns_response() -> ColumnLineage {
     ),
     responses(
         (status = 200, description = "Run detail"),
-        (status = 404, description = "Not found", body = crate::openapi::ErrorResponse)
+        (status = 404, description = "Not found", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn run_detail(
