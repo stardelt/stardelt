@@ -70,6 +70,18 @@ pub fn client_payload(stage: &DeployStage) -> serde_json::Value {
                 "access.token.claim": "true",
                 "introspection.token.claim": "true"
             }
+        }, {
+            // Nova forwards this token to Trino, which checks aud against its client id "trino" (#1164).
+            "name": "aud-trino",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "consentRequired": false,
+            "config": {
+                "included.client.audience": "trino",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true"
+            }
         }]
     })
 }
@@ -88,6 +100,21 @@ fn mapper_audience(value: &serde_json::Value) -> Option<&str> {
         .get("config")?
         .get("included.custom.audience")?
         .as_str()
+}
+
+/// Whether a client carries the mapper that puts Trino in the token's audience (#1164).
+fn has_trino_audience(value: &serde_json::Value) -> bool {
+    value
+        .get("protocolMappers")
+        .and_then(|m| m.as_array())
+        .is_some_and(|mappers| {
+            mappers.iter().any(|m| {
+                m.get("config")
+                    .and_then(|c| c.get("included.client.audience"))
+                    .and_then(|a| a.as_str())
+                    == Some("trino")
+            })
+        })
 }
 
 /// Whether the rendered client differs from what Keycloak answers (#274 rule 1: a second
@@ -109,6 +136,7 @@ pub fn needs_update(existing: &serde_json::Value, desired: &serde_json::Value) -
         }
     }
     mapper_audience(existing) != mapper_audience(desired)
+        || has_trino_audience(existing) != has_trino_audience(desired)
 }
 
 /// Whether this namespace owns a Keycloak: ConfigMap `keycloak-env` carries `KC_HOSTNAME` and
@@ -377,7 +405,24 @@ mod tests {
             payload["protocolMappers"][0]["config"]["included.custom.audience"],
             "stardelt-deploy"
         );
+        assert_eq!(payload["protocolMappers"][1]["name"], "aud-trino");
+        assert_eq!(
+            payload["protocolMappers"][1]["config"]["included.client.audience"],
+            "trino"
+        );
         assert_eq!(payload["serviceAccountsEnabled"], true);
+    }
+
+    #[test]
+    fn a_client_without_the_trino_audience_needs_a_write() {
+        let desired = client_payload(&stage());
+        let mut existing = desired.clone();
+        let mappers = existing["protocolMappers"]
+            .as_array_mut()
+            .expect("protocolMappers is an array");
+        mappers.remove(1);
+        assert!(needs_update(&existing, &desired));
+        assert!(!needs_update(&desired, &desired));
     }
 
     #[test]
@@ -626,6 +671,9 @@ mod tests {
                         "protocolMappers": [{
                             "name": "aud-stardelt-deploy",
                             "config": { "included.custom.audience": "stardelt-deploy" }
+                        }, {
+                            "name": "aud-trino",
+                            "config": { "included.client.audience": "trino" }
                         }]
                     }]),
                 );
