@@ -90,11 +90,14 @@ fn labels(name: &str) -> BTreeMap<String, String> {
 /// The client names the file (`rest.auth.token-file`) and reads it per request, so a rotation
 /// needs no restart (#492, #769).
 pub const CATALOG_TOKEN_MOUNT: &str = "/var/run/secrets/stardelt-catalog";
-/// The audience Lakekeeper verifies (`LAKEKEEPER__OPENID_AUDIENCE` in `platform/helm-values/lakekeeper.yaml`).
-pub const CATALOG_TOKEN_AUDIENCE: &str = "lakekeeper";
+/// The audience the catalog's Kubernetes authentication verifies
+/// (`LAKEKEEPER__KUBERNETES_AUTHENTICATION_AUDIENCE` in `platform/helm-values/lakekeeper.yaml`,
+/// twin `operator/crates/stardelt-operator/values/lakekeeper.yaml`). The OIDC audience
+/// `lakekeeper` is a different token type and is refused on a ServiceAccount token (#538).
+pub const CATALOG_TOKEN_AUDIENCE: &str = "stardelt-catalog-workload";
 
 /// The `SparkConnect` a `SparkCluster` becomes. Pure: no client, no cluster state.
-/// The driver also carries a projected ServiceAccount token with audience `lakekeeper` at
+/// The driver also carries a projected ServiceAccount token with audience `stardelt-catalog-workload` at
 /// /var/run/secrets/stardelt-catalog, an identity that gives no Kubernetes rights (#492).
 pub fn spark_connect(
     name: &str,
@@ -1288,9 +1291,11 @@ mod tests {
         let server = &connect.data["spec"]["server"]["template"]["spec"];
         let volume = &server["volumes"][0];
         assert_eq!(volume["name"], json!("catalog-token"));
+        // The literal, not the constant: a constant that drifts from the catalog's verified audience
+        // is the defect this pins (#538, `make verify-catalog-workload-auth`).
         assert_eq!(
             volume["projected"]["sources"][0]["serviceAccountToken"]["audience"],
-            json!(CATALOG_TOKEN_AUDIENCE)
+            json!("stardelt-catalog-workload")
         );
         assert_eq!(
             volume["projected"]["sources"][0]["serviceAccountToken"]["path"],

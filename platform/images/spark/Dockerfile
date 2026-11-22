@@ -91,12 +91,13 @@ RUN chmod 0644 /opt/spark/jars/iceberg-spark-runtime.jar /opt/spark/jars/iceberg
 
 # --- Catalog identity from a projected token file ---------------------------
 # A workload signs in to the catalog with its ServiceAccount's projected token
-# (audience `lakekeeper`), which the kubelet rewrites before it expires (#492,
-# #769 measured it). Iceberg loads a custom `rest.auth.type` with `(String)`
-# and hands the catalog properties to `catalogSession`; this class reads the
-# file inside every `authenticate`, so a long job survives a rotation without a
-# restart. Compiled here and checked here: a class that caches the token fails
-# the build (the check writes a second token and compares the header).
+# (the projected token's audience is `stardelt-catalog-workload`), which the
+# kubelet rewrites before it expires (#492, #769 measured it). Iceberg loads a
+# custom `rest.auth.type` with `(String)` and hands the catalog properties to
+# `catalogSession`; this class reads the file inside every `authenticate`, so a
+# long job survives a rotation without a restart. Compiled here and checked
+# here: a class that caches the token fails the build (the check writes a second
+# token and compares the header).
 #
 # The jar goes to /opt/spark/jars so the driver and every executor have it on
 # the classpath without a `spark.driver.extraClassPath` setting. Apache-2.0.
