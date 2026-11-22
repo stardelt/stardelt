@@ -22,7 +22,7 @@ use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::{Deployment, StatefulSet},
     batch::v1::Job,
-    core::v1::{ConfigMap, PersistentVolumeClaim, Secret},
+    core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Secret},
 };
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::{
@@ -255,6 +255,13 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         ),
         crate::objects::spark_application_resource(),
         watcher::Config::default(),
+    )
+    // The driver pod is not owned by the StreamApp, so a label maps it back (#274 rule 4):
+    // a pod that terminates wakes the reconcile instead of a 5 s poll.
+    .watches(
+        Api::<Pod>::all(client.clone()),
+        watcher::Config::default().labels("sparkoperator.k8s.io/app-name"),
+        |pod: Pod| crate::stream_app::stream_of_pod(&pod),
     )
     .run(
         |obj, ctx| {
