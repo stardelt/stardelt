@@ -42,6 +42,11 @@ rows=(
   # paths. The pattern names the `value:` line — the `- name: PIPELINE_NOTEBOOK_IMAGE` line
   # above it carries no digest.
   "notebook-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|jupyter-singleuser:dev@sha256:"
+  # The Spark image's third copy: PIPELINE_SPARK_IMAGE in the airflow values, on both paths
+  # (#1087). `pin-image.sh spark` moves the platform line, so a rollup that leaves the
+  # operator's copy behind fails `check-operator-pins.sh`'s whole-file `airflow` row and no
+  # pin lands at all (measured on run 44999427123, 2026-11-22T07:42Z).
+  "spark-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|spark:dev@sha256:"
 )
 
 changed=""
@@ -85,7 +90,7 @@ PY
 done
 
 if [ -z "$changed" ]; then
-  echo "sync-operator-goldens: no drift (nova, loader, spark, spark-auth, superset, notebook, notebook-airflow)"
+  echo "sync-operator-goldens: no drift (nova, loader, spark, spark-auth, superset, notebook, notebook-airflow, spark-airflow)"
   exit 0
 fi
 echo "sync-operator-goldens: moved${changed}; proving it with check-operator-pins.sh"
