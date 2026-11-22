@@ -6314,6 +6314,11 @@ pub(crate) async fn validate_pipeline(
     })
 }
 
+/// The name of one listed `StreamApp` (a full object, as `streams::stream_apps` answers them).
+fn stream_name(object: &Value) -> Option<&str> {
+    object.pointer("/metadata/name").and_then(Value::as_str)
+}
+
 /// `POST /api/deployments/plan`: what creating and updating this bundle's rendered Pipeline
 /// documents on one target would do, writing nothing (#101). Each document goes through
 /// `validate_pipeline`, the same function `pipelines_validate` and every write route use, so the
@@ -6325,6 +6330,7 @@ pub(crate) async fn plan_bundle(
     notebooks_store: Option<&NotebookStore>,
     who: &Identity,
     recorded_files: Option<&[crate::deployments::DeploymentFile]>,
+    existing_streams: &[Value],
     request: crate::deployments::BundlePlanRequest,
 ) -> Result<crate::deployments::BundlePlan, Fail> {
     let resources = resources.ok_or_else(no_cluster)?;
@@ -6369,8 +6375,6 @@ pub(crate) async fn plan_bundle(
                 }
             }
             "StreamApp" => {
-                // A stream write is a PUT; without listing StreamApps the plan names every stream
-                // change as a create (#101).
                 let body: crate::streams::StreamWrite =
                     match serde_json::from_value(document.clone()) {
                         Ok(body) => body,
@@ -6393,12 +6397,25 @@ pub(crate) async fn plan_bundle(
                     continue;
                 }
                 match crate::streams::check_write(&body.name, &body, who) {
-                    Ok(_) => changes.push(PlanChange {
-                        kind: "StreamApp".into(),
-                        name: body.name.clone(),
-                        action: "create".into(),
-                        diff: Vec::new(),
-                    }),
+                    Ok(_) => {
+                        // A stream write is a PUT, so the write cannot say create or update; a listed stream
+                        // of this name does (#101). No stream diff yet: a changed stream still reads `update`
+                        // with an empty diff.
+                        let action = if existing_streams
+                            .iter()
+                            .any(|stream| stream_name(stream) == Some(body.name.as_str()))
+                        {
+                            "update"
+                        } else {
+                            "create"
+                        };
+                        changes.push(PlanChange {
+                            kind: "StreamApp".into(),
+                            name: body.name.clone(),
+                            action: action.into(),
+                            diff: Vec::new(),
+                        });
+                    }
                     Err(message) => errors.push(PlanIssue {
                         path: format!("{path} ({})", body.name),
                         message,
@@ -17275,9 +17292,17 @@ mod tests {
             plan_document("daily-trips", "analytics", "select 2", "0 3 * * *"),
         ]);
         let before = resources.list().await.expect("memory list").len();
-        let plan = plan_bundle(Some(&resources), None, None, &ada, None, request.clone())
-            .await
-            .expect("an answer");
+        let plan = plan_bundle(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            None,
+            &[],
+            request.clone(),
+        )
+        .await
+        .expect("an answer");
 
         assert!(!plan.ok, "one document is refused");
         assert_eq!(plan.errors.len(), 1, "{:?}", plan.errors);
@@ -17343,6 +17368,7 @@ mod tests {
             None,
             &ada,
             None,
+            &[],
             plan_request(vec![plan_document(
                 "other-marts",
                 "analytics",
@@ -17386,7 +17412,7 @@ mod tests {
             "0 3 * * *",
         )]);
         request.prune = true;
-        let plan = plan_bundle(Some(&resources), None, None, &ada, None, request)
+        let plan = plan_bundle(Some(&resources), None, None, &ada, None, &[], request)
             .await
             .expect("an answer");
 
@@ -17418,6 +17444,7 @@ mod tests {
             None,
             &ada,
             None,
+            &[],
             plan_request(vec![plan_document(
                 "new-marts",
                 "analytics",
@@ -17451,6 +17478,7 @@ mod tests {
             None,
             &ada,
             None,
+            &[],
             plan_request(vec![stream_document("events", "analytics")]),
         )
         .await
@@ -17466,6 +17494,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_plan_names_an_existing_stream_as_an_update() {
+        let resources = memory_with(&[], &[]);
+        let ada = who("sub-ada", &["analytics"], false);
+        let existing = vec![json!({"metadata": {"name": "events"}})];
+        let plan = plan_bundle(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            None,
+            &existing,
+            plan_request(vec![stream_document("events", "analytics")]),
+        )
+        .await
+        .expect("an answer");
+
+        assert!(plan.ok, "{:?}", plan.errors);
+        assert_eq!(plan.changes.len(), 1, "{:?}", plan.changes);
+        assert_eq!(plan.changes[0].kind, "StreamApp");
+        assert_eq!(plan.changes[0].action, "update");
+    }
+
+    #[tokio::test]
     async fn a_plan_refuses_a_bad_stream_document() {
         let resources = memory_with(&[], &[]);
         let ada = who("sub-ada", &["analytics"], false);
@@ -17477,6 +17528,7 @@ mod tests {
             None,
             &ada,
             None,
+            &[],
             plan_request(vec![document]),
         )
         .await
@@ -17501,6 +17553,7 @@ mod tests {
             None,
             &ada,
             None,
+            &[],
             plan_request(vec![stream_document("events", "other")]),
         )
         .await
