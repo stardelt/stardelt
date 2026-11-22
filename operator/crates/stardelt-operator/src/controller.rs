@@ -2345,6 +2345,19 @@ async fn reconcile_platform(
     ) {
         conditions.push(condition);
     }
+    let previous_allow_list = instance.status.as_ref().and_then(|s| {
+        s.conditions
+            .iter()
+            .find(|c| c.type_ == "AllowListNotEnforced")
+    });
+    if let Some(condition) = crate::ingress::allow_list_condition(
+        &instance.spec,
+        instance.metadata.generation,
+        previous_allow_list,
+        &now,
+    ) {
+        conditions.push(condition);
+    }
     let status = PlatformInstanceStatus {
         phase: phase.into(),
         conditions,
