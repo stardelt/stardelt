@@ -183,6 +183,20 @@ if [ -n "$CRDS_DIR" ]; then
   fi
 fi
 
+# #1126: an upgrade whose session died leaves the release `pending-*`, and helm then refuses
+# every later one ("another operation is in progress") — after this script has already moved
+# the Deployment. Stop before it moves. `helm status` failing means no release exists yet.
+if [ "$APP" = "stardelt-operator" ] && [ "${SYNC_CHART:-1}" = "1" ]; then
+  status_file="$(mktemp)"
+  if helm -n "$NS" status stardelt-operator -o json >"$status_file" 2>/dev/null; then
+    if ! python3 scripts/check_helm_release.py "$status_file"; then
+      rm -f "$status_file"
+      exit 1
+    fi
+  fi
+  rm -f "$status_file"
+fi
+
 # The deployment and the manifest are updated independently: skipping the first because the
 # cluster already matches must not skip the second, or the manifest keeps the old digest and
 # the next `kubectl apply` puts it back. (That hole shipped once — the early exit said

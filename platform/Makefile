@@ -36,7 +36,11 @@ SPARK_OPERATOR_VERSION := 2.5.2
 # (identity.keycloak.image.tag); scripts/check-version-parity.sh checks all three.
 KEYCLOAK_VERSION   := 26.8.2
 
-HELM_FLAGS := --namespace $(NAMESPACE) --create-namespace --wait --timeout 10m
+# `--atomic`: a timed-out upgrade rolls back to its previous revision instead of leaving the
+# release `pending-upgrade`, which refuses every later upgrade ("another operation is in
+# progress"); measured three times on the dev cluster (airflow 91, jupyterhub 85,
+# stardelt-operator 157 on 2026-11-22).
+HELM_FLAGS := --namespace $(NAMESPACE) --create-namespace --wait --atomic --timeout 10m
 
 SUPERSET_IMAGE := ghcr.io/stardelt/superset:dev
 JUPYTER_IMAGE  := ghcr.io/stardelt/jupyter-singleuser:dev
@@ -1402,7 +1406,11 @@ openbao: deps _context _helm-repos ## Install the sandbox secret store (OpenBao,
 	@# has been initialised, and initialisation is the next step. `helm --wait` therefore can
 	@# only time out on a first install (measured: "context deadline exceeded" after 10m with
 	@# openbao-0 Running 0/1). openbao-bootstrap.sh polls the API itself and initialises.
-	@helm upgrade --install openbao openbao/openbao --version $(OPENBAO_VERSION) $(HELM_FLAGS) --wait=false -f helm-values/openbao.yaml
+	@# --atomic=false: `--atomic` implies `--wait` whatever the flag order, so the atomic flag
+	@# that $(HELM_FLAGS) now carries would re-arm the wait and, on the timeout, uninstall the
+	@# releases it had just created (measured on helm 3.18.4: 25s, "failed, and has been
+	@# uninstalled due to atomic being set"). Both flags are switched off together.
+	@helm upgrade --install openbao openbao/openbao --version $(OPENBAO_VERSION) $(HELM_FLAGS) --wait=false --atomic=false -f helm-values/openbao.yaml
 	@# The bootstrap execs into the pod, so it must exist — not be Ready.
 	@kubectl -n $(NAMESPACE) wait --for=create --timeout=120s pod/openbao-0
 	@NAMESPACE=$(NAMESPACE) bash scripts/openbao-bootstrap.sh
@@ -1549,7 +1557,7 @@ install-operator: _context ## Install the stardelt Operator (needs ../operator)
 	@test -f $(OPERATOR_DIR)/chart/Chart.yaml || { \
 	  echo "operator chart not found at $(OPERATOR_DIR)/chart — set OPERATOR_DIR"; exit 1; }
 	@helm upgrade --install stardelt-operator $(OPERATOR_DIR)/chart \
-	  --namespace $(NAMESPACE) --create-namespace --wait --timeout 5m \
+	  --namespace $(NAMESPACE) --create-namespace --wait --atomic --timeout 5m \
 	  -f helm-values/operator.yaml \
 	  --set 'imagePullSecrets[0].name=ghcr-creds'
 	@# Helm applies chart/crds/ on `helm install` only, never on `helm upgrade`: an upgraded
