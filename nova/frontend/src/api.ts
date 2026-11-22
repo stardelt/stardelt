@@ -1941,7 +1941,9 @@ export const api = {
     jget<{ queries: RunQueryView[] }>(`/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/queries`),
   /** The checks the run's `quality` tasks declare (#829); `rows` is null until the task's log has the line. */
   pipelineRunChecks: (namespace: string, name: string, runId: string) =>
-    jget<{ checks: RunCheckView[] }>(`/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/checks`),
+    jget<{ checks: RunCheckView[]; auditBranch?: string; auditedTables?: string[] }>(
+      `/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/checks`,
+    ),
   stopPipelineRun: (ns: string, name: string, runId: string) =>
     jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/stop`, {}),
   retryPipelineRun: (ns: string, name: string, runId: string) =>

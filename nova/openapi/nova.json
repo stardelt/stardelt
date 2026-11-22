@@ -11290,6 +11290,20 @@
           "checks"
         ],
         "properties": {
+          "auditBranch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The audit branch this run wrote, when the pipeline publishes with `wap` (#114); `None` for\na `direct` pipeline. Deterministic from the run id, so a failed run can be inspected."
+          },
+          "auditedTables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tables the run wrote (`spec.tasks[].writes`), sorted; empty for a `direct` pipeline."
+          },
           "checks": {
             "type": "array",
             "items": {
