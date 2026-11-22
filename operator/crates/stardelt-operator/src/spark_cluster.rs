@@ -271,7 +271,9 @@ async fn prune_driver_identity(
     }
     let users = clusters.list(&Default::default()).await?;
     if users.items.iter().any(|other| {
-        other.name_any() != cluster && other.spec.owner.group.as_deref() == Some(group)
+        other.name_any() != cluster
+            && other.metadata.deletion_timestamp.is_none()
+            && other.spec.owner.group.as_deref() == Some(group)
     }) {
         return Ok(());
     }
@@ -1896,6 +1898,35 @@ mod tests {
             !deletes_anything(&log),
             "another cluster of the group still runs as the identity: {log}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_fellow_cluster_being_deleted_does_not_keep_the_driver_identity() {
+        let mut other = listed_cluster("other", "old");
+        other["metadata"]["deletionTimestamp"] =
+            json!(k8s_openapi::jiff::Timestamp::now().to_string());
+        let (client, requests) =
+            prune_mock(cluster_list(vec![listed_cluster("trial", "old"), other]));
+        let mut dying = cluster_with_status(
+            SparkClusterState::Running,
+            Some("old"),
+            "spark-cluster-driver-old",
+        );
+        dying.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        reconcile_spark_cluster(Arc::new(dying), ctx(client))
+            .await
+            .expect("reconcile");
+        let log = requests.lock().expect("requests").join("\n");
+        for path in [
+            "/serviceaccounts/spark-cluster-driver-old",
+            "/rolebindings/spark-cluster-driver-old",
+        ] {
+            assert!(
+                log.lines()
+                    .any(|line| line.starts_with("DELETE") && line.contains(path)),
+                "{path} is pruned although the group's other cluster is being deleted: {log}"
+            );
+        }
     }
 
     #[tokio::test]
