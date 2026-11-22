@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::{ConfigMap, Event, EventSource, ObjectReference, Pod};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Event, EventSource, ObjectReference, Pod, ServiceAccount,
+};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{OwnerReference, Time};
 use kube::ResourceExt;
@@ -268,6 +270,24 @@ fn status_value(
     })
 }
 
+/// `status_value` plus the driver's catalog identity (#493): only this write sets the two
+/// fields, so every later merge patch leaves them as they are.
+fn status_with_identity(
+    mut status: serde_json::Value,
+    account: &ServiceAccount,
+) -> serde_json::Value {
+    status["driverServiceAccount"] = json!(account.metadata.name);
+    if let Some(uid) = account
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|uid| !uid.is_empty())
+    {
+        status["workloadIdentity"] = json!(format!("kubernetes~{uid}"));
+    }
+    status
+}
+
 async fn patch_status(
     clusters: &Api<SparkCluster>,
     name: &str,
@@ -510,7 +530,7 @@ pub async fn reconcile_spark_cluster(
     }
 
     // The driver's identity must exist before the SparkConnect's driver pod is created.
-    if let Err(e) = objects::apply(
+    let mut driver_account = match objects::apply(
         &ctx.client,
         &namespace,
         &crate::spark::cluster_driver_service_account(&namespace),
@@ -518,15 +538,18 @@ pub async fn reconcile_spark_cluster(
     )
     .await
     {
-        patch_status(
-            &clusters,
-            &name,
-            status_value("Failed", None, None, None, Some(&e.to_string()), generation),
-        )
-        .await?;
-        tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
-        return Ok(action_after_failure(&e));
-    }
+        Ok(account) => account,
+        Err(e) => {
+            patch_status(
+                &clusters,
+                &name,
+                status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+            )
+            .await?;
+            tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+            return Ok(action_after_failure(&e));
+        }
+    };
     if let Err(e) = objects::apply(
         &ctx.client,
         &namespace,
@@ -563,9 +586,11 @@ pub async fn reconcile_spark_cluster(
     }
 
     // A cluster owned by a group runs the group's own code, so it gets its own driver identity
-    // bound to the shared Role (#493). A cluster owned by a person keeps the shared driver.
+    // bound to the shared Role (#493). A cluster owned by a person keeps the shared driver. The
+    // applied object replaces the shared one above: it is the identity the driver runs as, so it
+    // is the one the status names (#1102).
     if let Some(group) = spec.owner.group.as_deref() {
-        if let Err(e) = objects::apply(
+        driver_account = match objects::apply(
             &ctx.client,
             &namespace,
             &crate::spark::group_cluster_driver_service_account(&namespace, group),
@@ -573,15 +598,18 @@ pub async fn reconcile_spark_cluster(
         )
         .await
         {
-            patch_status(
-                &clusters,
-                &name,
-                status_value("Failed", None, None, None, Some(&e.to_string()), generation),
-            )
-            .await?;
-            tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
-            return Ok(action_after_failure(&e));
-        }
+            Ok(account) => account,
+            Err(e) => {
+                patch_status(
+                    &clusters,
+                    &name,
+                    status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+                )
+                .await?;
+                tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+                return Ok(action_after_failure(&e));
+            }
+        };
         if let Err(e) = objects::apply(
             &ctx.client,
             &namespace,
@@ -832,13 +860,16 @@ pub async fn reconcile_spark_cluster(
     patch_status(
         &clusters,
         &name,
-        status_value(
-            phase,
-            endpoint.as_deref(),
-            started_at.as_deref(),
-            last_activity.as_deref(),
-            message.as_deref(),
-            generation,
+        status_with_identity(
+            status_value(
+                phase,
+                endpoint.as_deref(),
+                started_at.as_deref(),
+                last_activity.as_deref(),
+                message.as_deref(),
+                generation,
+            ),
+            &driver_account,
         ),
     )
     .await?;
@@ -1043,18 +1074,30 @@ mod tests {
         ))
     }
 
+    /// The ServiceAccount the request applies, echoed back with a uid: a typed server-side apply
+    /// refuses a response of another object, and the status records the object it was given
+    /// (#1102).
+    fn sa_name_in(path: &str) -> Option<String> {
+        let name = path
+            .split('/')
+            .skip_while(|segment| *segment != "serviceaccounts")
+            .nth(1)?;
+        name.starts_with("spark-cluster-driver")
+            .then(|| name.to_string())
+    }
+
     /// The driver identities and the two cluster guards always answer with a document of their own
     /// kind: a typed server-side apply refuses a response of another kind (operator#773,
     /// operator#775).
     fn identity_response(path: &str) -> Option<(u16, String)> {
         // A cluster owned by a group applies `spark-cluster-driver-<group>` (#493), so the mock
-        // answers with the name the request asked for.
+        // answers with the name the request asked for, and a uid the status can record (#1102).
         let object_name = path.rsplit('/').next().unwrap_or("spark-cluster-driver");
-        let object = if path.contains("/serviceaccounts/spark-cluster-driver") {
+        let object = if let Some(name) = sa_name_in(path) {
             json!({
                 "apiVersion": "v1",
                 "kind": "ServiceAccount",
-                "metadata": { "name": object_name, "namespace": "data" }
+                "metadata": { "name": name, "namespace": "data", "uid": "uid-sa" }
             })
         } else if path.contains("/roles/spark-cluster-driver") {
             json!({
@@ -1466,6 +1509,28 @@ mod tests {
                 "{path} must be applied before the SparkConnect: {log}"
             );
         }
+        let status = lines
+            .iter()
+            .rfind(|line| line.starts_with("PATCH") && line.contains("/sparkclusters/trial/status"))
+            .expect("a status write");
+        let body = status
+            .split_once(' ')
+            .and_then(|(_, rest)| rest.split_once(' '))
+            .map(|(_, body)| body)
+            .expect("the recorded line carries the body");
+        let body: Value = serde_json::from_str(body).expect("the status patch is JSON");
+        assert_eq!(
+            body["status"]["workloadIdentity"],
+            json!("kubernetes~uid-sa"),
+            "{log}"
+        );
+        // The fixture's cluster is owned by `mobility-analytics`, so the driver runs as the
+        // group's ServiceAccount (#493, #1100): the status names that one, not the shared one.
+        assert_eq!(
+            body["status"]["driverServiceAccount"],
+            json!("spark-cluster-driver-mobility-analytics"),
+            "{log}"
+        );
     }
 
     #[tokio::test]

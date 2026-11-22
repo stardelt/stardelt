@@ -192,6 +192,12 @@ spec:
           status:
             nullable: true
             properties:
+              driverServiceAccount:
+                description: |-
+                  `metadata.name` of the ServiceAccount the driver runs as (`spark-cluster-driver` until
+                  #1100, then `spark-cluster-driver-<group>`).
+                nullable: true
+                type: string
               endpoint:
                 description: The Spark Connect endpoint while the cluster runs.
                 nullable: true
@@ -211,6 +217,13 @@ spec:
                 description: '`Stopped`, `Starting`, `Running`, `Stopping` or `Failed`.'
                 type: string
               startedAt:
+                nullable: true
+                type: string
+              workloadIdentity:
+                description: |-
+                  The catalog principal the driver's projected token becomes: `kubernetes~<ServiceAccount
+                  uid>` (#538, #493), the same form a ServicePrincipal records. Absent until the operator
+                  has applied the ServiceAccount.
                 nullable: true
                 type: string
             type: object
