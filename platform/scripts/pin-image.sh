@@ -242,6 +242,19 @@ if [ "$APP" = "airflow" ]; then
   done
   if [ -n "$moved" ]; then
     echo "›$moved: image set to …@${digest:0:19}…"
+    # The KubernetesExecutor's task-pod image is a second copy of this pin
+    # (`AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG`, rendered by the chart and pinned in
+    # helm-values/airflow.yaml). A `kubectl set image` leaves it on the previous digest until a
+    # `helm upgrade`, so a run's pods execute the loader code of the last full install (#1021).
+    env_deploys=()
+    for deploy in airflow-api-server airflow-scheduler airflow-dag-processor airflow-triggerer; do
+      kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1 && env_deploys+=("deploy/$deploy")
+    done
+    if [ "${#env_deploys[@]}" -gt 0 ]; then
+      kubectl -n "$NS" set env "${env_deploys[@]}" \
+        "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG=$TAG@$digest" >/dev/null
+      echo "›${env_deploys[*]}: worker tag $TAG@${digest:0:19}…"
+    fi
     if [ "${NOWAIT:-0}" != "1" ]; then
       for deploy in airflow-scheduler airflow-dag-processor airflow-triggerer; do
         kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1 && \
