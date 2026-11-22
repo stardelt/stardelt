@@ -1727,9 +1727,16 @@ pub struct AuthContext {
     pub app: Arc<crate::AppState>,
 }
 
-/// The routes a deploy principal may call (#57): the deployment routes and the CLI's `me`.
+/// The routes a deploy principal may call (#57): the deployment routes, the CLI's `me`, and the
+/// two reads a bundle plan makes before the plan (`GET /api/catalog/catalogs` for the
+/// production-catalog guard, `POST /api/pipelines/validate` for the create rules). Both write
+/// nothing; every write outside `/api/deployments` stays refused.
 pub(crate) fn deploy_route(path: &str) -> bool {
-    path == "/api/me" || path == "/api/deployments" || path.starts_with("/api/deployments/")
+    path == "/api/me"
+        || path == "/api/deployments"
+        || path.starts_with("/api/deployments/")
+        || path == "/api/catalog/catalogs"
+        || path == "/api/pipelines/validate"
 }
 
 /// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
@@ -1752,7 +1759,7 @@ pub async fn require_auth(
                     "refused: a deploy principal outside the deployment routes"
                 );
                 let detail = format!(
-                    "a deploy principal may only use the deployments routes (stage `{stage}`)"
+                    "a deploy principal may only plan and record deployments (stage `{stage}`)"
                 );
                 return (
                     StatusCode::FORBIDDEN,
@@ -4117,22 +4124,25 @@ mod tests {
         assert_eq!(deploy_stage(None), None);
     }
 
-    /// A deploy principal is admitted by `require_auth` for the deployments routes and the
-    /// CLI's sign-in confirmation only (`/api/me/extra` is a different route).
+    /// A deploy principal is admitted by `require_auth` for the deployments routes, the two
+    /// reads a bundle plan makes, and the CLI's sign-in confirmation only (`/api/me/extra` is a
+    /// different route).
     #[test]
-    fn deploy_route_is_only_the_deployment_routes() {
+    fn deploy_route_is_the_deployment_routes_and_the_plans_reads() {
         for path in [
             "/api/me",
             "/api/deployments",
             "/api/deployments/plan",
             "/api/deployments/7/rollback",
+            "/api/catalog/catalogs",
+            "/api/pipelines/validate",
         ] {
             assert!(deploy_route(path), "{path} must be admitted");
         }
         for path in [
             "/api/pipelines",
             "/api/query",
-            "/api/catalogs",
+            "/api/catalog/namespaces",
             "/api/me/extra",
         ] {
             assert!(!deploy_route(path), "{path} must be refused");
@@ -4234,7 +4244,7 @@ mod tests {
         let (status, body) = ask(&app, "GET", "/api/pipelines").await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert!(
-            body.contains("a deploy principal may only use the deployments routes (stage `dev`)"),
+            body.contains("a deploy principal may only plan and record deployments (stage `dev`)"),
             "{body}"
         );
     }
