@@ -258,6 +258,7 @@ pub async fn prune_missing(
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list(
@@ -317,6 +318,7 @@ pub async fn list(
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn create(
@@ -399,6 +401,7 @@ pub async fn create(
         (status = 404, description = "No such verified query, catalog or table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn check(
@@ -510,6 +513,7 @@ async fn check_one(
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn check_all(
@@ -682,6 +686,7 @@ fn short(message: &str) -> String {
         (status = 404, description = "No such verified query, or the id is not a number", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn delete(

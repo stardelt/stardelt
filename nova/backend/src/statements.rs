@@ -440,6 +440,7 @@ async fn advance(
         (status = 429, description = "The caller already holds ten statements; read or cancel one", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Not available in demo mode", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 async fn submit(
@@ -568,6 +569,7 @@ async fn poll(
     responses(
         (status = 200, description = "The rows of the chunk", content((ChunkView = "application/json"), (String = "text/csv"))),
         (status = 404, description = "No such statement of the caller's, or no such chunk (yet)", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 async fn chunk(
@@ -644,7 +646,10 @@ fn csv_text(names: Option<Vec<&str>>, rows: &[Vec<Value>]) -> String {
     path = "/api/statements",
     tag = "public",
     description = "The statements the caller holds (at most ten), in order of their ids: state, rows read, whether the rows were cut and the seconds since the last request that named each. It answers \"which ones do I hold?\" when a submit says the caller already holds ten. Only the caller's own are listed. A statement another request is advancing at that moment is listed as `RUNNING` with `rowCount` 0.",
-    responses((status = 200, description = "The caller's statements", body = StatementList)),
+    responses(
+        (status = 200, description = "The caller's statements", body = StatementList),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
 )]
 async fn list(
     State(s): State<Arc<AppState>>,
@@ -676,7 +681,10 @@ async fn list(
     tag = "public",
     description = "Cancel one of the caller's statements in the engine and forget it. Idempotent: it answers `204` whether or not the statement exists or is the caller's (it cancels only the caller's own).",
     params(("id" = String, Path, description = "The statement id")),
-    responses((status = 204, description = "Cancelled, or nothing to cancel")),
+    responses(
+        (status = 204, description = "Cancelled, or nothing to cancel"),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
 )]
 async fn cancel(
     State(s): State<Arc<AppState>>,

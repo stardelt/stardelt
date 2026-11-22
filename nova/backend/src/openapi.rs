@@ -969,6 +969,43 @@ mod tests {
         );
     }
 
+    /// The document's `security` is global; only the credential-free routes carry an empty list.
+    /// Every other operation must say it answers `401`, so a generated client can tell a missing
+    /// credential from a bad request.
+    #[test]
+    fn every_authenticated_operation_lists_401() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (_path, item) in value["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                if !matches!(method.as_str(), "get" | "put" | "post" | "delete" | "patch") {
+                    continue;
+                }
+                let Some(id) = op["operationId"].as_str() else {
+                    continue;
+                };
+                let credential_free = op
+                    .get("security")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|list| list.is_empty());
+                if credential_free {
+                    continue;
+                }
+                if !op["responses"]
+                    .as_object()
+                    .expect("responses is an object")
+                    .contains_key("401")
+                {
+                    bad.push(id.to_string());
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "these authenticated operations do not list 401: {bad:#?}"
+        );
+    }
+
     /// The document's `security` is global, so a route that answers without a
     /// credential says so with the empty list. Those are the document itself,
     /// the readiness probe and the sign-in configuration; `me` inherits the

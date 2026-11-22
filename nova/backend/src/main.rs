@@ -368,6 +368,7 @@ struct OidcMe<'a> {
     description = "The caller: static user in `dev` mode, verified claims (never tokens) in `oidc` mode. The `oidc` shape is the documented `OidcMe` superset of this one.",
     responses(
         (status = 200, description = "Current user, auth mode, demo flag and warehouse", body = Me),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn me(

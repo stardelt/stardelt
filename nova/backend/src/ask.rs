@@ -671,6 +671,7 @@ pub(crate) async fn feedback(
     responses(
         (status = 200, description = "The conversations, newest first", body = Vec<AskConversation>),
         (status = 503, description = "No state store", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn history(

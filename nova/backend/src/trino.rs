@@ -463,6 +463,7 @@ fn trim_statement(sql: &str) -> String {
         (status = 200, description = "The columns, the rows and the engine's query id", body = QueryResult),
         (status = 400, description = "The statement is empty, was refused or failed in the engine", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn run_query(

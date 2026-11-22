@@ -60,6 +60,7 @@ pub struct StoredSetting {
     responses(
         (status = 200, description = "Key to value", body = Object),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list(
@@ -96,6 +97,7 @@ pub async fn list(
         (status = 200, description = "The key and the value as stored", body = StoredSetting),
         (status = 400, description = "The key or the value is not valid", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn put(
@@ -145,6 +147,7 @@ pub async fn put(
         (status = 204, description = "Removed"),
         (status = 404, description = "The caller has no such setting", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn remove(

@@ -1538,6 +1538,7 @@ pub(crate) async fn break_glass_managed(
         (status = 200, description = "The most recent events, newest first", body = BreakGlassLogResponse),
         (status = 403, description = "Not an administrator", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn break_glass_log(
