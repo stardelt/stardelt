@@ -228,7 +228,7 @@ stardelt bundle destroy pipelines/ -t dev                        # list what the
 stardelt bundle generate etl daily pipelines/                  # write a pipeline made in the interface into the bundle: its file and its SQL file
 stardelt bundle validate pipelines/ -t prod                      # check a bundle (bundle.yaml + pipeline files) offline: no host, no sign-in
 stardelt bundle plan pipelines/ -t prod                          # ask Nova what deploying the target would do; writes nothing
-stardelt bundle deploy pipelines/ -t prod                        # Nova checks every pipeline, then they are created or updated
+stardelt bundle deploy pipelines/ -t prod                        # Nova checks every pipeline, then they are created, updated, or left unchanged
 ```
 
 `bundle plan` and `bundle deploy` (which also takes `--dry-run`, the same as `plan`) work on one target. Every pipeline file gets
@@ -335,7 +335,7 @@ has a schedule; an update lists `changes`, which of `statement` (or `notebook`),
 and exit code 2. An update replaces
 what the file says (`params` and `options` left out go back to their defaults); the group of an existing
 pipeline cannot change. The answer on stdout is `{"action": "created" | "updated" | "would-create" |
-"would-update", "name": ...}`, `"changes": [...]` on a dry run of an update, `"nextRuns": [...]` on a dry run of a scheduled file, and `"modified": true` (with one warning on standard error) when the pipeline was changed in the interface or with `kubectl` after its last deploy, so the file overwrites that change. `-f` can also name a directory: every `.json`, `.yaml` and `.yml` file directly
+"would-update" | "unchanged", "name": ...}` (`"unchanged"` when the plan found the stored pipeline identical, so nothing was written: a `bundle deploy` row), `"changes": [...]` on a dry run of an update, `"nextRuns": [...]` on a dry run of a scheduled file, and `"modified": true` (with one warning on standard error) when the pipeline was changed in the interface or with `kubectl` after its last deploy, so the file overwrites that change. `-f` can also name a directory: every `.json`, `.yaml` and `.yml` file directly
 inside it is applied in name order, one answer line per file; all files are read first, so a bad file or two
 files with one pipeline name write nothing.
 

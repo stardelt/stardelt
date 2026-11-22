@@ -1182,7 +1182,7 @@ def _touched(nova, specs, done, stale):
     spaces = {p["name"]: p["namespace"] for p in nova.call("pipelines_list")["pipelines"]}
     touched = []
     for spec in specs:
-        row = next((r for r in done if r["name"] == spec["name"] and r["action"] in ("created", "updated")), None)
+        row = next((r for r in done if r["name"] == spec["name"] and r["action"] in ("created", "updated", "unchanged")), None)
         if row is not None and spec["name"] in spaces:
             touched.append({"namespace": spaces[spec["name"]], "name": spec["name"], "action": row["action"]})
     for space, name in stale:
@@ -1382,7 +1382,13 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             if row["action"] == "would-apply-migration" and row["name"] in applied:
                 row["action"] = "migration-applied"
                 row.pop("class", None)
+    # A pipeline the plan found identical is not written again; the record still names it (#101).
+    planned = {r["name"]: r for r in results if r.get("kind") == "Pipeline"}
     for spec in specs:
+        row = planned.get(spec["name"], {})
+        if row.get("action") == "would-update" and not row.get("changes") and not row.get("modified"):
+            done.append({"action": "unchanged", "name": spec["name"], "kind": "Pipeline"})
+            continue
         try:
             answer = apply.apply(nova, spec)
         except apply.ApplyError as err:

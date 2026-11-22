@@ -721,6 +721,43 @@ def test_a_pipeline_with_viewers_is_sent_to_create(tmp_path):
     assert create[2]["json"]["viewers"] == ["visitors"], "the deploy sends the file's viewers to create"
 
 
+SHARED = "name: shared\nsql: select 1\nschedule: {cron: '0 3 * * *', timezone: Europe/Berlin}\n"
+UNCHANGED = {"ok": True, "action": "update", "errors": [], "changes": [], "nextRuns": []}
+ONE_PIPELINE = FakeResponse(payload={"pipelines": [{"name": "shared", "namespace": "stardelt"}]})
+RECORDED = FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"})
+
+
+def test_a_second_deploy_of_an_unchanged_pipeline_writes_nothing(tmp_path):
+    make(tmp_path, resources={"shared.yaml": SHARED},
+         files={"sql/load.sql": "select 1", "notebooks/explore.ipynb": "{}"})
+    code, out, _, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=UNCHANGED), FakeResponse(payload=PLAN_OK), ONE_PIPELINE, RECORDED,
+    )
+    assert code == 0
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "unchanged", "name": "shared", "kind": "Pipeline"},
+        {"action": "recorded", "id": 7},
+    ]
+    writes = [
+        (method, url) for method, url in calls(session)
+        if method in ("PUT", "POST") and url.startswith("/api/pipelines")
+    ]
+    assert writes == [("POST", "/api/pipelines/validate")], "the plan's check only: the pipeline is not written"
+
+
+def test_an_unchanged_pipeline_is_recorded_by_name(tmp_path):
+    make(tmp_path, resources={"shared.yaml": SHARED},
+         files={"sql/load.sql": "select 1", "notebooks/explore.ipynb": "{}"})
+    code, _, _, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=UNCHANGED), FakeResponse(payload=PLAN_OK), ONE_PIPELINE, RECORDED,
+    )
+    assert code == 0
+    record = next(call for call in session.calls if call[0] == "POST" and call[1].endswith("/api/deployments"))
+    assert {"namespace": "stardelt", "name": "shared", "action": "unchanged"} in record[2]["json"]["pipelines"]
+
+
 def test_a_pipeline_with_viewers_publishes_the_notebook_with_them(tmp_path):
     explore = "name: explore\nviewers: [visitors]\nnotebook: {file: notebooks/explore.ipynb}\n"
     make(tmp_path, resources={"explore.yaml": explore},
