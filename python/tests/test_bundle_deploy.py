@@ -65,6 +65,15 @@ def test_a_development_name_that_is_too_long_is_refused_and_a_notebook_file_stay
     assert problems == [] and {spec["name"]: spec.get("notebook") for spec in specs}["nb"] == {"file": "notebooks/explore.ipynb"}
 
 
+def test_a_deploy_principals_service_account_prefix_is_dropped_from_a_development_name(tmp_path):
+    problems, mode, specs = bundle.render(make(tmp_path), "dev", "service-account-stardelt-deploy-dev")
+    assert (problems, mode) == ([], "development")
+    assert [spec["name"] for spec in specs] == [
+        "dev-stardelt-deploy-dev-load",
+        "dev-stardelt-deploy-dev-nightly",
+    ]
+
+
 def test_plan_asks_nova_about_every_pipeline_and_writes_nothing(tmp_path):
     make(tmp_path)
     code, out, err, session = run(

@@ -697,8 +697,15 @@ def validate(directory, target=None):
 
 
 def _slug(user):
-    """A person's sign-in name as part of a pipeline name: lower-case letters, digits and single dashes."""
-    return re.sub(r"[^a-z0-9]+", "-", str(user or "").lower()).strip("-")
+    """A person's sign-in name as part of a pipeline name: lower-case letters, digits and single dashes.
+
+    A federated deploy principal signs in as Keycloak's service account
+    ``service-account-stardelt-deploy-<stage>`` (#57). ``service-account-`` is Keycloak's label for
+    a client's credential, not part of the stage's name: dropping it keeps the development prefix
+    inside Nova's 40-character rule.
+    """
+    name = re.sub(r"[^a-z0-9]+", "-", str(user or "").lower()).strip("-")
+    return name.removeprefix("service-account-")
 
 
 def render(directory, target, user=None):
