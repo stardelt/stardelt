@@ -20,7 +20,7 @@
 # deletes it again on every exit path; no other object is touched. Reaches the admin API through
 # svc/keycloak (port-forward); the master credential travels only through a mode-0600 file.
 #
-# Exit codes: 0 PASS (5 of 5), 1 FAIL, 3 UNVERIFIED (a tool, the CRD or the realm admin API is
+# Exit codes: 0 PASS (7 of 7), 1 FAIL, 3 UNVERIFIED (a tool, the CRD or the realm admin API is
 # absent — nothing was measured).
 set -euo pipefail
 

@@ -96,6 +96,11 @@ pub fn needs_update(existing: &serde_json::Value, desired: &serde_json::Value) -
     if existing.get("clientAuthenticatorType") != desired.get("clientAuthenticatorType") {
         return true;
     }
+    // A client rendered before #1024 carries `serviceAccountsEnabled: false`; without this the
+    // stage keeps answering `unauthorized_client` for ever (#1009).
+    if existing.get("serviceAccountsEnabled") != desired.get("serviceAccountsEnabled") {
+        return true;
+    }
     for key in ["jwt.credential.issuer", "jwt.credential.sub"] {
         if existing.get("attributes").and_then(|a| a.get(key))
             != desired.get("attributes").and_then(|a| a.get(key))
@@ -373,6 +378,14 @@ mod tests {
             "stardelt-deploy"
         );
         assert_eq!(payload["serviceAccountsEnabled"], true);
+    }
+
+    #[test]
+    fn a_client_without_a_service_account_needs_a_write() {
+        let payload = client_payload(&stage());
+        let mut old = payload.clone();
+        old["serviceAccountsEnabled"] = json!(false);
+        assert!(needs_update(&old, &payload));
     }
 
     #[test]
