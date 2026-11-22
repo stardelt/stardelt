@@ -295,6 +295,65 @@ async fn prune_driver_identity(
     Ok(())
 }
 
+/// The driver identity is not owned by the cluster, so somebody must remove it after the
+/// object is gone; this finalizer keeps the object readable until `prune_driver_identity` ran.
+const DRIVER_IDENTITY_FINALIZER: &str = "stardelt.io/driver-identity";
+
+/// Replace `metadata.finalizers` with exactly `finalizers` (a merge patch replaces the whole
+/// list, so it never appends a duplicate).
+async fn patch_spark_cluster_finalizers(
+    clusters: &Api<SparkCluster>,
+    cluster: &SparkCluster,
+    finalizers: Vec<String>,
+) -> Result<(), kube::Error> {
+    clusters
+        .patch(
+            &cluster.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({ "metadata": { "finalizers": finalizers } })),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Add the finalizer when it is missing; a cluster that already carries it is not patched again.
+async fn ensure_driver_identity_finalizer(
+    clusters: &Api<SparkCluster>,
+    cluster: &SparkCluster,
+) -> Result<(), kube::Error> {
+    if cluster
+        .finalizers()
+        .iter()
+        .any(|f| f == DRIVER_IDENTITY_FINALIZER)
+    {
+        return Ok(());
+    }
+    let mut finalizers = cluster.finalizers().to_vec();
+    finalizers.push(DRIVER_IDENTITY_FINALIZER.to_string());
+    patch_spark_cluster_finalizers(clusters, cluster, finalizers).await
+}
+
+/// Remove the finalizer so the API server can finish the deletion.
+async fn remove_driver_identity_finalizer(
+    clusters: &Api<SparkCluster>,
+    cluster: &SparkCluster,
+) -> Result<(), kube::Error> {
+    if !cluster
+        .finalizers()
+        .iter()
+        .any(|f| f == DRIVER_IDENTITY_FINALIZER)
+    {
+        return Ok(());
+    }
+    let finalizers: Vec<String> = cluster
+        .finalizers()
+        .iter()
+        .filter(|f| *f != DRIVER_IDENTITY_FINALIZER)
+        .cloned()
+        .collect();
+    patch_spark_cluster_finalizers(clusters, cluster, finalizers).await
+}
+
 /// The `status` half of the merge patch. Absent values are written as JSON `null` so a merge
 /// patch clears them instead of leaving the previous value (see operator#362).
 fn status_value(
@@ -517,14 +576,15 @@ pub async fn reconcile_spark_cluster(
     ctx: Arc<Context>,
 ) -> Result<Action, kube::Error> {
     if cluster.metadata.deletion_timestamp.is_some() {
-        // No finalizer runs for a deleted cluster, so its driver identity is pruned here, while
-        // `spec.owner.group` is still readable (#493, #1112).
+        // The finalizer keeps the object readable, so its driver identity is pruned here while
+        // `spec.owner.group` still is (#493, #1112); then the API server may finish the deletion.
         let name = cluster.name_any();
         let namespace = cluster.namespace().unwrap_or_else(|| "default".into());
+        let clusters: Api<SparkCluster> = Api::namespaced(ctx.client.clone(), &namespace);
         if let Some(group) = cluster.spec.owner.group.as_deref() {
-            let clusters: Api<SparkCluster> = Api::namespaced(ctx.client.clone(), &namespace);
             prune_driver_identity(&ctx.client, &clusters, &namespace, &name, group).await?;
         }
+        remove_driver_identity_finalizer(&clusters, &cluster).await?;
         return Ok(Action::await_change());
     }
     let name = cluster.name_any();
@@ -538,6 +598,10 @@ pub async fn reconcile_spark_cluster(
         &namespace,
         &objects::spark_connect_resource(),
     );
+
+    // A live cluster carries the finalizer that keeps it readable until its driver identity is
+    // pruned; one that already has it is not patched again.
+    ensure_driver_identity_finalizer(&clusters, &cluster).await?;
 
     if let Err(message) = spec.validate(&name) {
         patch_status(
@@ -1065,6 +1129,8 @@ mod tests {
         }
     }
 
+    /// A live cluster carries the driver-identity finalizer, the steady state a reconcile leaves
+    /// (#1147); a test that wants the first reconcile builds `fresh_cluster`.
     fn cluster(state: SparkClusterState) -> SparkCluster {
         SparkCluster {
             metadata: ObjectMeta {
@@ -1072,6 +1138,7 @@ mod tests {
                 namespace: Some("data".into()),
                 uid: Some("uid-1".into()),
                 generation: Some(1),
+                finalizers: Some(vec![DRIVER_IDENTITY_FINALIZER.into()]),
                 ..Default::default()
             },
             spec: SparkClusterSpec { state, ..spec() },
@@ -1649,6 +1716,12 @@ mod tests {
             if method == "GET" && path.ends_with("/sparkclusters") {
                 return (200, list.clone());
             }
+            if method == "PATCH" && path.ends_with("/sparkclusters/trial") {
+                return (
+                    200,
+                    r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"new"},"runtime":"spark-4.0-py3.12","state":"Running"}}"#.into(),
+                );
+            }
             if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
                 return (
                     200,
@@ -1686,6 +1759,14 @@ mod tests {
             .any(|line| line.starts_with("GET") && line.contains("/sparkclusters"))
     }
 
+    /// The finalizer patch of the cluster object itself, as recorded in the request log (the
+    /// status write patches `/sparkclusters/trial/status` and is not this one).
+    fn finalizer_patch(log: &str) -> Option<String> {
+        log.lines()
+            .find(|line| line.starts_with("PATCH") && line.contains("/sparkclusters/trial?"))
+            .map(str::to_string)
+    }
+
     /// Whether the reconcile deleted any object: the pod guard's policy bodies carry `DELETE`
     /// among their allowed operations, so only a request line counts.
     fn deletes_anything(log: &str) -> bool {
@@ -1714,6 +1795,64 @@ mod tests {
                 "{path} is pruned: {log}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_live_cluster_carries_the_driver_identity_finalizer() {
+        let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "new")]));
+        let mut fresh = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver-new",
+        );
+        fresh.metadata.finalizers = None;
+        reconcile_spark_cluster(Arc::new(fresh.clone()), ctx(client.clone()))
+            .await
+            .expect("reconcile");
+        let log = requests.lock().expect("requests").join("\n");
+        let patch = finalizer_patch(&log).expect("the finalizer is patched");
+        assert!(patch.contains(DRIVER_IDENTITY_FINALIZER), "{patch}");
+
+        // The object carries it now, so the next reconcile writes nothing (quiet operator).
+        let mut current = fresh;
+        current.metadata.finalizers = Some(vec![DRIVER_IDENTITY_FINALIZER.into()]);
+        requests.lock().expect("requests").clear();
+        reconcile_spark_cluster(Arc::new(current), ctx(client))
+            .await
+            .expect("reconcile");
+        let log = requests.lock().expect("requests").join("\n");
+        assert!(finalizer_patch(&log).is_none(), "not patched again: {log}");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_cluster_prunes_the_driver_identity_and_drops_the_finalizer() {
+        let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "old")]));
+        let mut dying = cluster_with_status(
+            SparkClusterState::Running,
+            Some("old"),
+            "spark-cluster-driver-old",
+        );
+        dying.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        let action = reconcile_spark_cluster(Arc::new(dying), ctx(client))
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::await_change());
+        let log = requests.lock().expect("requests").join("\n");
+        for path in [
+            "/serviceaccounts/spark-cluster-driver-old",
+            "/rolebindings/spark-cluster-driver-old",
+        ] {
+            assert!(
+                log.lines()
+                    .any(|line| line.starts_with("DELETE") && line.contains(path)),
+                "{path} is pruned: {log}"
+            );
+        }
+        let patch = finalizer_patch(&log).expect("the finalizer is patched");
+        assert!(
+            patch.contains("\"finalizers\":[]"),
+            "the finalizer is removed: {patch}"
+        );
     }
 
     #[tokio::test]
