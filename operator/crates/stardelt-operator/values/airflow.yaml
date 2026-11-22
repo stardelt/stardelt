@@ -406,7 +406,7 @@ extraEnv: |
   # helm-values/airflow.yaml. Short names, like every address in this file: the operator
   # installs into another namespace.
   - name: PIPELINE_SPARK_IMAGE
-    value: ghcr.io/stardelt/spark:dev@sha256:71635e7637593b8612f11359bcd1ff49648360d40df90706a293653721f9d128
+    value: ghcr.io/stardelt/spark:dev@sha256:f1f21f2eef2885bc3138d00a79060375d66a6a05a3f86e0ebb95edad462ac4e2
   - name: PIPELINE_SPARK_REMOTE
     value: sc://spark-connect:15002
   - name: PIPELINE_SPARK_BUCKET
