@@ -345,6 +345,15 @@ pub fn may_record(identity: &Identity, owner_group: &str) -> bool {
     identity.is_admin || identity.groups.iter().any(|g| g == owner_group)
 }
 
+/// The sentence for a token whose client names another stage than the one asked for. Shared with
+/// `record`, `plan` and `rollback`, which answer it before they read the stage object, so a stage
+/// refusal never depends on the cluster (#1038).
+fn stage_sentence(stage: &str, verb: &str) -> String {
+    format!(
+        "this token belongs to deploy stage `{stage}`; it may only {verb} a deployment to that stage"
+    )
+}
+
 /// Why this caller may not record or plan a deployment to `target`, or `None` when it may.
 /// A deploy principal (#57) is confined to the stage its client names and to its own group;
 /// everyone else keeps the administrator-or-member rule. `verb` is `record` or `plan`.
@@ -357,9 +366,7 @@ pub fn deploy_refusal(
 ) -> Option<String> {
     let member = identity.groups.iter().any(|g| g == owner_group);
     match deploy_stage(client_id) {
-        Some(stage) if stage != target => Some(format!(
-            "this token belongs to deploy stage `{stage}`; it may only {verb} a deployment to that stage"
-        )),
+        Some(stage) if stage != target => Some(stage_sentence(stage, verb)),
         Some(_) if !member => Some(format!(
             "a deploy principal may only {verb} a deployment of its own group"
         )),
@@ -633,6 +640,16 @@ async fn visible(
         .await
 }
 
+/// The one row with the id, whoever owns it: `rollback` reads it before it knows which group the
+/// caller acts as (#1038). Every route that answers a row of another group says `404`.
+async fn row_by_id(pool: &sqlx::PgPool, id: i64) -> Result<Option<Deployment>, sqlx::Error> {
+    let sql = format!("SELECT {ROW_COLUMNS} FROM deployment WHERE id = $1");
+    sqlx::query_as::<_, Deployment>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
 /// The one INSERT behind `record` and `rollback`: a row with the caller as `actor`.
 async fn store(
     pool: &sqlx::PgPool,
@@ -739,6 +756,13 @@ pub async fn record(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
+    // The stage the token names needs no cluster to compare: a token of another stage is
+    // refused before the stage object is read (#1038).
+    if let Some(stage) = deploy_stage(caller.client_id.as_deref())
+        && stage != new.target
+    {
+        return error(StatusCode::FORBIDDEN, &stage_sentence(stage, "record"));
+    }
     let identity = match deploy_identity(&s, caller).await {
         Ok(identity) => identity,
         Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
@@ -800,6 +824,11 @@ pub async fn plan(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
+    if let Some(stage) = deploy_stage(caller.client_id.as_deref())
+        && stage != request.target
+    {
+        return error(StatusCode::FORBIDDEN, &stage_sentence(stage, "plan"));
+    }
     let identity = match deploy_identity(&s, caller).await {
         Ok(identity) => identity,
         Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
@@ -922,11 +951,9 @@ pub async fn rollback(
     let Some(caller) = caller.as_ref().map(|c| &c.0) else {
         return error(StatusCode::UNAUTHORIZED, SIGN_IN);
     };
-    let identity = match deploy_identity(&s, caller).await {
-        Ok(identity) => identity,
-        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
-    };
-    let row = match visible(pool, id, &identity).await {
+    // The row is read by id first: a token that names another stage is refused before the stage
+    // object is read, so that refusal never depends on the cluster (#1038).
+    let row = match row_by_id(pool, id).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return error(
@@ -936,6 +963,24 @@ pub async fn rollback(
         }
         Err(e) => return store_failed(e),
     };
+    if let Some(stage) = deploy_stage(caller.client_id.as_deref())
+        && stage != row.target
+    {
+        return error(StatusCode::FORBIDDEN, &stage_sentence(stage, "roll back"));
+    }
+    // A deploy principal (#57) acts as a member of its stage's group: `deploy_identity` reads the
+    // `DeployStage` for that group, and nothing else about the caller changes.
+    let identity = match deploy_identity(&s, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => return error(StatusCode::BAD_GATEWAY, &sentence),
+    };
+    // The rule `visible` applies in SQL, with the identity the caller now acts as.
+    if !may_record(&identity, &row.owner_group) {
+        return error(
+            StatusCode::NOT_FOUND,
+            &format!("no deployment {id} among the ones you may see"),
+        );
+    }
     if row.status != "applied" {
         return error(
             StatusCode::CONFLICT,
