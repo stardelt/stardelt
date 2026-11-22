@@ -42,6 +42,7 @@ declare -A recipe=(
   [verify-spark-pipeline]='bash scripts/verify-spark-pipeline.sh'
   [verify-spark-no-platform-key]='bash scripts/verify-spark-no-platform-key.sh'
   [verify-spark-guard]='bash scripts/verify-spark-pod-guard.sh'
+  [verify-spark-driver-identity]='bash scripts/verify-spark-driver-identity.sh'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -50,16 +51,13 @@ if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
   done <<< "$VERIFY_RELEASE_RECIPES"
 fi
 
-# verify-spark-driver-identity is deliberately not a default target: it answers exit 3
-# (UNVERIFIED) unless a group-owned SparkCluster exists, and a converged lab has none. It
-# returns to this list with the demo's permanent `visitors` cluster (#493 point 6), which is
-# then a live row; until it does, `make verify-spark-driver-identity` runs it by hand.
+# verify-spark-driver-identity's subject is the demo's permanent SparkCluster (#1157, #493).
 default_targets="verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming
 verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query
-verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard"
+verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
