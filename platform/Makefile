@@ -765,11 +765,12 @@ install-spark: deps _context ## Install the Spark Connect endpoint (Iceberg on t
 	  echo "› spark-connect pod guard: skipped — ValidatingAdmissionPolicy needs Kubernetes 1.30+"; \
 	fi
 	@kubectl -n $(NAMESPACE) apply -f manifests/spark-confmap-janitor.yaml
-	@# The token-checking front (stardelt#84 Q4, spike #208). Additive: nothing points at it
-	@# yet. Envoy reads its config at start; the apply alone restarts nothing, so the block
-	@# restarts the front when the rendered `envoy.yaml` changes. The apply and the rollout are
-	@# one logical line and the sub-make another, because a logical line carrying $(MAKE) is
-	@# executed whole under `make -n` (test_make_dry_run).
+	@# The token-checking front (stardelt#84 Q4, spike #208). The Ingress in the same manifest is
+	@# the second, token-checked path; this block installs both. Envoy reads its config at
+	@# start, so the apply alone restarts nothing, and the block restarts the front when the
+	@# rendered `envoy.yaml` changes. The apply and the rollout are one logical line and the
+	@# sub-make another, because a logical line carrying $(MAKE) is executed whole under
+	@# `make -n` (test_make_dry_run).
 	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
 	  echo "› Spark Connect front: Envoy jwt_authn at spark.$(BASE_DOMAIN) (issuer, audience and claim from stardelt-identity)"; \
 	  old=$$(kubectl -n $(NAMESPACE) get configmap spark-connect-auth \

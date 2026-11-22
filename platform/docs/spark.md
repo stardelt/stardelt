@@ -309,12 +309,16 @@ The CRD path is the follow-up, not a reason to make this node heavier today.
 ## Limits
 
 Spark Connect has no built-in authentication (upstream points at authenticating
-proxies). The endpoint is therefore ClusterIP-only: anyone who can create pods in
-`stardelt` can open a session and present any token they hold. The catalog still
-decides what that token may read, and a session without a valid `aud=lakekeeper`
-token gets 401 — but the endpoint itself is not an identity boundary. Wiring
-Connect behind the platform IdP is a follow-up with the CRD work, not something
-to expose on an Ingress before then.
+proxies), so it is reached through two paths. In-cluster clients — notebook pods
+and the library — reach the driver directly through the ClusterIP Service
+`spark-connect`; there the gate is the NetworkPolicy, not a token: anyone whose
+pod the policy admits can open a session and present any token they hold. The
+public route `spark.<baseDomain>` is a second, token-checked path: an Envoy front
+verifies the access token with `jwt_authn` (audience `spark-connect`) and an RBAC
+filter on the identity contract's group claim admits only its member and admin
+groups, so an unsigned call is refused `401`. Behind either path the catalog
+decides what the token may read, and a session without a valid `aud=lakekeeper`
+token gets 401 — the Connect endpoint itself is not an identity boundary.
 
 Two more limits, deliberately not hidden: row and column masks are Trino-only
 (design `multitenant-catalogs.md` §5.8), so a Spark read is governed by table
