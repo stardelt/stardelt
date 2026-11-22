@@ -932,8 +932,14 @@ pub async fn ensure_spark(
                 return Some(status(NAME, false, e.to_string()));
             }
             // The public name comes from the instance's ingress settings; `ingress::spark`
-            // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`.
-            if let Some(route) = ingress::spark(&instance.spec)
+            // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`. With
+            // `spec.ingress.mode: gateway` no Ingress is rendered at all, and Spark Connect
+            // gets no HTTPRoute in this slice: an HTTPRoute carries neither the backend
+            // protocol nor the per-route timeouts a gRPC front needs (`GRPCRoute` is a later
+            // slice), so the public name waits for that slice instead of falling back to an
+            // Ingress that would honour the ignored `className`/`allowedCidrs`/`tls`.
+            if instance.spec.ingress.mode != IngressMode::Gateway
+                && let Some(route) = ingress::spark(&instance.spec)
                 && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
             {
                 return Some(status(NAME, false, e.to_string()));
@@ -3518,6 +3524,29 @@ mod tests {
         )
     }
 
+    /// A context whose platform store holds one `PlatformInstance` for `spec.namespace`, for the
+    /// code paths that read the instance of a namespace instead of listing it (#274 rule 5).
+    fn context_with_platform(client: kube::Client, spec: &PlatformInstanceSpec) -> Context {
+        let (platforms, mut writer) = kube::runtime::reflector::store();
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Init);
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitApply(
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "PlatformInstance",
+                "metadata": { "name": "cluster" },
+                "spec": spec,
+            }))
+            .expect("deserialize PlatformInstance"),
+        ));
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::InitDone);
+        Context {
+            client,
+            helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
+            keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
+            platforms,
+        }
+    }
+
     fn lakehouse() -> Lakehouse {
         serde_json::from_value(serde_json::json!({
             "apiVersion": "stardelt.io/v1alpha1",
@@ -5986,6 +6015,48 @@ mod tests {
             "/apis/apps/v1/namespaces/data/deployments/spark-connect",
         ];
         assert_eq!(paths, expected);
+    }
+
+    /// The `PlatformInstance` in namespace `data` that `ensure_spark` reads for the public name.
+    fn spark_platform(ingress: serde_json::Value) -> PlatformInstanceSpec {
+        serde_json::from_value(serde_json::json!({
+            "namespace": "data",
+            "baseDomain": "example.com",
+            "identity": { "mode": "platform" },
+            "ingress": ingress,
+        }))
+        .expect("a PlatformInstanceSpec")
+    }
+
+    #[tokio::test]
+    async fn the_spark_connect_ingress_is_not_rendered_in_gateway_mode() {
+        let mut lh = lakehouse();
+        lh.spec.compute.spark.enabled = true;
+        let ingress = "/apis/networking.k8s.io/v1/namespaces/data/ingresses/spark-connect";
+
+        let (client, requests) = mock_client(true);
+        let spec = spark_platform(serde_json::json!({ "enabled": true }));
+        let _ = ensure_spark(&context_with_platform(client, &spec), &lh, "data").await;
+        assert!(
+            applied_paths(&requests).iter().any(|path| path == ingress),
+            "mode: ingress publishes the gRPC front: {:?}",
+            applied_paths(&requests)
+        );
+
+        let (client, requests) = mock_client(true);
+        let spec = spark_platform(serde_json::json!({
+            "enabled": true,
+            "mode": "gateway",
+            "gateway": { "name": "platform" },
+        }));
+        let _ = ensure_spark(&context_with_platform(client, &spec), &lh, "data").await;
+        assert!(
+            !applied_paths(&requests)
+                .iter()
+                .any(|path| path.contains("/ingresses/")),
+            "mode: gateway renders no Ingress, Spark Connect included: {:?}",
+            applied_paths(&requests)
+        );
     }
 
     #[tokio::test]
