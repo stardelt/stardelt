@@ -35,7 +35,6 @@ declare -A recipe=(
   [verify-airflow-runs]='bash scripts/verify-airflow-runs.sh'
   [verify-catalog-workload-auth]='bash scripts/verify-catalog-workload-auth.sh'
   [verify-workload-identity]='bash scripts/verify-workload-identity.sh'
-  [verify-spark-driver-identity]='bash scripts/verify-spark-driver-identity.sh'
   [verify-spark-demo-sandbox]='bash scripts/verify-spark-demo-sandbox.sh'
   [verify-spark-demo-query]='bash scripts/verify-spark-demo-query.sh'
   [verify-wap]='bash scripts/verify-wap.sh'
@@ -51,10 +50,14 @@ if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
   done <<< "$VERIFY_RELEASE_RECIPES"
 fi
 
+# verify-spark-driver-identity is deliberately not a default target: it answers exit 3
+# (UNVERIFIED) unless a group-owned SparkCluster exists, and a converged lab has none. It
+# returns to this list with the demo's permanent `visitors` cluster (#493 point 6), which is
+# then a live row; until it does, `make verify-spark-driver-identity` runs it by hand.
 default_targets="verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming
 verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
-verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity verify-spark-driver-identity
+verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query
 verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
