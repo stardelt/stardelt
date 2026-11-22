@@ -1129,6 +1129,10 @@ export type ComputeCluster = {
   endpoint: string | null
   startedAt: string | null
   lastActivityAt: string | null
+  /** The ServiceAccount the driver runs as: `spark-cluster-driver-<group>` for a group's cluster (#1100, #1102). */
+  driverServiceAccount?: string | null
+  /** The catalog principal the driver's token becomes, `kubernetes~<uid>` (#1102, #493). */
+  workloadIdentity?: string | null
   idleStopMinutes: number
   /** The caller's group owns the cluster (or it is `shared`); a viewer sees `false`. */
   canUse: boolean

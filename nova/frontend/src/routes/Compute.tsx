@@ -178,6 +178,18 @@ export default function Compute() {
                     )}
                     <dt className="text-text-dim">image</dt>
                     <dd className="font-mono break-words">{c.runtime || '—'}</dd>
+                    {c.driverServiceAccount && (
+                      <>
+                        <dt className="text-text-dim">runs as</dt>
+                        <dd className="font-mono break-words">{c.driverServiceAccount}</dd>
+                      </>
+                    )}
+                    {c.workloadIdentity && (
+                      <>
+                        <dt className="text-text-dim">catalog identity</dt>
+                        <dd className="font-mono break-words" title={c.workloadIdentity}>{c.workloadIdentity}</dd>
+                      </>
+                    )}
                   </dl>
                   {c.shared ? (
                     <p className="text-sm text-text-dim">{SHARED_COPY}</p>
