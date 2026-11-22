@@ -190,7 +190,7 @@ class CheckTest(unittest.TestCase):
             problems,
         )
         self.assertIn(
-            "cluster demo-lab does not name visitors in its viewers — run make install-spark-demo YES=1",
+            "cluster demo-lab does not name visitors in its viewers — run make demo-cluster YES=1",
             problems,
         )
 
@@ -293,6 +293,22 @@ class CheckTest(unittest.TestCase):
         self.assertIn(
             "no stream is visible to visitors: the visitors' streams page is empty"
             " — run make demo-stream YES=1",
+            problems,
+        )
+
+    def test_check_names_an_empty_compute_page(self):
+        """When: a stream and a connection name `visitors` but no cluster does. Then: check
+        names the Compute page and the command that fills it."""
+        problems = demo_inventory.check(
+            [],
+            [stream("demo-pegelonline", viewers=["visitors"])],
+            [],
+            {},
+            [connection("rnacentral", viewers=["visitors"])],
+        )
+        self.assertIn(
+            "no cluster is visible to visitors: the visitors' compute page is empty"
+            " — run make demo-cluster",
             problems,
         )
 

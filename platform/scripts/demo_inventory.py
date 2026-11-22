@@ -47,17 +47,15 @@ LEGACY = (
     "shop-07-stg-cust", "shop-08-stg-prod", "shop-09-stg-lines", "shop-10-revenue", "shop-11-ltv", "shop-12-mix",
 )
 
-# The command that converges one kind of demo object. A demo-owned cluster today is the
-# sandbox `make install-spark-demo` applies (`manifests/spark-demo-sandbox.yaml`); a
-# `demo-cluster` target is only added with the first demo-owned SparkCluster in the
-# stardelt namespace (#79).
-FIX = {"pipeline": "demo-shop", "stream": "demo-stream", "cluster": "install-spark-demo"}
+# The command that converges one kind of demo object.
+FIX = {"pipeline": "demo-shop", "stream": "demo-stream", "cluster": "demo-cluster"}
 
 # A page a visitor opens first; #79 says none of them may be empty. The value is the command
 # that fills it (`FIX` names the object's own command; this names the page's).
 COVERAGE_FIX = {
     "stream": "demo-stream",
     "connection": "demo-connection",
+    "cluster": "demo-cluster",
 }
 
 
@@ -341,6 +339,13 @@ def check(pipelines, streams, clusters, runs, connections=None) -> list[str]:
                     f"no {kind} is visible to {GROUP}: the visitors' {kind}s page is empty"
                     f" — run make {COVERAGE_FIX[kind]} YES=1"
                 )
+        if not any(
+            GROUP in (_spec(obj).get("viewers") or []) for obj in clusters
+        ):
+            problems.append(
+                f"no cluster is visible to {GROUP}: the visitors' compute page is empty"
+                f" — run make {COVERAGE_FIX['cluster']}"
+            )
     return problems
 
 
