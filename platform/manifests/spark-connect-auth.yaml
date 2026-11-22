@@ -9,8 +9,8 @@
 #
 # The listener is plaintext h2c: the client's `;token=` forces TLS, so TLS terminates at
 # ingress-nginx with the platform's Let's Encrypt certificate, which speaks h2c
-# (`backend-protocol: GRPC`) to this Service. Nothing points here yet — this file only
-# makes the front exist and prove that it refuses an unsigned call.
+# (`backend-protocol: GRPC`) to this Service. The Ingress at the end of this file is the
+# second, token-checked path to the driver; `make install-spark` installs both.
 #
 # Authenticating is not authorizing (security finding, 2026-11-19). A signed token is not yet
 # a member: the RBAC filter below reads the identity contract's group claim and admits only
