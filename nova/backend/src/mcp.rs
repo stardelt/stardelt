@@ -1446,6 +1446,7 @@ mod tests {
             client_secret: Secret::new("s"),
             scopes: "openid".into(),
             audiences: vec!["nova".into()],
+            deploy_audiences: vec!["stardelt-deploy".into()],
             public_url: "https://nova.example.com".into(),
             claims: ClaimConfig::default(),
             session_secret: Secret::new("0123456789abcdef0123456789abcdef"),

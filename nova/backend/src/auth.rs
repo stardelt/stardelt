@@ -180,6 +180,8 @@ pub struct OidcConfig {
     pub scopes: String,
     /// Accepted `aud` values for bearer access tokens; default the client id.
     pub audiences: Vec<String>,
+    /// Accepted `aud` values for a deploy principal's token (#57); default `stardelt-deploy`.
+    pub deploy_audiences: Vec<String>,
     /// Nova's external origin, e.g. `https://nova.example.com` (no trailing slash).
     pub public_url: String,
     pub claims: ClaimConfig,
@@ -285,6 +287,16 @@ impl AuthMode {
             .filter(|a| !a.is_empty())
             .unwrap_or_else(|| vec![client_id.clone()]);
 
+        let deploy_audiences = var("NOVA_OIDC_DEPLOY_AUDIENCES")
+            .map(|a| {
+                a.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| vec!["stardelt-deploy".to_string()]);
+
         // An administrator mechanism is on by default; an explicitly empty value turns
         // it off, which is the configuration that reports `admin_group: null` (#213).
         let raw = |k: &str| get(k).map(|v| v.trim().to_string());
@@ -309,6 +321,7 @@ impl AuthMode {
             client_secret,
             scopes,
             audiences,
+            deploy_audiences,
             public_url,
             claims,
             session_secret: Secret::new(session_secret),
@@ -901,17 +914,42 @@ pub trait BearerValidator: Send + Sync {
 struct OidcBearer {
     provider: Arc<Provider>,
     audiences: Vec<String>,
+    deploy_audiences: Vec<String>,
     client_id: String,
     claims: ClaimConfig,
+}
+
+impl OidcBearer {
+    /// Verify an access token, accepting a deploy principal's own audience when its `azp` names a
+    /// stage (#1038). Nothing else changes: a token with a foreign `azp` is still `wrong audience`.
+    async fn verify_any(&self, token: &str) -> Result<Value, AuthError> {
+        match self
+            .provider
+            .verify(token, &self.audiences, &self.client_id)
+            .await
+        {
+            Err(AuthError::InvalidToken("wrong audience")) if !self.deploy_audiences.is_empty() => {
+                let claims = self
+                    .provider
+                    .verify(token, &self.deploy_audiences, &self.client_id)
+                    .await?;
+                match claim_str(&claims, "azp")
+                    .as_deref()
+                    .and_then(|azp| deploy_stage(Some(azp)))
+                {
+                    Some(_) => Ok(claims),
+                    None => Err(AuthError::InvalidToken("wrong audience")),
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 impl BearerValidator for OidcBearer {
     fn validate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>> {
         Box::pin(async move {
-            let claims = self
-                .provider
-                .verify(token, &self.audiences, &self.client_id)
-                .await?;
+            let claims = self.verify_any(token).await?;
             identity_from_claims(&claims, &self.claims)
         })
     }
@@ -971,10 +1009,7 @@ impl BearerValidator for OidcBearer {
         token: &'a str,
     ) -> BoxFuture<'a, Result<(Identity, BearerFacts), AuthError>> {
         Box::pin(async move {
-            let claims = self
-                .provider
-                .verify(token, &self.audiences, &self.client_id)
-                .await?;
+            let claims = self.verify_any(token).await?;
             let identity = identity_from_claims(&claims, &self.claims)?;
             Ok((
                 identity,
@@ -1307,6 +1342,13 @@ pub fn safe_return_to(raw: Option<&str>) -> String {
 // Auth state, cookies, middleware
 // ---------------------------------------------------------------------------
 
+/// The deploy stage a token was issued to: `stardelt-deploy-<stage>` in `azp`, else `None` (#57).
+pub fn deploy_stage(client_id: Option<&str>) -> Option<&str> {
+    client_id
+        .and_then(|id| id.strip_prefix("stardelt-deploy-"))
+        .filter(|stage| !stage.is_empty())
+}
+
 /// Who made this request and how. Inserted into request extensions by the middleware.
 #[derive(Clone, Debug)]
 pub struct Principal {
@@ -1318,7 +1360,8 @@ pub struct Principal {
     pub access_token: Option<Secret>,
     /// The token's `azp`: the client it was issued to. `None` for a browser session and for
     /// a token whose IdP sets no `azp`. A `stardelt-deploy-<stage>` value marks a deploy
-    /// principal (#57), which `deployments.rs` confines to that stage.
+    /// principal (#57), which `require_auth` confines to the deployment routes and
+    /// `deployments.rs` confines to that stage.
     pub client_id: Option<String>,
 }
 
@@ -1357,6 +1400,7 @@ impl AuthState {
         let bearer = Arc::new(OidcBearer {
             provider: provider.clone(),
             audiences: config.audiences.clone(),
+            deploy_audiences: config.deploy_audiences.clone(),
             client_id: config.client_id.clone(),
             claims: config.claims.clone(),
         });
@@ -1683,6 +1727,11 @@ pub struct AuthContext {
     pub app: Arc<crate::AppState>,
 }
 
+/// The routes a deploy principal may call (#57): the deployment routes and the CLI's `me`.
+pub(crate) fn deploy_route(path: &str) -> bool {
+    path == "/api/me" || path == "/api/deployments" || path.starts_with("/api/deployments/")
+}
+
 /// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
 pub async fn require_auth(
     State(ctx): State<AuthContext>,
@@ -1691,6 +1740,29 @@ pub async fn require_auth(
 ) -> Response {
     match ctx.auth.authenticate(req.headers()).await {
         Ok((principal, facts)) => {
+            // A deploy principal (#57) holds a token for its stage and nothing else: it may
+            // plan, record and read deployments, and confirm its sign-in, no more.
+            if let Some(stage) = deploy_stage(principal.client_id.as_deref())
+                && !deploy_route(req.uri().path())
+            {
+                warn!(
+                    target: "audit",
+                    stage = stage,
+                    path = %crate::audit::original_path(&req),
+                    "refused: a deploy principal outside the deployment routes"
+                );
+                let detail = format!(
+                    "a deploy principal may only use the deployments routes (stage `{stage}`)"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "forbidden",
+                        "detail": detail,
+                    })),
+                )
+                    .into_response();
+            }
             // The directory is best effort and must not add latency to the request: the
             // token's identity is copied into a task and the request goes on.
             let identity = principal.identity.clone();
@@ -4033,5 +4105,60 @@ mod tests {
                 .is_none(),
             "the row must be deleted"
         );
+    }
+
+    // --- Deploy principals (#57, #1038) ---------------------------------
+
+    #[test]
+    fn deploy_stage_is_read_from_azp() {
+        assert_eq!(deploy_stage(Some("stardelt-deploy-prod")), Some("prod"));
+        assert_eq!(deploy_stage(Some("stardelt-deploy-")), None);
+        assert_eq!(deploy_stage(Some("nova")), None);
+        assert_eq!(deploy_stage(None), None);
+    }
+
+    /// A deploy principal is admitted by `require_auth` for the deployments routes and the
+    /// CLI's sign-in confirmation only (`/api/me/extra` is a different route).
+    #[test]
+    fn deploy_route_is_only_the_deployment_routes() {
+        for path in [
+            "/api/me",
+            "/api/deployments",
+            "/api/deployments/plan",
+            "/api/deployments/7/rollback",
+        ] {
+            assert!(deploy_route(path), "{path} must be admitted");
+        }
+        for path in [
+            "/api/pipelines",
+            "/api/query",
+            "/api/catalogs",
+            "/api/me/extra",
+        ] {
+            assert!(!deploy_route(path), "{path} must be refused");
+        }
+    }
+
+    /// `aud: stardelt-deploy` alone is not a credential: the `azp` must name a stage.
+    #[test]
+    fn deploy_audience_without_a_stage_azp_is_wrong_audience() {
+        let deploy = vec!["stardelt-deploy".to_string()];
+        let mut claims = base_claims();
+        claims["aud"] = json!("stardelt-deploy");
+        claims["azp"] = json!("nova");
+        let verified = verify_jwt(&sign(&claims, Some("k1")), &jwks(), &expect_access(&deploy))
+            .expect("the audience half succeeds");
+        assert_eq!(claim_str(&verified, "azp").as_deref(), Some("nova"));
+        assert_eq!(
+            deploy_stage(claim_str(&verified, "azp").as_deref()),
+            None,
+            "a foreign azp is refused"
+        );
+
+        claims.as_object_mut().unwrap().remove("azp");
+        let verified = verify_jwt(&sign(&claims, Some("k1")), &jwks(), &expect_access(&deploy))
+            .expect("the audience half succeeds");
+        assert_eq!(claim_str(&verified, "azp"), None);
+        assert_eq!(deploy_stage(None), None, "a missing azp is refused");
     }
 }

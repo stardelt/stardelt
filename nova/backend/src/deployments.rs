@@ -39,7 +39,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::api_json::ApiJson;
-use crate::auth::{Identity, Principal};
+use crate::auth::{Identity, Principal, deploy_stage};
 use crate::connection_routes::Fail;
 use crate::saved_queries::{error, store_failed, unavailable};
 
@@ -341,13 +341,6 @@ const ROW_COLUMNS: &str = "id, bundle, owner_group, target, revision, repository
 /// member of the group.
 pub fn may_record(identity: &Identity, owner_group: &str) -> bool {
     identity.is_admin || identity.groups.iter().any(|g| g == owner_group)
-}
-
-/// The deploy stage a token was issued to: `stardelt-deploy-<stage>` in `azp`, else `None` (#57).
-pub fn deploy_stage(client_id: Option<&str>) -> Option<&str> {
-    client_id
-        .and_then(|id| id.strip_prefix("stardelt-deploy-"))
-        .filter(|stage| !stage.is_empty())
 }
 
 /// Why this caller may not record or plan a deployment to `target`, or `None` when it may.
@@ -1039,14 +1032,6 @@ mod tests {
             access_token: None,
             client_id: None,
         }
-    }
-
-    #[test]
-    fn deploy_stage_is_read_from_azp() {
-        assert_eq!(deploy_stage(Some("stardelt-deploy-prod")), Some("prod"));
-        assert_eq!(deploy_stage(Some("stardelt-deploy-")), None);
-        assert_eq!(deploy_stage(Some("nova")), None);
-        assert_eq!(deploy_stage(None), None);
     }
 
     #[test]
