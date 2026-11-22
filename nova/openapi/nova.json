@@ -4891,6 +4891,7 @@
         "tags": [
           "public"
         ],
+        "description": "The lineage graph around one table: the tables upstream and downstream within `depth` hops, the jobs that connect them, and what a change to the table would affect, from the lineage events of the last `days` days. 403 when the caller may not read the table.",
         "operationId": "lineage_graph",
         "parameters": [
           {
@@ -4980,6 +4981,7 @@
         "tags": [
           "public"
         ],
+        "description": "Column lineage for one table: for each output column, the source columns it was written from and when it was last written. A source in a catalog the caller cannot read is answered as `{ \"hidden\": true }`, without names.",
         "operationId": "lineage_columns",
         "parameters": [
           {
@@ -5069,6 +5071,7 @@
         "tags": [
           "public"
         ],
+        "description": "The tables the caller read most in the last `days` days, at most `limit`, newest read first. 503 when Nova has no state store.",
         "operationId": "lineage_read_tables",
         "parameters": [
           {
@@ -5131,6 +5134,7 @@
         "tags": [
           "public"
         ],
+        "description": "One run from the lineage record, by its run ID. 404 when there is no such run.",
         "operationId": "lineage_run_detail",
         "parameters": [
           {

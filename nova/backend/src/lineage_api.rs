@@ -587,6 +587,7 @@ pub(crate) fn build_graph(
     operation_id = "lineage_graph",
     path = "/api/lineage",
     tag = "public",
+    description = "The lineage graph around one table: the tables upstream and downstream within `depth` hops, the jobs that connect them, and what a change to the table would affect, from the lineage events of the last `days` days. 403 when the caller may not read the table.",
     params(
         ("catalog" = Option<String>, Query, description = "Catalog"),
         ("schema" = Option<String>, Query, description = "Schema"),
@@ -753,6 +754,7 @@ pub struct ReadTablesQuery {
     operation_id = "lineage_read_tables",
     path = "/api/lineage/read-tables",
     tag = "public",
+    description = "The tables the caller read most in the last `days` days, at most `limit`, newest read first. 503 when Nova has no state store.",
     params(
         ("days" = Option<i32>, Query, description = "Time window in days, 1–365, default 30"),
         ("limit" = Option<usize>, Query, description = "Tables to answer, 1–20, default 5")
@@ -1112,6 +1114,7 @@ const COLUMNS_SQL: &str = "SELECT payload->'ioMetadata'->'output'->'columns', to
     operation_id = "lineage_columns",
     path = "/api/lineage/columns",
     tag = "public",
+    description = "Column lineage for one table: for each output column, the source columns it was written from and when it was last written. A source in a catalog the caller cannot read is answered as `{ \"hidden\": true }`, without names.",
     params(
         ("catalog" = String, Query, description = "Catalog"),
         ("schema" = String, Query, description = "Schema"),
@@ -1212,6 +1215,7 @@ fn demo_columns_response() -> ColumnLineage {
     operation_id = "lineage_run_detail",
     path = "/api/lineage/runs/{run_id}",
     tag = "public",
+    description = "One run from the lineage record, by its run ID. 404 when there is no such run.",
     params(
         ("run_id" = String, Path, description = "Run ID")
     ),

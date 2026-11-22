@@ -443,6 +443,32 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../openapi/nova.json")
     }
 
+    /// Every `public` operation says what it does: the API reference and the MCP/CLI
+    /// consumers show this text, and a bare path tells a reader nothing (#95).
+    #[test]
+    fn every_public_operation_has_a_description() {
+        let doc = serde_json::to_value(document()).expect("the document serializes");
+        let mut missing = Vec::new();
+        for (path, item) in doc["paths"].as_object().expect("paths") {
+            for (method, op) in item.as_object().expect("a path item") {
+                if !["get", "post", "put", "patch", "delete"].contains(&method.as_str()) {
+                    continue;
+                }
+                let public = op["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|t| t == "public"));
+                let text = |key: &str| op[key].as_str().is_some_and(|s| !s.trim().is_empty());
+                if public && !text("description") && !text("summary") {
+                    missing.push(format!("{} {path}", method.to_uppercase()));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "public operations without a description: {missing:?}"
+        );
+    }
+
     /// The CI check: the committed document must equal what the annotations
     /// generate. Regenerate with `UPDATE_OPENAPI=1 cargo test -p
     /// stardelt-nova-backend openapi` and commit the result alongside the
