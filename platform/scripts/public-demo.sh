@@ -47,7 +47,11 @@
 # `make demo-stream YES=1`. Row 25 is the three visitor catalogs' vended credentials, fixed by
 # `make demo-sts-visitors YES=1` (#201 slice a). Row 26 is the demo inventory's convergence —
 # no legacy pipeline, viewers, a schedule and a green last run (#79 slice 2), fixed by
-# `make demo-shop YES=1 && make demo-stream YES=1`.
+# `make demo-shop YES=1 && make demo-stream YES=1`. Row 28 is the person `product-path`, the
+# identity `make verify-product-path-create` acts as (#98 item 4): its Secret, its group and no role.
+#
+# Step 2b creates `product-path`, the person `make verify-product-path-create` acts as, with a
+# generated password in Secret `product-path-user` that is never printed.
 #
 # Step 9 stays as the convergence for pipelines deployed by another path; a bundle deploy
 # writes `spec.viewers` itself when the pipeline file names them (#534), so a redeploy of
@@ -70,6 +74,9 @@ GROUP=visitors
 PERSON=demo
 PASSWORD=demo
 OWNER=demo
+PATH_PERSON=product-path
+PATH_SECRET=product-path-user
+PATH_MARK=product-path
 PUBLIC_CATALOGS=(bronze silver gold)
 DEFAULT_GROUP=stardelt-users
 DEFAULT_ROLE=default-roles-stardelt
@@ -155,6 +162,11 @@ user_id() { # user_id <username> -> the Keycloak id, empty when absent; non-zero
   out="$(kc --get --data-urlencode "username=$1" --data-urlencode 'exact=true' "$API/users")" || return 1
   printf '%s' "$out" | jq -r '.[0].id // ""'
 }
+user_id_mark() { # user_id_mark <username> <attribute> -> the attribute's value, empty when absent
+  local out
+  out="$(kc --get --data-urlencode "username=$1" --data-urlencode 'exact=true' "$API/users")" || return 1
+  printf '%s' "$out" | jq -r --arg a "$2" '(.[0].attributes // {})[$a] // [] | join(",")'
+}
 
 # --check (platform#940): the read-only report of what the rollout still misses.
 #
@@ -205,6 +217,7 @@ if [ "$mode" = check ]; then
       25) check_25 || rc=1 ;;
       26) check_26 || rc=1 ;;
       27) check_27 || rc=1 ;;
+      28) check_28 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -889,6 +902,51 @@ PY
     fi
   }
 
+  # 28. The person the create half acts as: its Secret, its group and no role (#98 item 4).
+  check_28() {
+    local keys uid groups_json others roles
+    keys="$(kubectl -n "$NAMESPACE" get secret "$PATH_SECRET" -o json 2>/dev/null | jq -r '.data | keys | join(",")' 2>/dev/null || true)"
+    if [ "$keys" != "password" ]; then
+      check_msg="Secret $PATH_SECRET holds the key '${keys:-nothing}' (want password)"
+      check_fix="make public-demo YES=1"
+      return 1
+    fi
+    kc_prepare || { kc_down; return 1; }
+    if ! uid="$(user_id "$PATH_PERSON")"; then
+      check_msg="the Keycloak admin API refused the lookup of $PATH_PERSON"
+      check_fix="make public-demo-check again; if it repeats, make install-identity"
+      return 1
+    fi
+    if [ -z "$uid" ]; then
+      check_msg="the person $PATH_PERSON does not exist"
+      check_fix="make public-demo YES=1"
+      return 1
+    fi
+    if ! groups_json="$(kc "$API/users/$uid/groups")"; then
+      check_msg="cannot read the groups of $PATH_PERSON"
+      check_fix="make public-demo YES=1"
+      return 1
+    fi
+    if ! jq -e --arg g "$OWNER" 'any(.[]; .name == $g)' <<<"$groups_json" >/dev/null; then
+      check_msg="$PATH_PERSON is not a member of $OWNER"
+      check_fix="make public-demo YES=1"
+      return 1
+    fi
+    others="$(jq -r --arg g "$OWNER" '[.[] | select(.name != $g) | .name] | join(", ")' <<<"$groups_json")"
+    if [ -n "$others" ]; then
+      check_msg="$PATH_PERSON is in $OWNER and also in $others"
+      check_fix="make public-demo YES=1"
+      return 1
+    fi
+    roles="$(jq -r '[.[].name] | join(", ")' <<<"$(kc "$API/users/$uid/role-mappings/realm")")"
+    if [ -n "$roles" ]; then
+      check_msg="$PATH_PERSON holds the realm roles $roles"
+      check_fix="make public-demo YES=1"
+      return 1
+    fi
+    check_msg="person $PATH_PERSON in $OWNER only, Secret $PATH_SECRET, no realm role"
+  }
+
   render 0a
   render 0b
   render 0
@@ -921,6 +979,7 @@ PY
   render 25
   render 26
   render 27
+  render 28
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then
@@ -971,6 +1030,8 @@ if [ "$YES" != 1 ]; then
   cat <<EOF
 would: create the realm group $GROUP (marked $MARK_ATTRIBUTE=$MARK_VALUE)
 would: create the person $PERSON with the password $PASSWORD (public on purpose) and reset it
+would: create the person $PATH_PERSON (a member of $OWNER) with a generated password in Secret $PATH_SECRET
+would: reset the password of $PATH_PERSON to that Secret's value on every run (never printed)
 would: make $PERSON a member of $GROUP and of no other group, $DEFAULT_GROUP included
 would: remove the realm role $DEFAULT_ROLE from $PERSON
 would: grant $GROUP browse and select on ${PUBLIC_CATALOGS[*]}
@@ -1057,6 +1118,71 @@ kc -H 'Content-Type: application/json' -X PUT --data @"$tmp/password.json" "$API
 kc -X DELETE "$API/attack-detection/brute-force/users/$uid" >/dev/null \
   || fail "Keycloak refused to clear the brute-force lock of user $PERSON"
 echo "  password of $PERSON reset (public on purpose)"
+
+# 2b. The person the create half of the product-path test acts as (#98 item 4). Its password is
+# generated once into a Secret and never printed; every run resets the realm to that value.
+path_password="$(kubectl -n "$NAMESPACE" get secret "$PATH_SECRET" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+if [ -z "$path_password" ]; then
+  path_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+  kubectl -n "$NAMESPACE" create secret generic "$PATH_SECRET" \
+      --from-literal=password="$path_password" --dry-run=client -o yaml \
+    | kubectl -n "$NAMESPACE" apply -f - >/dev/null \
+    || fail "cannot write Secret $PATH_SECRET"
+  echo "› Secret $PATH_SECRET: created"
+else
+  echo "› Secret $PATH_SECRET: unchanged — the password is kept"
+fi
+
+path_uid="$(user_id "$PATH_PERSON")" || fail "the Keycloak admin API refused the lookup of $PATH_PERSON"
+if [ -z "$path_uid" ]; then
+  printf '{"username":"%s","enabled":true,"emailVerified":true,"email":"product-path@example.invalid","firstName":"Product path","lastName":"Check","requiredActions":[],"attributes":{"%s":["%s"]}}' \
+    "$PATH_PERSON" "$MARK_ATTRIBUTE" "$PATH_MARK" >"$tmp/create-path-user.json"
+  kc -H 'Content-Type: application/json' -X POST --data @"$tmp/create-path-user.json" "$API/users" >/dev/null \
+    || fail "Keycloak refused to create user $PATH_PERSON"
+  path_uid="$(user_id "$PATH_PERSON")"
+  [ -n "$path_uid" ] || fail "user $PATH_PERSON is not in the realm after creating it"
+  echo "› user $PATH_PERSON: created"
+else
+  path_mark="$(user_id_mark "$PATH_PERSON" "$MARK_ATTRIBUTE")"
+  [ "$path_mark" = "$PATH_MARK" ] || fail "a user $PATH_PERSON exists that this script did not create (no $MARK_ATTRIBUTE=$PATH_MARK); nothing was changed"
+  echo "› user $PATH_PERSON: unchanged — exists"
+fi
+printf '{"enabled":true,"requiredActions":[]}' >"$tmp/enable-path.json"
+kc -H 'Content-Type: application/json' -X PUT --data @"$tmp/enable-path.json" "$API/users/$path_uid" >/dev/null \
+  || fail "Keycloak refused to enable user $PATH_PERSON"
+printf '{"type":"password","value":"%s","temporary":false}' "$path_password" >"$tmp/password-path.json"
+kc -H 'Content-Type: application/json' -X PUT --data @"$tmp/password-path.json" "$API/users/$path_uid/reset-password" >/dev/null \
+  || fail "Keycloak refused to set the password of user $PATH_PERSON"
+kc -X DELETE "$API/attack-detection/brute-force/users/$path_uid" >/dev/null \
+  || fail "Keycloak refused to clear the brute-force lock of user $PATH_PERSON"
+echo "  password of $PATH_PERSON reset from Secret $PATH_SECRET (never printed)"
+unset path_password
+
+read_groups
+path_gid="$(group_id "$OWNER")"
+[ -n "$path_gid" ] || fail "the realm group $OWNER does not exist; run make demo-access YES=1 GROUP=demo MEMBERS=<you> first (nothing was changed)"
+path_groups="$tmp/path-groups.json"
+kc "$API/users/$path_uid/groups" >"$path_groups" || fail "cannot read the groups of user $PATH_PERSON"
+in_owner=0
+left=""
+while read -r other_id other_name; do
+  [ -n "$other_name" ] || continue
+  if [ "$other_name" = "$OWNER" ]; then in_owner=1; continue; fi
+  kc -X DELETE "$API/users/$path_uid/groups/$other_id" >/dev/null || fail "cannot remove user $PATH_PERSON from group $other_name"
+  left="$left $other_name"
+done < <(jq -r '.[] | "\(.id) \(.name)"' "$path_groups")
+if [ "$in_owner" -eq 0 ]; then
+  kc -X PUT "$API/users/$path_uid/groups/$path_gid" >/dev/null || fail "cannot add user $PATH_PERSON to group $OWNER"
+fi
+echo "› groups of $PATH_PERSON: in $OWNER only"
+path_roles="$(kc "$API/users/$path_uid/role-mappings/realm")" || fail "cannot read the realm roles of user $PATH_PERSON"
+if [ "$(jq -r 'length' <<<"$path_roles")" -ne 0 ]; then
+  jq -c '.' <<<"$path_roles" >"$tmp/realm-roles-path.json"
+  kc -H 'Content-Type: application/json' -X DELETE --data @"$tmp/realm-roles-path.json" \
+    "$API/users/$path_uid/role-mappings/realm" >/dev/null \
+    || fail "Keycloak refused to remove the realm roles of user $PATH_PERSON"
+fi
+echo "› realm roles of $PATH_PERSON: none"
 
 # 3. Group memberships: in $GROUP, in nothing else (defaultGroups adds new users to $DEFAULT_GROUP).
 current_json="$tmp/memberships.json"
