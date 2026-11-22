@@ -72,7 +72,7 @@ CHART_EXTRA ?=
 # client redirect URIs on the app subdomains. Same default as `dev-dns`.
 BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
-.PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status verify-product-path
+.PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins verify-spark-guard verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status verify-product-path spike-trino-idle
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
@@ -313,6 +313,10 @@ verify-crds: _context ## The live CRD schemas match the operator checkout (needs
 .PHONY: verify-pins
 verify-pins: _context ## The live Deployment images match the checked-in pins
 	@bash scripts/verify-pins.sh
+
+.PHONY: spike-trino-idle
+spike-trino-idle: _context ## What a query does while no Trino worker runs (#30 step A)
+	bash scripts/spike-trino-idle-workers.sh
 
 # verify-pins proves the live Nova image digest is the pin; this proves the document inside that
 # image is the one nova/openapi/nova.json carries at the commit the pin names (#951, #95).
