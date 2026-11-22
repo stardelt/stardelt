@@ -255,6 +255,32 @@ wait_run() { # <dag> <run> -> RUN_STATE; 1 when it did not settle within TIMEOUT
   return 1
 }
 
+# A pod that never scheduled is the lab's capacity, not a WAP defect (#1185). Kubernetes keeps
+# these events for about an hour; the `.eventTime` field is the one this cluster fills in.
+unscheduled_pod() { # <task-name> -> the FailedScheduling message for a pod of that task, or empty
+  local since
+  since="$(date -u -d '-20 min' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [ -n "$since" ] || return 0
+  kubectl -n "$NS" get events --field-selector reason=FailedScheduling -o json 2>/dev/null \
+    | jq -r --arg prefix "^$1-" --arg since "$since" \
+        '.items[]
+         | select(.involvedObject.kind == "Pod")
+         | select(.involvedObject.name | test($prefix))
+         | select(((.eventTime // .lastTimestamp // .firstTimestamp) // "") >= $since)
+         | .message' 2>/dev/null | head -n 1
+}
+
+# Exit 3 (nothing measured) when a task failed and its pod never got scheduled: a retry on a
+# quieter node is what decides WAP, not this run.
+no_room() { # <dag> <run> <task>
+  [ "$(task_state "$1" "$2" "$3")" = "failed" ] || return 0
+  local why
+  why="$(unscheduled_pod "$3")"
+  [ -n "$why" ] || return 0
+  echo "verify-wap: UNVERIFIED (the $3 pod never scheduled on the lab — $why; nothing about WAP was measured, retry when the node has CPU free)" >&2
+  exit 3
+}
+
 trigger_run() { # <dag> -> sets RUN; 1 when the newest run did not appear
   local before after _ deadline=$(( SECONDS + 120 ))
   before="$(newest_run_id "$1")"
@@ -382,6 +408,7 @@ if ! wait_run "$DAG" "$RUN"; then
   echo "verify-wap: UNVERIFIED (run 2 ($RUN) did not finish within ${TIMEOUT}s, state=${RUN_STATE})"
   exit 3
 fi
+no_room "$DAG" "$RUN" build
 tasks=""
 for task in wap-prepare build check wap-publish; do
   tasks="$tasks $task=$(task_state "$DAG" "$RUN" "$task")"
@@ -417,6 +444,7 @@ if ! wait_run "$DAG" "$RUN"; then
   echo "verify-wap: UNVERIFIED (run 3 ($RUN) did not finish within ${TIMEOUT}s, state=${RUN_STATE})"
   exit 3
 fi
+no_room "$DAG" "$RUN" build
 check_state="$(task_state "$DAG" "$RUN" check)"
 publish_state="$(task_state "$DAG" "$RUN" wap-publish)"
 S3="$(main_snapshot || true)"
