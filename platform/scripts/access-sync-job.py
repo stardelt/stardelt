@@ -694,8 +694,9 @@ def driver_identities():
     deterministic, so no status field is read. An install whose Role predates this read
     answers 403 and returns None (the caller keeps every `kubernetes~` assignee, the
     rule of #693); a missing CRD (404) returns {}; a cluster whose driver SA does not
-    exist yet answers 404 for that SA and is skipped. An identity is a principal id and
-    is never printed.
+    exist yet answers 404 for that SA and is skipped. Any other answer for one SA also
+    returns None: a tick that cannot tell a removed object from an unreadable one must
+    not delete the grant. An identity is a principal id and is never printed.
     """
     status, listing = k8s_request("GET", SPARKCLUSTER_PATH)
     if status == 403:
@@ -713,16 +714,22 @@ def driver_identities():
         group = ((item.get("spec") or {}).get("owner") or {}).get("group")
         if not isinstance(group, str) or not group:
             continue
-        status, account = k8s_request(
-            "GET", SERVICEACCOUNT_PATH % ("spark-cluster-driver-%s" % group)
-        )
+        # The group is a name from a spec, not a path: a `/` must not retarget the read.
+        name = urllib.parse.quote("spark-cluster-driver-%s" % group, safe="")
+        status, account = k8s_request("GET", SERVICEACCOUNT_PATH % name)
         if status == 403:
             print(
                 "access-sync: no ServiceAccount read (HTTP 403); driver identities kept as they are"
             )
             return None
-        if status != 200 or account is None:
+        if status == 404:
             continue
+        if status != 200 or account is None:
+            print(
+                "access-sync: cannot read ServiceAccount %s (HTTP %s); driver identities kept as they are"
+                % (name, status)
+            )
+            return None
         uid = (account.get("metadata") or {}).get("uid")
         if not isinstance(uid, str) or not uid:
             continue

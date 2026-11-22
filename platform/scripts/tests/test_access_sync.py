@@ -428,7 +428,8 @@ class FakeKubernetes:
     predates the workload identity read (#684). `sparkclusters` and
     `sparkclusters_forbidden` are the same pair for the driver read (#1100), and
     `serviceaccounts` is a name→object map for `GET .../serviceaccounts/<name>` (a name
-    that is absent answers 404).
+    that is absent answers 404); `serviceaccounts_status` makes that read answer one
+    status for every name.
     """
 
     def __init__(
@@ -439,6 +440,7 @@ class FakeKubernetes:
         sparkclusters=(),
         sparkclusters_forbidden=False,
         serviceaccounts=None,
+        serviceaccounts_status=None,
     ):
         self.catalog = catalog
         self.principals = list(principals)
@@ -446,6 +448,7 @@ class FakeKubernetes:
         self.sparkclusters = list(sparkclusters)
         self.sparkclusters_forbidden = sparkclusters_forbidden
         self.serviceaccounts = dict(serviceaccounts or {})
+        self.serviceaccounts_status = serviceaccounts_status
         self.calls = []
 
     def request(self, method, path, body=None):
@@ -459,6 +462,8 @@ class FakeKubernetes:
                 return 403, None
             return 200, {"items": self.sparkclusters}
         if method == "GET" and "/serviceaccounts/" in path:
+            if self.serviceaccounts_status is not None:
+                return self.serviceaccounts_status, None
             account = self.serviceaccounts.get(path.rsplit("/", 1)[-1])
             if account is None:
                 return 404, None
@@ -670,6 +675,7 @@ class JobTestCase(unittest.TestCase):
         self,
         *clusters,
         serviceaccounts=None,
+        serviceaccounts_status=None,
         sparkclusters_forbidden=False,
         principals=(),
         principals_forbidden=False,
@@ -682,6 +688,7 @@ class JobTestCase(unittest.TestCase):
             sparkclusters=clusters,
             sparkclusters_forbidden=sparkclusters_forbidden,
             serviceaccounts=serviceaccounts,
+            serviceaccounts_status=serviceaccounts_status,
         )
         access_sync.k8s_request = kubernetes.request
         access_sync.list_catalogs = lambda: [json.loads(json.dumps(CATALOG))]
@@ -1643,6 +1650,33 @@ class MainTest(JobTestCase):
     def test_a_forbidden_sparkcluster_read_returns_none(self):
         self.use_sparkclusters(sparkclusters_forbidden=True)
         self.assertIsNone(access_sync.driver_identities())
+
+    def test_a_forbidden_driver_service_account_read_returns_none(self):
+        cluster = {"spec": {"owner": {"group": "demo"}}}
+        self.use_sparkclusters(cluster, serviceaccounts_status=403)
+        self.assertIsNone(access_sync.driver_identities())
+
+    def test_an_unreadable_driver_service_account_keeps_the_driver_assignee(self):
+        """A 500 is not a removed ServiceAccount: the tick must not delete the grant."""
+        kubernetes = self.use_sparkclusters(
+            {"spec": {"owner": {"group": "stardelt-users"}}},
+            serviceaccounts={
+                "spark-cluster-driver-stardelt-users": {"metadata": {"uid": "uid-driver"}}
+            },
+        )
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-driver"},
+        )
+        kubernetes.serviceaccounts_status = 500
+        self.assertEqual(access_sync.main(), 0)
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-driver"},
+            "a tick that cannot read the driver's ServiceAccount must not remove the identity",
+        )
 
     def test_a_groups_driver_identity_joins_its_groups_role(self):
         self.use_sparkclusters(
