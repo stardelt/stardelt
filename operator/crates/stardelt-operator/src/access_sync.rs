@@ -88,8 +88,17 @@ pub fn role(namespace: &str) -> Role {
                     "catalogs".into(),
                     "sqlwarehouses".into(),
                     "serviceprincipals".into(),
+                    "sparkclusters".into(),
                 ]),
                 verbs: vec!["get".into(), "list".into()],
+                ..PolicyRule::default()
+            },
+            // The driver ServiceAccount's uid: a group's SparkCluster runs as
+            // `spark-cluster-driver-<group>` (#493, #1100).
+            PolicyRule {
+                api_groups: Some(vec![String::new()]),
+                resources: Some(vec!["serviceaccounts".into()]),
+                verbs: vec!["get".into()],
                 ..PolicyRule::default()
             },
             PolicyRule {
@@ -359,7 +368,7 @@ mod tests {
     fn the_role_reads_three_secrets_and_writes_the_two_config_maps() {
         let role = role("data");
         let rules = role.rules.as_ref().unwrap();
-        assert_eq!(rules.len(), 6);
+        assert_eq!(rules.len(), 7);
         // rule 0
         assert_eq!(
             rules[0].resource_names.as_ref().unwrap(),
@@ -369,9 +378,15 @@ mod tests {
                 "stardelt-oidc-clients".to_string()
             ]
         );
-        // rule 3
+        // rule 2: the driver ServiceAccount's uid (#493, #1100)
         assert_eq!(
-            rules[3].resource_names.as_ref().unwrap(),
+            rules[2].resources.as_ref().unwrap(),
+            &vec!["serviceaccounts".to_string()]
+        );
+        assert_eq!(rules[2].verbs, vec!["get".to_string()]);
+        // rule 4
+        assert_eq!(
+            rules[4].resource_names.as_ref().unwrap(),
             &vec![
                 "trino-warehouses".to_string(),
                 "trino-group-file".to_string()

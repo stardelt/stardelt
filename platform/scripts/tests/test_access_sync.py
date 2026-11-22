@@ -425,13 +425,27 @@ class FakeKubernetes:
 
     `principals` is what `GET .../serviceprincipals` answers (`{"items": [...]}`) and
     `principals_forbidden` makes that read answer 403 — the Role of an install that
-    predates the workload identity read (#684).
+    predates the workload identity read (#684). `sparkclusters` and
+    `sparkclusters_forbidden` are the same pair for the driver read (#1100), and
+    `serviceaccounts` is a name→object map for `GET .../serviceaccounts/<name>` (a name
+    that is absent answers 404).
     """
 
-    def __init__(self, catalog, principals=(), principals_forbidden=False):
+    def __init__(
+        self,
+        catalog,
+        principals=(),
+        principals_forbidden=False,
+        sparkclusters=(),
+        sparkclusters_forbidden=False,
+        serviceaccounts=None,
+    ):
         self.catalog = catalog
         self.principals = list(principals)
         self.principals_forbidden = principals_forbidden
+        self.sparkclusters = list(sparkclusters)
+        self.sparkclusters_forbidden = sparkclusters_forbidden
+        self.serviceaccounts = dict(serviceaccounts or {})
         self.calls = []
 
     def request(self, method, path, body=None):
@@ -440,6 +454,15 @@ class FakeKubernetes:
             if self.principals_forbidden:
                 return 403, None
             return 200, {"items": self.principals}
+        if method == "GET" and path.endswith("/sparkclusters"):
+            if self.sparkclusters_forbidden:
+                return 403, None
+            return 200, {"items": self.sparkclusters}
+        if method == "GET" and "/serviceaccounts/" in path:
+            account = self.serviceaccounts.get(path.rsplit("/", 1)[-1])
+            if account is None:
+                return 404, None
+            return 200, account
         if method == "GET":
             return 200, self.catalog
         if method == "PATCH" and path.endswith("/status"):
@@ -641,6 +664,27 @@ class JobTestCase(unittest.TestCase):
         )
         access_sync.k8s_request = kubernetes.request
         access_sync.list_catalogs = lambda: catalogs
+        return kubernetes
+
+    def use_sparkclusters(
+        self,
+        *clusters,
+        serviceaccounts=None,
+        sparkclusters_forbidden=False,
+        principals=(),
+        principals_forbidden=False,
+    ):
+        """Wire the SparkCluster and ServiceAccount reads (the driver half, #1100)."""
+        kubernetes = FakeKubernetes(
+            json.loads(json.dumps(CATALOG)),
+            principals=principals,
+            principals_forbidden=principals_forbidden,
+            sparkclusters=clusters,
+            sparkclusters_forbidden=sparkclusters_forbidden,
+            serviceaccounts=serviceaccounts,
+        )
+        access_sync.k8s_request = kubernetes.request
+        access_sync.list_catalogs = lambda: [json.loads(json.dumps(CATALOG))]
         return kubernetes
 
     def use_warehouses(self, *warehouses, configmaps=None):
@@ -1581,6 +1625,37 @@ class MainTest(JobTestCase):
         self.assertEqual(
             self.fake.assignees(users_role),
             {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-1"},
+        )
+
+    def test_a_group_clusters_driver_service_account_is_a_workload_identity(self):
+        self.use_sparkclusters(
+            {"spec": {"owner": {"group": "demo"}}},
+            serviceaccounts={"spark-cluster-driver-demo": {"metadata": {"uid": "uid-driver"}}},
+        )
+        self.assertEqual(
+            access_sync.driver_identities(), {"demo": {"kubernetes~uid-driver"}}
+        )
+
+    def test_a_cluster_without_its_driver_service_account_is_skipped(self):
+        self.use_sparkclusters({"spec": {"owner": {"group": "demo"}}}, serviceaccounts={})
+        self.assertEqual(access_sync.driver_identities(), {})
+
+    def test_a_forbidden_sparkcluster_read_returns_none(self):
+        self.use_sparkclusters(sparkclusters_forbidden=True)
+        self.assertIsNone(access_sync.driver_identities())
+
+    def test_a_groups_driver_identity_joins_its_groups_role(self):
+        self.use_sparkclusters(
+            {"spec": {"owner": {"group": "stardelt-users"}}},
+            serviceaccounts={
+                "spark-cluster-driver-stardelt-users": {"metadata": {"uid": "uid-driver"}}
+            },
+        )
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-driver"},
         )
 
     def test_a_keycloak_403_fails_the_run_without_a_partial_write(self):
