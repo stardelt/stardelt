@@ -154,6 +154,8 @@ mod stages;
 mod statements;
 mod streams;
 mod superset;
+#[allow(dead_code)] // called by the import route, #115 a/3b
+mod superset_archive;
 mod trino;
 mod user_settings;
 mod verified_queries;
