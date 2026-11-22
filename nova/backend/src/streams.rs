@@ -488,7 +488,7 @@ fn stream_api(state: &AppState) -> Result<Api<kube::api::DynamicObject>, Fail> {
 }
 
 /// Every `StreamApp` of Nova's namespace.
-async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
+pub(crate) async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
     let api = stream_api(state)?;
     let objects = api
         .list(&kube::api::ListParams::default())

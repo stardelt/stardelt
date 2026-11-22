@@ -800,7 +800,7 @@ pub async fn record(
     operation_id = "deployments_plan",
     path = "/api/deployments/plan",
     tag = "public",
-    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes are not covered yet; a StreamApp document is checked with the rules its write runs, and every stream change reads as a create because a stream write is a PUT. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
+    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes are not covered yet; a StreamApp document is checked with the rules its write runs, and reads as an update when a StreamApp of that name exists, a create otherwise (a stream write is a PUT, so a stream change carries no diff yet). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
     request_body(content = BundlePlanRequest, example = json!(bundle_plan_request_example())),
     responses(
         (status = 200, description = "The plan, with its identity", body = BundlePlan, example = json!(bundle_plan_example())),
@@ -851,6 +851,10 @@ pub async fn plan(
         .as_ref()
         .and_then(|row| serde_json::from_value::<Vec<DeploymentFile>>(row.files.clone()).ok());
     let resources = crate::pipelines::resources(&s);
+    let streams = match crate::streams::stream_apps(&s).await {
+        Ok(streams) => streams,
+        Err(fail) => return crate::pipelines::answer::<crate::deployments::BundlePlan>(Err(fail)),
+    };
     crate::pipelines::answer(
         crate::pipelines::plan_bundle(
             resources.as_ref(),
@@ -858,6 +862,7 @@ pub async fn plan(
             s.notebooks.as_ref(),
             &identity,
             files.as_deref(),
+            &streams,
             request,
         )
         .await,
