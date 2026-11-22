@@ -225,6 +225,13 @@ def _parser():
         metavar="GROUPS",
         help="comma-separated groups that may read the version without being members (at most 8)",
     )
+    boards = commands.add_parser("dashboards", help="work with Superset dashboards")
+    board_commands = boards.add_subparsers(dest="dashboards_command", required=True)
+    out = board_commands.add_parser(
+        "export", help="write a dashboard as an unzipped Superset export for a bundle (databases/ is not stored)"
+    )
+    out.add_argument("dashboard_id", type=int, help="the dashboard's Superset id (the number in its URL)")
+    out.add_argument("-o", "--out", required=True, metavar="DIR", help="the bundle folder to write, for example dashboards/shop")
     return parser
 
 
@@ -550,6 +557,16 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             ]))
             for line in lineage.jobs(answer):
                 stderr.write(f"stardelt: job {line}\n")
+            return OK
+        if args.command == "dashboards" and args.dashboards_command == "export":
+            try:
+                from stardelt import dashboards
+
+                target, written = dashboards.export(nova, args.dashboard_id, args.out)
+            except (ValueError, OSError, RuntimeError) as err:
+                stderr.write(f"stardelt: {err}\n")
+                return ERROR if not isinstance(err, ValueError) else USAGE
+            stderr.write(f"stardelt: {dashboards.summary(target, written)}\n")
             return OK
         if args.command == "apply":
             for spec in specs:

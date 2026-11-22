@@ -196,6 +196,10 @@ class Client:
         """``POST /api/query``: run one statement as the caller. Rows beyond Nova's cap are cut and ``truncated`` is true."""
         return QueryResult(self._request("POST", "/api/query", json={"sql": sql}).json())
 
+    def download(self, path):
+        """GET a raw (non-JSON) answer, for example an archive; returns the body bytes."""
+        return self._request("GET", path).content
+
     def statement(self, sql, max_seconds=None):
         """Like ``query``, through the statement API: no request stays open, up to 100 000 rows, cancelled when it fails.
 
