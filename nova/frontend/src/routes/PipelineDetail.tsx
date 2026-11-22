@@ -602,6 +602,16 @@ function RunRow({
                 label={started.title ?? run.runId}
                 notebookTasks={pipeline.tasks.filter((task) => task.kind === 'notebook').map((task) => task.name)}
                 taskKinds={Object.fromEntries(pipeline.tasks.map((task) => [task.name, task.kind]))}
+                taskWrites={Object.fromEntries(
+                  pipeline.tasks
+                    .filter((task) => (task.writes?.length ?? 0) > 0)
+                    .map((task) => [task.name, task.writes ?? []]),
+                )}
+                taskRefresh={Object.fromEntries(
+                  pipeline.tasks
+                    .filter((task) => task.kind === 'spark-pipeline')
+                    .map((task) => [task.name, task.refresh ?? null]),
+                )}
               />
             </div>
           </td>
@@ -618,6 +628,8 @@ function RunTasks({
   label,
   notebookTasks,
   taskKinds,
+  taskWrites,
+  taskRefresh,
 }: {
   namespace: string
   name: string
@@ -625,6 +637,8 @@ function RunTasks({
   label: string
   notebookTasks: string[]
   taskKinds: Record<string, string>
+  taskWrites: Record<string, string[]>
+  taskRefresh: Record<string, string | null>
 }) {
   const tasks = useQuery({
     queryKey: ['pipeline-run', namespace, name, runId],
@@ -658,6 +672,8 @@ function RunTasks({
         queries={queries.data?.queries ?? []}
         notebookTasks={notebookTasks}
         taskKinds={taskKinds}
+        taskWrites={taskWrites}
+        taskRefresh={taskRefresh}
       />
     </div>
   )

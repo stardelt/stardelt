@@ -116,6 +116,12 @@ export default function RunDetail() {
   const specs = pipeline.data?.tasks ?? []
   const taskKinds = Object.fromEntries(specs.map((task) => [task.name, task.kind]))
   const notebookTasks = specs.filter((task) => task.kind === 'notebook').map((task) => task.name)
+  const taskWrites = Object.fromEntries(
+    specs.filter((task) => (task.writes?.length ?? 0) > 0).map((task) => [task.name, task.writes ?? []]),
+  )
+  const taskRefresh = Object.fromEntries(
+    specs.filter((task) => task.kind === 'spark-pipeline').map((task) => [task.name, task.refresh ?? null]),
+  )
 
   return (
     <div className="max-w-6xl space-y-5">
@@ -170,6 +176,8 @@ export default function RunDetail() {
           queries={queries.data?.queries ?? []}
           notebookTasks={notebookTasks}
           taskKinds={taskKinds}
+          taskWrites={taskWrites}
+          taskRefresh={taskRefresh}
         />
       </section>
 
