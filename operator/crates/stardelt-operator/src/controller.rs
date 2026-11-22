@@ -77,18 +77,23 @@ pub struct Context {
     /// The cached `PlatformInstance` list (#274 rule 5): every principal reconcile reads it
     /// instead of a cluster-wide LIST.
     pub platforms: kube::runtime::reflector::Store<PlatformInstance>,
+    /// The namespace's `stardelt-identity` ConfigMap, cached (#274 rule 5). Two reconciles read
+    /// it on every pass and it changes only when an administrator edits identity settings.
+    pub identity: kube::runtime::reflector::Store<ConfigMap>,
 }
 
 impl Context {
-    /// A context whose platform store is detached (tests that never ask for a
-    /// `PlatformInstance`): the store answers empty and no watcher runs.
+    /// A context whose platform and identity stores are detached (tests that never ask for a
+    /// `PlatformInstance` or the identity contract): the stores answer empty and no watcher runs.
     pub fn new(client: Client, helm: Arc<dyn HelmRunner>) -> Self {
         let (platforms, _writer) = kube::runtime::reflector::store();
+        let (identity, _identity_writer) = kube::runtime::reflector::store();
         Self {
             client,
             helm,
             keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
             platforms,
+            identity,
         }
     }
 }
@@ -160,11 +165,38 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
             })?;
         }
     }
+    // The identity ConfigMap is read by two reconciles and changes rarely (#274 rule 5). A field
+    // selector keeps the watch to one object; the store's pump must stay polled in the final
+    // `loop` below, or the store would freeze after the first list.
+    let (identity, identity_writer) = reflector::store();
+    let identity_stream = reflector::reflector(
+        identity_writer,
+        watcher(
+            Api::<ConfigMap>::all(client.clone()),
+            watcher::Config::default().fields("metadata.name=stardelt-identity"),
+        ),
+    );
+    let mut identity_pump = std::pin::pin!(
+        identity_stream
+            .applied_objects()
+            .for_each(|_| futures::future::ready(()))
+    );
+    tokio::select! {
+        _ = &mut identity_pump => {
+            anyhow::bail!("the stardelt-identity store stopped before its first list");
+        }
+        ready = identity.wait_until_ready() => {
+            ready.map_err(|_| {
+                anyhow::anyhow!("the stardelt-identity store stopped before its first list")
+            })?;
+        }
+    }
     let ctx = Arc::new(Context {
         client: client.clone(),
         helm: Arc::new(CommandHelmRunner),
         keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
         platforms,
+        identity,
     });
 
     let lakehouses = Controller::new(
@@ -325,11 +357,13 @@ async fn run_controllers(client: Client) -> anyhow::Result<()> {
         spark_projects,
         streams,
         spark_clusters,
-        catalogs
+        catalogs,
+        identity_pump
     );
     loop {
         tokio::select! {
             _ = &mut pump => anyhow::bail!("the PlatformInstance store stopped"),
+            _ = &mut identity_pump => anyhow::bail!("the stardelt-identity store stopped"),
             _ = lakehouses.next() => {}
             _ = platforms.next() => {}
             _ = connections.next() => {}
@@ -633,15 +667,13 @@ fn profile_name(profile: Profile) -> &'static str {
     }
 }
 
-/// The identity contract's issuer, from ConfigMap `stardelt-identity` key `issuerUrl`. `None`
-/// without an identity contract: sign-in is off and the overlays do not apply.
-async fn identity_issuer(client: &Client, namespace: &str) -> Option<String> {
-    Api::<ConfigMap>::namespaced(client.clone(), namespace)
-        .get_opt(crate::identity::CONFIGMAP_NAME)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|cm| cm.data)
+/// The identity contract's issuer, from ConfigMap `stardelt-identity` key `issuerUrl`, as the
+/// cached store has it (#274 rule 5). `None` without an identity contract: sign-in is off and
+/// the overlays do not apply.
+fn identity_issuer(ctx: &Context, namespace: &str) -> Option<String> {
+    ctx.identity
+        .get(&ObjectRef::new(crate::identity::CONFIGMAP_NAME).within(namespace))
+        .and_then(|cm| cm.data.clone())
         .and_then(|data| data.get("issuerUrl").cloned())
         .filter(|issuer| !issuer.is_empty())
 }
@@ -649,8 +681,8 @@ async fn identity_issuer(client: &Client, namespace: &str) -> Option<String> {
 /// The platform's rule for its identity overlay: ConfigMap `stardelt-identity` exists in the
 /// namespace (stardelt-platform `Makefile`, target `trino:`). A `Lakehouse` has no identity
 /// field of its own.
-async fn identity_contract_present(client: &Client, namespace: &str) -> bool {
-    identity_issuer(client, namespace).await.is_some()
+fn identity_contract_present(ctx: &Context, namespace: &str) -> bool {
+    identity_issuer(ctx, namespace).is_some()
 }
 
 /// The change stamp of the resource-group file: ConfigMap `trino-warehouses` is written by
@@ -1786,7 +1818,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     let plan = plan_lakehouse(&lh.spec);
     // The identity contract decides whether Trino authenticates; its key material decides
     // whether it may start with the HTTPS listener on. A dry run shows the intended state.
-    let identity_contract = identity_contract_present(&ctx.client, &namespace).await;
+    let identity_contract = identity_contract_present(&ctx, &namespace);
     let trino_ready = lh.spec.dry_run
         || !identity_contract
         || trino_key_material_present(&ctx.client, &namespace).await;
@@ -1796,7 +1828,7 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
         None
     };
     let issuer = if identity_contract {
-        identity_issuer(&ctx.client, &namespace).await
+        identity_issuer(&ctx, &namespace)
     } else {
         None
     };
@@ -2501,6 +2533,41 @@ mod tests {
             ))
         });
         (Client::new(service, "stardelt"), requests)
+    }
+
+    #[tokio::test]
+    async fn the_identity_issuer_comes_from_the_store() {
+        let (client, requests) = mock_client("[]", "[]");
+        // #274 rule 5: the reconcile reads the identity contract from the cached store, so the
+        // mock client must never see a request for the ConfigMap.
+        let (identity, mut writer) = kube::runtime::reflector::store();
+        let contract: ConfigMap = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": crate::identity::CONFIGMAP_NAME, "namespace": "data" },
+            "data": { "issuerUrl": "https://id.example/realms/stardelt" }
+        }))
+        .expect("deserialize ConfigMap");
+        writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(contract));
+        let ctx = Context {
+            identity,
+            ..Context::new(client, helm_stub())
+        };
+
+        assert_eq!(
+            identity_issuer(&ctx, "data"),
+            Some("https://id.example/realms/stardelt".to_string())
+        );
+        assert_eq!(identity_issuer(&ctx, "other"), None);
+        assert!(identity_contract_present(&ctx, "data"));
+        assert!(!identity_contract_present(&ctx, "other"));
+        let requests = requests.lock().expect("requests poisoned");
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains(crate::identity::CONFIGMAP_NAME)),
+            "the store must answer without a request: {requests:?}"
+        );
     }
 
     #[test]

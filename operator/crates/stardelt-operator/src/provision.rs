@@ -3645,6 +3645,7 @@ mod tests {
     /// code paths that read the instance of a namespace instead of listing it (#274 rule 5).
     fn context_with_platform(client: kube::Client, spec: &PlatformInstanceSpec) -> Context {
         let (platforms, mut writer) = kube::runtime::reflector::store();
+        let (identity, _identity_writer) = kube::runtime::reflector::store();
         writer.apply_watcher_event(&kube::runtime::watcher::Event::Init);
         writer.apply_watcher_event(&kube::runtime::watcher::Event::InitApply(
             serde_json::from_value(serde_json::json!({
@@ -3661,6 +3662,7 @@ mod tests {
             helm: Arc::new(crate::helm::testing::RecordingRunner::default()),
             keycloak: Arc::new(crate::principal_keycloak::HttpKeycloakTransport),
             platforms,
+            identity,
         }
     }
 

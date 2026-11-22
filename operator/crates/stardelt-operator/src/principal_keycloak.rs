@@ -988,6 +988,7 @@ mod tests {
         // The platform store replaces the LIST `platform_instance_for_namespace` used to make
         // (#274 rule 5); the instance is the one the old mock answered with.
         let (platforms, mut writer) = kube::runtime::reflector::store();
+        let (identity, _identity_writer) = kube::runtime::reflector::store();
         writer.apply_watcher_event(&kube::runtime::watcher::Event::Init);
         writer.apply_watcher_event(&kube::runtime::watcher::Event::InitApply(
             serde_json::from_value(serde_json::json!({
@@ -1012,6 +1013,7 @@ mod tests {
                 requests: requests.clone(),
             }),
             platforms,
+            identity,
         });
         (ctx, requests)
     }
