@@ -322,6 +322,10 @@ spike-trino-idle: _context ## What a query does while no Trino worker runs (#30 
 spike-superset-dashboards: _context ## Measure Superset's dashboard export/import API (#115)
 	@bash scripts/spike-superset-dashboards.sh
 
+.PHONY: spike-superset-nova-identity
+spike-superset-nova-identity: _context ## Which Superset user Nova acts as, and where its password lives (#115)
+	@bash scripts/spike-superset-nova-identity.sh
+
 # verify-pins proves the live Nova image digest is the pin; this proves the document inside that
 # image is the one nova/openapi/nova.json carries at the commit the pin names (#951, #95).
 .PHONY: verify-contract
