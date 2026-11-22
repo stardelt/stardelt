@@ -3252,6 +3252,13 @@ pub struct LogView {
 #[serde(rename_all = "camelCase")]
 pub struct ChecksResponse {
     pub checks: Vec<CheckView>,
+    /// The audit branch this run wrote, when the pipeline publishes with `wap` (#114); `None` for
+    /// a `direct` pipeline. Deterministic from the run id, so a failed run can be inspected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_branch: Option<String>,
+    /// The tables the run wrote (`spec.tasks[].writes`), sorted; empty for a `direct` pipeline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audited_tables: Vec<String>,
 }
 
 /// One check of one `quality` task. `rows` and `passed` are `None` until the task's log
@@ -3677,6 +3684,36 @@ fn quality_tasks(pipeline: &Value) -> Vec<(String, Vec<(String, String)>)> {
             Some((name, checks))
         })
         .collect()
+}
+
+/// The audit branch a `publish: wap` run writes: `audit_` + the first 16 hex of
+/// `sha256(run_id)`, the twin of `demos/dags/stardelt_pipelines/wap.py::branch_name` (#114).
+pub(crate) fn audit_branch(run_id: &str) -> String {
+    format!(
+        "audit_{}",
+        &crate::migrations::hex_lower(&Sha256::digest(run_id.as_bytes()))[..16]
+    )
+}
+
+/// `spec.tasks[].writes` of a pipeline, deduplicated and sorted; empty for a `direct` pipeline.
+fn audited_tables(pipeline: &Value) -> Vec<String> {
+    let mut tables: Vec<String> = pipeline
+        .get("spec")
+        .and_then(|s| s.get("tasks"))
+        .and_then(Value::as_array)
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter_map(|task| task.get("writes").and_then(Value::as_array))
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    tables.sort();
+    tables.dedup();
+    tables
 }
 
 /// `check <name>: <error|warn>, <n> row(s)` -> `(name, severity, n)`.
@@ -4808,7 +4845,20 @@ async fn run_checks(
             });
         }
     }
-    Ok(ChecksResponse { checks })
+    let wap = pipeline
+        .get("spec")
+        .and_then(|s| s.get("publish"))
+        .and_then(Value::as_str)
+        == Some("wap");
+    Ok(ChecksResponse {
+        checks,
+        audit_branch: wap.then(|| audit_branch(run_id)),
+        audited_tables: if wap {
+            audited_tables(&pipeline)
+        } else {
+            Vec::new()
+        },
+    })
 }
 
 /// `^\S{1,64}$` of `[A-Za-z0-9_-]`: what a task id in a run's object key can be.
@@ -10897,6 +10947,28 @@ mod tests {
                 ("b".to_string(), "warn".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn audit_branch_matches_the_loader() {
+        assert_eq!(
+            audit_branch("manual__2026-11-22T01:00:00+00:00"),
+            "audit_49229452c902639d"
+        );
+    }
+
+    #[test]
+    fn audited_tables_reads_the_writes_lists() {
+        let pipeline = serde_json::json!({"spec": {"tasks": [
+            {"name": "a", "kind": "spark", "writes": ["gold.shop.t"]},
+            {"name": "b", "kind": "spark", "writes": ["gold.shop.t", "gold.shop.u"]},
+            {"name": "c", "kind": "notebook"}
+        ]}});
+        assert_eq!(
+            audited_tables(&pipeline),
+            vec!["gold.shop.t".to_string(), "gold.shop.u".to_string()]
+        );
+        assert!(audited_tables(&serde_json::json!({"spec": {"publish": "direct"}})).is_empty());
     }
 
     // -----------------------------------------------------------------------

@@ -179,6 +179,8 @@ export default function RunDetail() {
           checks={checks.data?.checks ?? []}
           error={checks.error}
           wap={pipeline.data?.publish === 'wap'}
+          auditBranch={checks.data?.auditBranch}
+          auditedTables={checks.data?.auditedTables ?? []}
         />
       </section>
     </div>
@@ -188,16 +190,21 @@ export default function RunDetail() {
 /**
  * The checks a run declares and what each returned; `rows` is null until the task's log has the
  * line (#829). A `wap` run publishes only when its checks pass, so a failed blocking check also
- * says what that means for production (#866, design #114 decision 6).
+ * says what that means for production (#866, design #114 decision 6), and which audit branch the
+ * data is on so "inspect audit data" is a thing a person can do (#1044).
  */
 function RunCheckTable({
   checks,
   error,
   wap,
+  auditBranch,
+  auditedTables,
 }: {
   checks: RunCheckView[]
   error: unknown
   wap: boolean
+  auditBranch?: string
+  auditedTables: string[]
 }) {
   if (error && checks.length === 0) {
     return <ErrorBox error={error} />
@@ -211,6 +218,17 @@ function RunCheckTable({
       {wap && blocking.length > 0 ? (
         <p className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
           Not published: {blocking.length === 1 ? '1 check failed' : `${blocking.length} checks failed`}. Production data is unchanged.
+        </p>
+      ) : null}
+      {wap && auditBranch ? (
+        <p className="text-sm text-text-mute">
+          Audit branch <code>{auditBranch}</code>
+          {auditedTables.length > 0 ? ` on ${auditedTables.join(', ')}` : null}. Inspect it with a
+          branch-qualified table read, e.g.{' '}
+          <code>
+            {auditedTables[0] ?? '<catalog>.<schema>.<table>'}.branch_{auditBranch}
+          </code>
+          .
         </p>
       ) : null}
       <p className="text-sm text-text-dim">
