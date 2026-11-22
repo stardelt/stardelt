@@ -189,6 +189,12 @@ pub fn spark_connect(
                     "template": {
                         "spec": {
                             "serviceAccountName": driver_sa,
+                            "securityContext": {
+                                "runAsNonRoot": true,
+                                "runAsUser": 185,
+                                "fsGroup": 185,
+                                "seccompProfile": {"type": "RuntimeDefault"}
+                            },
                             "volumes": [{
                                 "name": "catalog-token",
                                 "projected": {
@@ -204,6 +210,10 @@ pub fn spark_connect(
                             "containers": [{
                                 "name": "spark-kubernetes-driver",
                                 "env": env,
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": false,
+                                    "capabilities": {"drop": ["ALL"]}
+                                },
                                 "volumeMounts": [{
                                     "name": "catalog-token",
                                     "mountPath": CATALOG_TOKEN_MOUNT,
@@ -224,9 +234,19 @@ pub fn spark_connect(
                             // pods (operator#773). The Spark operator's webhook refuses this
                             // identity inside sparkConf, so it belongs in this template.
                             "serviceAccountName": runtime.service_account.clone(),
+                            "securityContext": {
+                                "runAsNonRoot": true,
+                                "runAsUser": 185,
+                                "fsGroup": 185,
+                                "seccompProfile": {"type": "RuntimeDefault"}
+                            },
                             "containers": [{
                                 "name": "spark-kubernetes-executor",
                                 "env": env,
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": false,
+                                    "capabilities": {"drop": ["ALL"]}
+                                },
                             }],
                         }
                     }
@@ -1475,6 +1495,49 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn the_driver_and_executor_templates_are_pod_security_restricted() {
+        let object = spark_connect("trial", "data", &spec(), &runtime(), &owner()).expect("build");
+        for template in ["/spec/server/template/spec", "/spec/executor/template/spec"] {
+            assert_eq!(
+                object
+                    .data
+                    .pointer(&format!("{template}/securityContext/runAsNonRoot")),
+                Some(&json!(true)),
+                "{template} pod securityContext"
+            );
+            assert_eq!(
+                object
+                    .data
+                    .pointer(&format!("{template}/securityContext/runAsUser")),
+                Some(&json!(185)),
+                "{template} runAsUser"
+            );
+            assert_eq!(
+                object
+                    .data
+                    .pointer(&format!("{template}/securityContext/seccompProfile/type")),
+                Some(&json!("RuntimeDefault")),
+                "{template} seccompProfile"
+            );
+            let container = format!("{template}/containers/0/securityContext");
+            assert_eq!(
+                object
+                    .data
+                    .pointer(&format!("{container}/allowPrivilegeEscalation")),
+                Some(&json!(false)),
+                "{container} allowPrivilegeEscalation"
+            );
+            assert_eq!(
+                object
+                    .data
+                    .pointer(&format!("{container}/capabilities/drop")),
+                Some(&json!(["ALL"])),
+                "{container} capabilities"
+            );
+        }
     }
 
     #[test]
