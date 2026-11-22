@@ -485,6 +485,29 @@ def test_plan_refuses_a_libraries_entry_without_a_glob():
         )
 
 
+@pytest.mark.parametrize("include", ["*.sql", "sql/*.sql", "sql/**/*", "sql/", "**", "/"])
+def test_plan_refuses_a_libraries_glob_the_cli_refuses(include):
+    """Spark refuses `*.sql`; the loader must refuse it before the pod starts (#1031)."""
+    graph = (
+        "name: graph\n"
+        "libraries:\n"
+        f'  - glob:\n      include: "{include}"\n'
+        "configuration:\n  spark.sql.catalog.playground.type: rest\n"
+    )
+    with pytest.raises(PlanError, match="must be a file path or a folder ending in /\\*\\*"):
+        plan(
+            *owned(
+                spark(files={"spark-pipeline.yml": graph, "sql/range_ten.sql": "SELECT 1"})
+            )
+        )
+
+
+def test_plan_accepts_the_folder_form_and_a_file_form():
+    for include in ("sql/**", "sql/range_ten.sql"):
+        graph = GRAPH if include == "sql/**" else GRAPH.replace("sql/**", include)
+        plan(*owned(spark(files={"spark-pipeline.yml": graph, "sql/range_ten.sql": "SELECT 1"})))
+
+
 def test_a_spark_pipeline_graph_without_writes_is_refused():
     with pytest.raises(PlanError) as error:
         plan(*owned(spark(writes=())))

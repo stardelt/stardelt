@@ -288,6 +288,20 @@ def _wap_placeholder_problems(where, doc):
     return []
 
 
+def _spark_glob_include_problem(include):
+    """Spark's CLI accepts a file path or a folder ending in `/**`; anything else dies in the pod (#1031).
+
+    Measured in #1025: `include: "*.sql"` answers
+    `[PIPELINE_SPEC_INVALID_GLOB_PATTERN] Invalid glob pattern … Only file paths, or folder paths
+    ending with /** are allowed.` The rule is checked here so the deploy refuses it, not the run.
+    """
+    if include.endswith("/**") and include.count("*") == 2 and len(include) > len("/**"):
+        return None
+    if "*" not in include and not include.endswith("/"):
+        return None
+    return include
+
+
 def _spark_pipeline_problems(where, task, root):
     """What a ``spark-pipeline`` task must say, offline — the CRD's ``project`` rules and the file it names."""
     if "spark-pipeline" not in task:
@@ -338,6 +352,15 @@ def _spark_pipeline_problems(where, task, root):
                 if not isinstance(include, str) or not include:
                     problems.append(
                         (where, "spark-pipeline.yml libraries entries need glob.include: <path or pattern>")
+                    )
+                    break
+                if _spark_glob_include_problem(include):
+                    problems.append(
+                        (
+                            where,
+                            "spark-pipeline.yml libraries glob.include must be a file path or a folder "
+                            f"ending in /**: '{include}'",
+                        )
                     )
                     break
     if any(key in spec for key in SPARK_OWNED_KEYS):

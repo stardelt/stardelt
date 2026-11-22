@@ -503,6 +503,44 @@ def test_a_spark_pipeline_libraries_entry_needs_a_glob(tmp_path):
     assert "libraries entries need glob.include" in said(problems)
 
 
+@pytest.mark.parametrize(
+    "include, refused",
+    [
+        ("*.sql", True),
+        ("sql/*.sql", True),
+        ("sql/**/*", True),
+        ("sql/", True),
+        ("**", True),
+        ("/", True),
+        ("sql/range_ten.sql", False),
+        ("sql/**", False),
+    ],
+)
+def test_a_spark_pipeline_libraries_pattern_must_be_a_file_or_a_folder(tmp_path, include, refused):
+    """Spark's CLI refuses `*.sql`; the bundle must refuse it first (#1031)."""
+    make(
+        tmp_path,
+        resources={
+            "gold.yaml": "name: shop-gold\ntasks:\n"
+            "  - {name: build, spark-pipeline: {project: spark/shop}, writes: [gold.shop.trips]}\n"
+        },
+        files={
+            **TASK_FILES,
+            # the quotes matter: a YAML plain scalar may not start with `*` (an alias)
+            "spark/shop/spark-pipeline.yml": "name: shop\nlibraries:\n"
+            f'  - glob:\n      include: "{include}"\n'
+            "configuration:\n  spark.sql.catalog.gold.type: rest\n",
+        },
+    )
+    problems = bundle.validate(tmp_path)[0]
+    if refused:
+        assert problems, f"{include!r} passed validation"
+        assert "must be a file path or a folder ending in /**" in said(problems)
+        assert include in said(problems)
+    else:
+        assert not [p for p in problems if "glob.include" in p[1]]
+
+
 @pytest.mark.parametrize("graph", ["# nothing yet\n", "[]\n", "- name: x\n"])
 def test_a_spark_pipeline_yml_that_is_not_a_mapping_is_refused(tmp_path, graph):
     """A comment-only, empty or list graph is a problem, not an AttributeError (#972)."""

@@ -106,6 +106,10 @@ SPARK_PIPELINE_BAD_LIBRARIES = "spark-pipeline task `{task}` libraries must be a
 SPARK_PIPELINE_NEEDS_GLOB = (
     "spark-pipeline task `{task}` libraries entries need glob.include: <path or pattern>"
 )
+SPARK_PIPELINE_BAD_GLOB = (
+    "spark-pipeline task `{task}` libraries glob.include must be a file path or a folder "
+    "ending in /**: {pattern}"
+)
 SPARK_PIPELINE_NEEDS_BLOCK = (
     "spark-pipeline task `{task}`: catalog `{catalog}` has no `spark.sql.catalog.{catalog}.type` "
     "under `configuration:` — the Connect session would not know the catalog"
@@ -477,6 +481,20 @@ def _dbt_config(config: dict | None) -> tuple[str, tuple[str, ...], str, str | N
     return project, selectors, threads, vars_text
 
 
+def _spark_glob_include_problem(include):
+    """Spark's CLI accepts a file path or a folder ending in `/**`; anything else dies in the pod (#1031).
+
+    Measured in #1025: `include: "*.sql"` answers
+    `[PIPELINE_SPEC_INVALID_GLOB_PATTERN] Invalid glob pattern … Only file paths, or folder paths
+    ending with /** are allowed.` The rule is checked here so the deploy refuses it, not the run.
+    """
+    if include.endswith("/**") and include.count("*") == 2 and len(include) > len("/**"):
+        return None
+    if "*" not in include and not include.endswith("/"):
+        return None
+    return include
+
+
 def _spark_pipeline_config(
     task_name: str, raw: dict
 ) -> tuple[tuple[tuple[str, str], ...], str | None, tuple[str, ...]]:
@@ -514,6 +532,10 @@ def _spark_pipeline_config(
                 include = entry["glob"].get("include")
             if not isinstance(include, str) or not include:
                 raise PlanError(SPARK_PIPELINE_NEEDS_GLOB.format(task=task_name))
+            if _spark_glob_include_problem(include):
+                raise PlanError(
+                    SPARK_PIPELINE_BAD_GLOB.format(task=task_name, pattern=include)
+                )
     writes = raw.get("writes")
     if not isinstance(writes, list) or not writes:
         raise PlanError(SPARK_PIPELINE_NEEDS_WRITES.format(task=task_name))
