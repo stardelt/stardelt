@@ -151,6 +151,13 @@ pub fn spark_connect(
     );
     let image = spec.image.clone().unwrap_or_else(|| runtime.image.clone());
 
+    let driver_sa = spec
+        .owner
+        .group
+        .as_deref()
+        .map(crate::spark::cluster_driver_for)
+        .unwrap_or_else(|| crate::spark::CLUSTER_DRIVER.to_string());
+
     Ok(DynamicObject {
         types: Some(TypeMeta {
             api_version: "sparkoperator.k8s.io/v1alpha1".into(),
@@ -178,7 +185,7 @@ pub fn spark_connect(
                     "memory": driver_mem,
                     "template": {
                         "spec": {
-                            "serviceAccountName": crate::spark::CLUSTER_DRIVER,
+                            "serviceAccountName": driver_sa,
                             "volumes": [{
                                 "name": "catalog-token",
                                 "projected": {
@@ -553,6 +560,45 @@ pub async fn reconcile_spark_cluster(
         .await?;
         tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
         return Ok(action_after_failure(&e));
+    }
+
+    // A cluster owned by a group runs the group's own code, so it gets its own driver identity
+    // bound to the shared Role (#493). A cluster owned by a person keeps the shared driver.
+    if let Some(group) = spec.owner.group.as_deref() {
+        if let Err(e) = objects::apply(
+            &ctx.client,
+            &namespace,
+            &crate::spark::group_cluster_driver_service_account(&namespace, group),
+            false,
+        )
+        .await
+        {
+            patch_status(
+                &clusters,
+                &name,
+                status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+            )
+            .await?;
+            tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+            return Ok(action_after_failure(&e));
+        }
+        if let Err(e) = objects::apply(
+            &ctx.client,
+            &namespace,
+            &crate::spark::group_cluster_driver_role_binding(&namespace, group),
+            false,
+        )
+        .await
+        {
+            patch_status(
+                &clusters,
+                &name,
+                status_value("Failed", None, None, None, Some(&e.to_string()), generation),
+            )
+            .await?;
+            tracing::info!(cluster = %name, %namespace, error = %e, "spark cluster driver identity not applied");
+            return Ok(action_after_failure(&e));
+        }
     }
 
     // The driver runs the group's own code, so the two admission policies that bound what it may
@@ -1001,23 +1047,26 @@ mod tests {
     /// kind: a typed server-side apply refuses a response of another kind (operator#773,
     /// operator#775).
     fn identity_response(path: &str) -> Option<(u16, String)> {
+        // A cluster owned by a group applies `spark-cluster-driver-<group>` (#493), so the mock
+        // answers with the name the request asked for.
+        let object_name = path.rsplit('/').next().unwrap_or("spark-cluster-driver");
         let object = if path.contains("/serviceaccounts/spark-cluster-driver") {
             json!({
                 "apiVersion": "v1",
                 "kind": "ServiceAccount",
-                "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+                "metadata": { "name": object_name, "namespace": "data" }
             })
         } else if path.contains("/roles/spark-cluster-driver") {
             json!({
                 "apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "Role",
-                "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+                "metadata": { "name": object_name, "namespace": "data" }
             })
         } else if path.contains("/rolebindings/spark-cluster-driver") {
             json!({
                 "apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "RoleBinding",
-                "metadata": { "name": "spark-cluster-driver", "namespace": "data" }
+                "metadata": { "name": object_name, "namespace": "data" }
             })
         } else if path.contains("/validatingadmissionpolicies/spark-cluster-executor-pods") {
             json!({
@@ -1196,7 +1245,7 @@ mod tests {
             object
                 .data
                 .pointer("/spec/server/template/spec/serviceAccountName"),
-            Some(&json!("spark-cluster-driver"))
+            Some(&json!("spark-cluster-driver-mobility-analytics"))
         );
         assert_eq!(
             object
@@ -1207,13 +1256,31 @@ mod tests {
     }
 
     #[test]
+    fn a_person_owned_cluster_keeps_the_shared_driver() {
+        let s = SparkClusterSpec {
+            owner: SparkClusterOwner {
+                group: None,
+                user: Some("ada".into()),
+            },
+            ..spec()
+        };
+        let object = spark_connect("trial", "data", &s, &runtime(), &owner()).expect("build");
+        assert_eq!(
+            object
+                .data
+                .pointer("/spec/server/template/spec/serviceAccountName"),
+            Some(&json!("spark-cluster-driver"))
+        );
+    }
+
+    #[test]
     fn the_driver_and_the_executors_have_different_identities() {
         let object = spark_connect("trial", "data", &spec(), &runtime(), &owner()).expect("build");
         assert_eq!(
             object
                 .data
                 .pointer("/spec/server/template/spec/serviceAccountName"),
-            Some(&json!("spark-cluster-driver"))
+            Some(&json!("spark-cluster-driver-mobility-analytics"))
         );
         assert_eq!(
             object
@@ -1381,8 +1448,10 @@ mod tests {
             .expect("the SparkConnect is written");
         for path in [
             "serviceaccounts/spark-cluster-driver",
+            "serviceaccounts/spark-cluster-driver-mobility-analytics",
             "roles/spark-cluster-driver",
             "rolebindings/spark-cluster-driver",
+            "rolebindings/spark-cluster-driver-mobility-analytics",
             "validatingadmissionpolicies/spark-cluster-executor-pods",
             "validatingadmissionpolicybindings/spark-cluster-executor-pods-data",
             "validatingadmissionpolicies/spark-cluster-configmaps",
