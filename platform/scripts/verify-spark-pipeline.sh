@@ -19,6 +19,8 @@
 #          write reached the catalog through the principal's token and the vended credential
 #          (the spec carries no S3 key at all);
 #   rows   a fresh session from the same configuration counts 10 rows, so the commit is readable.
+#   credential  the pod carries one projected ServiceAccount token for the catalog audience and
+#               no Secret reference; the token is the principal's ServiceAccount
 #
 # Exit 0 = PASS (all four), 1 = FAIL (one of the four did not hold), 3 = UNVERIFIED (no kubectl,
 # the server or the principal is not installed, the pod never started or never reached the
@@ -39,6 +41,7 @@ SCHEMA="${SCHEMA:-verify_spark_pipeline}"
 TABLE="${TABLE:-range_ten}"
 GROUP="${GROUP:-demo}"
 PRINCIPAL_SECRET="${PRINCIPAL_SECRET:-sp-pipeline-$GROUP}"
+PRINCIPAL_SA="${PRINCIPAL_SA:-sp-pipeline-$GROUP}"
 CONNECT_URL="${CONNECT_URL:-sc://spark-connect.$NS.svc.cluster.local:15002}"
 BUCKET="${BUCKET:-lakehouse}"
 CM="${CM:-verify-spark-pipeline-graph}"
@@ -251,11 +254,8 @@ cat > "$tmp/runner.py" <<'PY'
 import glob
 import json
 import os
-import ssl
 import subprocess
 import sys
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import yaml
@@ -294,20 +294,7 @@ configuration = {
 # dropped them the same way (measured #957).
 for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
     os.environ.pop(name, None)
-body = urllib.parse.urlencode(
-    {
-        "grant_type": "client_credentials",
-        "client_id": os.environ["PIPELINE_CLIENT_ID"],
-        "client_secret": os.environ["PIPELINE_CLIENT_SECRET"],
-    }
-).encode()
-request = urllib.request.Request(
-    os.environ["PIPELINE_TOKEN_URL"],
-    data=body,
-    headers={"Content-Type": "application/x-www-form-urlencoded"},
-)
-with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context()) as answer:
-    token = json.load(answer)["access_token"]
+token = Path("/var/run/secrets/stardelt-catalog/token").read_text().strip()
 configuration[f"spark.sql.catalog.{CATALOG}.token"] = token
 document["configuration"] = configuration
 spec.write_text(yaml.safe_dump(document, sort_keys=False))
@@ -332,6 +319,7 @@ result = subprocess.run(
     text=True,
 )
 print(result.stdout.replace(token, "<token>"))
+print(f"credential=projected token-bytes={len(token)}")
 print(f"run exit={result.returncode}")
 
 READBACK = r"""
@@ -401,6 +389,7 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  serviceAccountName: $PRINCIPAL_SA
   imagePullSecrets:
     - name: ghcr-creds
   securityContext:
@@ -424,13 +413,6 @@ spec:
         - { name: SPARK_REMOTE, value: "$CONNECT_URL" }
         - { name: CATALOG_URI, value: "http://lakekeeper.$NS.svc.cluster.local:8181/catalog" }
         - { name: S3_ENDPOINT, value: "http://seaweedfs-s3.$NS.svc.cluster.local:8333" }
-        - { name: PIPELINE_TOKEN_URL, value: "$token_url" }
-        - name: PIPELINE_CLIENT_ID
-          valueFrom:
-            secretKeyRef: { name: $PRINCIPAL_SECRET, key: client-id }
-        - name: PIPELINE_CLIENT_SECRET
-          valueFrom:
-            secretKeyRef: { name: $PRINCIPAL_SECRET, key: client-secret }
       securityContext:
         allowPrivilegeEscalation: false
         capabilities: { drop: ["ALL"] }
@@ -440,6 +422,7 @@ spec:
       volumeMounts:
         - { name: graph, mountPath: /opt/graph, readOnly: true }
         - { name: tmp, mountPath: /tmp }
+        - { name: catalog-token, mountPath: /var/run/secrets/stardelt-catalog, readOnly: true }
   volumes:
     - name: graph
       configMap:
@@ -449,12 +432,23 @@ spec:
           - { key: tables.sql, path: tables.sql }
     - name: tmp
       emptyDir: {}
+    - name: catalog-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: stardelt-catalog-workload
+              expirationSeconds: 3600
+              path: token
 EOF
 }
 
 # A pod left by an interrupted run would give this one its old log; it is this check's own name.
 kubectl -n "$NS" delete pod "$POD" --ignore-not-found --timeout=120s >/dev/null 2>&1 || true
 pod_manifest > "$tmp/pod.yaml"
+if grep -q 'secretKeyRef' "$tmp/pod.yaml"; then
+  echo "verify-spark-pipeline: FAIL (the pod carries a Secret reference)"
+  exit 1
+fi
 if kubectl apply -f "$tmp/pod.yaml" >/dev/null 2>&1; then pod_created=yes; fi
 [ "$pod_created" = "yes" ] || { echo "verify-spark-pipeline: FAIL (the API server refused pod $POD)"; exit 1; }
 
@@ -529,6 +523,13 @@ else
   bad="$bad rows"
 fi
 
+# PASS 5 — the pod held only the projected catalog token.
+if printf '%s\n' "$logs" | grep -q '^credential=projected'; then
+  printf 'PASS %-12s%s\n' credential "one projected catalog token, no Secret in the pod"
+else
+  bad="$bad credential"
+fi
+
 if printf '%s\n' "$logs" | grep -q '^s3-key-in-spec=[1-9]'; then
   bad="$bad s3-key"
 fi
@@ -544,5 +545,5 @@ if [ -n "$bad" ]; then
   echo "verify-spark-pipeline: FAIL (did not hold:$bad)"
   exit 1
 fi
-echo "verify-spark-pipeline: PASS (4 of 4)"
+echo "verify-spark-pipeline: PASS (5 of 5)"
 exit 0
