@@ -1644,6 +1644,23 @@ class MainTest(JobTestCase):
         self.use_sparkclusters(sparkclusters_forbidden=True)
         self.assertIsNone(access_sync.driver_identities())
 
+    def test_a_forbidden_sparkcluster_read_keeps_the_driver_assignee(self):
+        self.kubernetes = self.use_sparkclusters(
+            {"spec": {"owner": {"group": "stardelt-users"}}},
+            serviceaccounts={
+                "spark-cluster-driver-stardelt-users": {"metadata": {"uid": "uid-driver"}}
+            },
+        )
+        self.assertEqual(access_sync.main(), 0)
+        self.kubernetes.sparkclusters_forbidden = True
+        self.assertEqual(access_sync.main(), 0)
+        users_role = self.fake.roles["stardelt-users"]["id"]
+        self.assertEqual(
+            self.fake.assignees(users_role),
+            {"oidc~sub-1", "oidc~sub-2", "kubernetes~uid-driver"},
+            "a tick that cannot read the SparkClusters must not remove the driver identity",
+        )
+
     def test_a_groups_driver_identity_joins_its_groups_role(self):
         self.use_sparkclusters(
             {"spec": {"owner": {"group": "stardelt-users"}}},
