@@ -5,10 +5,10 @@
 #   NS=stardelt bash scripts/verify-spark-cluster.sh
 #
 # Creates one `small` SparkCluster named `verify-spark-cluster`, polls its phase and asserts the
-# ten things the phase alone has lied about before (operator#774): the endpoint, the server
+# eleven things the phase alone has lied about before (operator#774): the endpoint, the server
 # pod's readiness and identity, the driver's ServiceAccount/Role/RoleBinding, the two admission
 # policies with their bindings, the ingress NetworkPolicy, a TLS-clean server log, the executor
-# path and the catalogue.
+# path, the catalogue and the token's audience.
 # The CR and the objects it owns are deleted on every exit path — the trap is the contract.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -230,7 +230,30 @@ else
   bad "the driver reaches the catalog on lakekeeper:8181 (the policy names it: ${named}; the probe connects: ${connects})"
 fi
 
+# 11. The driver's projected catalog token (#1077): the operator must mount it with the
+#     audience Lakekeeper verifies (`auth.k8s.audience`, `helm-values/lakekeeper.yaml`),
+#     not the OIDC audience `lakekeeper`. A wrong value authenticates nothing and the
+#     phase stays Running, which is how #1077 shipped.
+audience="$(kubectl -n "$NS" get sparkconnect "spc-${NAME}" -o json 2>/dev/null | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+template = (((doc.get("spec") or {}).get("server") or {}).get("template") or {}).get("spec") or {}
+for volume in template.get("volumes") or []:
+    if volume.get("name") != "catalog-token":
+        continue
+    for source in ((volume.get("projected") or {}).get("sources") or []):
+        token = source.get("serviceAccountToken") or {}
+        if token.get("audience"):
+            print(token["audience"])
+            raise SystemExit(0)
+' 2>/dev/null || true)"
+if [ "$audience" = stardelt-catalog-workload ]; then
+  ok "the driver's projected catalog token audience is stardelt-catalog-workload"
+else
+  bad "the driver's projected catalog token audience is stardelt-catalog-workload (it is '${audience:-absent}')"
+fi
+
 # The FAIL branch exits first on purpose: a trailing unconditional `exit` makes ShellCheck
 # (0.9 SC2317, 0.11 SC2329) call the trap-only `cleanup` unreachable.
-[ "$problems" -eq 0 ] || { echo "FAIL ($((10 - problems)) of 10 checks passed; $problems failed)"; exit 1; }
-echo "PASS (10 of 10: the endpoint, the driver's identity, its guards, a TLS-clean log, the executor path and the catalog)"
+[ "$problems" -eq 0 ] || { echo "FAIL ($((11 - problems)) of 11 checks passed; $problems failed)"; exit 1; }
+echo "PASS (11 of 11: the endpoint, the driver's identity, its guards, a TLS-clean log, the executor path, the catalog and the token's audience)"

@@ -9,6 +9,9 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PLATFORM_VALUES = REPO_ROOT / "platform" / "helm-values" / "lakekeeper.yaml"
 OPERATOR_VALUES = REPO_ROOT / "operator" / "crates" / "stardelt-operator" / "values" / "lakekeeper.yaml"
+OPERATOR_SOURCE = (
+    REPO_ROOT / "operator" / "crates" / "stardelt-operator" / "src" / "spark_cluster.rs"
+)
 SPIKE = REPO_ROOT / "platform" / "scripts" / "spike-k8s-auth.sh"
 
 EXPECTED = {
@@ -30,6 +33,14 @@ class LakekeeperKubernetesAuthTest(unittest.TestCase):
     def test_the_audience_matches_the_spike_that_measured_it(self):
         match = re.search(r"^AUDIENCE=(\S+)$", SPIKE.read_text(), re.M)
         self.assertIsNotNone(match, "spike-k8s-auth.sh has no AUDIENCE=")
+        self.assertEqual(match.group(1), EXPECTED["audience"])
+
+    def test_the_operator_mounts_the_audience_the_catalog_verifies(self):
+        source = OPERATOR_SOURCE.read_text()
+        match = re.search(
+            r'pub const CATALOG_TOKEN_AUDIENCE: &str = "([^"]+)";', source
+        )
+        self.assertIsNotNone(match, "spark_cluster.rs has no CATALOG_TOKEN_AUDIENCE")
         self.assertEqual(match.group(1), EXPECTED["audience"])
 
 
