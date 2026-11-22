@@ -178,6 +178,7 @@ spec:
                 default:
                   allowedCidrs: []
                   enabled: false
+                  mode: ingress
                   tls:
                     enabled: false
                     secretNameTemplate: '{host}-tls'
@@ -193,6 +194,8 @@ spec:
                       Always include the cluster's own egress address: pods that call the public names
                       arrive through it.
 
+                      Ignored when `mode: gateway`: source filtering belongs to the Gateway's listener.
+
                       The bounds are not cosmetic: the API server's CEL cost estimator treats an
                       unbounded array under a `matches()` rule as unbounded, and refuses the whole
                       CRD ("estimated rule cost exceeds budget by factor of more than 100x",
@@ -204,7 +207,9 @@ spec:
                     maxItems: 64
                     type: array
                   className:
-                    description: 'IngressClass name, for example `nginx` or `traefik`. Absent: the cluster default.'
+                    description: |-
+                      IngressClass name, for example `nginx` or `traefik`. Absent: the cluster default.
+                      Ignored when `mode: gateway`.
                     maxLength: 253
                     minLength: 1
                     nullable: true
@@ -216,11 +221,43 @@ spec:
                       on `id.` with `identity.mode: platform`; Airflow on `airflow.` with the `pipelines` pillar;
                       JupyterHub on `jupyter.` with `notebooks`.
                     type: boolean
+                  gateway:
+                    description: |-
+                      The Gateway the HTTPRoutes attach to; required by `mode: gateway`, ignored by
+                      `mode: ingress`. Its listeners own TLS, the host name and source filtering.
+                    nullable: true
+                    properties:
+                      name:
+                        description: Name of the Gateway in the cluster.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace of the Gateway; absent means the instance's namespace.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  mode:
+                    default: ingress
+                    description: |-
+                      How the applications are reached; see [`IngressMode`]. Defaults to `ingress`.
+                      With `gateway`, one `HTTPRoute` per application is rendered instead of Ingresses, and
+                      `className`, `allowedCidrs` and `tls` are ignored.
+                    enum:
+                    - ingress
+                    - gateway
+                    type: string
                   tls:
                     default:
                       enabled: false
                       secretNameTemplate: '{host}-tls'
-                    description: TLS through cert-manager.
+                    description: |-
+                      TLS through cert-manager on the Ingresses. Ignored when `mode: gateway`: TLS belongs to
+                      the Gateway's listeners and their certificate references.
                     properties:
                       enabled:
                         default: false

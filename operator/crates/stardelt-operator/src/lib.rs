@@ -13,6 +13,7 @@ pub mod controller;
 pub mod crd;
 pub mod deploy_stage_keycloak;
 pub mod helm;
+pub mod http_route;
 pub mod identity;
 pub mod identity_checklist;
 pub mod ingress;
