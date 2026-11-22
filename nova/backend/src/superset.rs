@@ -1,26 +1,34 @@
-//! Superset's dashboard API, read half: the ZIP Superset exports for one dashboard (#115).
+//! Superset's dashboard API for bundles: the ZIP Superset exports for one dashboard, and the
+//! import client that puts one back (#115).
 //!
 //! A bundle is the platform's answer to "dashboards in Git": Nova exports a dashboard, the
-//! bundle carries it, and the import slice puts it back. This module speaks the export half
-//! and nothing else.
+//! bundle carries it, and the import slice puts it back. This module speaks both halves of
+//! the Superset conversation; the bundle's own rules are not decided here.
 //!
-//! Two facts the spike (#1210) measured decide the design, and they are not guessable from
+//! Facts the spike (#1210) measured decide the design, and they are not guessable from
 //! Superset's documentation:
 //!
 //! - with `Authorization: Bearer <access_token>` the GETs work over plain http to the
 //!   cluster Service (`login 200`, `csrf 200`, `export 200`, 18444 bytes);
-//! - the CSRF/session **POST** does not, because Superset sets `SESSION_COOKIE_SECURE`
-//!   whenever `STARDELT_PUBLIC_URL` is https, and a `Secure` cookie is not stored over
-//!   http (`302 → /login/`). The import slice needs a session, so Nova builds its API
+//! - the import is a **session POST**: `login` → `GET /api/v1/security/csrf_token/` →
+//!   `POST /api/v1/dashboard/import/` with the ZIP as the multipart field `formData`,
+//!   `overwrite` as a form field, and the `X-CSRFToken` and `Referer` headers. A POST
+//!   without them fails;
+//! - the POST does not work over plain http either, because Superset sets
+//!   `SESSION_COOKIE_SECURE` whenever `STARDELT_PUBLIC_URL` is https, and a `Secure`
+//!   cookie is not stored over http (`302 → /login/`). That is why Nova builds its API
 //!   base as the **public https URL** when the platform has a base domain (see
 //!   `AppState::superset_api_url`); that certificate is public, so no CA is added for it.
 //!
-//! The token lives a short while, so [`SupersetClient::export`] repeats once after a `401`
-//! with a fresh sign-in (measured: the expired token answers `401`, a new one works).
+//! The token lives a short while, so [`SupersetClient::export`] and [`SupersetClient::import`]
+//! repeat once after a `401` with a fresh sign-in (measured: the expired token answers `401`,
+//! a new one works).
 //!
-//! Nova acts as its own Superset service user ([`SERVICE_USER`]): it could export any
-//! dashboard, so the route is administrator-only. A bundle author's narrower rule belongs
-//! with the import slice, which reads the bundle's owner group.
+//! Nova acts as its own Superset service user ([`SERVICE_USER`]): it could export or import
+//! any dashboard, so the routes are administrator-only. The bundle's own rules — the owner
+//! group guard, the synthesized `databases/` folder (an archive without one imports `200`
+//! and links none of its charts), the provenance stamp and the prune — belong to the import
+//! route (#115 a/3), not here.
 //!
 //! **No password and no token ever reach a log line, an error string or a `Debug`.** The
 //! password is held in [`crate::auth::Secret`] (`[redacted]`), every upstream message is
@@ -258,6 +266,130 @@ impl SupersetClient {
         Err(self.status_error(status, response, &token).await)
     }
 
+    /// `GET /api/v1/security/csrf_token`, answering `(bearer, csrf)`.
+    ///
+    /// The CSRF token belongs to the session the sign-in minted, so both come from one call:
+    /// a `401` signs in once more and repeats the GET once, and the returned bearer is the
+    /// new one the caller must send. An answer without a string `result` is a transport
+    /// error, and the token is never stored in an error (see [`Self::clean`]).
+    async fn csrf(&self, token: &str) -> Result<(String, String), SupersetError> {
+        let url = format!("{}/api/v1/security/csrf_token/", self.base);
+        let mut token = token.to_string();
+        let mut response = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            token = self.login().await?;
+            response = self
+                .http
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.status_error(status, response, &token).await);
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        let csrf = body["result"]
+            .as_str()
+            .ok_or_else(|| {
+                SupersetError::Transport("Superset's CSRF answer carries no result".into())
+            })?
+            .to_string();
+        Ok((token, csrf))
+    }
+
+    /// Imports one ZIP bundle: `POST /api/v1/dashboard/import/` with the archive as the
+    /// multipart field `formData`, `overwrite` as a form field, and the `X-CSRFToken` and
+    /// `Referer` headers the session needs. Answers Superset's JSON body.
+    ///
+    /// A `401` means the session expired; Nova signs in once more, fetches a fresh CSRF token
+    /// and sends the same body once more. Every other non-2xx is Superset's status and
+    /// message; the CSRF token is scrubbed like the bearer.
+    // The import route that calls this is #115 a/3.
+    #[allow(dead_code)]
+    pub async fn import(&self, archive: &[u8], overwrite: bool) -> Result<Value, SupersetError> {
+        let url = format!("{}/api/v1/dashboard/import/", self.base);
+        let referer = format!("{}/", self.base);
+        // A `multipart::Form` is consumed by the request, so a retry builds a fresh one.
+        let form = || -> Result<reqwest::multipart::Form, SupersetError> {
+            let part = reqwest::multipart::Part::bytes(archive.to_vec())
+                .file_name("dashboard.zip")
+                .mime_str("application/zip")
+                .map_err(|e| SupersetError::Transport(e.to_string()))?;
+            Ok(reqwest::multipart::Form::new()
+                .part("formData", part)
+                .text("overwrite", if overwrite { "true" } else { "false" }))
+        };
+        let (mut token, mut csrf) = {
+            let bearer = self.login().await?;
+            self.csrf(&bearer).await?
+        };
+        let send = |token: &str, csrf: &str| -> Result<reqwest::RequestBuilder, SupersetError> {
+            Ok(self
+                .http
+                .post(&url)
+                .bearer_auth(token)
+                .header("X-CSRFToken", csrf)
+                .header(reqwest::header::REFERER, &referer)
+                .multipart(form()?))
+        };
+        let mut response = send(&token, &csrf)?
+            .send()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let (fresh_token, fresh_csrf) = {
+                let bearer = self.login().await?;
+                self.csrf(&bearer).await?
+            };
+            token = fresh_token;
+            csrf = fresh_csrf;
+            response = send(&token, &csrf)?
+                .send()
+                .await
+                .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self
+                .import_status_error(status, response, &token, &csrf)
+                .await);
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| SupersetError::Transport("Superset's import answer is not JSON".into()))
+    }
+
+    /// [`Self::status_error`] plus the CSRF token: an import answer that echoes a header must
+    /// not store it either.
+    async fn import_status_error(
+        &self,
+        status: StatusCode,
+        response: reqwest::Response,
+        token: &str,
+        csrf: &str,
+    ) -> SupersetError {
+        let body = response.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|body| body["message"].as_str().map(str::to_string))
+            .unwrap_or_default()
+            .replace(csrf, "[redacted]");
+        SupersetError::Status(status.as_u16(), self.clean(&message, token))
+    }
+
     /// Superset's status and its JSON `message` (when there is one), scrubbed of the
     /// password and of `token`, cut to [`MAX_DETAIL`] characters.
     async fn status_error(
@@ -355,7 +487,7 @@ mod fake {
 
     use axum::{
         Json, Router,
-        body::Body,
+        body::{Body, Bytes},
         extract::{Query, State},
         http::{HeaderMap, StatusCode, header},
         response::{IntoResponse, Response},
@@ -368,6 +500,7 @@ mod fake {
 
     pub(super) const PASSWORD: &str = "pw-canary-4e7b";
     pub(super) const TOKEN: &str = "tok-canary-4e7b";
+    pub(super) const CSRF: &str = "csrf-canary";
     pub(super) const ARCHIVE: &[u8] = b"PK\x03\x04canary";
 
     #[derive(Default)]
@@ -376,9 +509,14 @@ mod fake {
         pub(super) logins: usize,
         /// How many more `401` answers to serve on an export before accepting the token.
         pub(super) unauthorized: usize,
+        /// How many more `401` answers to serve on an import before accepting the session.
+        pub(super) unauthorized_imports: usize,
         /// Answer every export with a `500` and a talkative message that repeats the
         /// password it was sent.
         pub(super) failing: bool,
+        /// The headers and the raw body of the last import that arrived.
+        pub(super) import_headers: BTreeMap<String, String>,
+        pub(super) import_body: Vec<u8>,
     }
 
     pub(super) type Shared = Arc<Mutex<Fake>>;
@@ -391,6 +529,19 @@ mod fake {
             .into_response()
     }
 
+    /// The `Authorization: Bearer <TOKEN>` header, or the value that arrived instead.
+    fn bearer(headers: &HeaderMap) -> String {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn has_bearer(headers: &HeaderMap) -> bool {
+        bearer(headers) == format!("Bearer {TOKEN}")
+    }
+
     async fn login(State(s): State<Shared>, Json(body): Json<Value>) -> Response {
         let mut state = s.lock().unwrap();
         state.logins += 1;
@@ -398,6 +549,60 @@ mod fake {
             return (StatusCode::OK, Json(json!({ "access_token": TOKEN }))).into_response();
         }
         refused()
+    }
+
+    async fn csrf_token(headers: HeaderMap) -> Response {
+        if !has_bearer(&headers) {
+            return refused();
+        }
+        (StatusCode::OK, Json(json!({ "result": CSRF }))).into_response()
+    }
+
+    async fn import_dashboard(
+        State(s): State<Shared>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        let mut state = s.lock().unwrap();
+        state.import_headers = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_string(), value.to_string()))
+            })
+            .collect();
+        state.import_body = body.to_vec();
+        if state.unauthorized_imports > 0 {
+            state.unauthorized_imports -= 1;
+            return refused();
+        }
+        if !has_bearer(&headers) {
+            return refused();
+        }
+        let csrf = headers
+            .get("x-csrftoken")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if csrf != CSRF {
+            return refused();
+        }
+        if state.failing {
+            // Deliberately chatty: it repeats the credentials it was sent, so a client that
+            // copies the body into an error would print them.
+            let message = format!("boom for {} {PASSWORD} csrf {csrf}", bearer(&headers));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": message })),
+            )
+                .into_response();
+        }
+        (
+            StatusCode::OK,
+            Json(json!({ "result": { "message": "OK", "dashboard_count": 1 } })),
+        )
+            .into_response()
     }
 
     async fn export_one(
@@ -451,7 +656,9 @@ mod fake {
         let shared: Shared = Arc::new(Mutex::new(Fake::default()));
         let app = Router::new()
             .route("/api/v1/security/login", post(login))
+            .route("/api/v1/security/csrf_token/", get(csrf_token))
             .route("/api/v1/dashboard/export/", get(export_one))
+            .route("/api/v1/dashboard/import/", post(import_dashboard))
             .with_state(Arc::clone(&shared));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -495,6 +702,97 @@ mod tests {
             fake.lock().unwrap().logins,
             2,
             "the 401 costs exactly one new sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_sends_the_archive_as_form_data_and_overwrite() {
+        let (client, fake) = fake::start().await;
+        let value = client.import(ARCHIVE, true).await.unwrap();
+        assert_eq!(
+            value["result"]["dashboard_count"], 1,
+            "the parsed answer comes back: {value}"
+        );
+
+        let state = fake.lock().unwrap();
+        let body = String::from_utf8_lossy(&state.import_body).to_string();
+        assert!(
+            body.contains("name=\"formData\""),
+            "the archive travels as the field formData: {body}"
+        );
+        assert!(
+            body.contains("PK\u{3}\u{4}canary"),
+            "the archive's bytes travel in the body: {body}"
+        );
+        let after = body
+            .split("name=\"overwrite\"")
+            .nth(1)
+            .expect("the overwrite field is in the body");
+        assert!(after.contains("true"), "overwrite=true was asked: {after}");
+        assert_eq!(
+            state.import_headers.get("x-csrftoken").map(String::as_str),
+            Some(fake::CSRF),
+            "the session's CSRF token travels as a header"
+        );
+        assert!(
+            state
+                .import_headers
+                .get("referer")
+                .is_some_and(|referer| referer == &format!("{}/", client.base)),
+            "the referer is the API base: {:?}",
+            state.import_headers.get("referer")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_can_ask_not_to_overwrite() {
+        let (client, fake) = fake::start().await;
+        client.import(ARCHIVE, false).await.unwrap();
+        let state = fake.lock().unwrap();
+        let body = String::from_utf8_lossy(&state.import_body).to_string();
+        let after = body
+            .split("name=\"overwrite\"")
+            .nth(1)
+            .expect("the overwrite field is in the body");
+        assert!(
+            after.contains("false"),
+            "overwrite=false was asked: {after}"
+        );
+        assert!(
+            !after.contains("true"),
+            "the false answer is not shadowed by a true: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_repeats_the_import_once() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().unauthorized_imports = 1;
+        let value = client.import(ARCHIVE, true).await.unwrap();
+        assert_eq!(value["result"]["dashboard_count"], 1);
+        assert_eq!(
+            fake.lock().unwrap().logins,
+            2,
+            "the 401 costs exactly one new sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_error_never_echoes_the_password_or_token() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().failing = true;
+        let error = client.import(ARCHIVE, true).await.unwrap_err();
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        for text in [&display, &debug] {
+            assert!(!text.contains(PASSWORD), "the password reached: {text}");
+            assert!(!text.contains(TOKEN), "the token reached: {text}");
+            assert!(!text.contains(fake::CSRF), "the CSRF token reached: {text}");
+            assert!(text.contains("[redacted]"), "nothing was scrubbed: {text}");
+        }
+        assert!(
+            display.contains("500"),
+            "the upstream status stays in the sentence: {display}"
         );
     }
 
