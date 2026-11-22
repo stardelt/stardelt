@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
     Api, Resource, ResourceExt,
@@ -205,6 +206,74 @@ pub fn principal_service_account(sp: &ServicePrincipal, namespace: &str) -> Serv
     }
 }
 
+/// The Role that lets the Airflow worker create a task pod as this principal's ServiceAccount
+/// (#492). Kubernetes' ServiceAccount admission asks the pod's creator for `use` on the named
+/// ServiceAccount; `airflow-pod-launcher-role` grants pods, not that verb.
+pub fn principal_use_role(sp: &ServicePrincipal, namespace: &str) -> Role {
+    let name = sp.name_any();
+    let service_account = principal_client_id(&name);
+    Role {
+        metadata: ObjectMeta {
+            name: Some(format!("{service_account}-use")),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    "app.kubernetes.io/part-of".to_string(),
+                    "stardelt".to_string(),
+                ),
+                ("stardelt.io/service-principal".to_string(), name),
+            ])),
+            owner_references: Some(vec![
+                sp.controller_owner_ref(&())
+                    .expect("a ServicePrincipal read from the API has a uid"),
+            ]),
+            ..ObjectMeta::default()
+        },
+        rules: Some(vec![PolicyRule {
+            api_groups: Some(vec![String::new()]),
+            resources: Some(vec!["serviceaccounts".to_string()]),
+            resource_names: Some(vec![service_account]),
+            verbs: vec!["use".to_string()],
+            ..PolicyRule::default()
+        }]),
+    }
+}
+
+/// The binding of [`principal_use_role`] to the Airflow worker, which creates the task pods.
+pub fn principal_use_binding(sp: &ServicePrincipal, namespace: &str) -> RoleBinding {
+    let service_account = principal_client_id(&sp.name_any());
+    let role = format!("{service_account}-use");
+    RoleBinding {
+        metadata: ObjectMeta {
+            name: Some(role.clone()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    "app.kubernetes.io/part-of".to_string(),
+                    "stardelt".to_string(),
+                ),
+                ("stardelt.io/service-principal".to_string(), sp.name_any()),
+            ])),
+            owner_references: Some(vec![
+                sp.controller_owner_ref(&())
+                    .expect("a ServicePrincipal read from the API has a uid"),
+            ]),
+            ..ObjectMeta::default()
+        },
+        role_ref: RoleRef {
+            api_group: Some("rbac.authorization.k8s.io".to_string()),
+            kind: "Role".to_string(),
+            name: role,
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name: "airflow-worker".to_string(),
+            namespace: Some(namespace.to_string()),
+            ..Subject::default()
+        }]),
+    }
+}
+
 /// Attach the identity provider's subject. The platform-mode converge wins when it reports one;
 /// otherwise the Secret's `subject` (written by `keycloak-sync-principal.sh` on a chart install)
 /// is used, so `status.subject` is filled on every install that records it. Only a ready
@@ -306,6 +375,27 @@ pub async fn reconcile_principal(
         Err(e) => {
             tracing::warn!(principal = %name, %namespace, error = %e, "ServiceAccount not applied")
         }
+    }
+
+    if let Err(e) = crate::objects::apply(
+        &ctx.client,
+        &namespace,
+        &principal_use_role(&sp, &namespace),
+        false,
+    )
+    .await
+    {
+        tracing::warn!(principal = %name, %namespace, error = %e, "principal use Role not applied")
+    }
+    if let Err(e) = crate::objects::apply(
+        &ctx.client,
+        &namespace,
+        &principal_use_binding(&sp, &namespace),
+        false,
+    )
+    .await
+    {
+        tracing::warn!(principal = %name, %namespace, error = %e, "principal use RoleBinding not applied")
     }
 
     let secret_name = match &sp.spec.existing_secret_ref {
@@ -955,6 +1045,24 @@ mod tests {
                             "metadata": { "name": "sp-etl", "namespace": "stardelt", "uid": "0000-sa" }
                         }),
                     )
+                } else if path.contains("/rolebindings/sp-etl-use") {
+                    (
+                        200,
+                        json!({
+                            "apiVersion": "rbac.authorization.k8s.io/v1",
+                            "kind": "RoleBinding",
+                            "metadata": { "name": "sp-etl-use", "namespace": "stardelt" }
+                        }),
+                    )
+                } else if path.contains("/roles/sp-etl-use") {
+                    (
+                        200,
+                        json!({
+                            "apiVersion": "rbac.authorization.k8s.io/v1",
+                            "kind": "Role",
+                            "metadata": { "name": "sp-etl-use", "namespace": "stardelt" }
+                        }),
+                    )
                 } else {
                     (
                         200,
@@ -1017,6 +1125,29 @@ mod tests {
             message.contains("the operator may not read Secrets in this namespace"),
             "{message}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_principal_applies_the_use_role_and_binds_the_worker() {
+        let (client, requests) = forbidden_mock_client();
+        let ctx = Arc::new(context_with_platforms(client, &[]));
+        let principal: ServicePrincipal = serde_json::from_value(json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": { "name": "etl", "namespace": "stardelt", "generation": 3, "uid": "0000-sp" },
+            "spec": { "ownerGroup": "analytics" }
+        }))
+        .expect("deserialize ServicePrincipal");
+        let _ = reconcile_principal(Arc::new(principal), ctx).await;
+        let requests = requests.lock().expect("requests poisoned");
+        for suffix in ["/roles/sp-etl-use", "/rolebindings/sp-etl-use"] {
+            assert!(
+                requests
+                    .iter()
+                    .any(|(method, path, _)| method == "PATCH" && path.ends_with(suffix)),
+                "{suffix} was not applied: {requests:?}"
+            );
+        }
     }
 
     fn b64(s: &str) -> String {
@@ -1242,6 +1373,30 @@ mod tests {
             status.get("workloadIdentity").is_none(),
             "no catalog principal without a ServiceAccount UID: {status}"
         );
+    }
+
+    #[test]
+    fn the_use_role_grants_one_service_account_and_binds_the_worker() {
+        let sp: ServicePrincipal = serde_json::from_value(json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": { "name": "etl", "namespace": "stardelt", "uid": "0000-sp" },
+            "spec": { "ownerGroup": "analytics" }
+        }))
+        .expect("deserialize ServicePrincipal");
+        let role = principal_use_role(&sp, "stardelt");
+        assert_eq!(role.metadata.name.as_deref(), Some("sp-etl-use"));
+        let rule = &role.rules.as_ref().expect("rules")[0];
+        assert_eq!(rule.verbs, vec!["use".to_string()]);
+        assert_eq!(
+            rule.resource_names.as_deref(),
+            Some(&["sp-etl".to_string()][..])
+        );
+        let binding = principal_use_binding(&sp, "stardelt");
+        assert_eq!(binding.role_ref.name, "sp-etl-use");
+        let subject = &binding.subjects.as_ref().expect("subjects")[0];
+        assert_eq!(subject.name, "airflow-worker");
+        assert_eq!(subject.namespace.as_deref(), Some("stardelt"));
     }
 
     #[tokio::test]

@@ -57,6 +57,13 @@ rules:
   # deletecollection too: upstream charts ship aggregated -edit/-admin ClusterRoles that
   # grant it, and RBAC refuses to let the operator create a role with a verb it lacks
   # (CNPG on a fresh node, stardelt-platform#293 run, 2026-11-18).
+  # The ServicePrincipal controller renders one Role per principal that grants the Airflow
+  # worker `use` on that principal's ServiceAccount (#492). RBAC refuses a Role that grants a
+  # verb its creator lacks, so the operator needs `use` itself; this is narrower than
+  # `escalate` on roles (the trap the comment above records for the Spark driver's Role).
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["use"]
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
