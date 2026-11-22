@@ -277,9 +277,10 @@ if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then
   # The dispatch must use GITHUB_TOKEN: PIN_TOKEN has no Actions permission (#1026 probe 403).
   # Every run of this script leaves a `workflow_dispatch` run on `$branch` in the Actions
   # history, so `--limit 1` right after the dispatch can still answer the *previous* build:
-  # remember that id and accept only a new one (#1035 review finding 1).
+  # remember that id and accept only a new one (#1035 review finding 1). This read must succeed
+  # — with a `set -e` abort a failed read cannot leave the guard silently empty.
   previous_run="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
-    --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""' || true)"
+    --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
   GH_TOKEN="$GITHUB_TOKEN" gh workflow run operator-image.yml --ref "$branch"
   run_id=""
   for _ in $(seq 1 12); do
