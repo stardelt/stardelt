@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The visitor's whole path, measured through Nova's API as the person `demo`
-# (stardelt/stardelt#929, #98 item 4 — the read-only half).
+# (stardelt/stardelt#929, #98 item 4 — the read half and the visitor's run half).
 #
 #   make verify-product-path      (STARDELT_NOVA_URL=…, ISSUER=… to override)
 #
@@ -15,6 +15,9 @@
 #              GET /api/statements/{id}      SUCCEEDED, one column `customers`, rows > 0
 #              DELETE /api/statements/{id}   the person's statement slot is free again
 #   query-log  GET /api/query-log?limit=10   an entry whose `sql` names the statement
+#   run        POST /api/pipelines/{ns}/{name}/runs            a viewer starts shop-1-bronze
+#              GET  …/runs/{run_id}                            the run reaches `success`
+#   log        GET  …/runs/{run_id}/tasks/{task_id}/logs       the task's log lines, not an empty page
 #
 # The failures that reach a person are at the joins: a search hit whose metadata 404s in the
 # other catalog, a statement that submits and never finishes, a query log that never sees it.
@@ -22,7 +25,8 @@
 # The password is `demo` and it is PUBLIC ON PURPOSE: scripts/public-demo.sh creates that person
 # and prints it, so it protects nothing. The password and the token live in two `mktemp` files
 # (0600, removed on every exit) and nothing here prints the token. Every request is a read
-# except the statement and its cancel: nothing on the cluster changes.
+# except the statement, its cancel and one manual run of `shop-1-bronze`; a run writes the
+# demo's own bronze tables, as the demo's **Run now** does, and creates and deletes nothing.
 #
 # PASS (exit 0) = every row held. FAIL (exit 1) = the first row that did not, named in the last
 # line — a check that passes before the demo is deployed proves nothing.
@@ -37,12 +41,13 @@ ISSUER="${ISSUER%/}"
 PASSWORD_FILE="$(mktemp)"
 TOKEN_FILE="$(mktemp)"
 BODY_FILE="$(mktemp)"
-chmod 600 "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE"
+RUN_FILE="$(mktemp)"
+chmod 600 "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE" "$RUN_FILE"
 # `mint-user-token.py` strips the trailing newline; the realm compares the exact string.
 printf 'demo\n' > "$PASSWORD_FILE"
 
 CURRENT_ROW=startup
-cleanup() { rm -f "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE"; }
+cleanup() { rm -f "$PASSWORD_FILE" "$TOKEN_FILE" "$BODY_FILE" "$RUN_FILE"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -278,10 +283,81 @@ PY
   return 1
 }
 
+row_pipeline_run() {
+  local verdict
+  if ! curl -fsS -X POST -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+      -H 'Content-Type: application/json' -d '{}' \
+      "$NOVA/api/pipelines/stardelt/shop-1-bronze/runs" >"$BODY_FILE"; then
+    echo "FAIL POST /api/pipelines/stardelt/shop-1-bronze/runs did not answer: a viewer may run it"
+    return 1
+  fi
+  verdict="$(python3 - "$BODY_FILE" "$RUN_FILE" <<'PY'
+import json, sys
+
+answer = json.load(open(sys.argv[1]))
+run_id = answer.get("runId")
+if not run_id:
+    print("FAIL the run answer carries no runId")
+    raise SystemExit
+open(sys.argv[2], "w").write(run_id + "\n")
+print("✓ run started as the visitor (%s)" % run_id)
+PY
+)" || true
+  [ -n "$verdict" ] || verdict="FAIL the run answer is not JSON"
+  printf '%s\n' "$verdict"
+  case "$verdict" in "✓ "*) return 0 ;; *) return 1 ;; esac
+}
+
+row_pipeline_log() {
+  local run i state task verdict
+  run="$(tr -d '\n' < "$RUN_FILE")"
+  # shop-1-bronze finished in ~35 s on 2026-11-22; 180 s is the budget for a loaded host.
+  for i in $(seq 1 36); do
+    api "/api/pipelines/stardelt/shop-1-bronze/runs/$run"
+    state="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("run") or {}).get("state"))' "$BODY_FILE")"
+    case "$state" in
+      success) break ;;
+      failed|error)
+        echo "FAIL the run is $state"
+        return 1
+        ;;
+    esac
+    [ "$i" -eq 36 ] && { echo "FAIL the run is still $state after 180 s"; return 1; }
+    sleep 5
+  done
+  task="$(python3 -c 'import json,sys; print(((json.load(open(sys.argv[1])).get("tasks") or [{}])[0]).get("taskId") or "")' "$BODY_FILE")"
+  if [ -z "$task" ]; then
+    echo "FAIL the run names no task"
+    return 1
+  fi
+  if ! curl -fsS -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+      "$NOVA/api/pipelines/stardelt/shop-1-bronze/runs/$run/tasks/$task/logs" >"$BODY_FILE"; then
+    echo "FAIL the log route did not answer for the viewer"
+    return 1
+  fi
+  verdict="$(python3 - "$BODY_FILE" <<'PY'
+import json, sys
+
+page = json.load(open(sys.argv[1]))
+lines = page.get("lines") or []
+text = " ".join((line.get("text") or "") for line in lines)
+if not lines or not text.strip():
+    print("FAIL the task log is empty")
+else:
+    print("✓ run succeeded and its log read (%d lines)" % len(lines))
+PY
+)" || true
+  [ -n "$verdict" ] || verdict="FAIL the log answer is not JSON"
+  printf '%s\n' "$verdict"
+  case "$verdict" in "✓ "*) return 0 ;; *) return 1 ;; esac
+}
+
 row sign-in row_sign_in
 row search row_search
 row table row_table
 row query row_query
 row query-log row_query_log
+row run row_pipeline_run
+row log row_pipeline_log
 
 echo "verify-product-path: PASS"
