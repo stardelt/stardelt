@@ -1609,7 +1609,10 @@ mod tests {
             let mut bad = body();
             bad.owner.group = Some(group.to_string());
             let err = validate_spec("trial", &bad).unwrap_err();
-            assert!(err.contains("not a valid Kubernetes name"), "{group}: {err}");
+            assert!(
+                err.contains("not a valid Kubernetes name"),
+                "{group}: {err}"
+            );
         }
         let mut ok = body();
         ok.owner.group = Some("data-team".to_string());

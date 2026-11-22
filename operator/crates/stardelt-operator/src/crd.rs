@@ -6443,7 +6443,10 @@ mod tests {
             }));
             let err = c.spec.validate("analytics").unwrap_err();
             assert!(err.contains(sa), "{group}: {err}");
-            assert!(err.contains("not a valid Kubernetes name"), "{group}: {err}");
+            assert!(
+                err.contains("not a valid Kubernetes name"),
+                "{group}: {err}"
+            );
         }
         for group in ["analytics", "data-team", "team42"] {
             let c = spark_cluster(serde_json::json!({
