@@ -33,7 +33,7 @@ jobs:
     # (platform#1013). The guard is per workflow, so it covers all four Image/push workflows.
     # #746 adds the head-branch guard: the rollup dispatches `operator / Image` from
     # `chore/pin-rollup`, and without this the completion of that build would fire a second
-    # rollup and `concurrency.cancel-in-progress` would cancel the waiting one. A build of a
+    # rollup while the first is still waiting on it (#1037). A build of a
     # tag or any other non-default branch moved no `dev` tag either, so nothing is lost.
     if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
