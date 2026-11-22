@@ -2348,6 +2348,14 @@ fn visible_principals(principals: &[Value], who: &Identity) -> Vec<ServicePrinci
                 .and_then(|status| status.get("ready"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let status = principal.get("status");
+            let status_text = |key: &str| {
+                status
+                    .and_then(|status| status.get(key))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
             Some(ServicePrincipalView {
                 name: name.to_string(),
                 owner_group: spec
@@ -2359,6 +2367,8 @@ fn visible_principals(principals: &[Value], who: &Identity) -> Vec<ServicePrinci
                 audiences,
                 ready,
                 message: (!ready).then(|| principal_message(principal)),
+                workload_identity: status_text("workloadIdentity"),
+                client_id: status_text("clientId"),
             })
         })
         .collect();
@@ -3227,6 +3237,13 @@ pub struct ServicePrincipalView {
     pub ready: bool,
     /// `null` when ready; otherwise the same sentence the Schedule dialog would refuse with.
     pub message: Option<String>,
+    /// `status.workloadIdentity`: the catalog principal this principal's workloads become,
+    /// `kubernetes~<ServiceAccount uid>` (#492, #650). `null` until the operator has written it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_identity: Option<String>,
+    /// `status.clientId`: the identity provider's client (`sp-<name>`); `null` until written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 /// `GET /api/service-principals`: the principals the caller may see.
@@ -7356,7 +7373,7 @@ pub(crate) async fn principals(caller: ReadCaller) -> Response {
     operation_id = "service_principals_list",
     path = "/api/service-principals",
     tag = "public",
-    description = "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
+    description = "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `workloadIdentity` is `status.workloadIdentity` — the catalog principal `kubernetes~<ServiceAccount uid>` (#492) — and `clientId` is `status.clientId`; both are absent until the operator has written them. `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's principals, sorted by name", body = ServicePrincipalsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -12532,6 +12549,8 @@ mod tests {
         if let Some(ready) = ready {
             resource["status"] = json!({
                 "ready": ready,
+                "clientId": name,
+                "workloadIdentity": format!("kubernetes~{name}-uid"),
                 "conditions": [{
                     "type": "Ready",
                     "status": if ready { "True" } else { "False" },
@@ -15737,6 +15756,11 @@ mod tests {
         assert!(view.audiences.is_empty());
         assert!(view.ready);
         assert_eq!(view.message, None);
+        assert_eq!(
+            view.workload_identity.as_deref(),
+            Some("kubernetes~pipeline-analytics-uid")
+        );
+        assert_eq!(view.client_id.as_deref(), Some("pipeline-analytics"));
     }
 
     #[tokio::test]
@@ -15763,6 +15787,17 @@ mod tests {
             .map(|principal| principal.name.as_str())
             .collect();
         assert_eq!(names, vec!["collector-finance", "pipeline-analytics"]);
+        let client_ids: Vec<&str> = answer
+            .principals
+            .iter()
+            .map(|principal| {
+                principal
+                    .client_id
+                    .as_deref()
+                    .expect("every visible principal carries its client id")
+            })
+            .collect();
+        assert_eq!(client_ids, vec!["collector-finance", "pipeline-analytics"]);
     }
 
     #[tokio::test]
@@ -15800,6 +15835,8 @@ mod tests {
         assert_eq!(view.audiences, vec!["trino", "lakekeeper"]);
         assert!(!view.ready);
         assert_eq!(view.message.as_deref(), Some(NOT_READY_MESSAGE));
+        assert_eq!(view.workload_identity, None);
+        assert_eq!(view.client_id, None);
     }
 
     #[tokio::test]
