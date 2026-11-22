@@ -909,6 +909,28 @@ fn managed_spark_conf_key(key: &str) -> bool {
             && (key.contains("credential") || key.contains("token")))
 }
 
+/// The name #1100 derives for a group's driver ServiceAccount; the twin of
+/// `operator/crates/stardelt-operator/src/spark.rs::cluster_driver_for`.
+fn driver_service_account(group: &str) -> String {
+    format!("spark-cluster-driver-{group}")
+}
+
+/// Whether `group` can be part of that name: an RFC 1123 subdomain (#1111).
+fn driver_service_account_name_ok(group: &str) -> bool {
+    let name = driver_service_account(group);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
 /// The rules `SparkClusterSpec::validate` enforces in the operator, in the same words: a
 /// body the CRD would refuse is a `400` from Nova, never the API server's message.
 fn validate_spec(name: &str, body: &ComputeSpecBody) -> Result<(), String> {
@@ -926,6 +948,14 @@ fn validate_spec(name: &str, body: &ComputeSpecBody) -> Result<(), String> {
         && !crate::connections::group_ok(group)
     {
         return Err("owner.group must be a valid group name".to_string());
+    }
+    if let Some(group) = group
+        && !driver_service_account_name_ok(group)
+    {
+        return Err(format!(
+            "owner.group `{group}` would make the driver ServiceAccount `{}`, which is not a valid Kubernetes name: use lower-case letters, digits, '-' and '.', starting and ending with a letter or digit",
+            driver_service_account(group)
+        ));
     }
     if let Some(user) = user
         && !user_ok(user)
@@ -1571,6 +1601,19 @@ mod tests {
             validate_spec("trial", &bad),
             Err("owner.group must be a valid group name".to_string())
         );
+    }
+
+    #[test]
+    fn a_group_that_would_make_an_invalid_driver_service_account_is_refused() {
+        for group in ["Visitors", "team_a", "team."] {
+            let mut bad = body();
+            bad.owner.group = Some(group.to_string());
+            let err = validate_spec("trial", &bad).unwrap_err();
+            assert!(err.contains("not a valid Kubernetes name"), "{group}: {err}");
+        }
+        let mut ok = body();
+        ok.owner.group = Some("data-team".to_string());
+        assert_eq!(validate_spec("trial", &ok), Ok(()));
     }
 
     #[test]

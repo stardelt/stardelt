@@ -3426,6 +3426,14 @@ impl SparkClusterSpec {
         if self.owner.group.is_some() == self.owner.user.is_some() {
             return Err("set exactly one of owner.group and owner.user".to_string());
         }
+        if let Some(group) = &self.owner.group
+            && !crate::spark::cluster_driver_name_ok(group)
+        {
+            return Err(format!(
+                "owner.group `{group}` would make the driver ServiceAccount `{}`, which is not a valid Kubernetes name: use lower-case letters, digits, '-' and '.', starting and ending with a letter or digit",
+                crate::spark::cluster_driver_for(group)
+            ));
+        }
         if self.viewers.len() > 16 {
             return Err("viewers holds at most 16 groups".to_string());
         }
@@ -6421,6 +6429,28 @@ mod tests {
             "owner": { "user": "ada" }, "runtime": "spark-4.0-py3.12"
         }));
         assert!(one_person.spec.validate("ada-spark").is_ok());
+    }
+
+    #[test]
+    fn a_group_whose_driver_service_account_is_invalid_is_refused() {
+        for (group, sa) in [
+            ("Visitors", "spark-cluster-driver-Visitors"),
+            ("team_a", "spark-cluster-driver-team_a"),
+            ("team.", "spark-cluster-driver-team."),
+        ] {
+            let c = spark_cluster(serde_json::json!({
+                "owner": { "group": group }, "runtime": "spark-4.0-py3.12"
+            }));
+            let err = c.spec.validate("analytics").unwrap_err();
+            assert!(err.contains(sa), "{group}: {err}");
+            assert!(err.contains("not a valid Kubernetes name"), "{group}: {err}");
+        }
+        for group in ["analytics", "data-team", "team42"] {
+            let c = spark_cluster(serde_json::json!({
+                "owner": { "group": group }, "runtime": "spark-4.0-py3.12"
+            }));
+            assert!(c.spec.validate("analytics").is_ok(), "{group}");
+        }
     }
 
     #[test]
