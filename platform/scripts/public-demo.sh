@@ -150,8 +150,10 @@ read_groups() {
     || fail "cannot list the groups of realm $REALM"
 }
 group_id() { jq -r --arg name "$1" 'map(select(.name == $name))[0].id // ""' "$groups_json"; }
-user_id() { # user_id <username> -> the Keycloak id, empty when absent
-  kc --get --data-urlencode "username=$1" --data-urlencode 'exact=true' "$API/users" | jq -r '.[0].id // ""'
+user_id() { # user_id <username> -> the Keycloak id, empty when absent; non-zero when the API refused
+  local out
+  out="$(kc --get --data-urlencode "username=$1" --data-urlencode 'exact=true' "$API/users")" || return 1
+  printf '%s' "$out" | jq -r '.[0].id // ""'
 }
 
 # --check (platform#940): the read-only report of what the rollout still misses.
@@ -214,11 +216,18 @@ if [ "$mode" = check ]; then
     fi
   }
 
-  # The realm rows share one Keycloak admin session, opened on the first of them.
+  # The realm rows share one Keycloak admin session, opened on the first of them and
+  # renewed when the master-realm token is older than 45 s (it lives 60 s).
   check_kc=""
+  check_kc_at=0
   kc_prepare() {
     case "$check_kc" in
-      up) return 0 ;;
+      up)
+        if [ $((SECONDS - check_kc_at)) -lt 45 ]; then return 0; fi
+        keycloak_admin_stop
+        start_keycloak
+        check_kc_at=$SECONDS
+        return 0 ;;
       down) return 1 ;;
     esac
     if ! kubectl -n "$NAMESPACE" get configmap keycloak-env >/dev/null 2>&1 \
@@ -228,6 +237,7 @@ if [ "$mode" = check ]; then
     fi
     start_keycloak
     check_kc=up
+    check_kc_at=$SECONDS
     read_groups
   }
   kc_down() {
@@ -374,7 +384,11 @@ if [ "$mode" = check ]; then
   check_3() {
     kc_prepare || { kc_down; return 1; }
     local uid groups_json others
-    uid="$(user_id "$PERSON")"
+    if ! uid="$(user_id "$PERSON")"; then
+      check_msg="the Keycloak admin API refused the lookup of $PERSON"
+      check_fix="make public-demo-check again; if it repeats, make install-identity"
+      return 1
+    fi
     if [ -z "$uid" ]; then
       check_msg="the person $PERSON does not exist"
       check_fix="make public-demo YES=1"
@@ -403,7 +417,11 @@ if [ "$mode" = check ]; then
   check_4() {
     kc_prepare || { kc_down; return 1; }
     local uid roles_json names
-    uid="$(user_id "$PERSON")"
+    if ! uid="$(user_id "$PERSON")"; then
+      check_msg="the Keycloak admin API refused the lookup of $PERSON"
+      check_fix="make public-demo-check again; if it repeats, make install-identity"
+      return 1
+    fi
     if [ -z "$uid" ]; then
       check_msg="the person $PERSON does not exist"
       check_fix="make public-demo YES=1"
@@ -599,7 +617,11 @@ PY
   check_14() {
     kc_prepare || { kc_down; return 1; }
     local uid out disabled until failures
-    uid="$(user_id "$PERSON")"
+    if ! uid="$(user_id "$PERSON")"; then
+      check_msg="the Keycloak admin API refused the lookup of $PERSON"
+      check_fix="make public-demo-check again; if it repeats, make install-identity"
+      return 1
+    fi
     if [ -z "$uid" ]; then
       check_msg="the person $PERSON does not exist"
       check_fix="make public-demo YES=1"
@@ -897,7 +919,7 @@ if [ "$mode" = off ]; then
     exit 1
   fi
   start_keycloak
-  uid="$(user_id "$PERSON")"
+  uid="$(user_id "$PERSON")" || fail "the Keycloak admin API refused the lookup of $PERSON"
   [ -n "$uid" ] || fail "user $PERSON does not exist in realm $REALM"
   printf '{"enabled":false}' >"$tmp/off.json"
   kc -H 'Content-Type: application/json' -X PUT --data @"$tmp/off.json" "$API/users/$uid" >/dev/null \
