@@ -229,6 +229,7 @@ stardelt bundle generate etl daily pipelines/                  # write a pipelin
 stardelt bundle validate pipelines/ -t prod                      # check a bundle (bundle.yaml + pipeline files) offline: no host, no sign-in
 stardelt bundle plan pipelines/ -t prod                          # ask Nova what deploying the target would do; writes nothing
 stardelt bundle deploy pipelines/ -t prod                        # Nova checks every pipeline, then they are created, updated, or left unchanged
+stardelt dashboards export 42 -o dashboards/shop   # a Superset dashboard as bundle files; databases/ is never stored
 ```
 
 `bundle plan` and `bundle deploy` (which also takes `--dry-run`, the same as `plan`) work on one target. Every pipeline file gets
