@@ -16,7 +16,11 @@ permissions:
   # #746: the rollup dispatches `operator / Image` from the rolling branch when it moved a pin
   # the operator embeds (GITHUB_TOKEN with actions: write; PIN_TOKEN has no Actions permission).
   actions: write
-concurrency: { group: platform-pin-rollup, cancel-in-progress: true }
+# A run that waits on the dispatched operator build (#1032) must not be cancelled by the next
+# cron or push run: the branch already carries the moved pin and would keep the old operator
+# digest (#1037). A queued run is cheap; the cron fires every 30 minutes anyway. GitHub keeps
+# one pending run and cancels the older pending one, so the newest commit still wins.
+concurrency: { group: platform-pin-rollup, cancel-in-progress: false }
 defaults:
   run:
     working-directory: platform
