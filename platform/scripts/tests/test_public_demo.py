@@ -138,6 +138,14 @@ class PublicDemo(unittest.TestCase):
         done = self.run_script("--check", FAKE_LAST_SUCCESS=fresh)
         self.assertIn(f"PASS     12  the nightly reset last succeeded at {fresh}", done.stdout)
 
+    def test_a_refused_lookup_is_not_reported_as_a_missing_person(self):
+        text = SCRIPT.read_text()
+        start = text.index("user_id() {")
+        body = text[start : text.index("\n}\n", start)]
+        self.assertIn("|| return 1", body, "user_id must tell a refused lookup apart from an absent person")
+        self.assertIn("check_kc_at=$SECONDS", text, "the admin token is renewed before it expires")
+        self.assertIn("the Keycloak admin API refused the lookup of", text)
+
 
 if __name__ == "__main__":
     unittest.main()
