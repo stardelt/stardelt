@@ -1689,6 +1689,31 @@ fn check_publish(
         }) && tasks.iter().any(|task| !task.writes.is_empty())
     });
     if ready {
+        // `${table}` is ONE table's audit branch: the loader fills it in only when the pipeline
+        // writes one table, so a second written table makes the check's pod fail at run time.
+        let mut written = std::collections::BTreeSet::new();
+        let mut placeholder = false;
+        for task in tasks.unwrap_or_default() {
+            written.extend(task.writes.iter().map(String::as_str));
+            if let Some(quality) = task.quality.as_ref() {
+                placeholder |= quality
+                    .checks
+                    .iter()
+                    .any(|check| check.sql.contains("${table}"));
+            }
+        }
+        if placeholder && written.len() > 1 {
+            return Err(ActionError::refused(
+                "publish",
+                Fail::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "${{table}} names the audit branch of one table, and this pipeline writes {}: name the table in the check, or split the pipeline",
+                        written.len()
+                    ),
+                ),
+            ));
+        }
         return Ok(());
     }
     Err(ActionError::refused(
@@ -14065,6 +14090,40 @@ mod tests {
             .as_str()
             .expect("the check's sql");
         assert!(sql.contains("${table}"), "stored sql: {sql}");
+    }
+
+    /// A `${table}` check names ONE table's audit branch; a wap pipeline that writes two
+    /// tables is refused instead of failing in the check's pod (#114).
+    #[tokio::test]
+    async fn a_wap_create_refuses_a_table_placeholder_with_two_written_tables() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut first = spark_pipeline_task("first", "graphs/a", None, None, &[]);
+        first.writes = vec!["gold.shop.a".into()];
+        let mut second = spark_pipeline_task("second", "graphs/b", None, None, &[]);
+        second.writes = vec!["gold.shop.b".into()];
+        let mut body = create_body("shop-wap", "analytics", "");
+        body.tasks = Some(vec![
+            first,
+            second,
+            quality_task(
+                "check",
+                vec![check("rows", "select count(*) from ${table}", None)],
+                &["first", "second"],
+            ),
+        ]);
+        body.publish = Some(Publish::Wap);
+
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("one check cannot read two audit branches");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            "${table} names the audit branch of one table, and this pipeline writes 2: \
+             name the table in the check, or split the pipeline"
+        );
+        assert!(stored_pipeline(&resources, "shop-wap").await.is_none());
     }
 
     /// A `publish: direct` pipeline refuses `${table}` in a check: only a wap run has an audit
