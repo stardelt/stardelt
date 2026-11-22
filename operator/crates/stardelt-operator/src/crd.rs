@@ -6454,6 +6454,15 @@ mod tests {
             }));
             assert!(c.spec.validate("analytics").is_ok(), "{group}");
         }
+        // The API server has no per-label length limit: a 64-character group makes an
+        // 85-character name it accepts (`create serviceaccount … --dry-run=server`).
+        let c = spark_cluster(serde_json::json!({
+            "owner": { "group": "a".repeat(64) }, "runtime": "spark-4.0-py3.12"
+        }));
+        assert!(
+            c.spec.validate("analytics").is_ok(),
+            "a 64-character group is accepted"
+        );
     }
 
     #[test]

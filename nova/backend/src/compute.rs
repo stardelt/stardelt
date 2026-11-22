@@ -915,14 +915,15 @@ fn driver_service_account(group: &str) -> String {
     format!("spark-cluster-driver-{group}")
 }
 
-/// Whether `group` can be part of that name: an RFC 1123 subdomain (#1111).
+/// Whether `group` can be part of that name: an RFC 1123 subdomain (#1111). No per-label
+/// length limit, because the API server applies none to a ServiceAccount name (a 64-character
+/// group gives an 85-character name the server accepts).
 fn driver_service_account_name_ok(group: &str) -> bool {
     let name = driver_service_account(group);
     !name.is_empty()
         && name.len() <= 253
         && name.split('.').all(|label| {
             !label.is_empty()
-                && label.len() <= 63
                 && label.as_bytes()[0].is_ascii_alphanumeric()
                 && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
                 && label
@@ -1617,6 +1618,10 @@ mod tests {
         let mut ok = body();
         ok.owner.group = Some("data-team".to_string());
         assert_eq!(validate_spec("trial", &ok), Ok(()));
+        // A 64-character group gives an 85-character ServiceAccount name the API server accepts.
+        let mut longest = body();
+        longest.owner.group = Some("a".repeat(64));
+        assert_eq!(validate_spec("trial", &longest), Ok(()));
     }
 
     #[test]

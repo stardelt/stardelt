@@ -313,14 +313,15 @@ pub fn cluster_driver_for(group: &str) -> String {
 /// `spark-cluster-driver-<group>` (#1100, #1111). The group schema admits upper case, `_` and a
 /// trailing `.` or `-`; a ServiceAccount name is an RFC 1123 subdomain: lower-case
 /// alphanumerics, `-` and `.`, each dot-separated label starting and ending with an
-/// alphanumeric, at most 253 characters.
+/// alphanumeric, at most 253 characters. The API server applies no per-label length limit
+/// (`spark-cluster-driver-` plus a 64-character group is 85 characters and accepted), so this
+/// predicate has none either (#1111 review).
 pub fn cluster_driver_name_ok(group: &str) -> bool {
     let name = cluster_driver_for(group);
     !name.is_empty()
         && name.len() <= 253
         && name.split('.').all(|label| {
             !label.is_empty()
-                && label.len() <= 63
                 && label.as_bytes()[0].is_ascii_alphanumeric()
                 && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
                 && label
