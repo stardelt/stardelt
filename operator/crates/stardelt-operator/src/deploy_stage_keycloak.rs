@@ -51,7 +51,7 @@ pub fn client_payload(stage: &DeployStage) -> serde_json::Value {
         "standardFlowEnabled": false,
         "implicitFlowEnabled": false,
         "directAccessGrantsEnabled": false,
-        "serviceAccountsEnabled": false,
+        "serviceAccountsEnabled": true,
         "redirectUris": [],
         "webOrigins": [],
         "attributes": {
@@ -372,7 +372,7 @@ mod tests {
             payload["protocolMappers"][0]["config"]["included.custom.audience"],
             "stardelt-deploy"
         );
-        assert_eq!(payload["serviceAccountsEnabled"], false);
+        assert_eq!(payload["serviceAccountsEnabled"], true);
     }
 
     #[test]

@@ -180,16 +180,22 @@ fi
 "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/clients/$uuid" > "$tmp/client.json" \
   || fail "FAIL Keycloak did not answer for client $CLIENT_ID"
 subject="$(kubectl -n "$NS" get deploystage "$STAGE" -o jsonpath='{.spec.subject}' 2>/dev/null || true)"
-idp_status="$("${CURL_SOFT[@]}" -o /dev/null -w '%{http_code}' "${HEAD[@]}" "${AUTH[@]}" \
+idp_status="$("${CURL_SOFT[@]}" -o "$tmp/idp.json" -w '%{http_code}' "${HEAD[@]}" "${AUTH[@]}" \
   "$API/identity-provider/instances/github-actions" 2>/dev/null || true)"
 
-# 5. The five facts, one PASS/FAIL line each. The python block prints `check<TAB>verdict<TAB>
+# 5. The seven facts, one PASS/FAIL line each. The python block prints `check<TAB>verdict<TAB>
 #    sentence`; the shell only formats and counts.
-python3 - "$tmp/client.json" "$subject" "$AUDIENCE" "$idp_status" > "$tmp/checks" <<'PY'
+python3 - "$tmp/client.json" "$subject" "$AUDIENCE" "$idp_status" "$tmp/idp.json" > "$tmp/checks" <<'PY'
 import json, sys
 
 client = json.load(open(sys.argv[1]))
 subject, audience, idp_status = sys.argv[2], sys.argv[3], sys.argv[4]
+idp = {}
+if idp_status == "200":
+    try:
+        idp = json.load(open(sys.argv[5]))
+    except (OSError, ValueError):
+        idp = {}
 attrs = client.get("attributes") or {}
 none = "(none)"
 
@@ -227,6 +233,14 @@ row("audience", mapper is not None,
 row("idp", idp_status == "200",
     "the realm has the github-actions identity provider",
     "the realm has no github-actions identity provider - run make sync-github-idp (#988)")
+
+row("idp-enabled", bool(idp.get("enabled")),
+    "the github-actions identity provider is enabled, so Keycloak validates an assertion",
+    "the github-actions identity provider is disabled - a CI assertion is refused")
+
+row("service-account", client.get("serviceAccountsEnabled") is True,
+    "client %s may retrieve a service account, so client_credentials is accepted" % client.get("clientId", none),
+    "the client cannot retrieve a service account - Keycloak answers unauthorized_client before it reads the assertion")
 PY
 
 passed=0
@@ -236,9 +250,9 @@ while IFS=$'\t' read -r check verdict sentence; do
   total=$((total + 1))
   if [ "$verdict" = PASS ]; then passed=$((passed + 1)); fi
 done < "$tmp/checks"
-[ "$total" -eq 5 ] || fail "FAIL the check block answered $total of 5 rows"
+[ "$total" -eq 7 ] || fail "FAIL the check block answered $total of 7 rows"
 
 # The FAIL branch exits first on purpose: a trailing unconditional `exit` makes ShellCheck
 # (0.11 SC2329) call the trap-only `cleanup` unreachable.
-[ "$passed" -eq 5 ] || { echo "verify-deploy-stage: FAIL ($passed of 5)"; exit 1; }
-echo "verify-deploy-stage: PASS (5 of 5)"
+[ "$passed" -eq 7 ] || { echo "verify-deploy-stage: FAIL ($passed of 7)"; exit 1; }
+echo "verify-deploy-stage: PASS (7 of 7)"
