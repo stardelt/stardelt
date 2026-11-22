@@ -996,6 +996,14 @@ demo-notebook: _context ## The demo's report notebook: published as group demo, 
 demo-stream: _context ## The demo's stream: a demo-owned StreamApp over the pegelonline topic, visible to visitors (lab only; needs YES=1)
 	@NAMESPACE=$(NAMESPACE) YES='$(YES)' STARDELT_NOVA_URL='$(STARDELT_NOVA_URL)' bash scripts/demo-stream.sh
 
+.PHONY: demo-cluster demo-cluster-check demo-cluster-off
+demo-cluster: _context ## The demo's SparkCluster: owned by demo, visible to visitors, Running (#493)
+	@NAMESPACE=$(NAMESPACE) bash scripts/demo-cluster.sh --on
+demo-cluster-check: _context ## Read-only: the demo's SparkCluster is Running with its driver identity
+	@NAMESPACE=$(NAMESPACE) bash scripts/demo-cluster.sh --check
+demo-cluster-off: _context ## Remove the demo's SparkCluster (lab only; the finalizer prunes its driver identity; needs YES=1)
+	@NAMESPACE=$(NAMESPACE) YES='$(YES)' bash scripts/demo-cluster.sh --off
+
 .PHONY: demo-sts demo-sts-check demo-sts-off
 demo-sts: _context ## Flip a warehouse to vend table-scoped storage credentials (lab only; needs YES=1, WAREHOUSE=gold)
 	@if [ '$(YES)' != 1 ]; then echo "would: set sts-enabled=true on warehouse $(or $(WAREHOUSE),gold)"; echo "nothing was changed — re-run with YES=1"; exit 1; fi

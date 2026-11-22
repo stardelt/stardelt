@@ -204,6 +204,7 @@ if [ "$mode" = check ]; then
       24) check_24 || rc=1 ;;
       25) check_25 || rc=1 ;;
       26) check_26 || rc=1 ;;
+      27) check_27 || rc=1 ;;
       *) check_msg="unknown row $id"; check_fix="this is a bug in scripts/public-demo.sh"; rc=1 ;;
     esac
     check_rows=$((check_rows + 1))
@@ -867,6 +868,27 @@ PY
     fi
   }
 
+  # 27. The demo's Spark is a SparkCluster the visitors see (#493 point 6a).
+  check_27() {
+    local document phase sa identity
+    document="$(kubectl -n "$NAMESPACE" get sparkcluster demo -o json 2>/dev/null || true)"
+    if [ -z "$document" ]; then
+      check_msg="the SparkCluster demo does not exist"
+      check_fix="make demo-cluster"
+      return 1
+    fi
+    phase="$(jq -r '.status.phase // ""' <<<"$document")"
+    sa="$(jq -r '.status.driverServiceAccount // ""' <<<"$document")"
+    identity="$(jq -r '.status.workloadIdentity // ""' <<<"$document")"
+    if [ "$phase" = Running ] && [ "$sa" = spark-cluster-driver-demo ] && [ -n "$identity" ]; then
+      check_msg="the SparkCluster demo is Running as $sa ($identity)"
+    else
+      check_msg="the SparkCluster demo is phase=${phase:-?}, driver=${sa:-?}, identity=${identity:-?}"
+      check_fix="make demo-cluster"
+      return 1
+    fi
+  }
+
   render 0a
   render 0b
   render 0
@@ -898,6 +920,7 @@ PY
   render 24
   render 25
   render 26
+  render 27
 
   echo ""
   if [ "$check_ok" -eq "$check_rows" ]; then
