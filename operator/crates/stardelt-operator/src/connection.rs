@@ -81,6 +81,19 @@ pub fn plan(
     uid: &str,
     mode: SecretsMode,
 ) -> Plan {
+    plan_with_stores(spec, name, namespace, uid, mode, &[])
+}
+
+/// Like [`plan`], with the owner groups that have their own store (`spec.secrets.groups`). Empty
+/// means the single cluster-scoped store of `secrets.mode: external`.
+pub fn plan_with_stores(
+    spec: &ConnectionSpec,
+    name: &str,
+    namespace: &str,
+    uid: &str,
+    mode: SecretsMode,
+    external_groups: &[String],
+) -> Plan {
     if let Err(message) = spec.validate(name) {
         return Plan::Invalid {
             reason: "InvalidSpec",
@@ -104,11 +117,45 @@ pub fn plan(
                 message: "secrets.mode external: set secret.remoteRef to the path in the enterprise store (for example `apps/crm/db`)".to_string(),
             };
         };
-        (
-            secrets::ENTERPRISE_STORE.to_string(),
-            "ClusterSecretStore",
-            remote_ref.to_string(),
-        )
+        if external_groups.is_empty() {
+            (
+                secrets::ENTERPRISE_STORE.to_string(),
+                "ClusterSecretStore",
+                remote_ref.to_string(),
+            )
+        } else {
+            match (spec.scope, spec.owner_group.as_deref()) {
+                (ConnectionScope::Group, Some(group))
+                    if external_groups.iter().any(|x| x == group) =>
+                {
+                    (
+                        format!("enterprise-{group}"),
+                        "SecretStore",
+                        remote_ref.to_string(),
+                    )
+                }
+                (ConnectionScope::Group, Some(group)) => {
+                    return Plan::Invalid {
+                        reason: "GroupStoreMissing",
+                        message: format!(
+                            "secrets.mode external: the owner group `{group}` has no store; add it to spec.secrets.groups"
+                        ),
+                    };
+                }
+                (ConnectionScope::Group, None) => {
+                    return Plan::Invalid {
+                        reason: "InvalidSpec",
+                        message: "a group connection needs an ownerGroup".to_string(),
+                    };
+                }
+                (ConnectionScope::Managed, _) => {
+                    return Plan::Invalid {
+                        reason: "PerGroupStoreOnly",
+                        message: "secrets.mode external with spec.secrets.groups gives each owner group its own store; a managed connection needs the single enterprise store, so remove spec.secrets.groups".to_string(),
+                    };
+                }
+            }
+        }
     } else {
         if secret_spec.remote_ref.is_some() {
             return Plan::Invalid {
@@ -255,27 +302,48 @@ pub async fn reconcile_connection(
     // Where the store is (decision D23): ConfigMap `stardelt-secrets` in the connection's own
     // namespace, published by the PlatformInstance controller. Absent means `none` — today the
     // platform is one namespace; a connection in another namespace keeps the derived path.
+    let mut external_groups: Vec<String> = Vec::new();
     let mode = match Api::<ConfigMap>::namespaced(ctx.client.clone(), &namespace)
         .get_opt(secrets::MODE_CONFIGMAP)
         .await
     {
-        Ok(Some(config_map)) => match config_map
-            .data
-            .as_ref()
-            .and_then(|data| data.get("mode"))
-            .map(String::as_str)
-        {
-            Some("platform") => SecretsMode::Platform,
-            Some("external") => SecretsMode::External,
-            _ => SecretsMode::None,
-        },
+        Ok(Some(config_map)) => {
+            external_groups = config_map
+                .data
+                .as_ref()
+                .and_then(|data| data.get("groups"))
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter(|g| !g.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            match config_map
+                .data
+                .as_ref()
+                .and_then(|data| data.get("mode"))
+                .map(String::as_str)
+            {
+                Some("platform") => SecretsMode::Platform,
+                Some("external") => SecretsMode::External,
+                _ => SecretsMode::None,
+            }
+        }
         Ok(None) => SecretsMode::None,
         Err(e) => return Err(e),
     };
 
     // (ready, reason, message, last_sync)
-    let (ready, reason, message, last_sync) = match plan(&conn.spec, &name, &namespace, &uid, mode)
-    {
+    let (ready, reason, message, last_sync) = match plan_with_stores(
+        &conn.spec,
+        &name,
+        &namespace,
+        &uid,
+        mode,
+        &external_groups,
+    ) {
         Plan::Invalid { reason, message } => (false, reason, Some(message), None),
         Plan::NoSecret => (
             true,
@@ -618,6 +686,54 @@ mod tests {
         let data = es["spec"]["data"].as_array().unwrap();
         assert_eq!(data[0]["remoteRef"]["key"], "apps/crm/db");
         assert_eq!(data[1]["remoteRef"]["key"], "apps/crm/db");
+    }
+
+    #[test]
+    fn external_per_group_mode_uses_the_owner_groups_store() {
+        let s = spec(json!({ "ownerGroup": "shop",
+            "secret": { "keys": ["user", "password"], "remoteRef": "apps/crm/db" } }));
+        let es = applied(plan_with_stores(
+            &s,
+            "crm-db",
+            "stardelt",
+            "uid-1",
+            SecretsMode::External,
+            &["shop".to_string()],
+        ));
+        assert_eq!(es["spec"]["secretStoreRef"]["kind"], "SecretStore");
+        assert_eq!(es["spec"]["secretStoreRef"]["name"], "enterprise-shop");
+        assert_eq!(es["spec"]["data"][0]["remoteRef"]["key"], "apps/crm/db");
+    }
+
+    #[test]
+    fn external_per_group_mode_refuses_an_unlisted_group() {
+        let s = spec(json!({ "ownerGroup": "finance",
+            "secret": { "keys": ["user", "password"], "remoteRef": "apps/crm/db" } }));
+        let (reason, message) = invalid(plan_with_stores(
+            &s,
+            "crm-db",
+            "stardelt",
+            "uid-1",
+            SecretsMode::External,
+            &["shop".to_string()],
+        ));
+        assert_eq!(reason, "GroupStoreMissing");
+        assert!(message.contains("spec.secrets.groups"), "{message}");
+    }
+
+    #[test]
+    fn external_per_group_mode_refuses_a_managed_connection() {
+        let s = spec(json!({ "scope": "managed", "ownerGroup": null,
+            "usableBy": ["shop"], "secret": { "keys": ["user", "password"], "remoteRef": "apps/crm/db" } }));
+        let (reason, _) = invalid(plan_with_stores(
+            &s,
+            "crm-db",
+            "stardelt",
+            "uid-1",
+            SecretsMode::External,
+            &["shop".to_string()],
+        ));
+        assert_eq!(reason, "PerGroupStoreOnly");
     }
 
     #[test]

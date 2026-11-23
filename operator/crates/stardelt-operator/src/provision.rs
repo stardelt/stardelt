@@ -3169,6 +3169,76 @@ pub async fn ensure_external_store(
     }
 }
 
+/// One namespaced `SecretStore` + `eso-<group>` ServiceAccount per owner group in
+/// `secrets.mode: external` (#65). The provider block is the administrator's; the
+/// ServiceAccount is the identity they bind to the group in their cloud.
+pub async fn ensure_external_group_stores(
+    ctx: &Context,
+    spec: &PlatformInstanceSpec,
+) -> Option<ComponentStatus> {
+    const NAME: &str = "secret-group-stores";
+    if spec.secrets.mode != SecretsMode::External || spec.secrets.groups.is_empty() {
+        return None;
+    }
+    let Some(external) = spec.secrets.external.as_ref() else {
+        return Some(status(
+            NAME,
+            false,
+            "secrets.mode external needs secrets.external.provider",
+        ));
+    };
+    if spec.dry_run {
+        return Some(status(NAME, false, "planned (dry-run)"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for group in &spec.secrets.groups {
+        if !seen.insert(group.as_str()) {
+            continue;
+        }
+        let sa = match serde_json::from_value::<DynamicObject>(secrets::group_service_account(
+            &spec.namespace,
+            group,
+            "secret-store",
+        )) {
+            Ok(object) => object,
+            Err(e) => return Some(status(NAME, false, e.to_string())),
+        };
+        let sa_resource = ApiResource::from_gvk_with_plural(
+            &kube::core::GroupVersionKind::gvk("", "v1", "ServiceAccount"),
+            "serviceaccounts",
+        );
+        if let Err(e) = apply_dynamic(&ctx.client, &spec.namespace, &sa_resource, &sa, false).await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+        let store = match secrets::external_group_store(&spec.namespace, group, &external.provider)
+        {
+            Ok(store) => store,
+            Err(e) => return Some(status(NAME, false, e)),
+        };
+        let store = match serde_json::from_value::<DynamicObject>(store) {
+            Ok(object) => object,
+            Err(e) => return Some(status(NAME, false, e.to_string())),
+        };
+        if let Err(e) = apply_dynamic(
+            &ctx.client,
+            &spec.namespace,
+            &secrets::secret_store_resource(),
+            &store,
+            false,
+        )
+        .await
+        {
+            return Some(status(NAME, false, e.to_string()));
+        }
+    }
+    Some(status(
+        NAME,
+        true,
+        format!("ready: {} external group store(s)", seen.len()),
+    ))
+}
+
 /// One request to the store through the API server's service proxy. The token is a header and
 /// never a log line; the caller decides what to do with the answer.
 async fn store_request(
@@ -3342,6 +3412,7 @@ pub async fn ensure_group_stores(
         let sa = match serde_json::from_value::<DynamicObject>(secrets::group_service_account(
             &spec.namespace,
             group,
+            "openbao",
         )) {
             Ok(object) => object,
             Err(e) => return Some(status(NAME, false, e.to_string())),
