@@ -139,8 +139,16 @@ done
 
 templates=0 tpl_passed=0
 : >"$tmp/template.refused"
-for cj in $(kubectl -n "$NS" get cronjobs -o json \
-    | jq -r '.items[].metadata.name' | sort); do
+# The list is written to a file and its status checked: a `for` over a command substitution
+# swallows the failure, which would print `PASS … 0 of 0 CronJob template(s)` on a namespace
+# whose CronJobs cannot be read — the blind spot this check exists to close.
+if ! kubectl -n "$NS" get cronjobs -o json >"$tmp/cj.list" 2>"$tmp/cj.list.err"; then
+  echo "✗ cannot list the CronJobs of $NS: $(head -1 "$tmp/cj.list.err")"
+  exit 1
+fi
+cronjobs="$(jq -r '.items[].metadata.name' "$tmp/cj.list" | sort)" || {
+  echo "✗ cannot read the CronJob list of $NS"; exit 1; }
+for cj in $cronjobs; do
   if ! kubectl -n "$NS" get cronjob "$cj" -o json >"$tmp/cj.read" 2>/dev/null; then
     echo "– cronjob/$cj: gone before the probe (skipped)"
     continue
