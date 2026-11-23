@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Every running pod is admitted by a Pod Security namespace at the level given (`--level`, default
-# `restricted`; #1096 question 5).
+# `restricted`; #1096 question 5). The pod templates of the namespace's CronJobs are admitted too,
+# because a pod that runs for seconds is invisible to a scan of Running pods (#1363; #1362's flip
+# makes a refusal a silent nightly failure).
 #
 #   NS=stardelt bash scripts/verify-pod-security.sh --allow '^seaweedfs-' --allow '^lakekeeper-'
 #   NS=stardelt bash scripts/verify-pod-security.sh --level baseline --allow-namespace-level baseline
@@ -135,6 +137,46 @@ for pod in $(kubectl -n "$NS" get pods -o json \
   fi
 done
 
+templates=0 tpl_passed=0
+: >"$tmp/template.refused"
+for cj in $(kubectl -n "$NS" get cronjobs -o json \
+    | jq -r '.items[].metadata.name' | sort); do
+  if ! kubectl -n "$NS" get cronjob "$cj" -o json >"$tmp/cj.read" 2>/dev/null; then
+    echo "– cronjob/$cj: gone before the probe (skipped)"
+    continue
+  fi
+  templates=$((templates + 1))
+  jq --arg name "probe-cron-$templates" --arg ns "$PROBE" '
+      .spec.jobTemplate.spec.template
+      | .metadata.name = $name
+      | .metadata.namespace = $ns
+      | .metadata.labels = (.metadata.labels // {})
+      | .metadata.annotations = (.metadata.annotations // {})
+      | .spec.serviceAccountName = "default"
+      | del(.spec.nodeName, .spec.priorityClassName)
+      | {apiVersion: "v1", kind: "Pod", metadata: .metadata, spec: .spec}
+    ' "$tmp/cj.read" >"$tmp/cj.json"
+  if kubectl -n "$PROBE" create --dry-run=server -f "$tmp/cj.json" >/dev/null 2>"$tmp/err"; then
+    tpl_passed=$((tpl_passed + 1))
+    continue
+  fi
+  reason="$(grep -o "violates PodSecurity \"$level:latest\": .*" "$tmp/err" | head -1 | cut -c1-200 || true)"
+  [ -n "$reason" ] || reason="$(head -1 "$tmp/err")"
+  matched=""
+  for pattern in ${allow[@]+"${allow[@]}"}; do
+    if printf 'cronjob/%s\n' "$cj" | grep -Eq "$pattern"; then matched="$pattern"; break; fi
+  done
+  if [ -n "$matched" ]; then
+    allowed=$((allowed + 1))
+    printf 'cronjob/%s\t%s\n' "$cj" "$matched" >>"$tmp/allowed"
+    echo "– cronjob/$cj: known exception ($matched)"
+  else
+    failed=$((failed + 1))
+    printf 'cronjob/%s\t%s\n' "$cj" "$reason" >>"$tmp/template.refused"
+    echo "✗ cronjob/$cj: $reason"
+  fi
+done
+
 for pattern in ${allow[@]+"${allow[@]}"}; do
   if ! grep -Fq "$pattern" "$tmp/allowed"; then
     echo "note: --allow '$pattern' matched no refusal; drop it from the Makefile"
@@ -142,11 +184,11 @@ for pattern in ${allow[@]+"${allow[@]}"}; do
 done
 
 if [ "$failed" -gt 0 ]; then
-  echo "FAIL ($passed of $total pods admitted, $failed refused, $allowed known $(plural "$allowed"))"
+  echo "FAIL ($((passed + tpl_passed)) of $((total + templates)) admitted: $passed of $total pod(s), $tpl_passed of $templates CronJob template(s); $failed refused, $allowed known $(plural "$allowed"))"
   exit 1
 fi
 if [ "$passed" -lt 5 ]; then
   echo "UNVERIFIED ($passed of $total pods admitted; install the platform first)"
   exit 3
 fi
-echo "PASS ($passed of $total pods admitted by $level, $allowed known $(plural "$allowed"))"
+echo "PASS ($((passed + tpl_passed)) admitted by $level: $passed of $total pod(s) and $tpl_passed of $templates CronJob template(s), $allowed known $(plural "$allowed"))"
