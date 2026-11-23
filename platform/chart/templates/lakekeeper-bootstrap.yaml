@@ -19,6 +19,13 @@ spec:
       restartPolicy: OnFailure
       # Only talks to Lakekeeper over HTTP: no Kubernetes API token needed.
       automountServiceAccountToken: false
+      # Pod Security `restricted` (platform#1367, platform#1375): the pod runs as an
+      # unprivileged UID, like the manifest and the operator's bootstrap Job.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: bootstrap
           image: {{ .Values.lakekeeperBootstrap.image | quote }}
