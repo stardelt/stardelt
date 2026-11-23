@@ -454,11 +454,17 @@ PASS_SQL='SELECT id FROM ${table} WHERE id IS NULL'
 FAIL_SQL='SELECT id FROM ${table} WHERE id IS NOT NULL'
 
 # `main`'s snapshot id, or empty; also writes the refs to $tmp/refs.json.
+# 0 = read, 2 = the read failed after a retry (writes nothing).
 main_snapshot() {
   local code
   rm -f "$tmp/refs.json"
   code="$(catalog GET "/catalog/v1/$PREFIX/namespaces/$SCHEMA/tables/$TABLE_NAME?snapshots=all")"
-  [ "$code" = "200" ] || return 1
+  if [ "$code" != "200" ]; then
+    # The local forward dies under load; a dead forward is not a refusal (#1383).
+    forward_lk || { echo "  the catalog forward could not be re-established" >&2; return 2; }
+    code="$(catalog GET "/catalog/v1/$PREFIX/namespaces/$SCHEMA/tables/$TABLE_NAME?snapshots=all")"
+    [ "$code" = "200" ] || { echo "  the table's metadata answered HTTP $code" >&2; return 2; }
+  fi
   cp "$tmp/out.json" "$tmp/refs.json"
   jq -r '.metadata.refs.main["snapshot-id"] // empty' "$tmp/refs.json" 2>/dev/null || true
 }
@@ -554,7 +560,12 @@ for task in wap-prepare build check wap-publish; do
   tasks="$tasks $task=$(task_state "$DAG" "$RUN" "$task")"
 done
 echo "  run $RUN state=$RUN_STATE$tasks" >&2
-S2="$(main_snapshot || true)"
+read2=0
+S2="$(main_snapshot)" || read2=$?
+if [ "$read2" -ne 0 ]; then
+  echo "verify-wap: UNVERIFIED (the metadata of $CATALOG.$SCHEMA.$TABLE_NAME could not be read after a retry — the table's refs were never measured)"
+  exit 3
+fi
 audit2="$(jq -r '(.metadata.refs // {}) | keys[] | select(startswith("audit_"))' "$tmp/refs.json" 2>/dev/null || true)"
 if [ "$RUN_STATE" = "success" ] \
    && [ "$(task_state "$DAG" "$RUN" wap-prepare)" = "success" ] \
@@ -595,7 +606,12 @@ fi
 no_room "$DAG" "$RUN" build
 check_state="$(task_state "$DAG" "$RUN" check)"
 publish_state="$(task_state "$DAG" "$RUN" wap-publish)"
-S3="$(main_snapshot || true)"
+read3=0
+S3="$(main_snapshot)" || read3=$?
+if [ "$read3" -ne 0 ]; then
+  echo "verify-wap: UNVERIFIED (the metadata of $CATALOG.$SCHEMA.$TABLE_NAME could not be read after a retry — the table's refs were never measured)"
+  exit 3
+fi
 audit3="$(jq -r '(.metadata.refs // {}) | keys[] | select(startswith("audit_"))' "$tmp/refs.json" 2>/dev/null || true)"
 audit_count="$(printf '%s' "$audit3" | grep -c . || true)"
 audit_ttl=""
