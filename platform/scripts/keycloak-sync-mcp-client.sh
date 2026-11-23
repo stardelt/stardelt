@@ -119,7 +119,7 @@ client, audience = sys.argv[1], sys.argv[2]
 json.dump({
     "clientId": client,
     "name": "MCP agents",
-    "description": "Public client for MCP-capable agents (stardelt-nova#112): PKCE to a loopback address and the device grant. Tokens carry the audience <nova host>/mcp only; the engine token is minted by exchange (platform#174).",
+    "description": "Public client for MCP-capable agents (stardelt-nova#112): browser flow with PKCE to a loopback address, device grant for a command line. Tokens carry the audiences <nova host>/mcp (mapper aud-mcp) and nova (mapper aud-nova, the exchange actor); the engine audience is minted by token exchange.",
     "enabled": True,
     "protocol": "openid-connect",
     "publicClient": True,
