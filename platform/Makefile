@@ -74,7 +74,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins spike-superset-dashboards spike-spark-pipeline-dry-run spike-pyiceberg-catalog-token verify-spark-guard verify-spark-group-write verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status verify-product-path verify-product-path-create spike-trino-idle
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale verify-warehouse-autostop sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -147,6 +147,11 @@ verify-metrics: _context ## Every metrics endpoint a scraper can reach answers P
 .PHONY: verify-warehouse-scale
 verify-warehouse-scale: _context ## The three writers of a warehouse's scale state agree
 	@NS=$(NAMESPACE) bash scripts/verify-warehouse-scale.sh
+
+# #30 step A: every Ready class is temporarily set to autoStop=1m, the engine must reach 0 and
+# come back through the wake annotation. Restores the classes; ~10 minutes.
+verify-warehouse-autostop: _context ## The idle policy reaches 0 and wakes (patches the classes for ~10 minutes)
+	@bash scripts/verify-warehouse-autostop.sh
 
 # The `--allow` pattern is the one accepted exception of #1096 question 5, with its reason:
 # Lakekeeper's `opa` sidecar has no value key in chart 0.14.0. SeaweedFS carries both chart

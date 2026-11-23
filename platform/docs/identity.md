@@ -213,6 +213,13 @@ the zero-concurrency `no-warehouse` root group instead, which answers `Too many 
 Keycloak user outside `stardelt-users` — runs in `wh-small` rather than in a queue that never
 moves.
 
+A class with `spec.autoStop` (`1m` … `24h`) and `minWorkers: 0` lets access-sync scale the one
+worker Deployment to 0 once every Ready class has been idle that long; a class without it — or
+without a `last-query-at` stamp — is always on, and one always-on class keeps the engine up for
+everybody. Nova's Start (`POST /api/warehouses/{name}/start`) writes the class's
+`last-query-at`, which wakes it on the next two-minute tick. The dev seed sets `autoStop: 15m`
+on all three classes.
+
 Nova repeats that answer instead of deciding it (`GET /api/warehouses`, nova#236): the SQL editor
 shows `Warehouse: <name> (<class>)` next to **Run**, and your Profile page shows the same line as
 `SQL warehouse` — the largest class your groups are granted, the default class when none is, and
