@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DASH = "—"
@@ -43,6 +44,10 @@ GROUP = "visitors"
 # A `make verify-*` check that creates an object on the demo labels it with this key; its value
 # is the check's name. A leftover is reported, never counted as demo content (#1274).
 CHECK_LABEL = "stardelt.io/check"
+
+# A check's Pipeline lives while it runs; a killed run's stays behind (#1274). A run that
+# outlives this is a leftover, not a live check (measured #1332-time false positives).
+LEFTOVER_AGE = timedelta(minutes=30)
 
 # The twelve one-statement pipelines the shop bundle replaced, verbatim from
 # `scripts/demo-shop.sh`; stage 2 of that script deletes exactly this list.
@@ -203,6 +208,17 @@ def _check(obj):
     return (obj.get("metadata", {}).get("labels") or {}).get(CHECK_LABEL)
 
 
+def _created(obj):
+    """The object's `metadata.creationTimestamp` as an aware datetime, or None."""
+    stamp = (obj.get("metadata") or {}).get("creationTimestamp")
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _status(obj):
     return obj.get("status") or {}
 
@@ -282,9 +298,10 @@ def render(pipelines, streams, clusters, runs=None) -> str:
         ["cluster", "owner", "viewers", "phase"],
         [_cluster_row(obj) for obj in sorted(clusters, key=by_name)],
     )
+    demo = lambda items: [o for o in items if _check(o) is None]  # noqa: E731
     lines += [
         "",
-        f"Total: {len(pipelines)} pipelines, {len(streams)} streams, {len(clusters)} clusters.",
+        f"Total: {len(demo(pipelines))} pipelines, {len(demo(streams))} streams, {len(demo(clusters))} clusters.",
     ]
     return "\n".join(lines)
 
@@ -306,15 +323,23 @@ def _demo_objects(pipelines, streams, clusters):
     ]
 
 
-def check(pipelines, streams, clusters, runs, connections=None) -> list[str]:
+def check(pipelines, streams, clusters, runs, connections=None, now=None) -> list[str]:
     """The convergence list of stardelt#79; pure. `runs` is `None` for `--runs crd`."""
+    now = now or datetime.now(timezone.utc)
     problems = []
     for obj in pipelines:
-        if _check(obj):
-            problems.append(
-                f"the release check's pipeline {_name(obj)} is still on the demo — "
-                f"kubectl delete pipeline {_name(obj)} -n stardelt"
-            )
+        if not _check(obj):
+            continue
+        created = _created(obj)
+        # A live check is not a leftover: it is still running, and the delete command below
+        # would break it. Only an object older than the check's own deadline is reported.
+        if created is not None and now - created < LEFTOVER_AGE:
+            continue
+        age = "age unknown" if created is None else f"{int((now - created).total_seconds() // 60)} min old"
+        problems.append(
+            f"the release check's pipeline {_name(obj)} is still on the demo ({age}) — "
+            f"kubectl delete pipeline {_name(obj)} -n stardelt"
+        )
     names = {_name(obj) for obj in pipelines}
     for name in LEGACY:
         if name in names:

@@ -6,6 +6,7 @@ runs them in CI. `render()` is pure, so every test drives canned `kubectl get ..
 """
 import importlib.util
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "demo_inventory.py"
@@ -178,9 +179,49 @@ class CheckTest(unittest.TestCase):
             [pipeline("verify-wap", labels={"stardelt.io/check": "verify-wap"})], [], [], {}
         )
         assert problems == [
-            "the release check's pipeline verify-wap is still on the demo — "
+            "the release check's pipeline verify-wap is still on the demo (age unknown) — "
             "kubectl delete pipeline verify-wap -n stardelt"
         ]
+
+    def test_a_live_check_pipeline_is_not_a_leftover(self):
+        """When: a check-labelled pipeline was created five minutes ago and is still running.
+        Then: check stays silent — the delete command would break the run (#1336)."""
+        now = datetime.now(timezone.utc)
+        obj = pipeline("verify-wap", labels={"stardelt.io/check": "verify-wap"})
+        obj["metadata"]["creationTimestamp"] = (now - timedelta(minutes=5)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        self.assertEqual(demo_inventory.check([obj], [], [], {}, now=now), [])
+
+    def test_an_old_check_pipeline_is_still_a_leftover(self):
+        """When: a check-labelled pipeline was created two hours ago — its run is dead. Then:
+        check names it, with its age, and the delete command."""
+        now = datetime.now(timezone.utc)
+        obj = pipeline("verify-wap", labels={"stardelt.io/check": "verify-wap"})
+        obj["metadata"]["creationTimestamp"] = (now - timedelta(hours=2)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        self.assertEqual(
+            demo_inventory.check([obj], [], [], {}, now=now),
+            [
+                "the release check's pipeline verify-wap is still on the demo (120 min old) — "
+                "kubectl delete pipeline verify-wap -n stardelt"
+            ],
+        )
+
+    def test_the_total_excludes_check_pipelines(self):
+        """When: one demo pipeline and one check-labelled pipeline share the namespace. Then:
+        the total counts only the demo one, though both keep their row."""
+        text = demo_inventory.render(
+            [
+                pipeline("shop-1-bronze"),
+                pipeline("verify-wap", labels={"stardelt.io/check": "verify-wap"}),
+            ],
+            [],
+            [],
+        )
+        self.assertIn("| verify-wap |", text)
+        self.assertTrue(text.endswith("Total: 1 pipelines, 0 streams, 0 clusters."))
 
     def test_check_does_not_count_a_check_pipeline_as_demo_content(self):
         # No viewers, no description and no schedule: fine for a check's object, never reported.
