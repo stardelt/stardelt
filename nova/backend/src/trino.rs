@@ -308,10 +308,7 @@ pub async fn execute_from_tagged(
         ENGINE_UNREACHABLE.to_string()
     })?;
 
-    let mut current: TrinoResponse = initial
-        .json()
-        .await
-        .map_err(|e| format!("malformed Trino response: {e}"))?;
+    let mut current: TrinoResponse = decode_answer(initial).await?;
 
     let mut all_rows: Vec<Vec<Value>> = Vec::new();
     let mut held_bytes = 0usize;
@@ -383,10 +380,7 @@ pub async fn execute_from_tagged(
                     tracing::warn!(error = %e, "trino paginated request failed");
                     ENGINE_UNREACHABLE.to_string()
                 })?;
-            current = response
-                .json()
-                .await
-                .map_err(|e| format!("malformed Trino paginated response: {e}"))?;
+            current = decode_answer(response).await?;
         }
         Ok::<(), String>(())
     })
@@ -427,6 +421,50 @@ pub(crate) fn client_error(err: &Value) -> String {
         }
         _ => name.to_string(),
     }
+}
+
+/// The sentence for an answer that is not Trino's JSON: the status, its content type and the
+/// first bytes of the body. Trino answers errors in plain text (`401 … Invalid credentials`),
+/// and the body is what names the cause — a proxy page or an HTML gateway is recognised the
+/// same way. The body is cut at 200 bytes and its line breaks become spaces, so one refusal is
+/// always one line in a log or a UI.
+fn refused_answer(status: reqwest::StatusCode, content_type: Option<&str>, body: &str) -> String {
+    let flat = body.replace(['\n', '\r'], " ");
+    // Cut at 200 bytes without splitting a multi-byte character.
+    let end = (0..=200.min(flat.len()))
+        .rev()
+        .find(|&i| flat.is_char_boundary(i))
+        .unwrap_or(0);
+    let head = &flat[..end];
+    match content_type {
+        Some(content_type) => {
+            format!(
+                "the query engine answered HTTP {} {content_type}: {head}",
+                status.as_u16()
+            )
+        }
+        None => format!("the query engine answered HTTP {}: {head}", status.as_u16()),
+    }
+}
+
+/// Decode one statement answer: its JSON, or the sentence that names the refusal.
+///
+/// The status and the content type are read before the body is consumed, and the body is read
+/// as text once, so a plain-text refusal (every wrong-audience, expired or unauthorised token)
+/// names itself instead of becoming "malformed Trino response".
+async fn decode_answer(response: reqwest::Response) -> Result<TrinoResponse, String> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(refused_answer(status, content_type.as_deref(), &body));
+    }
+    serde_json::from_str::<TrinoResponse>(&body)
+        .map_err(|_| refused_answer(status, content_type.as_deref(), &body))
 }
 
 /// Replace every URL-shaped token with `<internal>`: Trino's messages can name the
@@ -592,6 +630,51 @@ mod tests {
         );
         assert!(!out.contains("io.trino."), "stack leaked: {out}");
         assert!(!out.contains("failureInfo"), "raw document leaked: {out}");
+    }
+
+    #[test]
+    fn a_client_error_document_is_unchanged() {
+        // The JSON path keeps its `NAME: message` sentence; the new helper does not take over.
+        assert_eq!(
+            client_error(&table_not_found()),
+            "TABLE_NOT_FOUND: line 1:15: Table 'warehouse.demo.nonexistent_tbl' does not exist"
+        );
+    }
+
+    #[test]
+    fn a_plain_text_refusal_names_status_body_and_type() {
+        assert_eq!(
+            refused_answer(
+                StatusCode::UNAUTHORIZED,
+                Some("text/plain;charset=utf-8"),
+                "Invalid credentials"
+            ),
+            "the query engine answered HTTP 401 text/plain;charset=utf-8: Invalid credentials"
+        );
+    }
+
+    #[test]
+    fn a_refusal_body_is_cut_and_flattened() {
+        let body = format!("Invalid credentials\n{}", "x".repeat(500));
+        let out = refused_answer(StatusCode::UNAUTHORIZED, None, &body);
+        let head = out
+            .strip_prefix("the query engine answered HTTP 401: ")
+            .expect("the status is named");
+        assert!(!out.contains('\n'), "one refusal is one line: {out}");
+        assert!(head.len() <= 200, "body was not cut: {} bytes", head.len());
+        assert!(
+            head.starts_with("Invalid credentials "),
+            "the line break did not become a space: {head}"
+        );
+        assert!(!head.contains('\n'));
+    }
+
+    #[test]
+    fn an_empty_refusal_body_ends_after_the_status() {
+        assert_eq!(
+            refused_answer(StatusCode::BAD_GATEWAY, None, ""),
+            "the query engine answered HTTP 502: "
+        );
     }
 
     #[test]
