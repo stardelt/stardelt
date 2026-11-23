@@ -32,6 +32,35 @@ def get(name, client=None):
     raise LookupError(f"no Spark cluster named {name!r} that you may use")
 
 
+def default(client=None):
+    """The one Spark cluster this person's group owns; `LookupError` naming what they have instead.
+
+    The library's answer to "which cluster is mine". Only a cluster the caller may act on counts
+    (its owning group, or an administrator), never a Spark server the platform's manifests install
+    (`kind: platform`) and never the `shared` one. Ambiguity is an error, not a guess: a person in
+    two groups that own clusters gets a sentence naming them, so they choose.
+    """
+    clusters = [
+        cluster
+        for cluster in list(client)
+        if cluster.get("kind", "cluster") == "cluster"
+        and not cluster.get("shared")
+        and cluster.get("canAct")
+    ]
+    if len(clusters) == 1:
+        return clusters[0]
+    names = ", ".join(sorted(cluster["name"] for cluster in clusters))
+    if not clusters:
+        raise LookupError(
+            "you have no Spark cluster of your own: no group you are in owns one — "
+            "use the shared Spark server (or %sql), or ask an administrator for a cluster"
+        )
+    raise LookupError(
+        f"you may act on {len(clusters)} Spark clusters ({names}): name one with "
+        "STARDELT_CLUSTER, or pass its name to stardelt.compute.get/start"
+    )
+
+
 def start(name, wait=True, timeout=300, interval=2, client=None):
     """Start `name`; with `wait`, poll until the phase is Running.
 
