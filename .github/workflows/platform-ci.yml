@@ -498,6 +498,8 @@ jobs:
         run: python3 -m unittest scripts.tests.test_chart_heavy_toggle -v
       - name: The chart's lakekeeper bootstrap Job passes restricted (platform#1375)
         run: python3 -m unittest scripts.tests.test_chart_lakekeeper_bootstrap -v
+      - name: The chart's lakekeeper bootstrap Job signs in like the manifest's (platform#1379)
+        run: python3 -m unittest scripts.tests.test_chart_bootstrap_signin -v
 
   # ---------------------------------------------------------------------------
   # The release scripts' tests (generate, release_notes, stamp-version)
