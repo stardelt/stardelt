@@ -57,6 +57,16 @@ def recipes() -> dict:
 
 
 class VerifyReleaseTest(unittest.TestCase):
+    def test_the_commit_is_read_before_the_checks_run(self):
+        """The summary names the tree the checks ran on, not HEAD at the end (stardelt/stardelt#1385)."""
+        text = SCRIPT.read_text()
+        self.assertIn('COMMIT="$(git rev-parse --short HEAD)"', text)
+        summary = [line for line in text.splitlines() if line.startswith("echo \"commit ")]
+        self.assertEqual(len(summary), 1, "verify-release.sh has no single summary line")
+        self.assertIn("commit $COMMIT", summary[0])
+        self.assertNotIn("$(git rev-parse", summary[0])
+        self.assertEqual(text.count("the checkout moved to"), 1)
+
     def test_every_default_target_has_a_recipe_in_the_table(self):
         self.assertEqual(list(table()), default_targets())
 
