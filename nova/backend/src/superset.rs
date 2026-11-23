@@ -1211,7 +1211,10 @@ mod tests {
     async fn the_import_remaps_each_dataset_and_stamps_the_dashboard() {
         let (client, fake) = fake::start().await;
         let archive = zipped(&[
-            ("shop-export/datasets/Trino_Gold/orders.yaml", &dataset("gold")),
+            (
+                "shop-export/datasets/Trino_Gold/orders.yaml",
+                &dataset("gold"),
+            ),
             ("shop-export/dashboards/Shop.yaml", &dashboard()),
         ]);
         let imported = import_archive(
@@ -1339,7 +1342,10 @@ mod tests {
         let (client, fake) = fake::start().await;
         fake.lock().unwrap().failing = true;
         let archive = zipped(&[
-            ("shop-export/datasets/Trino_Gold/orders.yaml", &dataset("gold")),
+            (
+                "shop-export/datasets/Trino_Gold/orders.yaml",
+                &dataset("gold"),
+            ),
             ("shop-export/dashboards/Shop.yaml", &dashboard()),
         ]);
         let error = import_archive(
