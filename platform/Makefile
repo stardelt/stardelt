@@ -534,8 +534,8 @@ install: step-preflight ## Install all stardelt components (idempotent)
 
 step-preflight: deps _context _helm-repos ## Tools, the kube-context and the Helm repos
 
-step-namespace: _context ## The namespace's Pod Security labels: baseline enforced, restricted warned (#1096)
-	@echo "› Namespace: Pod Security baseline enforced, restricted warned and audited"
+step-namespace: _context ## The namespace's Pod Security labels: restricted enforced, restricted warned and audited (#1096)
+	@echo "› Namespace: Pod Security restricted enforced, restricted warned and audited"
 	@sed "s/^  name: stardelt$$/  name: $(NAMESPACE)/" manifests/namespace.yaml | kubectl apply -f -
 
 step-reloader: ## Reloader: restarts a workload when a credential it reads changes
