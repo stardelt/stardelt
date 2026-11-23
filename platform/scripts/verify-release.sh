@@ -111,6 +111,12 @@ fi
 # exits 3 and is reported `?`, never ✗.
 transient='ServiceUnavailable|the server is currently unable to handle the request|error dialing backend|unable to upgrade connection|port-forward .* never came up|connection refused|i/o timeout|TLS handshake timeout'
 
+# A run takes 15–20 minutes and the fleet merges during it, so the commit is read once, before the
+# checks start: the summary must name the tree the checks ran on, never the one HEAD points at when
+# the run ends (stardelt/stardelt#1385).
+COMMIT="$(git rev-parse --short HEAD)"
+DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
+
 logdir="${TMPDIR:-/tmp}/verify-release.$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$logdir"
 passed=0 failed=0 unverified=0 total=0
@@ -150,7 +156,11 @@ for t in $targets; do
        failed=$((failed + 1)) ;;
   esac
 done
-echo "commit $(git rev-parse --short HEAD) · $passed/$total passed · $unverified unverified · logs in $logdir"
+NOW="$(git rev-parse --short HEAD)"
+MOVED=""
+[ "$NOW" = "$COMMIT" ] || MOVED=" · the checkout moved to $NOW during the run"
+[ "$DIRTY" = "0" ] || MOVED="$MOVED · $DIRTY uncommitted path(s) at the start"
+echo "commit $COMMIT$MOVED · $passed/$total passed · $unverified unverified · logs in $logdir"
 [ "$failed" -eq 0 ] || exit 1
 [ "$unverified" -eq 0 ] || exit 3
 exit 0
