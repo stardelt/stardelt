@@ -1,0 +1,6 @@
+name: shop-graph
+configuration:
+  spark.sql.catalog.silver.type: rest
+libraries:
+  - glob:
+      include: sql/**
