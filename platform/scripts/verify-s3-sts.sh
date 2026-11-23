@@ -72,7 +72,7 @@ spec:
           EP="http://seaweedfs-s3.$NAMESPACE.svc.cluster.local:8333"
           B="sts-verify-\$(date -u +%s)"
           POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],\"Resource\":[\"arn:aws:s3:::\$B/warehouse/ns/t\",\"arn:aws:s3:::\$B/warehouse/ns/t/*\"]}]}"
-          s3() { aws --endpoint-url "\$EP" "\$@"; }
+          s3() { aws --cli-connect-timeout 10 --cli-read-timeout 45 --endpoint-url "\$EP" "\$@"; }
           cleanup() {
             s3 s3 rm "s3://\$B" --recursive >/dev/null 2>&1 || true
             s3 s3api delete-bucket --bucket "\$B" >/dev/null 2>&1 || true
@@ -128,8 +128,13 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep "${S3_STS_POLL_SECONDS:-2}"
 done
 if [ "$phase" != "Succeeded" ] && [ "$phase" != "Failed" ]; then
-  kubectl -n "$NAMESPACE" logs "$pod" 2>&1 || true
-  echo "verify-s3-sts: UNVERIFIED (the probe pod reached no terminal phase — the gateway or its Secret is missing)"
+  partial="$(kubectl -n "$NAMESPACE" logs "$pod" 2>&1 || true)"
+  printf '%s\n' "$partial"
+  if printf '%s\n' "$partial" | grep -qE '^fail '; then
+    echo "verify-s3-sts: FAIL (the probe did not finish within ${S3_STS_WAIT_SECONDS:-240}s and a line it printed failed)"
+    exit 1
+  fi
+  echo "verify-s3-sts: UNVERIFIED (the probe pod reached no terminal phase before ${S3_STS_WAIT_SECONDS:-240}s — the gateway or its Secret is missing)"
   exit 3
 fi
 
