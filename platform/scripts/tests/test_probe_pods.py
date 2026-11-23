@@ -1,10 +1,9 @@
 """Tests for scripts/probe-pod-spec.py and the probe pods that use it (platform#1656).
 
-The namespace enforces `baseline` today and `restricted` when `make verify-pod-security`
-runs; under `restricted` a probe without a non-root UID, RuntimeDefault seccomp, no
-privilege escalation and `capabilities.drop: ["ALL"]` is refused. These tests pin the Pod
-document the helper prints and the fact that every `kubectl run` in the rewired scripts
-builds its pod from it. No cluster is needed.
+The namespace enforces `restricted` (#1362); a probe without a non-root UID, RuntimeDefault
+seccomp, no privilege escalation and `capabilities.drop: ["ALL"]` is refused. These tests pin
+the Pod document the helper prints and the fact that every `kubectl run` in the rewired
+scripts builds its pod from it. No cluster is needed.
 """
 
 import json

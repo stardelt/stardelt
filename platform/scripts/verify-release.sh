@@ -26,7 +26,7 @@ declare -A recipe=(
   [verify-operator-values]='bash scripts/verify-operator-values.sh'
   [verify-connections]='bash scripts/verify-connections.sh'
   [verify-maintenance]='bash scripts/verify-maintenance.sh'
-  [verify-pod-security]="bash scripts/verify-pod-security.sh --allow-namespace-level baseline # the opa sidecar is patched by scripts/lakekeeper-opa-security.sh (#1095)"
+  [verify-pod-security]='bash scripts/verify-pod-security.sh # the namespace enforces restricted (#1095)'
   [verify-cronjobs]='bash scripts/verify-cronjobs.sh'
   [verify-trino-tls]='bash scripts/verify-trino-tls.sh'
   [verify-oidc-clients]='bash scripts/verify-oidc-clients.sh'
@@ -62,7 +62,7 @@ declare -A recipe=(
   [verify-s3-sts]='bash scripts/verify-s3-sts.sh'
   [verify-airflow-actions]='bash scripts/verify-airflow-actions.sh'
   [verify-operator-quiet]='bash scripts/verify-operator-quiet.sh'
-  [verify-pod-security-baseline]='bash scripts/verify-pod-security.sh --level baseline --allow-namespace-level baseline # the platform namespace enforces baseline (#1095)'
+  [verify-pod-security-baseline]='bash scripts/verify-pod-security.sh --level baseline --allow-namespace-level baseline # a baseline probe of the same pods; the namespace enforces restricted (#1095)'
   [verify-external-secrets]='bash scripts/verify-external-secrets.sh'
   [verify-storage-capacity]='bash scripts/verify-storage-capacity.sh'
 )

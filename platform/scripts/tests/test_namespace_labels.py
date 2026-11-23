@@ -25,7 +25,7 @@ class NamespaceStep(unittest.TestCase):
     def test_the_manifest_carries_the_floor(self):
         text = (REPO / "manifests" / "namespace.yaml").read_text(encoding="utf-8")
         for label in (
-            "pod-security.kubernetes.io/enforce: baseline",
+            "pod-security.kubernetes.io/enforce: restricted",
             "pod-security.kubernetes.io/audit: restricted",
             "pod-security.kubernetes.io/warn: restricted",
         ):

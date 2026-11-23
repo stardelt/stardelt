@@ -10,8 +10,8 @@
 # spark-cluster-driver, so the admission policies decide and nothing is persisted. The
 # SparkCluster policies exist only after one has reconciled — run
 # `scripts/verify-spark-cluster.sh` first on a fresh cluster.
-# Case 3 is the one exception: Pod Security refuses hostNetwork before the policy in a baseline
-# namespace (platform#1455), so that line accepts either refusal and says which.
+# Case 3 is the one exception: Pod Security refuses hostNetwork before the policy in a
+# `restricted` namespace (platform#1455), so that line accepts either refusal and says which.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
@@ -77,7 +77,7 @@ deny_msg() {  # <sa> <policy> <label> <message>; the YAML to apply is on stdin
 }
 
 deny_or_pss() {  # <sa> <policy> <label>; the YAML to apply is on stdin.
-  # In a namespace with `pod-security.kubernetes.io/enforce: baseline` Pod Security refuses
+  # In a namespace with `pod-security.kubernetes.io/enforce: restricted` Pod Security refuses
   # hostNetwork before any ValidatingAdmissionPolicy sees the pod (platform#1455), so both
   # refusals are the expected answer and the line says which one answered.
   local sa="$1" policy="$2" label="$3" out
