@@ -27,6 +27,7 @@ Part of the [stardelt-platform](../README.md) manual.
 | `sync-realm-user-management` | Grant `stardelt-admins` the four `realm-management` user-management roles and enforce brute-force protection on the live realm; idempotent, runs with both install paths |
 | `sync-oidc-clients` | Point the realm's confidential clients (`nova`, `superset`, `airflow`, `jupyterhub`; delegates `trino`) at Secret `stardelt-oidc-clients`; probe-first, idempotent, never prints a value (#85) |
 | `verify-oidc-clients` | Prove every client secret still authenticates at the token endpoint (`invalid_grant` vs `unauthorized_client`) and matches what the realm stores; names the drifting clients and the fix |
+| `verify-mcp` | The hosted agent endpoint on the public host, unsigned: `/.well-known/oauth-protected-resource[/mcp]` answers 200 and names `<host>/mcp`, the realm and `stardelt:read`, and an unauthenticated `tools/list` meets a 401 whose challenge carries the same resource and scope. `NOVA_HOST=…` names another install; an install without MCP answers 404 and fails the row on purpose (#1438) |
 | `sync-catalog-audience` | Add/repair the `aud-lakekeeper` mapper on `jupyterhub` and `stardelt-dev` (the control client `superset` must not carry it), prove it with Keycloak's evaluate call; idempotent, runs with `install-identity` (#317) |
 | `sync-catalog-clients` | Create/converge the seven catalog-caller service clients (`svc-catalog-*`) and their Secrets, audience `lakekeeper`, no group; idempotent (#282, #303; Lakekeeper validates them since #285) |
 | `delete-catalog-clients` | Delete those seven clients and Secrets; only `stardelt-managed=service` clients, needs `YES=1` |
@@ -140,6 +141,7 @@ scripts/
   verify-pgdump.sh      Run a pg_dump CronJob, restore the newest dump into a scratch DB, compare table counts (platform#366)
   verify-notebook-identity.py  Headless hub login + run the quickstart in the pod (positive and 401 negative)
   verify-oidc-clients.sh Assert every client secret in Secret stardelt-oidc-clients authenticates at the token endpoint
+  verify-mcp.sh         Assert the hosted MCP endpoint answers its resource metadata and its 401 challenge
   verify-realm-admin.sh Assert the realm-admin Secret still signs in to realm `stardelt`
   verify-trino-auth.sh  Assert Trino refuses anonymous SQL, accepts user tokens + the service account, and Superset's stored connection works
   tests/

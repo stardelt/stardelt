@@ -81,7 +81,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale verify-warehouse-autostop sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
-.PHONY: sync-oidc-clients verify-oidc-clients verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
+.PHONY: sync-oidc-clients verify-oidc-clients verify-mcp verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
 .PHONY: perf-baseline
 
@@ -1018,6 +1018,9 @@ sync-oidc-clients: _context ## Point the realm's confidential clients at Secret 
 
 verify-oidc-clients: _context ## Prove every confidential client's secret still authenticates (token endpoint, in-cluster)
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-oidc-clients.sh
+
+verify-mcp: _context ## The hosted MCP endpoint answers its resource metadata and its 401 challenge
+	@NOVA_HOST=$(NOVA_HOST) bash scripts/verify-mcp.sh
 
 # platform#167: the group file used to go stale between applies — a removed
 # admin kept their all-queries view with no bound. Since platform#312 the file
