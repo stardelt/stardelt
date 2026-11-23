@@ -42,6 +42,16 @@ def test_lazy_spark_opens_one_session_on_first_use(monkeypatch):
         return StubSession()
 
     monkeypatch.setattr(stardelt, "_session", fake_session)
+    # No group owns a cluster here: the kernel uses the shared server, as before #1390.
+    monkeypatch.setattr(notebook, "_CLUSTER_RESOLVED", False)
+    monkeypatch.setattr(notebook, "_CLUSTER_NAME", None)
+    monkeypatch.delenv("STARDELT_CLUSTER", raising=False)
+    monkeypatch.setattr(
+        "stardelt.compute.default",
+        lambda client=None: (_ for _ in ()).throw(
+            LookupError("you have no Spark cluster of your own")
+        ),
+    )
 
     lazy = notebook._LazySpark()
     assert opened == []  # creating it opens nothing
@@ -120,3 +130,57 @@ def test_spark_is_deprecated(fake_spark, monkeypatch):
     with pytest.warns(FutureWarning, match="stardelt.spark"):
         session = stardelt.spark()
     assert session.configs["spark.sql.repl.eagerEval.enabled"] == "true"
+
+
+def test_lazy_spark_opens_the_group_cluster_when_the_environment_names_none(monkeypatch):
+    import stardelt.compute as compute
+
+    opened = []
+    monkeypatch.setattr(notebook, "_CLUSTER_RESOLVED", False, raising=False)
+    monkeypatch.setattr(notebook, "_CLUSTER_NAME", None, raising=False)
+    monkeypatch.delenv("STARDELT_CLUSTER", raising=False)
+    monkeypatch.setattr(compute, "default", lambda client=None: {"name": "team"})
+    monkeypatch.setattr(stardelt, "_session", lambda cluster=None: opened.append(cluster))
+
+    notebook._LazySpark()._get()
+
+    assert opened == ["team"]
+
+
+def test_lazy_spark_keeps_the_shared_server_and_prints_the_notice(monkeypatch, capsys):
+    import stardelt.compute as compute
+
+    opened = []
+
+    def several(client=None):
+        raise LookupError("you may act on 2 Spark clusters (a-team, b-team): name one with "
+                          "STARDELT_CLUSTER, or pass its name to stardelt.compute.get/start")
+
+    monkeypatch.setattr(notebook, "_CLUSTER_RESOLVED", False, raising=False)
+    monkeypatch.setattr(notebook, "_CLUSTER_NAME", None, raising=False)
+    monkeypatch.delenv("STARDELT_CLUSTER", raising=False)
+    monkeypatch.setattr(compute, "default", several)
+    monkeypatch.setattr(stardelt, "_session", lambda cluster=None: opened.append(cluster))
+
+    notebook._LazySpark()._get()
+
+    assert opened == [None]
+    assert capsys.readouterr().err.startswith("stardelt.spark: you may act on 2 Spark clusters")
+
+
+def test_lazy_spark_is_silent_when_no_group_owns_a_cluster(monkeypatch, capsys):
+    import stardelt.compute as compute
+
+    def none_of_my_own(client=None):
+        raise LookupError("you have no Spark cluster of your own: no group you are in owns one — "
+                          "use the shared Spark server (or %sql), or ask an administrator for a cluster")
+
+    monkeypatch.setattr(notebook, "_CLUSTER_RESOLVED", False, raising=False)
+    monkeypatch.setattr(notebook, "_CLUSTER_NAME", None, raising=False)
+    monkeypatch.delenv("STARDELT_CLUSTER", raising=False)
+    monkeypatch.setattr(compute, "default", none_of_my_own)
+    monkeypatch.setattr(stardelt, "_session", lambda cluster=None: None)
+
+    notebook._LazySpark()._get()
+
+    assert capsys.readouterr().err == ""
