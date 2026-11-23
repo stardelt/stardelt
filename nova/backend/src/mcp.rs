@@ -1080,10 +1080,24 @@ pub(crate) async fn run_statement(
     // The ticket's inline `&client_tags(tool, client)` is a temporary borrowed across the await;
     // hoisted to a `let` (same value, compiles).
     let tags = client_tags(tool, client);
+    // Trino wants a token whose audience is `trino`; the MCP token's is `stardelt-mcp`. Mint the
+    // engine token by exchange (stardelt/stardelt#1455) and run as that, never forwarding the
+    // MCP token. Without an exchange (off, dev mode, no provider endpoint) nothing changes.
+    let mut minted = None;
+    if let (Some(exchange), Some(p)) = (state.exchange.as_ref(), principal)
+        && let Some(subject) = p.access_token.as_ref()
+    {
+        minted = Some(exchange.exchange(subject).await.map_err(|e| e.sentence())?);
+    }
+    let as_engine = minted.map(|token| crate::auth::Principal {
+        access_token: Some(token),
+        ..principal.expect("the caller above").clone()
+    });
+    let caller = as_engine.as_ref().or(principal);
     let run = crate::trino::execute_from_tagged(
         state,
         statement.to_string(),
-        principal,
+        caller,
         "stardelt-mcp",
         &tags,
     );
@@ -2034,6 +2048,89 @@ mod tests {
         let result = call(app, "sql_read", json!({ "sql": "SELECT 1" })).await;
         assert_eq!(result["isError"], true, "{result}");
         assert_eq!(text_of(&result), "the query engine is not reachable");
+    }
+
+    #[tokio::test]
+    async fn sql_read_reports_a_refused_exchange_and_never_reaches_the_engine() {
+        // The IdP answers the exchange with a 400; the statement must not reach the engine at all.
+        async fn serve(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            format!("http://{addr}")
+        }
+
+        let idp = format!(
+            "{}/token",
+            serve(Router::new().route(
+                "/token",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_request"})),
+                    )
+                }),
+            ))
+            .await
+        );
+
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let trino = {
+            let hits = hits.clone();
+            serve(Router::new().route(
+                "/v1/statement",
+                axum::routing::post(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Json(json!({"id": "q1", "columns": [], "data": []}))
+                    }
+                }),
+            ))
+            .await
+        };
+
+        let exchange = crate::token_exchange::TokenExchange::new(
+            reqwest::Client::new(),
+            crate::token_exchange::TokenExchangeConfig {
+                token_url: idp,
+                client_id: "nova".into(),
+                client_secret: Secret::new("client-secret"),
+                audience: "trino".into(),
+            },
+        );
+        let state = crate::router_tests::test_state_with_exchange(&trino, exchange);
+        let principal = Principal {
+            identity: validate("good").expect("identity"),
+            via: "bearer",
+            access_token: Some(Secret::new("mcp-token")),
+            client_id: Some("stardelt-mcp".into()),
+        };
+
+        let error = run_statement(
+            &state,
+            Some(&principal),
+            "SELECT 1",
+            10,
+            std::time::Duration::from_secs(5),
+            "sql_read",
+            Some("stardelt-mcp"),
+        )
+        .await
+        .err()
+        .expect("the exchange is refused");
+
+        assert_eq!(
+            error,
+            "the engine token could not be minted: exchange refused (HTTP 400 invalid_request)"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refused exchange sends no statement to the engine"
+        );
     }
 
     #[tokio::test]

@@ -672,6 +672,7 @@ mod tests {
             shared_accounts: vec![],
             // No catalog client in these tests: Lakekeeper is called as before (#222).
             catalog_token: None,
+            exchange: None,
             superset_url: "http://superset:8088".into(),
             superset_api_url: "http://superset:8088".into(),
             superset: None,

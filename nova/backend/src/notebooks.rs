@@ -2315,6 +2315,7 @@ mod tests {
             lakekeeper_url: "http://127.0.0.1:1".into(),
             shared_accounts: vec![],
             catalog_token: None,
+            exchange: None,
             superset_url: "http://127.0.0.1:1".into(),
             superset_api_url: "http://127.0.0.1:1".into(),
             superset: None,
