@@ -1022,6 +1022,10 @@ verify-oidc-clients: _context ## Prove every confidential client's secret still 
 verify-mcp: _context ## The hosted MCP endpoint answers its resource metadata and its 401 challenge
 	@NOVA_HOST=$(NOVA_HOST) bash scripts/verify-mcp.sh
 
+.PHONY: verify-mcp-tools
+verify-mcp-tools: _context ## A signed-in MCP client lists the tools and the platform answers
+	@NOVA_HOST=$(NOVA_HOST) bash scripts/verify-mcp-tools.sh
+
 # platform#167: the group file used to go stale between applies — a removed
 # admin kept their all-queries view with no bound. Since platform#312 the file
 # (and the warehouses' resource groups) is converged by CronJob `access-sync`
