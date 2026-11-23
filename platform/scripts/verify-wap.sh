@@ -22,9 +22,11 @@
 # Traps this script carries:
 #   - `umask 077`: the principal's client credentials and every token go into mode-0600 files
 #     under $HOME, and none of them is printed;
-#   - `cleanup` runs on EXIT, INT and TERM: the Pipeline, the table and the port-forward are
-#     removed whatever happened. The `scratch` schema is the demo's and stays; no other table is
-#     touched;
+#   - `cleanup` runs on EXIT, INT and TERM: the table and the port-forward are removed whatever
+#     happened. A run still in flight keeps its Pipeline (`stardelt.io/check: verify-wap`), so
+#     a task parked in `up_for_reschedule` can still be re-queued; `make demo-inventory-check`
+#     reports that leftover with its delete command (#1279). The `scratch` schema is the demo's
+#     and stays; no other table is touched;
 #   - `airflow tasks logs` does not exist in Airflow 3.2 (#1025), so every assertion reads the
 #     run state, the per-task states and the catalog's `metadata.refs` — never a task log.
 set -euo pipefail
@@ -112,10 +114,22 @@ catalog() { # <method> <path> [data-file] -> status code, body in $tmp/out.json
 # shellcheck disable=SC2329  # called from the trap and from step 6
 cleanup() {
   set +e
-  local code
-  if kubectl -n "$NS" delete pipeline "$PIPELINE" --ignore-not-found --timeout=60s >/dev/null 2>&1; then
-    pipeline_deleted=yes
-  fi
+  local code state=""
+  # #1279: deleting the Pipeline drops its DAG, and a task instance parked in
+  # `up_for_reschedule` is only re-queued once the DAG is back. A run that has not settled keeps
+  # its Pipeline; it carries `stardelt.io/check: verify-wap`, so `make demo-inventory-check`
+  # reports it as a leftover together with the delete command (#1274).
+  if [ -n "${RUN:-}" ]; then state="$(run_state "$DAG" "$RUN" 2>/dev/null || true)"; fi
+  case "$state" in
+    running|queued)
+      echo "verify-wap: left the Pipeline $PIPELINE in place — run $RUN is still $state (delete it later with: kubectl -n $NS delete pipeline $PIPELINE)" >&2
+      ;;
+    *)
+      if kubectl -n "$NS" delete pipeline "$PIPELINE" --ignore-not-found --timeout=60s >/dev/null 2>&1; then
+        pipeline_deleted=yes
+      fi
+      ;;
+  esac
   if [ -n "$PREFIX" ]; then
     if up "$LK/management/v1/info" || forward_lk; then
       auth_ready >/dev/null 2>&1 || true
@@ -243,12 +257,17 @@ wait_dag() { # <dag> -> 0 when the loader has loaded it
 }
 
 wait_run() { # <dag> <run> -> RUN_STATE; 1 when it did not settle within TIMEOUT
-  local deadline=$(( SECONDS + TIMEOUT )) state=""
+  local deadline=$(( SECONDS + TIMEOUT )) state="" polls=0
   while [ "$SECONDS" -lt "$deadline" ]; do
     state="$(run_state "$1" "$2")"
     case "$state" in
       success|failed) RUN_STATE="$state"; return 0 ;;
     esac
+    polls=$((polls + 1))
+    # #1279: a task instance parked in `up_for_reschedule` sat 17 minutes until a second
+    # `make verify-wap` re-registered the Pipeline — the re-parse is what re-queued it. Ask for
+    # one every minute instead of waiting on `dag_dir_list_interval` (five minutes by default).
+    if [ $((polls % 6)) -eq 0 ]; then af dags reserialize >/dev/null 2>&1 || true; fi
     sleep 10
   done
   RUN_STATE="${state:-unknown}"
