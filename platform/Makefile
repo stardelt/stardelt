@@ -338,6 +338,12 @@ spike-spark-pipeline-dry-run: _context ## Measure the dry run: duration, error q
 spike-pyiceberg-catalog-token: _context ## Measure PyIceberg with the projected catalog token (#492)
 	@NS=$(NAMESPACE) bash scripts/spike-pyiceberg-catalog-token.sh
 
+# #492 question 2: which credential a notebook/dbt task pod still needs. Creates one pod,
+# prints six rows, deletes it. The standing rollout permission covers this.
+.PHONY: spike-task-pod-catalog-token
+spike-task-pod-catalog-token: _context ## Measure which credential a notebook/dbt task pod needs (#492)
+	@NS=$(NAMESPACE) bash scripts/spike-task-pod-catalog-token.sh
+
 .PHONY: spike-superset-nova-identity
 spike-superset-nova-identity: _context ## Which Superset user Nova acts as, and where its password lives (#115)
 	@bash scripts/spike-superset-nova-identity.sh
