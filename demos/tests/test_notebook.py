@@ -27,6 +27,9 @@ PUT_KEY = f"_runs/analytics/nbtest/{RUN_ID}/report.ipynb"
 class DagRun:
     run_id = RUN_ID
     run_after = RUN_AFTER
+    # A real `DagRun` always has `conf` (the run's parameters); without it the loader's
+    # `run_values(dag_run.conf, …)` raises before it reaches the pod.
+    conf = {}
 
 
 def context():
