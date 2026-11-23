@@ -58,7 +58,7 @@ utoipa = { version = "6" }
 # needed to sign a `ListObjectVersions` request it has no action for.
 rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto", "xml"] }
 instant-xml = "0.7"
-jiff = "0.2"
+jiff = "1.0"
 # A header-signed `ListObjectVersions` (stardelt-nova#245): SeaweedFS refuses the
 # presigned form of that one S3 action, so Nova signs the request headers itself. The
 # same 0.13 build rusty-s3's `rustcrypto` signing already pulls in. MIT OR Apache-2.0.
