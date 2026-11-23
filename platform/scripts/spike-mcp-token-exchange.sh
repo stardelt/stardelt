@@ -37,6 +37,7 @@ NOVA="${NOVA%/}"
 REALM="${REALM_URL:-https://id.alpha.dev.stardelt.io/realms/stardelt}"
 REALM="${REALM%/}"
 AUDIENCE="${AUDIENCE:-trino}"
+ACTOR="${ACTOR:-nova}"
 PF_PORT="${PF_PORT:-18443}"
 
 tmp="$(mktemp -d "${TMPDIR:-$HOME/.cache/opencode-scratch}/mcp-exchange.XXXXXX")" || exit 1
@@ -77,7 +78,7 @@ actor_ok=""
 if kubectl -n "$NS" get secret stardelt-oidc-clients -o jsonpath='{.data.nova}' 2>/dev/null \
      | base64 -d > "$tmp/actor-secret" && [ -s "$tmp/actor-secret" ]; then
   chmod 600 "$tmp/actor-secret"
-  printf 'nova' > "$tmp/actor-id"
+  printf '%s' "$ACTOR" > "$tmp/actor-id"
   issuer="$(kubectl -n "$NS" get configmap stardelt-identity -o jsonpath='{.data.issuerUrl}' 2>/dev/null)"
   issuer="${issuer%/}"
   [ -n "$issuer" ] || issuer="$REALM"
@@ -124,9 +125,12 @@ else
     echo "E2 exchange-token $status access_denied: the exchange was refused (${description:-no description}); the subject client stardelt-mcp has no token-exchange permission policy"
   else
     echo "E2 exchange-token $status error=${error:-none} description=${description:-none}"
+    if [ "${description:-}" = "Standard token exchange is not enabled for the requested client" ]; then
+      echo "E2 missing-object client attribute standard.token.exchange.enabled=true on the requesting client ${ACTOR} (Keycloak 26: standard token exchange is off per client; when it is on, ${ACTOR} must also be in the subject token's aud)"
+    fi
   fi
   echo "spike-mcp-token-exchange: DONE exchange=refused"
-  echo "summary: exchange=refused status=$status error=${error:-unknown} description=${description:-none} - the realm refuses the exchange; enabling it is the follow-up ticket's maintainer step"
+  echo "summary: exchange=refused status=$status error=${error:-unknown} description=${description:-none} - missing object: the ${ACTOR} client attribute standard.token.exchange.enabled=true; enabling it is the follow-up ticket's maintainer step"
   exit 0
 fi
 
