@@ -3,10 +3,17 @@ Load with `%load_ext stardelt.notebook`; the platform's notebook image loads it 
 import os
 import sys
 
+import requests
+
 # Resolved once per kernel: a cluster name does not change under a notebook, and every
 # attribute access on `spark` would otherwise cost one Nova call.
 _CLUSTER_RESOLVED = False
 _CLUSTER_NAME = None
+
+
+def _nova_configured():
+    """Whether a Nova URL is set at all — the only case in which asking it can answer anything."""
+    return bool(os.environ.get("STARDELT_NOVA_API_URL") or os.environ.get("STARDELT_NOVA_URL"))
 
 
 def _cluster_name():
@@ -14,7 +21,9 @@ def _cluster_name():
 
     With neither, the session falls back to the shared server — the behaviour of every kernel
     until 0.0.5. A person in several groups is told which clusters there are (once) and gets the
-    shared server rather than a guess; `None` is never a silent choice.
+    shared server rather than a guess; `None` is never a silent choice. A kernel with no Nova URL,
+    or one whose Nova does not answer, is "no cluster of mine" rather than an error: the kernel
+    still gets its session (#1398).
     """
     global _CLUSTER_RESOLVED, _CLUSTER_NAME
     if _CLUSTER_RESOLVED:
@@ -24,6 +33,9 @@ def _cluster_name():
     if name:
         _CLUSTER_NAME = name
         return name
+    if not _nova_configured():
+        _CLUSTER_NAME = None
+        return None
     from stardelt import compute
 
     try:
@@ -32,6 +44,8 @@ def _cluster_name():
         text = str(err)
         if text.startswith("you may act on"):
             print(f"stardelt.spark: {text}", file=sys.stderr)
+        _CLUSTER_NAME = None
+    except requests.RequestException:
         _CLUSTER_NAME = None
     return _CLUSTER_NAME
 
