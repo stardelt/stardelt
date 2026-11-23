@@ -77,7 +77,7 @@ CHART_EXTRA ?=
 # client redirect URIs on the app subdomains. Same default as `dev-dns`.
 BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
-.PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins spike-superset-dashboards spike-spark-pipeline-dry-run spike-pyiceberg-catalog-token verify-spark-guard verify-spark-group-write verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status verify-product-path verify-product-path-create verify-cli spike-trino-idle
+.PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins spike-superset-dashboards spike-spark-pipeline-dry-run spike-pyiceberg-catalog-token verify-spark-guard verify-spark-group-write verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status verify-product-path verify-product-path-create verify-cli spike-trino-idle spike-trino-row-filters
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale verify-warehouse-autostop sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
@@ -345,6 +345,10 @@ verify-pins: _context ## The live Deployment images match the checked-in pins
 .PHONY: spike-trino-idle
 spike-trino-idle: _context ## What a query does while no Trino worker runs (#30 step A)
 	bash scripts/spike-trino-idle-workers.sh
+
+.PHONY: spike-trino-row-filters
+spike-trino-row-filters: _context ## Can the Trino OPA plugin apply row filters and column masks (#1485, #50)
+	@bash scripts/spike-trino-row-filters.sh
 
 .PHONY: spike-superset-dashboards
 spike-superset-dashboards: _context ## Measure Superset's dashboard export/import API (#115)
