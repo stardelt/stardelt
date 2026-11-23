@@ -301,6 +301,8 @@ kind: Pipeline
 metadata:
   name: $PIPELINE
   namespace: $NS
+  labels:
+    stardelt.io/check: verify-wap
 spec:
   ownerGroup: $GROUP
   description: WAP release check (temporary; platform/scripts/verify-wap.sh)
