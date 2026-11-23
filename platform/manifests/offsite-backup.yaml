@@ -48,6 +48,11 @@ spec:
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile: { type: RuntimeDefault }
           containers:
             - name: rclone
               # Pinned: 1.68.2 and 1.75.2 were re-verified against this S3
@@ -112,11 +117,13 @@ spec:
                 # The destination credential may not be allowed to create
                 # buckets: do not probe or create the target bucket.
                 - { name: RCLONE_S3_NO_CHECK_BUCKET, value: "true" }
+                # UID 65534 owns no home: rclone resolves its config and cache under them.
+                - { name: HOME,            value: "/tmp" }
+                - { name: XDG_CACHE_HOME,  value: "/tmp/.cache" }
               resources:
                 requests: { cpu: "50m", memory: "128Mi" }
                 limits:   { cpu: "1",   memory: "512Mi" }
               securityContext:
-                # The rclone image has no non-root user and needs no root
-                # privileges: no runAsNonRoot, but nothing can be escalated.
+                # The pod sets the UID (65534); nothing here can be escalated.
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
