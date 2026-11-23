@@ -22,7 +22,7 @@
 # Traps this script carries:
 #   - `umask 077`: the principal's client credentials and every token go into mode-0600 files
 #     under $HOME, and none of them is printed;
-#   - `cleanup` runs on EXIT, INT and TERM: the table and the port-forward are removed whatever
+#   - `cleanup` runs on EXIT, INT and TERM: the table and both port-forwards are removed whatever
 #     happened. A run still in flight keeps its Pipeline (`stardelt.io/check: verify-wap`), so
 #     a task parked in `up_for_reschedule` can still be re-queued; `make demo-inventory-check`
 #     reports that leftover with its delete command (#1279). The `scratch` schema is the demo's
@@ -34,7 +34,8 @@
 #     per-run id with random digits, the port-forward listens on a port of its own, and the
 #     start sweep never drops a table whose Pipeline still exists. Only the label is shared.
 #   - `airflow tasks logs` does not exist in Airflow 3.2 (#1025), so every assertion reads the
-#     run state, the per-task states and the catalog's `metadata.refs` — never a task log.
+#     run state, the per-task states and the catalog's `metadata.refs` — never a task log. A
+#     failing row asks the API v2 for the task's log afterwards, only to say why (#1335).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 umask 077
@@ -55,13 +56,18 @@ TABLE="$CATALOG.$SCHEMA.$TABLE_NAME"
 GROUP="${GROUP:-demo}"
 PRINCIPAL_SECRET="${PRINCIPAL_SECRET:-sp-pipeline-$GROUP}"
 LK_PORT="${LK_PORT:-}"
+# The Airflow API server forward, opened only when a row fails (#1335).
+AF_PORT="${AF_PORT:-18082}"
 TIMEOUT="${TIMEOUT:-900}"
 LK=""
+AF="http://127.0.0.1:$AF_PORT"
 
 scratch="${TMPDIR:-$HOME/.cache}"
 mkdir -p "$scratch"
 tmp="$(mktemp -d "$scratch/verify-wap.XXXXXX")"
 LK_PID=""
+AF_PID=""
+AF_TOKEN=""
 PREFIX=""
 pipeline_deleted=no
 table_deleted=no
@@ -158,6 +164,8 @@ cleanup() {
     fi
   fi
   if [ -n "$LK_PID" ]; then kill "$LK_PID" >/dev/null 2>&1 || true; fi
+  if [ -n "$AF_PID" ]; then kill "$AF_PID" >/dev/null 2>&1 || true; fi
+  AF_TOKEN=""
   rm -f "$tmp/token" "$tmp/token.json" "$tmp/auth" "$tmp/client-id" "$tmp/client-secret"
   rm -rf "$tmp"
 }
@@ -215,6 +223,68 @@ PREFIX="$(curl -sS -H @"$tmp/auth" "$LK/catalog/v1/config?warehouse=$CATALOG" \
 
 # --- the Airflow CLI, on the scheduler ----------------------------------------------------
 af() { kubectl -n "$NS" exec deploy/airflow-scheduler -c scheduler -- airflow "$@" 2>/dev/null; }
+
+# --- the failing task's log, through the Airflow API v2 (#1335) ---------------------------
+# A red row printed `build=upstream_failed` and the refs, but not the sentence the failing task
+# raised — the one fact a reader needs (#1332), and `airflow tasks logs` does not exist in
+# Airflow 3.2. The API has `…/taskInstances/{task_id}/logs/{try_number}`; the service user and
+# the bearer-config curl are `verify-airflow-runs.sh`'s. Forward and sign-in start lazily, so a
+# passing run opens neither.
+af_forward() { # 0 when svc/airflow-api-server answers on $AF_PORT
+  local _ code
+  [ -n "$AF_PID" ] && return 0
+  kubectl -n "$NS" port-forward svc/airflow-api-server "$AF_PORT:8080" >/dev/null 2>&1 &
+  AF_PID=$!
+  for _ in $(seq 1 20); do
+    code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$AF/api/v2/version" 2>/dev/null)" || code="000"
+    [ "${code:-000}" = "200" ] && return 0
+    kill -0 "$AF_PID" 2>/dev/null || return 1   # the forward died: never borrow another listener
+    sleep 1
+  done
+  return 1
+}
+
+af_sign_in() { # sets AF_TOKEN from Secret airflow-nova-api; the values are never printed
+  local secret user pass body raw code
+  secret="$(kubectl -n "$NS" get secret airflow-nova-api -o json 2>/dev/null)" || return 1
+  user="$(printf '%s' "$secret" | jq -r '.data.username // empty' 2>/dev/null | base64 -d 2>/dev/null)" || return 1
+  pass="$(printf '%s' "$secret" | jq -r '.data.password // empty' 2>/dev/null | base64 -d 2>/dev/null)" || return 1
+  [ -n "$user" ] && [ -n "$pass" ] || return 1
+  body="$(AF_USER="$user" AF_PASS="$pass" jq -n '{username: env.AF_USER, password: env.AF_PASS}' 2>/dev/null)" || return 1
+  unset user pass
+  raw="$(printf '%s' "$body" | curl -s -m 5 -H 'Content-Type: application/json' \
+    --data-binary @- -w '\n%{http_code}' "$AF/auth/token" 2>/dev/null)" || return 1
+  unset body
+  code="${raw##*$'\n'}"
+  [ "$code" = "201" ] || return 1
+  AF_TOKEN="$(printf '%s' "${raw%$'\n'*}" | jq -r '.access_token // empty' 2>/dev/null)" || return 1
+  [ -n "$AF_TOKEN" ]
+}
+
+task_log() { # <dag> <run> <task> -> last error lines of attempt 1 on stderr, or nothing
+  local raw lines
+  af_forward || return 0
+  [ -n "$AF_TOKEN" ] || af_sign_in || return 0
+  # `-f`: a 404 (no log for this attempt) or any other refusal prints nothing; the bearer
+  # travels in a curl config on a pipe, never on the command line. A log that cannot be read is
+  # never a failure of the check, so this returns 0 whatever happened.
+  raw="$(curl -sf -m 10 -K <(printf 'header = "Authorization: Bearer %s"\n' "$AF_TOKEN") \
+    "$AF/api/v2/dags/$1/dagRuns/$2/taskInstances/$3/logs/1" 2>/dev/null || true)"
+  [ -n "$raw" ] || return 0
+  # The endpoint answers `{"content":[{"event":"…"}]}`, the whole log on one line (measured
+  # 2026-11-23 on 3.2), so the log is unfolded to one line per entry and per raised exception
+  # before it is filtered; anything else is filtered as it came.
+  lines="$(printf '%s' "$raw" | jq -r 'if type == "object" and (.content | type) == "array" then
+      (.content[] | (.event // empty | tostring)),
+      (.content[] | .error_detail[]? | "\(.exc_type // "error"): \(.exc_value // "")")
+    else . end' 2>/dev/null)" || lines="$raw"
+  lines="$(printf '%s\n' "$lines" | grep -E 'Error|Exception|Traceback|refused|failed|WapError' \
+    | tail -n 8 | sed -E 's/(Bearer|token=)[A-Za-z0-9._~+\/-]+/\1<redacted>/g' || true)"
+  # Printed rather than piped by the caller: a pipeline would run this in a subshell, and the
+  # port-forward it started (and the token) would outlive it — `cleanup` must be able to kill it.
+  if [ -n "$lines" ]; then printf '%s\n' "$lines" | sed 's/^/    /' >&2; fi
+  return 0
+}
 
 # `dags list-runs -o plain` is space-aligned (dag_id run_id state …); `tasks states-for-dag-run`
 # puts a `|` between its columns. Both are parsed from the plain output, never from logs.
@@ -455,6 +525,12 @@ if [ "$RUN_STATE" = "success" ] && [ -n "$S1" ]; then
 else
   echo "FAIL direct"
   echo "  run $RUN state=$RUN_STATE main-snapshot=${S1:-none} tasks: $(af tasks states-for-dag-run "$DAG" "$RUN" | grep -E "^$DAG" | awk -F'[|]' '{t=$3;gsub(/ /,"",t);s=$4;gsub(/ /,"",s);printf "%s=%s ",t,s}')" >&2
+  for t in wap-prepare build check wap-publish; do
+    if [ "$(task_state "$DAG" "$RUN" "$t")" = "failed" ]; then
+      echo "  $t said:" >&2
+      task_log "$DAG" "$RUN" "$t"
+    fi
+  done
   bad="$bad direct"
 fi
 
@@ -493,6 +569,12 @@ else
   echo "  run $RUN state=$RUN_STATE main${S2:+=}${S2:-none} audit=${audit2:-none}" >&2
   echo "  the run's own branch is $(own_branch "$RUN"); the table's refs:" >&2
   refs_line >&2
+  for t in wap-prepare build check wap-publish; do
+    if [ "$(task_state "$DAG" "$RUN" "$t")" = "failed" ]; then
+      echo "  $t said:" >&2
+      task_log "$DAG" "$RUN" "$t"
+    fi
+  done
   bad="$bad publish"
 fi
 
@@ -533,6 +615,12 @@ else
   echo "FAIL refusal"
   echo "  the run's own branch is $(own_branch "$RUN"); the table's refs:" >&2
   refs_line >&2
+  for t in wap-prepare build check wap-publish; do
+    if [ "$(task_state "$DAG" "$RUN" "$t")" = "failed" ]; then
+      echo "  $t said:" >&2
+      task_log "$DAG" "$RUN" "$t"
+    fi
+  done
   bad="$bad refusal"
 fi
 
