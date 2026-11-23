@@ -21,9 +21,14 @@
 #                  `stardelt:write`, and no run is started: the `stardelt-mcp` token a device
 #                  sign-in mints must not carry the optional write scope
 #
-# `sql_read`, `sql_explain` and `catalog_search` are listed here (so a missing tool is caught)
-# but not called: they are broken on the live cluster for a measured reason and are fixed under
-# stardelt/stardelt#1442. A follow-up adds the SQL call when #1442 closes.
+#   sql_read       tools/call `sql_read` {"sql":"SELECT 1 AS one"} → one row `[[1]]`, column `one`
+#   sql_explain    tools/call `sql_explain` → at least one plan row, column `Query Plan`
+#   catalog_search tools/call `catalog_search` {"query":"customers","catalog":"bronze"} →
+#                  `bronze.shop.customers` among the matches
+#   query-log      the agent's statement is attributed to the person, source `stardelt-mcp`
+#
+# These call the engine through the token exchange #1442/#1455 added: the MCP token is never
+# forwarded to Trino.
 #
 # The person and the client are the check's inputs: MCP_USER (default `demo`) and MCP_CLIENT
 # (default `stardelt-mcp`). The client's token is the one to use — the public demo client
@@ -183,6 +188,10 @@ if [ "$TOKEN_OK" != 1 ]; then
   bad tools/list "not run: sign-in minted no token"
   bad platform_status "not run: sign-in minted no token"
   bad write-scope "not run: sign-in minted no token"
+  bad sql_read "not run: sign-in minted no token"
+  bad sql_explain "not run: sign-in minted no token"
+  bad catalog_search "not run: sign-in minted no token"
+  bad query-log "not run: sign-in minted no token"
 else
 
   status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')"
@@ -282,13 +291,160 @@ print(structured.get("run_id") or structured.get("run") or structured.get("id") 
     bad write-scope "POST /mcp → $(describe "$status")$(error_of) (want 403 insufficient_scope)"
   fi
 
+  # ---- sql_read: the engine answers through the token exchange --------------------------------
+
+  status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"sql_read","arguments":{"sql":"SELECT 1 AS one"}}}')"
+  if [ "$status" = "200" ]; then
+    if detail="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    print("body is not JSON")
+    sys.exit(1)
+result = doc.get("result") if isinstance(doc, dict) else None
+if not isinstance(result, dict):
+    print("no result in the answer")
+    sys.exit(1)
+if result.get("isError") is True:
+    content = result.get("content") or [{}]
+    print("tool error: %s" % ((content[0] or {}).get("text") or "the tool failed"))
+    sys.exit(1)
+body = result.get("structuredContent") or {}
+columns = [c.get("name") for c in (body.get("columns") or []) if isinstance(c, dict)]
+rows = body.get("rows")
+if body.get("row_count") != 1 or rows != [[1]] or columns != ["one"]:
+    print("row_count=%s rows=%s columns=%s" % (body.get("row_count"), rows, columns))
+    sys.exit(1)
+print("SELECT 1 AS one → one row, column one")
+' < "$tmp/body")"; then
+      ok sql_read "tools/call → $detail"
+    else
+      bad sql_read "tools/call → $detail (want row_count=1 rows=[[1]] columns=[one])"
+    fi
+  else
+    bad sql_read "tools/call → $(describe "$status")$(error_of) (want 200 with a JSON-RPC result)"
+  fi
+
+  # ---- sql_explain: a plan, not an execution --------------------------------------------------
+
+  status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"sql_explain","arguments":{"sql":"SELECT 1 AS one"}}}')"
+  if [ "$status" = "200" ]; then
+    if detail="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    print("body is not JSON")
+    sys.exit(1)
+result = doc.get("result") if isinstance(doc, dict) else None
+if not isinstance(result, dict):
+    print("no result in the answer")
+    sys.exit(1)
+if result.get("isError") is True:
+    content = result.get("content") or [{}]
+    print("tool error: %s" % ((content[0] or {}).get("text") or "the tool failed"))
+    sys.exit(1)
+body = result.get("structuredContent") or {}
+rows = body.get("rows") or []
+columns = [c.get("name") for c in (body.get("columns") or []) if isinstance(c, dict)]
+if not rows or not columns:
+    print("rows=%s columns=%s" % (len(rows), columns))
+    sys.exit(1)
+print("EXPLAIN SELECT 1 AS one → %d row(s), column %s" % (len(rows), columns[0]))
+' < "$tmp/body")"; then
+      ok sql_explain "tools/call → $detail"
+    else
+      bad sql_explain "tools/call → $detail (want at least one plan row and one column)"
+    fi
+  else
+    bad sql_explain "tools/call → $(describe "$status")$(error_of) (want 200 with a JSON-RPC result)"
+  fi
+
+  # ---- catalog_search: the visitor's table is findable -----------------------------------------
+
+  status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"catalog_search","arguments":{"query":"customers","catalog":"bronze"}}}')"
+  if [ "$status" = "200" ]; then
+    if detail="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    print("body is not JSON")
+    sys.exit(1)
+result = doc.get("result") if isinstance(doc, dict) else None
+if not isinstance(result, dict):
+    print("no result in the answer")
+    sys.exit(1)
+if result.get("isError") is True:
+    content = result.get("content") or [{}]
+    print("tool error: %s" % ((content[0] or {}).get("text") or "the tool failed"))
+    sys.exit(1)
+body = result.get("structuredContent") or {}
+matches = body.get("matches") or []
+hit = [m for m in matches if isinstance(m, dict)
+       and m.get("catalog") == "bronze" and m.get("namespace") == "shop" and m.get("table") == "customers"]
+if not hit:
+    print("matches=%s" % (["%s.%s.%s" % (m.get("catalog"), m.get("namespace"), m.get("table")) for m in matches if isinstance(m, dict)][:5],))
+    sys.exit(1)
+print("customers bronze → bronze.shop.customers")
+' < "$tmp/body")"; then
+      ok catalog_search "tools/call → $detail"
+    else
+      bad catalog_search "tools/call → $detail (want bronze.shop.customers among the matches)"
+    fi
+  else
+    bad catalog_search "tools/call → $(describe "$status")$(error_of) (want 200 with a JSON-RPC result)"
+  fi
+
+  # ---- query-log: the agent's statement is attributed to the person and the MCP client ---------
+
+  found=""
+  for i in 1 2 3 4 5; do
+    status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"query_log_list","arguments":{"limit":5}}}')"
+    if [ "$status" = "200" ] && detail="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    print("body is not JSON")
+    sys.exit(1)
+result = doc.get("result") if isinstance(doc, dict) else None
+if not isinstance(result, dict):
+    print("no result in the answer")
+    sys.exit(1)
+if result.get("isError") is True:
+    content = result.get("content") or [{}]
+    print("tool error: %s" % ((content[0] or {}).get("text") or "the tool failed"))
+    sys.exit(1)
+body = result.get("structuredContent") or {}
+for item in body.get("items") or []:
+    if not isinstance(item, dict):
+        continue
+    if "SELECT 1 AS one" in (item.get("sql") or "") and item.get("source") == "stardelt-mcp":
+        print("SELECT 1 AS one, source=stardelt-mcp, state=%s" % (item.get("state"),))
+        sys.exit(0)
+print("no SELECT 1 AS one entry with source=stardelt-mcp yet")
+sys.exit(1)
+' < "$tmp/body")"; then
+      found=1
+      break
+    fi
+    [ "$i" -eq 5 ] || sleep 2
+  done
+  if [ "$found" = 1 ]; then
+    ok query-log "tools/call → $detail"
+  else
+    bad query-log "tools/call → ${detail:-not run} (the collector is asynchronous: five reads two seconds apart)"
+  fi
+
 fi
 
 # ---- verdict ---------------------------------------------------------------
 
-if [ "$PASSED" -eq 4 ] && [ "$FAILED" -eq 0 ]; then
-  echo "verify-mcp-tools: PASS (4 of 4)"
+if [ "$PASSED" -eq 8 ] && [ "$FAILED" -eq 0 ]; then
+  echo "verify-mcp-tools: PASS (8 of 8)"
   exit 0
 fi
-echo "verify-mcp-tools: FAIL ($PASSED of 4)"
+echo "verify-mcp-tools: FAIL ($PASSED of 8)"
 exit 1
