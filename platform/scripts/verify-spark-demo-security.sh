@@ -152,10 +152,18 @@ metadata:
     stardelt.io/group.visitors: "true"
 spec:
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile: { type: RuntimeDefault }
   automountServiceAccountToken: false
   containers:
     - name: client
       image: ${CLIENT_IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       env:
         - name: HOME
           value: /tmp

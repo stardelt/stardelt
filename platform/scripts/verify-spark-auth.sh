@@ -236,6 +236,11 @@ metadata:
     app.kubernetes.io/name: verify-spark-auth
 spec:
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile: { type: RuntimeDefault }
   automountServiceAccountToken: false
   containers:
     - name: client
