@@ -524,7 +524,7 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, health, onPick }: L
   // Fit on load and whenever the picture changes — or the toolbar's Fit button is pressed.
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void fitView({ padding: 0.06, maxZoom: 1, duration: 200 })
+      void fitView({ padding: '3%', maxZoom: 1, duration: 200 })
     }, 0)
     return () => window.clearTimeout(timer)
   }, [fitView, graph, showHandMade, unlimited, fitKey, selected])
@@ -564,7 +564,7 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, health, onPick }: L
           edgeTypes={edgeTypes}
           className="lineage-flow"
           fitView
-          fitViewOptions={{ padding: 0.06, maxZoom: 1 }}
+          fitViewOptions={{ padding: '3%', maxZoom: 1 }}
           minZoom={0.3}
           maxZoom={1.5}
           nodesDraggable={false}
