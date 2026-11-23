@@ -35,6 +35,8 @@ Permissive licences only. No phone-home. No licence server.
 - 👀 **Watch → Custom → Releases** to hear about new versions.
 - 🗺 The [roadmap](https://stardelt.io/docs/roadmap) says what works today and what comes next.
 
+[![stardelt stars over time](https://api.star-history.com/svg?repos=stardelt/stardelt&type=Date)](https://star-history.com/#stardelt/stardelt&Date)
+
 ## Where things live
 
 The product is one repository. Each part has its own folder, its own build and its own CI workflows (`.github/workflows/<folder>-*.yml`).
