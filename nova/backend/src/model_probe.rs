@@ -201,8 +201,9 @@ fn messages() -> Value {
 /// The tool check's body fragment: one function, `sql_explain`.
 const TOOL_CHECK: &str = r#"{"tools": [{"type": "function", "function": {"name": "sql_explain", "description": "Check a SQL statement without running it", "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}}]}"#;
 
-/// The JSON check's body fragment: an object with both fields, as the spike measured it.
-const JSON_CHECK: &str = r#"{"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object", "properties": {"sql": {"type": "string"}, "explanation": {"type": "string"}}, "required": ["sql", "explanation"]}}}}"#;
+/// The JSON check's body fragment: an object with both fields, as Ask asks it (`ask.rs`'s
+/// `SYSTEM_PROMPT`).
+const JSON_CHECK: &str = r#"{"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object", "properties": {"sql": {"type": "string"}, "sentence": {"type": "string"}}, "required": ["sql", "sentence"]}}}}"#;
 
 /// Record the plain chat check as one `model_call` row (design nova#890, slice 1). Best
 /// effort: an endpoint that answered, refused or failed still gets its row, and a failed
@@ -352,7 +353,7 @@ pub(crate) async fn probe(
         Ok(answer) => {
             outcome.json_output = Some(matches!(
                 serde_json::from_str::<Value>(&answer.content),
-                Ok(Value::Object(object)) if object.contains_key("sql") && object.contains_key("explanation")
+                Ok(Value::Object(object)) if object.contains_key("sql") && object.contains_key("sentence")
             ));
         }
         Err(ChatError::Refused(message) | ChatError::Transport(message)) => {
@@ -680,7 +681,7 @@ mod tests {
                     }
                     if body.get("response_format").is_some() {
                         fake.asked.lock().unwrap().push("json".into());
-                        return Json(json!({"choices": [{"message": {"role": "assistant", "content": "{\"sql\": \"select 1\", \"explanation\": \"one row\"}"}}]}));
+                        return Json(json!({"choices": [{"message": {"role": "assistant", "content": "{\"sql\": \"select 1\", \"sentence\": \"one row\"}"}}]}));
                     }
                     fake.asked.lock().unwrap().push("chat".into());
                     Json(json!({"choices": [{"message": {"role": "assistant", "content": "Lakes hold water."}}]}))
@@ -922,5 +923,23 @@ mod tests {
                 "{condition}"
             );
         }
+    }
+
+    #[test]
+    fn the_json_check_asks_for_the_keys_ask_parses() {
+        let schema: serde_json::Value =
+            serde_json::from_str(JSON_CHECK).expect("JSON_CHECK is JSON");
+        let required = schema
+            .pointer("/response_format/json_schema/schema/required")
+            .and_then(serde_json::Value::as_array)
+            .expect("the schema lists required keys");
+        let names: Vec<&str> = required
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(names, ["sql", "sentence"]);
+        // The same object Ask expects: parse_answer is the function that reads the model's answer.
+        let answer = r#"{"sql": "select 1", "sentence": "one row"}"#;
+        assert!(crate::ask::parse_answer(answer).is_some());
     }
 }

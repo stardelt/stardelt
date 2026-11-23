@@ -205,7 +205,7 @@ async fn body_of(response: Response) -> (StatusCode, Value) {
 }
 
 /// The model's content as `(sql, sentence)`, or `None` when it is not that JSON.
-fn parse_answer(content: &str) -> Option<(String, String)> {
+pub(crate) fn parse_answer(content: &str) -> Option<(String, String)> {
     let value: Value = serde_json::from_str(content.trim()).ok()?;
     let sql = value.get("sql")?.as_str()?.trim().to_string();
     let sentence = value.get("sentence")?.as_str()?.trim().to_string();
