@@ -177,7 +177,7 @@ def redacted(text):
 
 
 def trino_status(token):
-    """The status of one POST /v1/statement, as `stardelt.connection()` posts it."""
+    """The status of one POST /v1/statement, with the headers the ticket names."""
     import ssl
     body = STATEMENT.encode()
     request = urllib.request.Request(
