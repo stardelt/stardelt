@@ -45,6 +45,7 @@ declare -A recipe=(
   [verify-spark-demo-security]='DEMO_NS=stardelt-demo-spark bash scripts/verify-spark-demo-security.sh'
   [verify-wap]='bash scripts/verify-wap.sh'
   [verify-product-path]='bash scripts/verify-product-path.sh'
+  [verify-cli]='bash scripts/verify-cli.sh # the shipped CLI as demo'
   [verify-pipeline-validate]='bash scripts/verify-pipeline-validate.sh'
   [verify-spark-pipeline]='bash scripts/verify-spark-pipeline.sh'
   [verify-spark-no-platform-key]='bash scripts/verify-spark-no-platform-key.sh'
@@ -82,7 +83,7 @@ verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-c
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-mcp verify-mcp-tools verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query verify-spark-janitor verify-spark-demo-security
-verify-wap verify-product-path verify-pipeline-validate verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
+verify-wap verify-product-path verify-cli verify-pipeline-validate verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
 verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports verify-s3-sts verify-airflow-actions verify-operator-quiet verify-pod-security-baseline verify-external-secrets verify-storage-capacity"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
