@@ -55,15 +55,16 @@ use crate::principal::reconcile_principal;
 use crate::provision::{
     ensure_access_sync, ensure_airflow_group_roles, ensure_airflow_rbac, ensure_airflow_secrets,
     ensure_archive, ensure_barman_cloud, ensure_bootstrap, ensure_catalog_database,
-    ensure_catalog_principals, ensure_discovery, ensure_external_store, ensure_group_stores,
-    ensure_identity, ensure_identity_secrets, ensure_ingress, ensure_kafka_broker, ensure_keycloak,
-    ensure_keycloak_pg, ensure_lakekeeper_network_policy, ensure_namespace,
-    ensure_notebook_public_egress, ensure_notebooks_bucket, ensure_nova, ensure_nova_events,
-    ensure_nova_pg, ensure_nova_session, ensure_openbao_init, ensure_openbao_seal_key,
-    ensure_openfga_database, ensure_openfga_network_policy, ensure_pg_dumps,
-    ensure_pipeline_notebook_egress, ensure_s3_secrets, ensure_seaweedfs_network_policy,
-    ensure_secrets_mode, ensure_spark, ensure_superset_group_roles, ensure_superset_rbac,
-    ensure_superset_secrets, ensure_trino_auth_secrets, ensure_trino_config_maps, ensure_trino_tls,
+    ensure_catalog_principals, ensure_discovery, ensure_external_group_stores,
+    ensure_external_store, ensure_group_stores, ensure_identity, ensure_identity_secrets,
+    ensure_ingress, ensure_kafka_broker, ensure_keycloak, ensure_keycloak_pg,
+    ensure_lakekeeper_network_policy, ensure_namespace, ensure_notebook_public_egress,
+    ensure_notebooks_bucket, ensure_nova, ensure_nova_events, ensure_nova_pg, ensure_nova_session,
+    ensure_openbao_init, ensure_openbao_seal_key, ensure_openfga_database,
+    ensure_openfga_network_policy, ensure_pg_dumps, ensure_pipeline_notebook_egress,
+    ensure_s3_secrets, ensure_seaweedfs_network_policy, ensure_secrets_mode, ensure_spark,
+    ensure_superset_group_roles, ensure_superset_rbac, ensure_superset_secrets,
+    ensure_trino_auth_secrets, ensure_trino_config_maps, ensure_trino_tls,
 };
 use crate::stop;
 use crate::values::{deep_merge, effective_values, identity_values, parse_values_document};
@@ -2250,6 +2251,9 @@ async fn reconcile_platform(
     }
     if let Some(store) = ensure_external_store(&ctx, &instance.spec).await {
         outcome.components.push(store);
+    }
+    if let Some(stores) = ensure_external_group_stores(&ctx, &instance.spec).await {
+        outcome.components.push(stores);
     }
     if let Some(seal) = openbao_seal {
         outcome.components.push(seal);

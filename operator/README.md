@@ -129,7 +129,11 @@ credential; a production install uses `secrets.mode: external`.
 In `secrets.mode: external` the operator publishes `ClusterSecretStore` `enterprise` from
 `spec.secrets.external.provider` verbatim; exactly one provider key; credentials must be referenced
 by Secret name (`secretRef`/`tokenSecretRef`/`authSecretRef`), never inline; the store is the
-enterprise's, so the operator installs nothing else.
+enterprise's, so the operator installs nothing else. With `spec.secrets.groups`, the same list
+publishes one namespaced `SecretStore` `enterprise-<group>` per group (and no `ClusterSecretStore`)
+for a ServiceAccount-authenticated provider (`auth.kubernetes`): `${group}` in every provider string
+and every `serviceAccountRef.name` is rewritten to the group, so the administrator binds
+`eso-<group>` to that group's cloud identity and a group connection reads through its own store.
 
 A complete Entra instance is in
 [`examples/platforminstance-external-entra.yaml`](examples/platforminstance-external-entra.yaml):

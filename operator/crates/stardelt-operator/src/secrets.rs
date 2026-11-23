@@ -49,7 +49,9 @@ pub fn group_role_name(namespace: &str, group: &str) -> String {
 }
 
 /// The ServiceAccount External Secrets signs in as; the store's role is bound to its name.
-pub fn group_service_account(namespace: &str, group: &str) -> Value {
+/// `component` is the `stardelt.io/component` label: `openbao` for the sandbox store,
+/// `secret-store` when the enterprise provider is the administrator's.
+pub fn group_service_account(namespace: &str, group: &str, component: &str) -> Value {
     serde_json::json!({
         "apiVersion": "v1",
         "kind": "ServiceAccount",
@@ -58,7 +60,7 @@ pub fn group_service_account(namespace: &str, group: &str) -> Value {
             "namespace": namespace,
             "labels": {
                 "app.kubernetes.io/managed-by": "stardelt-operator",
-                "stardelt.io/component": "openbao",
+                "stardelt.io/component": component,
             },
         },
     })
@@ -156,7 +158,8 @@ pub fn mode_label(mode: SecretsMode) -> &'static str {
     }
 }
 
-/// ConfigMap `stardelt-secrets` for `spec.namespace`: key `mode` is `none`, `platform` or `external`.
+/// ConfigMap `stardelt-secrets` for `spec.namespace`: key `mode` is `none`, `platform` or
+/// `external`; key `groups` is the comma-separated `spec.secrets.groups` list (empty when none).
 pub fn mode_config_map(spec: &PlatformInstanceSpec, namespace: &str) -> ConfigMap {
     let mode = mode_label(spec.secrets.mode);
     ConfigMap {
@@ -172,7 +175,10 @@ pub fn mode_config_map(spec: &PlatformInstanceSpec, namespace: &str) -> ConfigMa
             ])),
             ..ObjectMeta::default()
         },
-        data: Some(BTreeMap::from([("mode".to_string(), mode.to_string())])),
+        data: Some(BTreeMap::from([
+            ("mode".to_string(), mode.to_string()),
+            ("groups".to_string(), spec.secrets.groups.join(",")),
+        ])),
         ..ConfigMap::default()
     }
 }
@@ -266,8 +272,92 @@ pub fn uses_kubernetes_auth(provider: &Value) -> bool {
         })
 }
 
+/// Whether the provider block authenticates through a ServiceAccount, at any depth.
+pub fn has_service_account_ref(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(k, v)| {
+            (k == "serviceAccountRef" && v.is_object()) || has_service_account_ref(v)
+        }),
+        Value::Array(items) => items.iter().any(has_service_account_ref),
+        _ => false,
+    }
+}
+
+/// The provider block for one owner group: `${group}` in every string becomes the group
+/// name, and every `serviceAccountRef.name` becomes `eso-<group>`.
+pub fn rewrite_for_group(value: &Value, group: &str) -> Value {
+    match value {
+        Value::String(text) => Value::String(text.replace("${group}", group)),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| rewrite_for_group(v, group)).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                if key == "serviceAccountRef"
+                    && let Value::Object(sa) = value
+                {
+                    let mut sa = sa.clone();
+                    sa.insert("name".into(), Value::String(format!("eso-{group}")));
+                    out.insert(key.clone(), Value::Object(sa));
+                    continue;
+                }
+                out.insert(key.clone(), rewrite_for_group(value, group));
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+/// The credential rule of `secrets.mode: external`: Kubernetes auth carries no credential, but an
+/// inline token next to it is still a credential in the CR and stays refused; every other block
+/// must reference a Secret by name.
+fn check_provider_credentials(provider: &Value) -> Result<(), String> {
+    if uses_kubernetes_auth(provider) {
+        if let Value::Object(root) = provider
+            && let Some(Value::Object(vault)) = root.get("vault")
+            && vault.contains_key("token")
+            && !vault.contains_key("tokenSecretRef")
+        {
+            return Err("secrets.external.provider must reference a Secret by name (secretRef/tokenSecretRef/authSecretRef), never inline credentials".to_string());
+        }
+    } else {
+        let _ = credential_secret_name(provider)?;
+    }
+    Ok(())
+}
+
+/// The namespaced `SecretStore` of one owner group in `secrets.mode: external`.
+pub fn external_group_store(
+    namespace: &str,
+    group: &str,
+    provider: &Value,
+) -> Result<Value, String> {
+    provider_block(provider)?;
+    check_provider_credentials(provider)?;
+    if !has_service_account_ref(provider) {
+        return Err("secrets.external.provider needs a serviceAccountRef (a ServiceAccount-authenticated provider) to give each owner group its own identity".to_string());
+    }
+    Ok(serde_json::json!({
+        "apiVersion": "external-secrets.io/v1",
+        "kind": "SecretStore",
+        "metadata": {
+            "name": format!("enterprise-{group}"),
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/managed-by": "stardelt-operator",
+                "stardelt.io/component": "secret-store",
+            }
+        },
+        "spec": { "provider": rewrite_for_group(provider, group) }
+    }))
+}
+
 /// The `ClusterSecretStore` for this instance: `Ok(None)` for `none`/`platform`, `Err` when
 /// `external` mode is incomplete, `Ok(Some(_))` with the provider block passed through unchanged.
+/// With `spec.secrets.groups` every owner group gets its own `SecretStore` instead, so the single
+/// cluster-scoped store is not published.
 pub fn external_store(spec: &PlatformInstanceSpec) -> Result<Option<Value>, String> {
     match spec.secrets.mode {
         SecretsMode::None | SecretsMode::Platform => Ok(None),
@@ -276,20 +366,11 @@ pub fn external_store(spec: &PlatformInstanceSpec) -> Result<Option<Value>, Stri
                 "secrets.mode external needs secrets.external.provider".to_string()
             })?;
             let provider = &external.provider;
-            let (provider_name, _provider_value) = provider_block(provider)?;
-            if uses_kubernetes_auth(provider) {
-                // Kubernetes auth carries no credential, but an inline token next to it is still a
-                // credential in the CR and stays refused.
-                if let Value::Object(root) = provider
-                    && let Some(Value::Object(vault)) = root.get("vault")
-                    && vault.contains_key("token")
-                    && !vault.contains_key("tokenSecretRef")
-                {
-                    return Err("secrets.external.provider must reference a Secret by name (secretRef/tokenSecretRef/authSecretRef), never inline credentials".to_string());
-                }
-            } else {
-                let _ = credential_secret_name(provider)?;
+            if !spec.secrets.groups.is_empty() {
+                return Ok(None);
             }
+            let (provider_name, _provider_value) = provider_block(provider)?;
+            check_provider_credentials(provider)?;
             Ok(Some(serde_json::json!({
                 "apiVersion": "external-secrets.io/v1",
                 "kind": "ClusterSecretStore",
@@ -379,6 +460,113 @@ mod tests {
             let data = cm.data.as_ref().unwrap();
             assert_eq!(data.get("mode").unwrap(), label);
         }
+    }
+
+    #[test]
+    fn mode_config_map_carries_the_groups() {
+        use crate::crd::{ComponentValues, IdentitySpec, IngressSettings, Pillars, Profile};
+        let mut spec = PlatformInstanceSpec {
+            profile: Profile::Demo,
+            pillars: Pillars::default(),
+            dry_run: true,
+            cluster_operation: Default::default(),
+            component_values: ComponentValues::default(),
+            namespace: "stardelt".into(),
+            base_domain: None,
+            identity: IdentitySpec::default(),
+            secrets: crate::crd::SecretsSpec {
+                mode: SecretsMode::External,
+                external: None,
+                groups: vec!["shop".into(), "analytics".into()],
+            },
+            ingress: IngressSettings::default(),
+            monitoring: Default::default(),
+            mcp: Default::default(),
+        };
+        let cm = mode_config_map(&spec, "stardelt");
+        let data = cm.data.as_ref().unwrap();
+        assert_eq!(data.get("groups"), Some(&"shop,analytics".to_string()));
+        spec.secrets.groups = Vec::new();
+        let cm = mode_config_map(&spec, "stardelt");
+        assert_eq!(
+            cm.data.as_ref().unwrap().get("groups"),
+            Some(&String::new())
+        );
+    }
+
+    #[test]
+    fn external_group_store_rewrites_the_group_and_the_service_account() {
+        let provider = serde_json::json!({"vault": {"auth": {"kubernetes": {
+            "role": "eso-${group}", "serviceAccountRef": {"name": "ignored"}
+        }}}});
+        let store = external_group_store("stardelt", "shop", &provider).unwrap();
+        assert_eq!(store["metadata"]["name"], "enterprise-shop");
+        assert_eq!(store["metadata"]["namespace"], "stardelt");
+        assert_eq!(
+            store["spec"]["provider"]["vault"]["auth"]["kubernetes"]["serviceAccountRef"]["name"],
+            "eso-shop"
+        );
+        assert_eq!(
+            store["spec"]["provider"]["vault"]["auth"]["kubernetes"]["role"],
+            "eso-shop"
+        );
+    }
+
+    #[test]
+    fn external_group_store_needs_a_service_account_ref() {
+        let provider = serde_json::json!({"aws": {"auth": {"secretRef": {"name": "aws"}}}});
+        let err = external_group_store("stardelt", "shop", &provider).unwrap_err();
+        assert!(err.contains("serviceAccountRef"), "{err}");
+    }
+
+    #[test]
+    fn external_group_store_refuses_credentials_inline() {
+        // Kubernetes auth carries no credential; an inline token next to it is refused, as it is
+        // for the cluster store.
+        let inline_token = serde_json::json!({"vault": {
+            "server": "https://vault.example.com", "token": "s3cret",
+            "auth": {"kubernetes": {"role": "eso-${group}",
+                "serviceAccountRef": {"name": "ignored"}}}
+        }});
+        let err = external_group_store("stardelt", "shop", &inline_token).unwrap_err();
+        assert!(err.contains("never inline credentials"), "{err}");
+        // A non-Vault provider that names no Secret is refused too (the existing external rule).
+        let no_credential = serde_json::json!({"azurekv": {"vaultUrl": "https://kv.vault.azure.net",
+            "auth": {"serviceAccountRef": {"name": "ignored"}}}});
+        assert!(external_group_store("stardelt", "shop", &no_credential).is_err());
+    }
+
+    #[test]
+    fn external_store_keeps_the_cluster_store_without_groups_and_drops_it_with_groups() {
+        use crate::crd::{ComponentValues, IdentitySpec, IngressSettings, Pillars, Profile};
+        let spec = PlatformInstanceSpec {
+            profile: Profile::Demo,
+            pillars: Pillars::default(),
+            dry_run: true,
+            cluster_operation: Default::default(),
+            component_values: ComponentValues::default(),
+            namespace: "stardelt".into(),
+            base_domain: None,
+            identity: IdentitySpec::default(),
+            secrets: crate::crd::SecretsSpec {
+                mode: SecretsMode::External,
+                external: Some(ExternalSecretsSpec {
+                    provider: serde_json::json!({"vault": {"server": "https://vault.example.com",
+                        "auth": {"kubernetes": {"role": "stardelt",
+                            "serviceAccountRef": {"name": "stardelt-secret-store"}}}}}),
+                }),
+                groups: Vec::new(),
+            },
+            ingress: IngressSettings::default(),
+            monitoring: Default::default(),
+            mcp: Default::default(),
+        };
+        let store = external_store(&spec).unwrap().unwrap();
+        assert_eq!(store["kind"], "ClusterSecretStore");
+        assert_eq!(store["metadata"]["name"], "enterprise");
+        let mut with_groups = spec.clone();
+        with_groups.secrets.groups = vec!["shop".into()];
+        assert!(external_store(&with_groups).unwrap().is_none());
     }
 
     #[test]

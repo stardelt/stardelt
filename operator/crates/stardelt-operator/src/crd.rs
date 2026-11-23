@@ -491,8 +491,9 @@ pub struct SecretsSpec {
     /// The enterprise's store; required for `external`, refused for the other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external: Option<ExternalSecretsSpec>,
-    /// Owner groups that get their own store entry in `secrets.mode: platform` (decision D27):
-    /// each one may read only its own path. Mirrors the platform's `STORE_GROUPS`.
+    /// Owner groups that get their own store entry in `secrets.mode: platform` or
+    /// `secrets.mode: external`: each one may read only its own path (decision D27).
+    /// Mirrors the platform's `STORE_GROUPS`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "group_list_schema")]
     pub groups: Vec<String>,
@@ -560,8 +561,8 @@ fn group_list_schema(_: &mut schemars::generate::SchemaGenerator) -> schemars::S
         "message": "secrets.groups entries are lower-case letters, digits and dashes (at most 40 characters)"
     },
     {
-        "rule": "!has(self.secrets) || !has(self.secrets.groups) || size(self.secrets.groups) == 0 || (has(self.secrets.mode) && self.secrets.mode == 'platform')",
-        "message": "secrets.groups is only allowed with secrets.mode platform"
+        "rule": "!has(self.secrets) || !has(self.secrets.groups) || size(self.secrets.groups) == 0 || (has(self.secrets.mode) && (self.secrets.mode == 'platform' || self.secrets.mode == 'external'))",
+        "message": "secrets.groups is only allowed with secrets.mode platform or external"
     },
     {
         "rule": "!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || has(self.baseDomain) || (has(self.mcp.audience) && self.mcp.audience.size() > 0)",
@@ -4428,6 +4429,10 @@ mod tests {
         let crd_str = serde_json::to_string(&crd_json).unwrap();
         assert!(crd_str.contains("secrets.mode external needs secrets.external.provider"));
         assert!(crd_str.contains("secrets.external is only allowed with secrets.mode external"));
+        assert!(
+            crd_str
+                .contains("secrets.groups is only allowed with secrets.mode platform or external")
+        );
     }
 
     /// `spec.secrets.groups` must carry the bounds its CEL rule is priced against.
