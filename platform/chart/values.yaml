@@ -326,7 +326,10 @@ seaweedfs:
         # volume for a *new* collection, and writes to a new bucket block forever —
         # the client sees a hang, the master log says "failed to find writable volumes
         # … Not enough data nodes found", and buckets created earlier keep working.
-        maxVolumes: 100
+        # 7 volumes per collection and one collection per S3 bucket, so 100 slots is
+        # ~14 buckets — one STS check run leaked 8 collections (#1350, #1354).
+        # `make verify-storage-capacity` measures the live slot count.
+        maxVolumes: 500
     resources:
       requests: { cpu: "200m", memory: "512Mi" }
       limits:   { cpu: "2",    memory: "2Gi"  }
