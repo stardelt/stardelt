@@ -82,6 +82,7 @@ class ChartBootstrapSigninTest(unittest.TestCase):
         chart_bootstrap = chart_containers[0]
         manifest_bootstrap = manifest_containers[0]
 
+        self.assertEqual(chart_bootstrap["command"], manifest_bootstrap["command"])
         self.assertEqual(chart_bootstrap["args"], manifest_bootstrap["args"],
                          "the chart's bootstrap script drifted from the manifest's")
         self.assertEqual(chart_bootstrap["env"], manifest_bootstrap["env"])
