@@ -75,3 +75,35 @@ def test_stop_posts_stop():
     c, session = client(FakeResponse(payload={"name": "trial", "phase": "Stopping"}))
     assert compute.stop("trial", c)["phase"] == "Stopping"
     assert session.calls[0][:2] == ("POST", "https://nova.example/api/compute/trial/stop")
+
+
+def test_default_answers_the_one_cluster_the_caller_may_act_on():
+    payload = {
+        "clusters": [
+            {"name": "shared", "kind": "cluster", "shared": True, "canUse": True, "canAct": False},
+            {"name": "sandbox", "kind": "platform", "shared": False, "canUse": True, "canAct": False},
+            {"name": "demo", "kind": "cluster", "shared": False, "canUse": True, "canAct": True},
+        ]
+    }
+    c, _ = client(FakeResponse(payload=payload))
+    assert compute.default(c)["name"] == "demo"
+
+
+def test_default_refuses_a_viewer_and_a_person_without_a_cluster():
+    payload = {"clusters": [
+        {"name": "shared", "kind": "cluster", "shared": True, "canUse": True, "canAct": False},
+        {"name": "team", "kind": "cluster", "shared": False, "canUse": True, "canAct": False},
+    ]}
+    c, _ = client(FakeResponse(payload=payload))
+    with pytest.raises(LookupError, match="no Spark cluster of your own"):
+        compute.default(c)
+
+
+def test_default_names_every_cluster_when_a_person_is_in_several_groups():
+    payload = {"clusters": [
+        {"name": "b-team", "kind": "cluster", "shared": False, "canUse": True, "canAct": True},
+        {"name": "a-team", "kind": "cluster", "shared": False, "canUse": True, "canAct": True},
+    ]}
+    c, _ = client(FakeResponse(payload=payload))
+    with pytest.raises(LookupError, match=r"2 Spark clusters \(a-team, b-team\)"):
+        compute.default(c)
