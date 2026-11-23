@@ -915,9 +915,10 @@ def _session(app_name="stardelt-notebook", cluster=None):
 
     The session is built from what Trino's ``SHOW CATALOGS`` returns for the
     person (engine-only names removed) and receives one Iceberg REST catalog per
-    name, each with ``token=_token()`` on the shared server (a named cluster is
-    different: see below). Lakekeeper — the authority — then refuses
-    a catalog the person has no grant on. ``STARDELT_CATALOG_URI`` and
+    name, each with a token on the shared server: yours, or — in a task pod that
+    sets ``STARDELT_CATALOG_TOKEN_FILE`` — the kubelet's projected ServiceAccount
+    token, read once per new session (#492). Lakekeeper — the authority — then refuses
+    a catalog the principal has no grant on. ``STARDELT_CATALOG_URI`` and
     ``STARDELT_S3_ENDPOINT`` override the in-cluster catalog and S3 endpoints.
 
     A named cluster (``cluster=…``) acts as its **owner group**, not as you: its driver runs as
@@ -936,7 +937,9 @@ def _session(app_name="stardelt-notebook", cluster=None):
     The catalogs and the token are set on the new session before its first catalog
     call (Spark reads ``spark.sql.catalog.*`` then). Setting the token again on a
     live session does not re-key an initialized catalog, so a later call with a
-    renewed token builds a new session and stops the previous one.
+    renewed token builds a new session and stops the previous one. A token file is
+    therefore read once per new session: one that outlives the projection's 3600 s
+    keeps the token it read (a named cluster's driver renews its own, #493).
 
     If the Spark server restarted, the next call opens a new session; DataFrames and temp views of the old one are gone, and a running job is not retried.
 
@@ -1015,10 +1018,11 @@ def _session(app_name="stardelt-notebook", cluster=None):
                 ("rest-catalog-purge", "true"),
                 ("uri", catalog_uri),
                 ("warehouse", name),
-                # The shared server acts as the person: the token decides the catalog identity. A group
-                # server acts as its owner group: the driver carries a projected token at `token_file`, and
-                # naming the file-auth class makes the driver read it and ignore any token in this set
-                # (#493, #1169: file-auth=365 as spark-cluster-driver-<group>).
+                # The shared server acts as the token's holder: the person, or a task pod's
+                # ServiceAccount (`catalog_token`), and the token decides the catalog identity. A
+                # group server acts as its owner group: the driver carries a projected token at
+                # `token_file`, and naming the file-auth class makes the driver read it and ignore
+                # any token in this set (#493, #1169: file-auth=365 as spark-cluster-driver-<group>).
                 *(
                     (("token", catalog_token),)
                     if cluster is None
@@ -1074,7 +1078,9 @@ def _session(app_name="stardelt-notebook", cluster=None):
                 session.stop()
             except Exception:  # noqa: BLE001 - the original failure is the one to report
                 pass
-        raise RuntimeError(f"stardelt.spark failed: {_redact(_one_line(exc), token)}") from exc
+        raise RuntimeError(
+            f"stardelt.spark failed: {_redact(_redact(_one_line(exc), token), catalog_token)}"
+        ) from exc
 
     # The client and the server must be on the same Spark line (platform#399);
     # a newer client mis-parses the server's settings.

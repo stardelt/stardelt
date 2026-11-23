@@ -907,6 +907,19 @@ def test_token_in_conf_never_printed_or_in_errors(
     assert "the client refused" in str(exc.value)
 
 
+def test_the_catalog_token_in_a_failure_is_redacted(
+    fake_spark, visible_catalogs, monkeypatch, tmp_path
+):
+    token_file = tmp_path / "token"
+    token_file.write_text("workload-canary-42\n")
+    monkeypatch.setenv("STARDELT_CATALOG_TOKEN_FILE", str(token_file))
+    fake_spark.fail_with = "the client refused workload-canary-42"
+    with pytest.raises(RuntimeError) as exc:
+        stardelt.spark()
+    assert "workload-canary-42" not in str(exc.value)
+    assert "the client refused" in str(exc.value)
+
+
 def test_second_call_refreshes_token(fake_spark, monkeypatch):
     tokens = iter(["token-one-317", "token-two-317"])
     monkeypatch.setattr(stardelt, "_token", lambda: next(tokens))
