@@ -415,9 +415,9 @@ fn stage_group_of(data: &serde_json::Value) -> Option<String> {
 }
 
 /// The identity a deploy principal acts with: its own groups replaced by the stage's group, so
-/// `deploy_refusal` reads "its own group" from the object (#1038). A person's identity is
-/// returned unchanged.
-async fn deploy_identity(state: &AppState, caller: &Principal) -> Result<Identity, String> {
+/// `deploy_refusal` reads "its own group" from the object (#1038), so the dashboard import reads
+/// the deploy principal's group the same way. A person's identity is returned unchanged.
+pub(crate) async fn deploy_identity(state: &AppState, caller: &Principal) -> Result<Identity, String> {
     let mut identity = caller.identity.clone();
     if let Some(stage) = deploy_stage(caller.client_id.as_deref())
         && let Some(group) = stage_owner_group(state, stage).await?
