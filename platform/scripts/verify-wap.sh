@@ -30,6 +30,9 @@
 #   - one table per run (`wap_gate_<UTC timestamp>`, #1319): a killed run's table and refs are
 #     never measured again; every `wap_gate*` table in `scratch` is dropped at the start, and a
 #     drop that fails is UNVERIFIED instead of a silent `|| true`;
+#   - two copies at once are safe (#1329): every resource is per-run (`PIPELINE`, `DAG`, the
+#     table and its graph ConfigMap), and the only shared name is the `stardelt.io/check:
+#     verify-wap` label;
 #   - `airflow tasks logs` does not exist in Airflow 3.2 (#1025), so every assertion reads the
 #     run state, the per-task states and the catalog's `metadata.refs` — never a task log.
 set -euo pipefail
@@ -37,7 +40,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 umask 077
 
 NS="${NS:-${NAMESPACE:-stardelt}}"
-PIPELINE="${PIPELINE:-verify-wap}"
+# One Pipeline per run: a second copy of this check deletes `pipeline verify-wap` in its
+# "start clean" step, which kills the first copy's run mid-flight. The `stardelt.io/check`
+# label stays fixed, so `make demo-inventory-check` still finds a leftover of any run.
+PIPELINE="${PIPELINE:-verify-wap-$(date -u +%Y%m%d%H%M%S)}"
 DAG="${DAG:-stardelt__$PIPELINE}"
 CATALOG="${CATALOG:-playground}"
 SCHEMA="${SCHEMA:-scratch}"
