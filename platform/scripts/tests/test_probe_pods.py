@@ -39,6 +39,11 @@ BUCKETS = (
     "scripts/create-notebooks-bucket.sh",
 )
 
+# The pod guard applies probe pods as a driver ServiceAccount: `restricted` must admit each
+# probe, so the ValidatingAdmissionPolicy is the actor that refuses it (#1404).
+GUARD = "scripts/verify-spark-pod-guard.sh"
+EXECUTOR_FIXTURE = "scripts/fixtures/spark-executor-pod.yaml"
+
 # The Spark checks start a client pod from the notebook image in the platform namespace
 # (#1397): a heredoc like the buckets, one Pod document each.
 CLIENTS = (
@@ -163,6 +168,39 @@ class ProbePodSpecTest(unittest.TestCase):
             home = [env for env in spec["containers"][0].get("env") or []
                     if env.get("name") == "HOME"]
             self.assertEqual(home, [{"name": "HOME", "value": "/tmp"}], relative)
+
+    def test_guard_probe_pods_declare_the_floor(self):
+        with open(os.path.join(ROOT, GUARD), encoding="utf-8") as handle:
+            text = handle.read()
+        blocks = re.findall(r"kind: Pod\n(.*?)\nEOF\n", text, re.S)
+        self.assertEqual(len(blocks), 8, "the guard no longer applies 8 probe pods")
+        for number, block in enumerate(blocks, start=1):
+            document = re.sub(r"\$\{[A-Za-z_]+\}", "x", block)
+            spec = yaml.safe_load("kind: Pod\n" + document)["spec"]
+            self.assertEqual(spec.get("securityContext"), {
+                "runAsNonRoot": True,
+                "runAsUser": 185,
+                "fsGroup": 185,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            }, "probe %d" % number)
+            self.assertEqual(spec["containers"][0].get("securityContext"), {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            }, "probe %d" % number)
+
+    def test_executor_fixture_declares_the_floor(self):
+        with open(os.path.join(ROOT, EXECUTOR_FIXTURE), encoding="utf-8") as handle:
+            spec = yaml.safe_load(handle.read())["spec"]
+        self.assertEqual(spec.get("securityContext"), {
+            "runAsNonRoot": True,
+            "runAsUser": 185,
+            "fsGroup": 185,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        })
+        self.assertEqual(spec["containers"][0].get("securityContext"), {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+        })
 
     def test_spark_client_pods_declare_the_floor(self):
         for relative in CLIENTS:
