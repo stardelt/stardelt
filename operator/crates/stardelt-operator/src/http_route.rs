@@ -4,9 +4,9 @@
 //! Gateway API (`gateway.networking.k8s.io/v1`) is the portable ingress object: the `Gateway`
 //! an installation already runs owns the listeners, the TLS certificates and source filtering,
 //! and one `HTTPRoute` per application attaches a host name and path prefixes to it. Nothing is
-//! rendered here for `mode: ingress`, and the gRPC front of Spark Connect stays an Ingress: an
-//! `HTTPRoute` has no backend protocol or per-route timeouts, and its Gateway API kind is
-//! `GRPCRoute`, which this slice does not cover.
+//! rendered here for `mode: ingress`, and the gRPC front of Spark Connect is not here either: an
+//! `HTTPRoute` has no backend protocol, so the front's Gateway API kind `GRPCRoute` lives in
+//! [`crate::grpc_route`].
 
 use std::collections::BTreeMap;
 
