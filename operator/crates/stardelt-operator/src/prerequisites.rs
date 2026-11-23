@@ -995,7 +995,10 @@ mod tests {
             assert!(labels.contains_key(key), "missing {key}");
         }
         assert_eq!(labels["pod-security.kubernetes.io/enforce"], "restricted");
-        assert_eq!(labels["pod-security.kubernetes.io/enforce-version"], "latest");
+        assert_eq!(
+            labels["pod-security.kubernetes.io/enforce-version"],
+            "latest"
+        );
         assert_eq!(labels["pod-security.kubernetes.io/warn"], "restricted");
     }
 
