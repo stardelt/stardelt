@@ -310,6 +310,24 @@ pub fn rewrite_for_group(value: &Value, group: &str) -> Value {
     }
 }
 
+/// The credential rule of `secrets.mode: external`: Kubernetes auth carries no credential, but an
+/// inline token next to it is still a credential in the CR and stays refused; every other block
+/// must reference a Secret by name.
+fn check_provider_credentials(provider: &Value) -> Result<(), String> {
+    if uses_kubernetes_auth(provider) {
+        if let Value::Object(root) = provider
+            && let Some(Value::Object(vault)) = root.get("vault")
+            && vault.contains_key("token")
+            && !vault.contains_key("tokenSecretRef")
+        {
+            return Err("secrets.external.provider must reference a Secret by name (secretRef/tokenSecretRef/authSecretRef), never inline credentials".to_string());
+        }
+    } else {
+        let _ = credential_secret_name(provider)?;
+    }
+    Ok(())
+}
+
 /// The namespaced `SecretStore` of one owner group in `secrets.mode: external`.
 pub fn external_group_store(
     namespace: &str,
@@ -317,6 +335,7 @@ pub fn external_group_store(
     provider: &Value,
 ) -> Result<Value, String> {
     provider_block(provider)?;
+    check_provider_credentials(provider)?;
     if !has_service_account_ref(provider) {
         return Err("secrets.external.provider needs a serviceAccountRef (a ServiceAccount-authenticated provider) to give each owner group its own identity".to_string());
     }
@@ -351,19 +370,7 @@ pub fn external_store(spec: &PlatformInstanceSpec) -> Result<Option<Value>, Stri
                 return Ok(None);
             }
             let (provider_name, _provider_value) = provider_block(provider)?;
-            if uses_kubernetes_auth(provider) {
-                // Kubernetes auth carries no credential, but an inline token next to it is still a
-                // credential in the CR and stays refused.
-                if let Value::Object(root) = provider
-                    && let Some(Value::Object(vault)) = root.get("vault")
-                    && vault.contains_key("token")
-                    && !vault.contains_key("tokenSecretRef")
-                {
-                    return Err("secrets.external.provider must reference a Secret by name (secretRef/tokenSecretRef/authSecretRef), never inline credentials".to_string());
-                }
-            } else {
-                let _ = credential_secret_name(provider)?;
-            }
+            check_provider_credentials(provider)?;
             Ok(Some(serde_json::json!({
                 "apiVersion": "external-secrets.io/v1",
                 "kind": "ClusterSecretStore",
@@ -510,6 +517,23 @@ mod tests {
         let provider = serde_json::json!({"aws": {"auth": {"secretRef": {"name": "aws"}}}});
         let err = external_group_store("stardelt", "shop", &provider).unwrap_err();
         assert!(err.contains("serviceAccountRef"), "{err}");
+    }
+
+    #[test]
+    fn external_group_store_refuses_credentials_inline() {
+        // Kubernetes auth carries no credential; an inline token next to it is refused, as it is
+        // for the cluster store.
+        let inline_token = serde_json::json!({"vault": {
+            "server": "https://vault.example.com", "token": "s3cret",
+            "auth": {"kubernetes": {"role": "eso-${group}",
+                "serviceAccountRef": {"name": "ignored"}}}
+        }});
+        let err = external_group_store("stardelt", "shop", &inline_token).unwrap_err();
+        assert!(err.contains("never inline credentials"), "{err}");
+        // A non-Vault provider that names no Secret is refused too (the existing external rule).
+        let no_credential = serde_json::json!({"azurekv": {"vaultUrl": "https://kv.vault.azure.net",
+            "auth": {"serviceAccountRef": {"name": "ignored"}}}});
+        assert!(external_group_store("stardelt", "shop", &no_credential).is_err());
     }
 
     #[test]
