@@ -54,7 +54,8 @@ for tool in kubectl curl python3 base64 jq; do
     || { echo "keycloak-sync-mcp-exchange: UNVERIFIED (missing tool: $tool)"; exit 3; }
 done
 
-tmp="$(mktemp -d "${TMPDIR:-$HOME/.cache/opencode-scratch}/mcp-exchange.XXXXXX")" || exit 3
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/mcp-exchange.XXXXXX")" \
+  || { echo "keycloak-sync-mcp-exchange: UNVERIFIED (cannot create a temp dir)"; exit 3; }
 chmod 700 "$tmp"
 kc_pid=""
 trino_pid=""
