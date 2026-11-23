@@ -37,6 +37,8 @@ declare -A recipe=(
   [verify-workload-identity]='bash scripts/verify-workload-identity.sh'
   [verify-spark-demo-sandbox]='bash scripts/verify-spark-demo-sandbox.sh'
   [verify-spark-demo-query]='bash scripts/verify-spark-demo-query.sh'
+  [verify-spark-auth]='bash scripts/verify-spark-auth.sh'
+  [verify-spark-query]='bash scripts/verify-spark-query.sh'
   [verify-wap]='bash scripts/verify-wap.sh'
   [verify-product-path]='bash scripts/verify-product-path.sh'
   [verify-spark-pipeline]='bash scripts/verify-spark-pipeline.sh'
@@ -68,7 +70,7 @@ default_targets="verify-trino-auth verify-catalog-permissions verify-backups-all
 verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
-verify-spark-demo-sandbox verify-spark-demo-query
+verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query
 verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
 verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
