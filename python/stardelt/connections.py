@@ -5,13 +5,18 @@
     crm = stardelt.connection("crm-db")          # yours, or your group's
     engine = sqlalchemy.create_engine(crm.sqlalchemy_url(driver="psycopg"))
 
-Identity comes from the pod, never from an argument: the signed-in person's token
-(``TRINO_TOKEN``, the same one ``stardelt.sql`` uses) signs in to the platform's secret
-store. The store, not this package, decides what that person may read: their own
+In an interactive notebook identity comes from the pod, never from an argument: the signed-in
+person's token (``TRINO_TOKEN``, the same one ``stardelt.sql`` uses) signs in to the platform's
+secret store. The store, not this package, decides what that person may read: their own
 connections and the connections of the groups they belong to. Connections that
 administrators manage (``managed``) cannot be read by anybody; the platform uses them on
 your behalf (a federated catalog, an ingestion template), so this function says so instead
 of returning them.
+
+In a scheduled task pod the values come from the environment, because the store is not
+reachable there: the pipeline hands the pod a named connection's fields as
+``CONN_<NAME>_<KEY>`` and its type and settings as ``STARDELT_CONNECTION_<NAME>_TYPE`` and
+``..._SETTINGS``. Such a connection works in every ``secrets.mode``, including ``external``.
 
 A value is fetched **when you ask for it** and never kept: ``crm.value("password")`` reads the
 store every time, so a rotation is seen on the next call and nothing sits in a variable you
@@ -147,11 +152,28 @@ class _Store:
 class Connection:
     """One connection. Settings and field names are known; values are read from the store when asked."""
 
-    def __init__(self, name, scope, group, path, meta):
+    def __init__(self, name, scope, group, path, meta, env_prefix=None):
         self.name = name
         self.scope = scope
         self.group = group
         self._path = path
+        self._env_prefix = env_prefix
+        if env_prefix is not None:
+            # A scheduled pod: the pipeline wrote the metadata to the environment, so no store
+            # call is made and nothing has to be reachable.
+            self.type = os.environ.get(f"{env_prefix}TYPE", "")
+            try:
+                settings = json.loads(os.environ.get(f"{env_prefix}SETTINGS", "") or "{}")
+            except ValueError:
+                settings = {}
+            self.settings = settings if isinstance(settings, dict) else {}
+            value_prefix = f"CONN_{name.upper().replace('-', '_')}_"
+            self.keys = [
+                key[len(value_prefix):].lower()
+                for key in os.environ
+                if key.startswith(value_prefix)
+            ]
+            return
         custom = meta.get("custom_metadata") or {}
         self.type = custom.get("type", "")
         self.keys = [k for k in custom.get("keys", "").split(",") if k]
@@ -167,6 +189,13 @@ class Connection:
 
     def value(self, key):
         """The current value of one secret field, read from the store now."""
+        if self._env_prefix is not None:
+            name = f"CONN_{self.name.upper().replace('-', '_')}_{key.upper()}"
+            if name not in os.environ:
+                raise ConnectionUnavailable(
+                    f"connection {self.name!r} has no value for {key!r} in this pod"
+                )
+            return os.environ[name]
         if key not in self.keys:
             raise KeyError(f"connection {self.name!r} has no field {key!r}; its fields are {self.keys}")
         data = _Store().get("data", self._path)  # a fresh sign-in each time: nothing is kept between calls
@@ -228,6 +257,10 @@ def connection(name, scope=None, group=None):
         )
     if scope not in (None, "personal", "group"):
         raise ConnectionUnavailable("scope must be 'personal' or 'group' (managed connections are not revealed).")
+    prefix = f"STARDELT_CONNECTION_{name.upper().replace('-', '_')}_"
+    if not os.environ.get("STARDELT_SECRET_STORE_URL") and f"{prefix}TYPE" in os.environ:
+        # A scheduled task pod: the pipeline already handed this pod the connection's values.
+        return Connection(name, "scheduled", None, "", {}, env_prefix=prefix)
     store = _Store()
     sub = store.claims.get("sub", "")
     groups = [g for g in (store.claims.get("groups") or []) if _group_ok(g)]

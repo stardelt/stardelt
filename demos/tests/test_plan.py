@@ -379,6 +379,17 @@ def test_a_connection_without_secret_keys_needs_no_synced_secret():
     assert report.connection_keys == ()
 
 
+def test_a_task_plan_carries_the_connections_type_and_settings():
+    name, crm = connection(type="postgresql", config={"host": "db", "port": "5432"})
+    p = plan(
+        *owned(notebook("report", connection=name)),
+        connections={name: crm},
+    )
+    (report,) = p.tasks
+    assert report.connection_type == "postgresql"
+    assert report.connection_config == (("host", "db"), ("port", "5432"))
+
+
 @pytest.mark.parametrize(
     "task, connections, message",
     [

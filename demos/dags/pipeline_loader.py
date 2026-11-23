@@ -346,6 +346,8 @@ def _build_dag(p) -> DAG:
                 principal_sa=f"sp-{p.principal.name}",
                 connection_name=t.connection,
                 connection_keys=t.connection_keys,
+                connection_type=t.connection_type,
+                connection_config=t.connection_config,
                 wap=p.publish == "wap",
                 namespace=namespace,
                 dag=dag,

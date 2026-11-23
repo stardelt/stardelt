@@ -157,6 +157,23 @@ def test_a_database_url_is_quoted_and_complete(store):
     assert stardelt.connection("pg").sqlalchemy_url() == "postgresql://u:p@h"
 
 
+def test_a_scheduled_pod_reads_the_connection_from_its_environment(monkeypatch):
+    # No store: a scheduled task pod gets the values from the pipeline's environment.
+    monkeypatch.delenv("STARDELT_SECRET_STORE_URL", raising=False)
+    monkeypatch.setenv("STARDELT_CONNECTION_CRM_DB_TYPE", "postgresql")
+    monkeypatch.setenv("STARDELT_CONNECTION_CRM_DB_SETTINGS", '{"host": "db", "port": "5432"}')
+    monkeypatch.setenv("CONN_CRM_DB_USER", "user")
+    monkeypatch.setenv("CONN_CRM_DB_PASSWORD", "password")
+    crm = stardelt.connection("crm-db")
+    assert (crm.scope, crm.type) == ("scheduled", "postgresql")
+    assert crm.settings == {"host": "db", "port": "5432"}
+    assert crm.keys == ["user", "password"]
+    assert crm.value("password") == "password"
+    assert crm.sqlalchemy_url() == "postgresql://user:password@db:5432"
+    with pytest.raises(ConnectionUnavailable, match="has no value for 'token' in this pod"):
+        crm.value("token")
+
+
 def test_the_typed_helpers_refuse_the_wrong_type(store):
     store.add("connections/group/analytics/pg", {"user": "u", "password": "p"}, "postgresql", {"host": "h"})
     pg = stardelt.connection("pg")
