@@ -43,6 +43,10 @@ pub const WAREHOUSE: &str = "warehouse";
 pub const AWS_CLI_IMAGE: &str =
     "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73";
 
+/// The bootstrap Job's `curl`. The same digest as `platform/manifests/lakekeeper-bootstrap.yaml`,
+/// so a re-pushed tag cannot change one and not the other.
+pub const CURL_IMAGE: &str = "curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b";
+
 /// A generated S3 key pair.
 #[derive(Clone, PartialEq, Eq)]
 pub struct S3Keys {
@@ -619,6 +623,7 @@ pub fn notebooks_bucket_job(
                 spec: Some(PodSpec {
                     restart_policy: Some("OnFailure".into()),
                     automount_service_account_token: Some(false),
+                    security_context: Some(archive_pod_security_context()),
                     containers: vec![Container {
                         name: "bucket".into(),
                         image: Some(AWS_CLI_IMAGE.into()),
@@ -634,6 +639,11 @@ pub fn notebooks_bucket_job(
                             secret_env("AWS_SECRET_ACCESS_KEY", "secret-key"),
                             secret_env("AWS_ENDPOINT_URL", "endpoint"),
                             secret_env("AWS_DEFAULT_REGION", "region"),
+                            EnvVar {
+                                name: "HOME".into(),
+                                value: Some("/tmp".into()),
+                                ..Default::default()
+                            },
                         ]),
                         security_context: Some(SecurityContext {
                             allow_privilege_escalation: Some(false),
@@ -877,9 +887,10 @@ pub fn bootstrap_job(lakehouse: &str, namespace: &str, name: &str, owner: OwnerR
                 spec: Some(PodSpec {
                     restart_policy: Some("OnFailure".into()),
                     automount_service_account_token: Some(false),
+                    security_context: Some(archive_pod_security_context()),
                     containers: vec![Container {
                         name: "bootstrap".into(),
-                        image: Some("curlimages/curl:8.10.1".into()),
+                        image: Some(CURL_IMAGE.into()),
                         command: Some(vec!["/bin/sh".into(), "-c".into()]),
                         args: Some(vec![BOOTSTRAP_SCRIPT.to_string()]),
                         volume_mounts: Some(vec![
@@ -1488,11 +1499,17 @@ mod tests {
                 ("AWS_SECRET_ACCESS_KEY", Some("secret-key")),
                 ("AWS_ENDPOINT_URL", Some("endpoint")),
                 ("AWS_DEFAULT_REGION", Some("region")),
+                ("HOME", None),
             ]
         );
         assert_eq!(
             c.env.as_ref().expect("env")[0].value.as_deref(),
             Some("notebooks")
+        );
+        assert_eq!(
+            c.env.as_ref().expect("env")[5].value.as_deref(),
+            Some("/tmp"),
+            "UID 65534 has no writable home, so `aws` writes to /tmp"
         );
         let script = &c.args.as_ref().expect("args")[0];
         assert!(script.contains("put-bucket-versioning"));
@@ -1660,6 +1677,38 @@ mod tests {
         };
         let job = archive_bucket_job("main", "data", "archive-bucket-1", owner);
         pod(job.spec.expect("spec").template.spec.expect("pod"));
+    }
+
+    #[test]
+    fn the_bootstrap_and_notebooks_bucket_jobs_declare_the_restricted_pod_fields() {
+        let pod = |spec: k8s_openapi::api::core::v1::PodSpec| {
+            let sc = spec.security_context.clone().expect("pod securityContext");
+            assert_eq!(sc.run_as_non_root, Some(true));
+            assert_eq!(sc.run_as_user, Some(65534));
+            assert_eq!(sc.run_as_group, Some(65534));
+            assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+            spec
+        };
+        let owner = OwnerReference {
+            name: "main".into(),
+            ..Default::default()
+        };
+        pod(
+            bootstrap_job("main", "data", "lakekeeper-bootstrap", owner.clone())
+                .spec
+                .expect("spec")
+                .template
+                .spec
+                .expect("pod"),
+        );
+        pod(
+            notebooks_bucket_job("main", "data", "notebooks-bucket", owner)
+                .spec
+                .expect("spec")
+                .template
+                .spec
+                .expect("pod"),
+        );
     }
 
     #[test]
@@ -1839,5 +1888,6 @@ mod tests {
             AWS_CLI_IMAGE,
             "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73"
         );
+        assert!(CURL_IMAGE.contains("@sha256:"));
     }
 }
