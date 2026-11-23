@@ -39,6 +39,18 @@ BUCKETS = (
     "scripts/create-notebooks-bucket.sh",
 )
 
+# The Spark checks start a client pod from the notebook image in the platform namespace
+# (#1397): a heredoc like the buckets, one Pod document each.
+CLIENTS = (
+    "scripts/verify-spark-auth.sh",
+    "scripts/verify-spark-cluster-read.sh",
+    "scripts/verify-spark-cluster-write.sh",
+    "scripts/verify-spark-demo-query.sh",
+    "scripts/verify-spark-demo-security.sh",
+    "scripts/verify-spark-no-platform-key.sh",
+    "scripts/verify-spark-query.sh",
+)
+
 
 def run(args, stdin=None):
     return subprocess.run(
@@ -151,6 +163,30 @@ class ProbePodSpecTest(unittest.TestCase):
             home = [env for env in spec["containers"][0].get("env") or []
                     if env.get("name") == "HOME"]
             self.assertEqual(home, [{"name": "HOME", "value": "/tmp"}], relative)
+
+    def test_spark_client_pods_declare_the_floor(self):
+        for relative in CLIENTS:
+            with open(os.path.join(ROOT, relative), encoding="utf-8") as handle:
+                text = handle.read()
+            match = re.search(r"<<EOF\n(.*?)\nEOF\n", text, re.S)
+            self.assertIsNotNone(match, "%s: no Pod heredoc found" % relative)
+            # The shell fills `${…}`/`$NAME`; a bare flow mapping such as
+            # `secretKeyRef: { name: ${POD}-token }` is not YAML until it is.
+            document = re.sub(r"\$\{[A-Za-z_]+\}|\$[A-Za-z_]+", "x", match.group(1))
+            pod = yaml.safe_load(document)
+            self.assertEqual(pod.get("kind"), "Pod", relative)
+            spec = pod["spec"]
+            self.assertEqual(spec.get("restartPolicy"), "Never", relative)
+            self.assertEqual(spec.get("securityContext"), {
+                "runAsNonRoot": True,
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            }, relative)
+            self.assertEqual(spec["containers"][0].get("securityContext"), {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            }, relative)
 
 
 if __name__ == "__main__":
