@@ -48,6 +48,13 @@ declare -A recipe=(
   [verify-superset-nova-identity]='bash scripts/verify-superset-nova-identity.sh'
   [verify-compute]='bash scripts/verify-compute.sh'
   [verify-deploy-stage]='bash scripts/verify-deploy-stage.sh'
+  [verify-secret-annotations]='python3 scripts/verify_secret_annotations.py'
+  [verify-trino-system-catalog]='bash scripts/verify-trino-system-catalog.sh'
+  [verify-trusted-engine]='bash scripts/verify-trusted-engine.sh'
+  [verify-warehouse-scale]='bash scripts/verify-warehouse-scale.sh'
+  [verify-cron-schedule]='bash scripts/verify-cronjobs.sh --max-age'
+  [verify-metrics]='bash scripts/verify-metrics.sh'
+  [verify-seaweedfs-ports]='bash scripts/verify-seaweedfs-ports.sh'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -62,7 +69,8 @@ verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-c
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query
-verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage"
+verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
+verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
