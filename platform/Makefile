@@ -1270,6 +1270,7 @@ catalogs: _context ## Converge Catalogs into Trino catalogs + bridge mappings (r
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh bridge-arg) \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh admin-arg)
 	@kubectl -n $(NAMESPACE) rollout status deploy/lakekeeper --timeout=5m
+	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
 	@$(MAKE) --no-print-directory trino
 
 # ---------------------------------------------------------------------------
@@ -1373,6 +1374,7 @@ catalog-enforce: deps _context ## Switch Trino to the permission bridge and the 
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh bridge-arg) \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh admin-arg)
 	@kubectl -n $(NAMESPACE) rollout status deploy/lakekeeper --timeout=5m
+	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
 	@$(MAKE) --no-print-directory trino
 	@kubectl -n $(NAMESPACE) rollout status deploy/trino-coordinator --timeout=5m
 	@echo ""
