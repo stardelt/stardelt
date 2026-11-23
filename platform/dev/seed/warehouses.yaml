@@ -26,6 +26,13 @@
 # defaults of platform#312). On a one-node cluster that means a `large` query gets a
 # bigger share and fewer concurrent peers — not more CPU or RAM.
 #
+# The classes are no longer permanently on (#30 step A): each carries `autoStop: 15m`
+# with a floor of 0 workers, so after a quarter of an hour without a query the
+# access-sync job scales the one worker Deployment to 0 and the dev node gets its
+# ~1.3 GiB back. A class that has never been queried carries no
+# `stardelt.io/last-query-at` and stays on until its first query writes one; Nova's
+# Start (or the next query) writes the stamp that wakes the engine.
+#
 # Written for people who want to exercise the classes; it is applied by
 # `make seed-dev-access YES=1` and removed by `make unseed-dev-access YES=1`, which
 # deletes `medium` and `large` and keeps `small` (the default class is part of the
@@ -39,6 +46,14 @@ spec:
   lakehouseRef: { name: main }
   displayName: "Small"
   size: small
+  # Idle engines cost memory the dev node does not have (#30 step A): after 15 minutes with no
+  # query the one worker is scaled to 0, and Nova's Start (or the next query's wake) brings it
+  # back. `minWorkers: 0` is what makes the floor 0; the CRD refuses it without `autoStop`.
+  # A class that has never been queried carries no `stardelt.io/last-query-at` and stays on
+  # until its first query writes one (`access-sync-job.py:1788-1792`).
+  autoStop: 15m
+  minWorkers: 0
+  maxWorkers: 1
   default: true
   grants:
     - { group: stardelt-users }
@@ -53,6 +68,10 @@ spec:
   lakehouseRef: { name: main }
   displayName: "Medium"
   size: medium
+  # The same idle policy as `small` (#30 step A).
+  autoStop: 15m
+  minWorkers: 0
+  maxWorkers: 1
   grants:
     - { group: finops }
 ---
@@ -65,5 +84,9 @@ spec:
   lakehouseRef: { name: main }
   displayName: "Large"
   size: large
+  # The same idle policy as `small` (#30 step A).
+  autoStop: 15m
+  minWorkers: 0
+  maxWorkers: 1
   grants:
     - { group: analytics }
