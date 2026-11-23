@@ -220,9 +220,10 @@ pub fn spark_connect_ingress(
 pub const CONNECT_POD_LABEL: &str = "sparkoperator.k8s.io/connect-name";
 
 /// Ingress to the Lakehouse's shared Spark Connect server (platform#1097). The server
-/// authenticates nobody, so the network admits members' notebook pods and a pipeline's own
-/// `spark-pipeline` task pods on 15002 (not a pod labelled `stardelt.io/group.visitors`) and
-/// the server's own driver and executor pods on any port. Both carry
+/// authenticates nobody, so the network admits members' notebook pods, a pipeline's own
+/// `spark-pipeline` task pods and `notebook` task pods on 15002 (not a pod labelled
+/// `stardelt.io/group.visitors`) and the server's own driver and executor pods on any port.
+/// Both carry
 /// `app.kubernetes.io/name: spark-connect` (values/spark.yaml), so one peer covers the
 /// driver-executor traffic both ways.
 /// The customer's Prometheus reads the driver's metrics on the UI port 4040 from any
@@ -303,6 +304,27 @@ pub fn shared_spark_connect_ingress(namespace: &str) -> NetworkPolicy {
                         "app.kubernetes.io/name",
                         "spark-connect-auth",
                     )])]),
+                    ports: Some(vec![port(SPARK_CONNECT_PORT)]),
+                },
+                // A `notebook` task pod (#80, kind: notebook): the same owner-group code as a
+                // `spark-pipeline` task pod (stardelt/stardelt#1282), and `pipeline-notebook-egress`
+                // already admits its 15002 egress. Visitors are excluded, as for notebooks.
+                NetworkPolicyIngressRule {
+                    from: Some(vec![NetworkPolicyPeer {
+                        pod_selector: Some(LabelSelector {
+                            match_labels: Some(BTreeMap::from([(
+                                "app.kubernetes.io/name".to_string(),
+                                PIPELINE_NOTEBOOK_LABEL.to_string(),
+                            )])),
+                            match_expressions: Some(vec![LabelSelectorRequirement {
+                                key: "stardelt.io/group.visitors".to_string(),
+                                operator: "DoesNotExist".to_string(),
+                                values: None,
+                            }]),
+                        }),
+                        namespace_selector: None,
+                        ip_block: None::<IPBlock>,
+                    }]),
                     ports: Some(vec![port(SPARK_CONNECT_PORT)]),
                 },
             ]),
@@ -1175,7 +1197,7 @@ mod tests {
             &vec!["Ingress".to_string()]
         );
         let ingress = spec.ingress.as_ref().expect("rules");
-        assert_eq!(ingress.len(), 5);
+        assert_eq!(ingress.len(), 6);
         // Rule 1: members' notebook pods only, on the Connect port.
         let members = ingress[0].from.as_ref().unwrap();
         assert_eq!(members.len(), 1);
@@ -1274,6 +1296,31 @@ mod tests {
         assert!(front[0].namespace_selector.is_none(), "same namespace");
         assert_eq!(
             ingress[4].ports.as_ref().unwrap(),
+            &vec![port(SPARK_CONNECT_PORT)]
+        );
+        // Rule 6: a pipeline's `notebook` task pods, on the Connect port. Not a visitor.
+        let notebook_task = ingress[5].from.as_ref().unwrap();
+        assert_eq!(notebook_task.len(), 1);
+        let notebook_selector = notebook_task[0]
+            .pod_selector
+            .as_ref()
+            .expect("pod selector");
+        assert_eq!(
+            notebook_selector.match_labels.as_ref().unwrap(),
+            &BTreeMap::from([(
+                "app.kubernetes.io/name".to_string(),
+                "pipeline-notebook".to_string()
+            )])
+        );
+        let notebook_expressions = notebook_selector
+            .match_expressions
+            .as_ref()
+            .expect("expressions");
+        assert_eq!(notebook_expressions.len(), 1);
+        assert_eq!(notebook_expressions[0].key, "stardelt.io/group.visitors");
+        assert_eq!(notebook_expressions[0].operator, "DoesNotExist");
+        assert_eq!(
+            ingress[5].ports.as_ref().unwrap(),
             &vec![port(SPARK_CONNECT_PORT)]
         );
     }

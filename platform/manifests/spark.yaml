@@ -398,3 +398,15 @@ spec:
       ports:
         - protocol: TCP
           port: 4040
+    # A `notebook` task pod (#80, kind: notebook): the same owner-group code as a
+    # `spark-pipeline` task pod, and `pipeline-notebook-egress` already admits its 15002
+    # egress. Not a pod labelled for the visitors group, as in the rules above.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pipeline-notebook
+            matchExpressions:
+              - { key: stardelt.io/group.visitors, operator: DoesNotExist }
+      ports:
+        - protocol: TCP
+          port: 15002
