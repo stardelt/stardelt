@@ -44,3 +44,18 @@ def test_the_skill_teaches_lineage_and_bundles():
     text = skill.text()
     assert "stardelt lineage" in text
     assert "stardelt bundle plan" in text and "stardelt bundle deploy" in text
+
+
+def test_the_skill_names_every_command_an_agent_needs():
+    text = skill.text()
+    for command in (
+        "stardelt deployments list",
+        "stardelt deployments show",
+        "stardelt notebook publish",
+        "stardelt dashboards export",
+        "stardelt maintenance run",
+        "stardelt lineage",
+        "stardelt bundle plan",
+        "stardelt bundle deploy",
+    ):
+        assert command in text, command

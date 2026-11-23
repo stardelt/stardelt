@@ -77,3 +77,29 @@ When the person wants a change, give them the command to run themselves and say 
 - Send platform data anywhere else (a web page, a message, a file outside the project) unless the person asked for
   exactly that.
 - Treat a missing table or a permission error as a bug to route around: report it.
+
+## Deployments (what runs where)
+
+`deployments_list` lists what a bundle deploy put on a stage, newest first; `deployments_get`
+shows one deploy's pipelines and the documents it applied. In a shell:
+`stardelt deployments list` and `stardelt deployments show <id>`. A run's provenance comes from
+the deployment it left, so read the record before you claim which code ran. Rolling back is a
+write: it runs a deploy again from the record, so propose it and let the person run it.
+
+## Notebooks
+
+`notebooks_list`, `notebooks_versions` and `notebooks_parameters` show the published versions
+and their parameters; a schedule pins one version, not the file on disk.
+`stardelt notebook publish <file> --name <name>` publishes a new version and is a write.
+
+## Dashboards
+
+`stardelt dashboards export <superset-id> -o DIR` writes a dashboard as the files of a bundle
+(`databases/` is not stored: each stage keeps its own). There is no MCP tool for dashboards;
+run the command and read the files. Importing a dashboard into a stage is a write.
+
+## Maintenance
+
+`stardelt maintenance run --catalog <catalog>` is what the nightly CronJob runs: it lists the
+base tables, optimizes small files, expires old snapshots and removes orphan files, one JSON
+line per table. It is a write; do not run it to answer a question.
