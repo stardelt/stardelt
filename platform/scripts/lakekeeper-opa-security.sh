@@ -4,9 +4,9 @@
 # Chart 0.14.0 (and 0.15.0) hardcodes the sidecar's securityContext in
 # deployment template: runAsUser/runAsGroup/readOnlyRootFilesystem, no
 # allowPrivilegeEscalation and no capabilities, and exposes no value key for the two.
-# A Helm post-renderer would be the other way; this install already applies manifests
-# after the release (lakekeeper-bootstrap.yaml, lakekeeper-network-policy.yaml), so the
-# patch lives here and every lakekeeper install calls it.
+# A Helm post-renderer would be the other way; step-lakekeeper calls it right after a release
+# that does not wait (#1384), because a `restricted` namespace refuses the unpatched pod and a
+# waiting, atomic release would roll back before the patch ran.
 #
 #   NAMESPACE=stardelt bash scripts/lakekeeper-opa-security.sh
 #

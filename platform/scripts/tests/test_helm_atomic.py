@@ -15,7 +15,12 @@ MAKEFILE = pathlib.Path(__file__).resolve().parents[2] / "Makefile"
 # a release that never waits does not pass through the pending state this fixes, and
 # `--atomic` would imply `--wait` and make it block on every workload. The exemption is
 # bounded by `test_chart_install_still_does_not_wait`: adding `--wait` there fails the suite.
-NON_WAITING = {"chart-install"}
+#
+# `step-lakekeeper` too (#1384): a namespace that enforces `restricted` refuses the chart's
+# unpatched `opa` sidecar, so `--wait` times out and `--atomic` rolls back before
+# `scripts/lakekeeper-opa-security.sh` patches it; the step waits itself with `rollout status`
+# after the patch. Bounded by `test_lakekeeper_step_still_does_not_wait`.
+NON_WAITING = {"chart-install", "step-lakekeeper"}
 
 
 def helm_upgrades():
@@ -74,6 +79,17 @@ class HelmAtomicTest(unittest.TestCase):
             self.assertNotIn("--wait", block, "chart-install waits now: it needs --atomic too")
             self.assertNotIn("$(HELM_FLAGS)", block, "chart-install waits now: it needs --atomic too")
             self.assertNotIn("--atomic", block, "chart-install does not wait, so it takes no --atomic")
+
+    def test_lakekeeper_step_still_does_not_wait(self):
+        # #1384: the exemption above is only sound while the release does not wait. A
+        # `step-lakekeeper` that waits again needs `--atomic` again, and its opa patch has to
+        # run before the release does.
+        blocks = [block for target, block in helm_upgrades() if target == "step-lakekeeper"]
+        self.assertTrue(blocks, "step-lakekeeper no longer runs `helm upgrade`")
+        for block in blocks:
+            self.assertNotIn("--wait", block, "step-lakekeeper waits now: it needs --atomic too")
+            self.assertNotIn("$(HELM_FLAGS)", block, "step-lakekeeper waits now: it needs --atomic too")
+            self.assertNotIn("--atomic", block, "step-lakekeeper does not wait, so it takes no --atomic")
 
     def test_a_recipe_that_switches_wait_off_switches_atomic_off_too(self):
         # `--atomic` implies `--wait` whatever the flag order: a recipe that turns the wait off

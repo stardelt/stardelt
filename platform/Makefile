@@ -42,6 +42,11 @@ KEYCLOAK_VERSION   := 26.8.2
 # stardelt-operator 157 on 2026-11-22).
 HELM_FLAGS := --namespace $(NAMESPACE) --create-namespace --wait --atomic --timeout 10m
 
+# Lakekeeper only (#1384): the chart's opa sidecar is refused by a `restricted` namespace until
+# scripts/lakekeeper-opa-security.sh patches it, so --wait would time out and --atomic would
+# roll back before the patch. step-lakekeeper waits itself, after the patch.
+HELM_FLAGS_NOWAIT := --namespace $(NAMESPACE) --create-namespace --timeout 10m
+
 SUPERSET_IMAGE := ghcr.io/stardelt/superset:dev
 JUPYTER_IMAGE  := ghcr.io/stardelt/jupyter-singleuser:dev
 
@@ -615,15 +620,16 @@ step-lakekeeper: ## The Iceberg REST catalog, its bootstrap and the ingress Netw
 	@echo "› Lakekeeper"
 	@helm upgrade --install lakekeeper lakekeeper/lakekeeper \
 	  --version $(LAKEKEEPER_VERSION) \
-	  $(HELM_FLAGS) \
+	  $(HELM_FLAGS_NOWAIT) \
 	  -f helm-values/lakekeeper.yaml \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh bridge-arg) \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh admin-arg)
+	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
+	@kubectl -n $(NAMESPACE) rollout status deployment/lakekeeper --timeout=10m
 	@echo "› Lakekeeper bootstrap"
 	@kubectl apply -f manifests/lakekeeper-bootstrap.yaml
 	@echo "› catalog ingress NetworkPolicy (only the components that need it)"
 	@kubectl apply -f manifests/lakekeeper-network-policy.yaml
-	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
 	@echo "› Access sync: one warehouse per Catalog (platform#305)"
 	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
 	  $(MAKE) --no-print-directory access-sync; \
