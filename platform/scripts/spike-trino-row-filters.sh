@@ -51,15 +51,25 @@ for tool in kubectl helm python3 curl git; do
 done
 
 # The install rules (AGENTS.md): never upgrade two releases from a checkout that is behind
-# origin/main — its pins are old and the upgrade rewrites the live Deployments to them.
+# origin/main — its pins are old and the upgrade rewrites the live Deployments to them. The
+# values and manifests this checkout deploys must be origin/main's, too: everything else here
+# is whatever branch the spike was started from.
 git rev-parse --git-dir >/dev/null 2>&1 || fail "not inside a git checkout"
 git fetch -q origin || fail "cannot reach origin"
 behind="$(git rev-list --count HEAD..origin/main)"
 [ "$behind" = 0 ] || fail "this checkout is $behind commit(s) behind origin/main — pull first"
+drift="$(git diff --name-only origin/main -- helm-values manifests)"
+[ -z "$drift" ] || fail "helm-values/ or manifests/ differ from origin/main (${drift//$'\n'/, }) — run this from main"
 
-# The values files are patched by this script; they must not carry anyone's work when it starts.
-git diff --quiet -- "$TRINO_VALUES" "$LAKEKEEPER_VALUES" \
-  || fail "$TRINO_VALUES or $LAKEKEEPER_VALUES has local changes — commit or stash them first"
+# `make step-*` upgrades the cluster the current context points at; pin it like the Makefile does.
+if [ -n "${EXPECT_CONTEXT:-}" ] && [ "$(kubectl config current-context)" != "$EXPECT_CONTEXT" ]; then
+  fail "current-context is '$(kubectl config current-context)', EXPECT_CONTEXT is '$EXPECT_CONTEXT'"
+fi
+
+# The values files are patched by this script; they must not carry anyone's work when it starts
+# (the index counts: the trap restores from it).
+git diff --quiet HEAD -- "$TRINO_VALUES" "$LAKEKEEPER_VALUES" \
+  || fail "$TRINO_VALUES or $LAKEKEEPER_VALUES has changes — commit or stash them first"
 
 umask 077
 tmp="$(mktemp -d)"
@@ -74,37 +84,52 @@ f6=""
 # shellcheck disable=SC2329  # called by the EXIT trap below
 cleanup() {
   rc=$?
-  trap - EXIT
+  trap - EXIT INT TERM HUP
   set +e
   echo "› revert: restore $TRINO_VALUES and $LAKEKEEPER_VALUES, redeploy both releases"
   git checkout -- "$TRINO_VALUES" "$LAKEKEEPER_VALUES"
   if [ "$deployed" = 1 ]; then
-    make step-lakekeeper >"$tmp/revert-lakekeeper.log" 2>&1 \
-      || { echo "  step-lakekeeper failed:"; tail -n 15 "$tmp/revert-lakekeeper.log"; }
+    # Trino first: while the bridge is back on main but the URIs are still set, the entry
+    # points are undefined — that is "no filter", but leaving both wrong at once is avoidable.
     make step-trino >"$tmp/revert-trino.log" 2>&1 \
-      || { echo "  step-trino failed:"; tail -n 15 "$tmp/revert-trino.log"; }
+      || { echo "  step-trino failed — the cluster is NOT back on main:"; tail -n 15 "$tmp/revert-trino.log"; rc=1; }
+    make step-lakekeeper >"$tmp/revert-lakekeeper.log" 2>&1 \
+      || { echo "  step-lakekeeper failed — the cluster is NOT back on main:"; tail -n 15 "$tmp/revert-lakekeeper.log"; rc=1; }
   fi
 
-  local rf count verify
-  rf="$(kubectl -n "$NAMESPACE" get configmap trino-coordinator \
-        -o jsonpath='{.data.access-control-opa\.properties}' 2>/dev/null | grep -c 'row-filters' || true)"
-  mint_trino_token
-  count="$(count_as "$tmp/demo-token")"
-  if make verify-trino-auth TRINO_VERIFY_USER="$SPIKE_USER" TRINO_VERIFY_USER_PASSWORD="$SPIKE_PASSWORD" \
-      >"$tmp/verify-trino-auth.log" 2>&1; then
+  local trino_conf bridge_policy rf="unknown" bridge="unknown" count="unknown" verify=FAIL
+  if trino_conf="$(kubectl -n "$NAMESPACE" get configmap trino-coordinator \
+      -o jsonpath='{.data.access-control-opa\.properties}')"; then
+    case "$trino_conf" in
+      *row-filters*) rf=yes ;;
+      *) rf=no ;;
+    esac
+  fi
+  if bridge_policy="$(kubectl -n "$NAMESPACE" get configmap lakekeeper-opa-policies \
+      -o jsonpath='{.data.stardelt\.front\.rego}')"; then
+    case "$bridge_policy" in
+      *row_filters*|*column_masks*) bridge=present ;;
+      *) bridge=absent ;;
+    esac
+  fi
+  if mint_trino_token; then
+    count="$(count_as "$tmp/demo-token")"
+  fi
+  if TRINO_VERIFY_USER="$SPIKE_USER" TRINO_VERIFY_USER_PASSWORD="$SPIKE_PASSWORD" \
+      make verify-trino-auth >"$tmp/verify-trino-auth.log" 2>&1; then
     verify=PASS
   else
-    verify=FAIL
     tail -n 8 "$tmp/verify-trino-auth.log"
   fi
 
   [ -z "$f6" ] || echo "$f6"
-  echo "CLEANUP row_filters_called=$([ "${rf:-0}" -eq 0 ] && echo no || echo yes) count=${count:-unknown} verify_trino_auth=$verify"
+  echo "CLEANUP row_filters_called=$rf trino_uri=$([ "$rf" = yes ] && echo present || echo absent) bridge_entry_points=$bridge count=${count:-unknown} verify_trino_auth=$verify"
   echo "spike-trino-row-filters: DONE"
   rm -rf "$tmp"
   exit "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 
 # ---------------------------------------------------------------------------
 # Clients. Each prints exactly one line: `rows=<json>` or `error=<the engine's sentence>`.
@@ -134,11 +159,18 @@ try:
         body = post(body["nextUri"])
         rows.extend(body.get("data") or [])
     if body.get("error"):
-        print("error=" + str(body["error"].get("message") or body["error"]).replace("\n", " "))
+        error = body["error"]
+        print("error=%s: %s" % (error.get("errorName") or "ERROR",
+                                str(error.get("message") or error).replace("\n", " ")))
     else:
         print("rows=" + json.dumps(rows))
 except urllib.error.HTTPError as e:
-    print("error=HTTP %s %s" % (e.code, e.read().decode("utf-8", "replace")[:300].replace("\n", " ")))
+    text = e.read().decode("utf-8", "replace").replace("\n", " ")
+    try:
+        error = json.loads(text)["error"]
+        print("error=%s: %s" % (error.get("errorName") or "HTTP %s" % e.code, error.get("message")))
+    except (ValueError, KeyError, TypeError):
+        print("error=HTTP %s %s" % (e.code, text[:300]))
 PY
 }
 
@@ -226,14 +258,18 @@ rows_of() { sed -n 's/^rows=//p'; }
 
 # A Keycloak access token for the measured person, through the device grant on client `trino`
 # (the same flow verify-trino-auth.sh's check 3 uses). It lives minutes, so it is re-minted
-# before every group of measurements. Nothing prints it.
+# before every group of measurements. Nothing prints it. Returns non-zero instead of exiting:
+# the revert path calls it too, and must still print its CLEANUP line.
 mint_trino_token() {
-  kubectl -n "$NAMESPACE" get secret stardelt-oidc-clients -o jsonpath='{.data.trino}' | base64 -d >"$tmp/trino-client"
+  kubectl -n "$NAMESPACE" get secret stardelt-oidc-clients -o jsonpath='{.data.trino}' | base64 -d >"$tmp/trino-client" || return 1
   ISSUER="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.issuerUrl}')" \
   TRINO_URL="$TRINO_URL" USER="$SPIKE_USER" PASSWORD="$SPIKE_PASSWORD" \
   CLIENT_SECRET_FILE="$tmp/trino-client" MINT_ONLY=1 TOKEN_FILE="$tmp/demo-token" \
-    python3 scripts/verify-trino-auth.py >"$tmp/mint-trino.log" 2>&1 \
-    || { cat "$tmp/mint-trino.log"; fail "could not mint a Trino token for $SPIKE_USER"; }
+    python3 scripts/verify-trino-auth.py >"$tmp/mint-trino.log" 2>&1 || return 1
+}
+
+need_trino_token() {
+  mint_trino_token || { cut -c1-300 "$tmp/mint-trino.log" | tail -n 5; fail "could not mint a Trino token for $SPIKE_USER"; }
 }
 
 # The same person's token with the `nova` audience — Nova accepts only its own client id, and
@@ -322,13 +358,20 @@ deploy_trino() {
     || fail "the Trino coordinator did not roll out"
 }
 
-# The coordinator's DEBUG lines for the OPA plugin, ANSI colours stripped.
+# The coordinator's DEBUG lines for the OPA plugin, ANSI colours stripped. The running pod is
+# named explicitly: `kubectl logs deployment/…` picks any pod of the selector, and a rollout
+# leaves Failed and Terminating ones behind.
 opa_requests() { # opa_requests <since, e.g. 180s> | opa_requests <RFC3339 mark>
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pods \
+    -l app.kubernetes.io/name=trino,app.kubernetes.io/component=coordinator,app.kubernetes.io/instance=trino \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+  [ -n "$pod" ] || fail "no running Trino coordinator pod to read the OPA requests from"
   if [[ "${1:-}" == *T* ]]; then
-    kubectl -n "$NAMESPACE" logs deployment/trino-coordinator --since-time="$1" 2>&1 \
+    kubectl -n "$NAMESPACE" logs "$pod" --since-time="$1" 2>&1 \
       | sed -e 's/\x1b\[[0-9;]*m//g'
   else
-    kubectl -n "$NAMESPACE" logs deployment/trino-coordinator --since="${1:-180s}" 2>&1 \
+    kubectl -n "$NAMESPACE" logs "$pod" --since="${1:-180s}" 2>&1 \
       | sed -e 's/\x1b\[[0-9;]*m//g'
   fi
 }
@@ -343,7 +386,7 @@ bridge_answer() { # bridge_answer <endpoint> <user>
 # ---------------------------------------------------------------------------
 # 0. Pre-flight: the person, the table and the untouched answer.
 # ---------------------------------------------------------------------------
-mint_trino_token
+need_trino_token
 baseline="$(count_as "$tmp/demo-token")"
 [ "$baseline" = 200 ] || fail "pre-spike $TABLE holds $baseline rows for $SPIKE_USER, expected 200"
 DEMO_USER="$(trino_sql "$tmp/demo-token" "SELECT current_user" | rows_of \
@@ -432,7 +475,7 @@ REGO
 )"
 deploy_trino
 
-mint_trino_token
+need_trino_token
 empty_arrays="$(trino_sql "$tmp/demo-token" "SELECT count(*) FROM $TABLE")"
 case "$empty_arrays" in
   rows=*) empty_arrays_fact="accepted" ;;
@@ -446,7 +489,7 @@ row_filters := []
 # (see F2), an absent entry point is.
 REGO
 )"
-mint_trino_token
+need_trino_token
 f2_count="$(count_as "$tmp/demo-token")"
 [ "$f2_count" = 200 ] || fail "the empty answer changed the result ($f2_count rows, expected 200)"
 
@@ -474,9 +517,12 @@ row_body="$(printf '%s\n' "$mine" | grep 'operation":"GetRowFilters"' | tail -n 
   | sed -n 's/.*request body = \(.*\) ; request headers.*/\1/p')"
 mask_body="$(printf '%s\n' "$mine" | grep 'operation":"GetColumnMask"' | tail -n 1 \
   | sed -n 's/.*request body = \(.*\) ; request headers.*/\1/p')"
+# Which columns Trino asks a mask for, in the order it asks (it includes Iceberg's hidden ones).
+mask_columns="$(printf '%s\n' "$mine" | grep 'operation":"GetColumnMask"' \
+  | sed -n 's/.*"columnName":"\([^"]*\)".*/\1/p' | tr '\n' ',' | sed 's/,$//')"
 if [ "$row_calls" -gt 0 ]; then called=yes; else called=no; fi
 echo "F1 row_filters_called=$called operation=GetRowFilters calls_for_2_queries=$row_calls path=${row_path:-none} row_filter_body=${row_body:-none}"
-echo "F1b column_masking_called=$([ "$mask_calls" -gt 0 ] && echo yes || echo no) operation=GetColumnMask calls_for_2_queries=$mask_calls column_mask_body=$(printf '%s' "${mask_body:-none}" | cut -c1-260)"
+echo "F1b column_masking_called=$([ "$mask_calls" -gt 0 ] && echo yes || echo no) operation=GetColumnMask calls_for_2_queries=$mask_calls columns=${mask_columns:-none} column_mask_body=$(printf '%s' "${mask_body:-none}" | cut -c1-260)"
 echo "F2 empty_rule_count=$f2_count empty_column_mask_array=$empty_arrays_fact"
 
 # ---------------------------------------------------------------------------
@@ -492,7 +538,7 @@ row_filters := [] if {
 }
 REGO
 )"
-mint_trino_token
+need_trino_token
 f3_line="$(trino_sql "$tmp/demo-token" "SELECT count(*) FROM $TABLE")"
 f3="$(printf '%s' "$f3_line" | sed -n 's/^rows=//p' \
   | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0][0] if rows else "no-rows")')"
@@ -517,58 +563,77 @@ column_masks := {"expression": "'masked'"} if {
 }
 REGO
 )"
-mint_trino_token
+need_trino_token
 masked_line="$(trino_sql "$tmp/demo-token" "SELECT name, country FROM $TABLE ORDER BY id LIMIT 2")"
 masked="$(printf '%s' "$masked_line" | sed -n 's/^rows=//p')"
 f4="$(printf '%s' "$masked" \
   | python3 -c 'import json,sys
 rows=json.load(sys.stdin)
-print(rows[0][0] if rows else "no-rows")' 2>/dev/null || printf '%s' "${masked_line#error=}")"
+print(rows[0][0] if rows else "no-rows")' || printf '%s' "${masked_line#error=}")"
 echo "F4 masked_name=$f4 masked_rows=$masked"
 
-superset_pw="$(kubectl -n "$NAMESPACE" get secret trino-password-db -o jsonpath='{.data.superset-password}' | base64 -d)"
-finish_statement() { python3 - "$1" <<'PY'
-import json, sys, urllib.request
+# The service account's password never reaches an argument list: curl reads a 0600 config file,
+# and the statement poller reads the same file for its own Authorization header.
+kubectl -n "$NAMESPACE" get secret trino-password-db -o jsonpath='{.data.superset-password}' \
+  | base64 -d >"$tmp/superset-pw"
+printf 'user = "superset:%s"\n' "$(cat "$tmp/superset-pw")" >"$tmp/superset.curlrc"
+finish_statement() { SUPERSET_PW_FILE="$tmp/superset-pw" python3 - "$1" <<'PY'
+import base64, json, os, sys, urllib.request
+password = open(os.environ["SUPERSET_PW_FILE"], encoding="utf-8").read().strip()
+headers = {"Authorization": "Basic " + base64.b64encode(("superset:" + password).encode()).decode()}
 body = json.loads(sys.argv[1])
 rows = list(body.get("data") or [])
+
+def get(url):
+    return json.load(urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60))
+
 while body.get("nextUri") and not body.get("error"):
-    with urllib.request.urlopen(urllib.request.Request(body["nextUri"]), timeout=60) as r:
-        body = json.load(r)
+    body = get(body["nextUri"])
     rows.extend(body.get("data") or [])
 if body.get("error"):
     print("error:" + str(body["error"].get("message"))[:160])
 elif rows:
-    print(rows[0][0])
+    print(json.dumps(rows))
 else:
     print("no-rows")
 PY
 }
 as_superset() { # as_superset <sql> — the `superset` service account, no impersonation
-  curl -sS -u "superset:$superset_pw" -X POST "$TRINO_URL/v1/statement" \
+  curl -sS -K "$tmp/superset.curlrc" -X POST "$TRINO_URL/v1/statement" \
     -H 'X-Trino-Source: spike-trino-row-filters' --data "$1"
 }
+first_value() { # first_value <finish_statement output>
+  printf '%s' "$1" | python3 -c 'import json,sys
+text=sys.stdin.read().strip()
+try:
+    rows=json.loads(text)
+except ValueError:
+    print(text or "no-rows"); raise SystemExit
+print(rows[0][0] if rows else "no-rows")' || printf '%s' "$1"
+}
 f5_id_line="$(as_superset "SELECT count(*) FROM $TABLE")"
-f5="$(finish_statement "$f5_id_line")"
-f5_names="$(finish_statement "$(as_superset "SELECT min(name) FROM $TABLE")")"
+f5="$(first_value "$(finish_statement "$f5_id_line")")"
+f5_names="$(first_value "$(finish_statement "$(as_superset "SELECT min(name) FROM $TABLE")")")"
+f5_catalogs="$(finish_statement "$(as_superset 'SHOW CATALOGS')" | cut -c1-160)"
 # The `superset` service account is not a member of the demo warehouse's group: Trino's own
 # rules deny the catalog before a row filter is ever considered, so "the other user still sees
 # 200" cannot be measured on this table. What can be measured is the policy's answer for the
 # same user string, asked the way Trino asks it.
 f5_policy="$(bridge_answer row_filters superset)"
-echo "F5 other_user_count=$f5 other_user=superset first_name=$f5_names other_user_policy_answer=$f5_policy query_id=$(printf '%s' "$f5_id_line" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "none")' 2>/dev/null || echo none)"
+echo "F5 other_user_count=$f5 other_user=superset first_name=$f5_names other_user_catalogs=$f5_catalogs other_user_policy_answer=$f5_policy query_id=$(printf '%s' "$f5_id_line" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "none")' || echo none)"
 
 # ---------------------------------------------------------------------------
 # 5. F7: the two paths #50 cares about — measured while the rule is in place.
 # ---------------------------------------------------------------------------
-mint_trino_token
+need_trino_token
 mint_nova_token
 nova_line="$(nova_sql "$tmp/nova-token" "SELECT count(*) FROM $TABLE")"
 nova_fact="$(printf '%s' "$nova_line" | sed -n 's/^rows=//p' \
-  | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0][0] if rows else "no-rows")' 2>/dev/null \
+  | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0][0] if rows else "no-rows")' \
   || printf 'error:%s' "$(printf '%s' "$nova_line" | sed -n 's/^error=//p' | cut -c1-120)")"
 impersonated_line="$(superset_sql "$DEMO_USER" "SELECT count(*) FROM $TABLE")"
 superset_fact="$(printf '%s' "$impersonated_line" | sed -n 's/^rows=//p' \
-  | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0][0] if rows else "no-rows")' 2>/dev/null \
+  | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0][0] if rows else "no-rows")' \
   || printf 'error:%s' "$(printf '%s' "$impersonated_line" | sed -n 's/^error=//p' | cut -c1-120)")"
 echo "F7 nova_path=$nova_fact superset_impersonation_path=$superset_fact spark_and_iceberg_path=not-measured (they never pass Trino, #84)"
 
@@ -586,7 +651,7 @@ row_filters := [] if {
 }
 REGO
 )"
-mint_trino_token
+need_trino_token
 broken="$(trino_sql "$tmp/demo-token" "SELECT count(*) FROM $TABLE")"
 case "$broken" in
   rows=*) f6="F6 malformed_error=none (the engine accepted a truncated expression: ${broken#rows=})" ;;
