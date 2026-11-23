@@ -19,10 +19,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "verify-pod-security.sh"
 
+# The platform namespace's labels a healthy install carries: `enforce` is `baseline` because
+# Lakekeeper's `opa` sidecar does not pass `restricted` in chart 0.14.0 (#1095), while `audit` and
+# `warn` stay `restricted`.
+NAMESPACE_LABELS = json.dumps(
+    {
+        "app.kubernetes.io/part-of": "stardelt",
+        "pod-security.kubernetes.io/enforce": "baseline",
+        "pod-security.kubernetes.io/enforce-version": "latest",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "latest",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "latest",
+    }
+)
+
+# The shim's default namespace label document, injected into its source.
 SHIM = '''#!/usr/bin/env python3
 """Fake kubectl: seven Running pods, and p7 is gone when its spec is read."""
 import json
+import os
 import sys
+
+NAMESPACE_LABELS = """__NAMESPACE_LABELS__"""
 
 argv = sys.argv[1:]
 namespace = ""
@@ -63,6 +82,11 @@ def pod(name):
 if verb == "get":
     kind = rest[1] if len(rest) > 1 else ""
     if kind == "namespace":
+        name = rest[2] if len(rest) > 2 else ""
+        if name == "stardelt" and any(a.startswith("jsonpath") for a in rest):
+            # The platform namespace's own Pod Security labels (#1096 question 5).
+            print(os.environ.get("NAMESPACE_LABELS", NAMESPACE_LABELS))
+            sys.exit(0)
         # The probe namespace does not exist yet; after the create the script never asks again.
         sys.exit(1)
     if kind == "pods":
@@ -100,10 +124,10 @@ class PodGoneMidScan(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         shim = Path(self.tmp.name) / "kubectl"
-        shim.write_text(SHIM)
+        shim.write_text(SHIM.replace("__NAMESPACE_LABELS__", NAMESPACE_LABELS))
         shim.chmod(0o755)
 
-    def run_script(self, *arguments):
+    def run_script(self, *arguments, labels=None):
         env = dict(
             os.environ,
             PATH=f"{self.tmp.name}:{os.environ['PATH']}",
@@ -111,12 +135,14 @@ class PodGoneMidScan(unittest.TestCase):
             POD_SECURITY_PROBE_NS="stardelt-pss-probe-test",
             TMPDIR=self.tmp.name,
         )
+        if labels is not None:
+            env["NAMESPACE_LABELS"] = labels
         return subprocess.run(
             ["bash", str(SCRIPT), *arguments], env=env, capture_output=True, text=True, timeout=120
         )
 
     def test_a_pod_that_finishes_mid_scan_is_skipped(self):
-        result = self.run_script("--level", "baseline")
+        result = self.run_script("--level", "baseline", "--allow-namespace-level", "baseline")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("– p7: gone before the probe (skipped)", result.stdout)
         self.assertTrue(
@@ -125,6 +151,22 @@ class PodGoneMidScan(unittest.TestCase):
             ),
             result.stdout,
         )
+
+    def test_the_namespace_label_is_reported_as_a_known_exception(self):
+        result = self.run_script("--level", "baseline", "--allow-namespace-level", "baseline")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "– namespace stardelt enforces baseline (allowed by --allow-namespace-level; "
+            "audit and warn restricted)",
+            result.stdout,
+        )
+
+    def test_a_privileged_namespace_label_fails(self):
+        labels = json.loads(NAMESPACE_LABELS)
+        labels["pod-security.kubernetes.io/enforce"] = "privileged"
+        result = self.run_script("--level", "baseline", labels=json.dumps(labels))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("✗ namespace stardelt:", result.stdout)
 
 
 if __name__ == "__main__":

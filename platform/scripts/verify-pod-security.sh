@@ -3,22 +3,26 @@
 # `restricted`; #1096 question 5).
 #
 #   NS=stardelt bash scripts/verify-pod-security.sh --allow '^seaweedfs-' --allow '^lakekeeper-'
-#   NS=stardelt bash scripts/verify-pod-security.sh --level baseline
+#   NS=stardelt bash scripts/verify-pod-security.sh --level baseline --allow-namespace-level baseline
 #
 # Read-only for the platform: each live pod's spec is re-admitted with a server-side dry run into a
 # scratch namespace labelled `pod-security.kubernetes.io/enforce=$level`, which is deleted
 # again. `--allow <regex>` names a pod that is a known exception; the reason belongs in the comment
 # beside the flag in the Makefile. A pattern that matches no refusal is reported (drop it), and a
-# refusal outside the list fails the run.
+# refusal outside the list fails the run. `--allow-namespace-level <level>` names an accepted
+# `enforce` level of the platform namespace itself (its `audit` and `warn` must be `restricted`).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
 PROBE="${POD_SECURITY_PROBE_NS:-stardelt-pss-probe}"
 level=restricted
 allow=()
+allow_ns_level=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow) allow+=("${2:?--allow needs a regular expression}"); shift 2 ;;
+    --allow-namespace-level)
+      allow_ns_level+=("${2:?--allow-namespace-level needs a level}"); shift 2 ;;
     --level)
       level="${2:?--level needs baseline or restricted}"
       case "$level" in
@@ -58,6 +62,34 @@ if ! kubectl label namespace "$PROBE" \
     pod-security.kubernetes.io/enforce-version=latest >/dev/null; then
   echo "cannot label the probe namespace $PROBE $level (the API server's message is above)" >&2
   exit 1
+fi
+
+labels="$(kubectl get namespace "$NS" -o jsonpath='{.metadata.labels}' 2>&1)" || {
+  echo "cannot read namespace $NS: $labels" >&2; exit 1; }
+enforce="$(printf '%s' "$labels" | jq -r '."pod-security.kubernetes.io/enforce" // ""')"
+audit="$(printf '%s' "$labels" | jq -r '."pod-security.kubernetes.io/audit" // ""')"
+warn="$(printf '%s' "$labels" | jq -r '."pod-security.kubernetes.io/warn" // ""')"
+ns_problem=""
+if [ "$enforce" != restricted ]; then
+  allowed_level=""
+  for accepted in ${allow_ns_level[@]+"${allow_ns_level[@]}"}; do
+    [ "$enforce" = "$accepted" ] && allowed_level="$accepted"
+  done
+  if [ -z "$allowed_level" ]; then
+    ns_problem="pod-security.kubernetes.io/enforce is ${enforce:-not set} (accepted: restricted ${allow_ns_level[*]:-—})"
+  fi
+fi
+[ "$audit" = restricted ] || ns_problem="${ns_problem:+$ns_problem; }pod-security.kubernetes.io/audit is ${audit:-not set}"
+[ "$warn" = restricted ] || ns_problem="${ns_problem:+$ns_problem; }pod-security.kubernetes.io/warn is ${warn:-not set}"
+if [ -n "$ns_problem" ]; then
+  echo "✗ namespace $NS: $ns_problem"
+  exit 1
+fi
+if [ "$enforce" = restricted ]; then
+  echo "✓ namespace $NS enforces restricted (audit and warn restricted)"
+else
+  echo "– namespace $NS enforces $enforce (allowed by --allow-namespace-level; audit and warn restricted)"
+  ns_allowed=1
 fi
 
 plural() { [ "$1" -eq 1 ] && echo exception || echo exceptions; }
