@@ -89,7 +89,6 @@ if [ "$enforce" = restricted ]; then
   echo "✓ namespace $NS enforces restricted (audit and warn restricted)"
 else
   echo "– namespace $NS enforces $enforce (allowed by --allow-namespace-level; audit and warn restricted)"
-  ns_allowed=1
 fi
 
 plural() { [ "$1" -eq 1 ] && echo exception || echo exceptions; }
