@@ -20,7 +20,12 @@ MAKEFILE = pathlib.Path(__file__).resolve().parents[2] / "Makefile"
 # unpatched `opa` sidecar, so `--wait` times out and `--atomic` rolls back before
 # `scripts/lakekeeper-opa-security.sh` patches it; the step waits itself with `rollout status`
 # after the patch. Bounded by `test_lakekeeper_step_still_does_not_wait`.
-NON_WAITING = {"chart-install", "step-lakekeeper"}
+#
+# `catalogs` and `catalog-enforce` upgrade the same chart with the same values, so a namespace
+# that refuses the unpatched `opa` sidecar fails them the same way (#1389): they pass the no-wait
+# flags, patch the sidecar, and only then wait. Bounded by
+# `test_the_catalog_targets_still_do_not_wait` and `test_the_catalog_targets_patch_before_they_wait`.
+NON_WAITING = {"chart-install", "step-lakekeeper", "catalogs", "catalog-enforce"}
 
 
 def helm_upgrades():
@@ -90,6 +95,30 @@ class HelmAtomicTest(unittest.TestCase):
             self.assertNotIn("--wait", block, "step-lakekeeper waits now: it needs --atomic too")
             self.assertNotIn("$(HELM_FLAGS)", block, "step-lakekeeper waits now: it needs --atomic too")
             self.assertNotIn("--atomic", block, "step-lakekeeper does not wait, so it takes no --atomic")
+
+    def test_the_catalog_targets_still_do_not_wait(self):
+        # #1389: `catalogs` and `catalog-enforce` upgrade the same chart with the same values,
+        # so a namespace that refuses the unpatched opa sidecar fails them the same way.
+        for target in ("catalogs", "catalog-enforce"):
+            blocks = [block for name, block in helm_upgrades() if name == target]
+            self.assertTrue(blocks, f"{target} no longer runs `helm upgrade`")
+            for block in blocks:
+                self.assertNotIn("--wait", block, f"{target} waits now: it needs --atomic too")
+                self.assertNotIn("$(HELM_FLAGS)", block, f"{target} waits now: it needs --atomic too")
+                self.assertNotIn("--atomic", block, f"{target} does not wait, so it takes no --atomic")
+
+    def test_the_catalog_targets_patch_before_they_wait(self):
+        # #1389: the patch has to run while the release is not waiting; a `rollout status`
+        # before it brings the timeout-and-rollback back.
+        body = MAKEFILE.read_text(encoding="utf-8")
+        for target in ("catalogs", "catalog-enforce"):
+            recipe = body.split("\n" + target + ":", 1)[1].split("\n\n", 1)[0]
+            self.assertIn("lakekeeper-opa-security.sh", recipe, f"{target} no longer patches opa")
+            self.assertLess(
+                recipe.index("lakekeeper-opa-security.sh"),
+                recipe.index("rollout status deployment/lakekeeper"),
+                f"{target} waits before it patches",
+            )
 
     def test_a_recipe_that_switches_wait_off_switches_atomic_off_too(self):
         # `--atomic` implies `--wait` whatever the flag order: a recipe that turns the wait off
