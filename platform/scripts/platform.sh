@@ -95,7 +95,7 @@ add_step preflight step-preflight \
   "kubectl config current-context"
 
 add_step namespace step-namespace \
-  "labels the platform namespace: Pod Security baseline enforced, restricted warned and audited" \
+  "labels the platform namespace: Pod Security restricted enforced, and restricted warned and audited" \
   "kubectl label namespace $NAMESPACE pod-security.kubernetes.io/enforce- pod-security.kubernetes.io/audit- pod-security.kubernetes.io/warn-" \
   "kubectl get namespace $NAMESPACE -o jsonpath='{.metadata.labels}'"
 

@@ -2,7 +2,7 @@
 """The Pod document for a throwaway check probe (platform#1656).
 
 Every `make verify-*` check starts short-lived pods in the target namespace to ask
-the cluster a question. The namespace enforces `baseline` and warns `restricted`
+the cluster a question. The namespace enforces `restricted` and warns `restricted`
 (`manifests/namespace.yaml`); under `restricted` a pod without a non-root UID,
 `RuntimeDefault` seccomp, `allowPrivilegeEscalation: false` and `capabilities.drop:
 ["ALL"]` is refused, and every one of those checks stops working. The probe images

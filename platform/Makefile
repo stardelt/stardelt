@@ -160,12 +160,11 @@ verify-warehouse-autostop: _context ## The idle policy reaches 0 and wakes (patc
 
 # Every running pod passes `restricted`; the Kubernetes Pod Security floor has no exception.
 verify-pod-security: _context ## Every running pod is admitted by a `restricted` Pod Security namespace (#1096)
-	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh \
-	  --allow-namespace-level baseline   # the opa sidecar is patched by scripts/lakekeeper-opa-security.sh (#1095)
+	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh # the namespace enforces restricted (#1095)
 
 verify-pod-security-baseline: _context ## Every running pod is admitted by a `baseline` Pod Security namespace (#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh --level baseline \
-	  --allow-namespace-level baseline   # the platform namespace enforces baseline (#1095)
+	  --allow-namespace-level baseline   # a baseline probe of the same pods; the namespace enforces restricted (#1095)
 
 verify-backups: _context ## Verify WAL archiving for real: config + the bucket covers every queued WAL segment + agreement with pg_stat_archiver. SKIP_OBJECTS=1 drops the S3 half
 	@NAMESPACE=$(NAMESPACE) CLUSTER=$(PG_CLUSTER) SKIP_OBJECTS="$(SKIP_OBJECTS)" \

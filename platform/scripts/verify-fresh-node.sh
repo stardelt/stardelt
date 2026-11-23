@@ -115,10 +115,10 @@ readiness() { # <soft>: return 3 on a doubt instead of exiting (the `product` ph
   psa_enforce="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null || true)"
   psa_warn="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/warn}' 2>/dev/null || true)"
   psa_audit="$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/audit}' 2>/dev/null || true)"
-  if [ "$psa_enforce" = "baseline" ] && [ "$psa_warn" = "restricted" ] && [ "$psa_audit" = "restricted" ]; then
-    ok namespace "enforce=baseline, warn/audit=restricted"
+  if [ "$psa_enforce" = "restricted" ] && [ "$psa_warn" = "restricted" ] && [ "$psa_audit" = "restricted" ]; then
+    ok namespace "enforce=restricted, warn/audit=restricted"
   else
-    bad namespace "\"expected enforce=baseline warn/audit=restricted, got enforce=${psa_enforce:-none} warn=${psa_warn:-none} audit=${psa_audit:-none}\""
+    bad namespace "\"expected enforce=restricted warn/audit=restricted, got enforce=${psa_enforce:-none} warn=${psa_warn:-none} audit=${psa_audit:-none}\""
   fi
 
   if ! kubectl -n "$NAMESPACE" get platforminstance "$PLATFORM_INSTANCE" >/dev/null 2>&1; then

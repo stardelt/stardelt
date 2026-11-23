@@ -1,9 +1,10 @@
 # The platform namespace's Pod Security floor (platform#1096 question 5).
 #
-# `baseline` is enforced: no privileged container, no host network/PID/IPC, no hostPath.
-# Every running pod is admitted. `restricted` is only warned and audited: Lakekeeper's
-# `opa` sidecar does not pass it yet (#1095, chart 0.14.0). The five SeaweedFS pods pass
-# `restricted` since platform#1758 (uid/gid 65534, `emptyDir` logs).
+# `restricted` is enforced: no privilege escalation, no added capabilities, seccomp
+# `RuntimeDefault`, non-root. Every pod on both install paths passes it; the one that did
+# not, Lakekeeper's chart `opa` sidecar, is patched by `scripts/lakekeeper-opa-security.sh`
+# (#1095, #1361). The five SeaweedFS pods pass since platform#1758 (uid/gid 65534,
+# `emptyDir` logs).
 apiVersion: v1
 kind: Namespace
 # Applied by `make step-namespace`, which renders `name` from `$(NAMESPACE)`.
@@ -11,7 +12,7 @@ metadata:
   name: stardelt
   labels:
     app.kubernetes.io/part-of: stardelt
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: latest

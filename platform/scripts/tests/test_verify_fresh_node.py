@@ -39,7 +39,7 @@ case "$joined" in
   # the namespace's Pod Security floor (platform#1480): each label is asked for on its own.
   *" get namespace "*)
     case "$joined" in
-      *"/enforce"*) printf '%s' "${FAKE_ENFORCE-baseline}" ;;
+      *"/enforce"*) printf '%s' "${FAKE_ENFORCE-restricted}" ;;
       *"/warn"*) printf '%s' "${FAKE_WARN-restricted}" ;;
       *"/audit"*) printf '%s' "${FAKE_AUDIT-restricted}" ;;
       *) exit 1 ;;
@@ -289,7 +289,7 @@ class FreshNodeTest(unittest.TestCase):
             merge_streams=True,
             remove=["instance_present"],
             env_extra={
-                "FAKE_ENFORCE": "baseline",
+                "FAKE_ENFORCE": "restricted",
                 "FAKE_WARN": "restricted",
                 "FAKE_AUDIT": "restricted",
             },
@@ -297,7 +297,7 @@ class FreshNodeTest(unittest.TestCase):
         # No PlatformInstance on this cluster is the script's existing UNVERIFIED rule (exit 3),
         # not a failure of this check.
         self.assertEqual(result.code, 3, result.out)
-        self.assertIn("✓ namespace enforce=baseline, warn/audit=restricted", result.out)
+        self.assertIn("✓ namespace enforce=restricted, warn/audit=restricted", result.out)
         self.assertIn("? instance", result.out)
         self.assertIn(
             "verify-fresh-node: UNVERIFIED (no PlatformInstance on this cluster)", result.out
@@ -315,7 +315,7 @@ class FreshNodeTest(unittest.TestCase):
             env_extra={"FAKE_ENFORCE": "", "FAKE_WARN": "restricted", "FAKE_AUDIT": "restricted"},
         )
         self.assertEqual(result.code, 3, result.out)
-        self.assertIn('✗ namespace "expected enforce=baseline', result.out)
+        self.assertIn('✗ namespace "expected enforce=restricted', result.out)
         self.assertIn("got enforce=none warn=restricted audit=restricted", result.out)
         self.assertLess(
             result.out.index("✗ namespace"),

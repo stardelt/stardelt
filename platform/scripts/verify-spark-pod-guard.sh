@@ -10,8 +10,8 @@
 # spark-cluster-driver, so the admission policies decide and nothing is persisted. The
 # SparkCluster policies exist only after one has reconciled — run
 # `scripts/verify-spark-cluster.sh` first on a fresh cluster.
-# Case 3 is the one exception: Pod Security refuses hostNetwork before the policy in a baseline
-# namespace (platform#1455), so that line accepts either refusal and says which.
+# Case 3 is the one exception: Pod Security refuses hostNetwork before the policy in a
+# `restricted` namespace (platform#1455), so that line accepts either refusal and says which.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"

@@ -21,9 +21,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "verify-pod-security.sh"
 
-# The platform namespace's labels a healthy install carries: `enforce` is `baseline` because
-# Lakekeeper's `opa` sidecar does not pass `restricted` in chart 0.14.0 (#1095), while `audit` and
-# `warn` stay `restricted`.
+# The platform namespace's labels in the `--allow-namespace-level baseline` case: a namespace that
+# still enforces `baseline` is accepted only because the caller named that level, while `audit` and
+# `warn` must stay `restricted`. The platform namespace itself enforces `restricted` (#1362).
 NAMESPACE_LABELS = json.dumps(
     {
         "app.kubernetes.io/part-of": "stardelt",

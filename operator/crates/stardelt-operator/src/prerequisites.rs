@@ -84,11 +84,11 @@ pub fn generate_sts_signing_key() -> Result<String, getrandom::Error> {
     random_hex(32)
 }
 
-/// The namespace the platform is installed into. Same floor as the platform repo's
-/// `manifests/namespace.yaml` (platform#1096 question 5): `baseline` is enforced, so no
-/// privileged, hostNetwork or hostPath pod; `restricted` is only warned and audited while
-/// Lakekeeper's `opa` sidecar does not pass it (#1095). The four SeaweedFS pods pass
-/// `restricted` since operator#860 (uid/gid 65534, `emptyDir` logs).
+/// The namespace the platform is installed into, with the `restricted` Pod Security floor
+/// (#1096 question 5): no privilege escalation, `capabilities.drop: ["ALL"]`, seccomp
+/// `RuntimeDefault`, non-root. Both install paths pass it; the operator path renders
+/// Lakekeeper with `authz.backend: allowall` and therefore no chart `opa` sidecar, which is
+/// the one container the platform path patches (`scripts/lakekeeper-opa-security.sh` (new), #1361).
 pub fn platform_namespace(name: &str) -> Namespace {
     Namespace {
         metadata: ObjectMeta {
@@ -100,7 +100,7 @@ pub fn platform_namespace(name: &str) -> Namespace {
                 ),
                 (
                     "pod-security.kubernetes.io/enforce".to_string(),
-                    "baseline".to_string(),
+                    "restricted".to_string(),
                 ),
                 (
                     "pod-security.kubernetes.io/enforce-version".to_string(),
@@ -994,7 +994,8 @@ mod tests {
         ] {
             assert!(labels.contains_key(key), "missing {key}");
         }
-        assert_eq!(labels["pod-security.kubernetes.io/enforce"], "baseline");
+        assert_eq!(labels["pod-security.kubernetes.io/enforce"], "restricted");
+        assert_eq!(labels["pod-security.kubernetes.io/enforce-version"], "latest");
         assert_eq!(labels["pod-security.kubernetes.io/warn"], "restricted");
     }
 
