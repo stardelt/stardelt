@@ -32,9 +32,10 @@
 # missing: nothing was asked, nothing proved).
 #
 # It prints no token, client secret or password. The actor's credentials go through a mode-0600
-# `curl -K` config file and the subject token through `--data-urlencode name@file`, so none of
-# them reaches argv or stdout; every file lives in a mode-0700 temp dir that the trap removes,
-# together with the two port-forwards.
+# `curl -K` config file and the subject token through `--data-urlencode name@file`, so neither the
+# secret nor the subject token reaches argv or stdout (the master token and the exchanged token
+# travel as bearer headers to the loopback port-forwards); every file lives in a mode-0700 temp dir
+# that the trap removes, together with the two port-forwards.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 umask 077
