@@ -390,6 +390,12 @@ pub fn external_store(spec: &PlatformInstanceSpec) -> Result<Option<Value>, Stri
     }
 }
 
+/// True when the per-group stores replace the cluster-scoped one, so a previously published
+/// `ClusterSecretStore enterprise` has to be removed.
+pub fn cluster_store_is_left_over(spec: &PlatformInstanceSpec) -> bool {
+    spec.secrets.mode == SecretsMode::External && !spec.secrets.groups.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +573,8 @@ mod tests {
         let mut with_groups = spec.clone();
         with_groups.secrets.groups = vec!["shop".into()];
         assert!(external_store(&with_groups).unwrap().is_none());
+        assert!(!cluster_store_is_left_over(&spec));
+        assert!(cluster_store_is_left_over(&with_groups));
     }
 
     #[test]

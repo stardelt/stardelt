@@ -134,6 +134,9 @@ publishes one namespaced `SecretStore` `enterprise-<group>` per group (and no `C
 for a ServiceAccount-authenticated provider (`auth.kubernetes`): `${group}` in every provider string
 and every `serviceAccountRef.name` is rewritten to the group, so the administrator binds
 `eso-<group>` to that group's cloud identity and a group connection reads through its own store.
+Switching an instance from `external` without groups to `external` with groups deletes the leftover
+`ClusterSecretStore enterprise` on the next reconcile; a store with other labels is left in place
+and reported in the status as not ready.
 
 A complete Entra instance is in
 [`examples/platforminstance-external-entra.yaml`](examples/platforminstance-external-entra.yaml):
