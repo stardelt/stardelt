@@ -28,8 +28,11 @@
 #     reports that leftover with its delete command (#1279). The `scratch` schema is the demo's
 #     and stays; no other table is touched;
 #   - one table per run (`wap_gate_<UTC timestamp>`, #1319): a killed run's table and refs are
-#     never measured again; every `wap_gate*` table in `scratch` is dropped at the start, and a
-#     drop that fails is UNVERIFIED instead of a silent `|| true`;
+#     never measured again; a `wap_gate*` table whose Pipeline is gone is dropped at the start,
+#     and a drop that fails is UNVERIFIED instead of a silent `|| true`;
+#   - two copies at once are safe (#1329): the Pipeline, DAG, table and graph ConfigMap carry a
+#     per-run id with random digits, the port-forward listens on a port of its own, and the
+#     start sweep never drops a table whose Pipeline still exists. Only the label is shared.
 #   - `airflow tasks logs` does not exist in Airflow 3.2 (#1025), so every assertion reads the
 #     run state, the per-task states and the catalog's `metadata.refs` — never a task log.
 set -euo pipefail
@@ -37,19 +40,23 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 umask 077
 
 NS="${NS:-${NAMESPACE:-stardelt}}"
-PIPELINE="${PIPELINE:-verify-wap}"
+# One id per run (#1329): UTC seconds plus 4 random hex digits. The clock alone collides when
+# two copies start in the same second (measured: identical names, both runs failed). Lower-case
+# hex and digits are legal in a Kubernetes name and in an unquoted SQL identifier.
+RUN_SUFFIX="${RUN_SUFFIX:-$(date -u +%Y%m%d%H%M%S)$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')}"
+PIPELINE="${PIPELINE:-verify-wap-$RUN_SUFFIX}"
 DAG="${DAG:-stardelt__$PIPELINE}"
 CATALOG="${CATALOG:-playground}"
 SCHEMA="${SCHEMA:-scratch}"
 # One table per run (#1319): a run that was killed half-way leaves a table, and its refs,
 # that the next run must never measure. Leftovers of that shape are swept at the start.
-TABLE_NAME="${TABLE_NAME:-wap_gate_$(date -u +%Y%m%d%H%M%S)}"
+TABLE_NAME="${TABLE_NAME:-wap_gate_$RUN_SUFFIX}"
 TABLE="$CATALOG.$SCHEMA.$TABLE_NAME"
 GROUP="${GROUP:-demo}"
 PRINCIPAL_SECRET="${PRINCIPAL_SECRET:-sp-pipeline-$GROUP}"
-LK_PORT="${LK_PORT:-18184}"
+LK_PORT="${LK_PORT:-}"
 TIMEOUT="${TIMEOUT:-900}"
-LK="http://127.0.0.1:$LK_PORT"
+LK=""
 
 scratch="${TMPDIR:-$HOME/.cache}"
 mkdir -p "$scratch"
@@ -70,13 +77,18 @@ up() { # url -> true when anything but a transport failure answered
   [ "${code:-000}" != "000" ]
 }
 
-forward_lk() {
-  local _
+forward_lk() { # sets LK to this run's own port-forward; 1 when none answered within 30 s
+  local _ port
   if [ -n "$LK_PID" ]; then kill "$LK_PID" >/dev/null 2>&1 || true; fi
-  kubectl -n "$NS" port-forward svc/lakekeeper "$LK_PORT:8181" >/dev/null 2>&1 &
+  kubectl -n "$NS" port-forward svc/lakekeeper "$LK_PORT:8181" > "$tmp/port-forward.out" 2>&1 &
   LK_PID=$!
   for _ in $(seq 1 30); do
-    if up "$LK/management/v1/info"; then return 0; fi
+    port="$(grep -oE '127\.0\.0\.1:[0-9]+' "$tmp/port-forward.out" | head -n 1 | cut -d: -f2)"
+    if [ -n "$port" ]; then
+      LK="http://127.0.0.1:$port"
+      if up "$LK/management/v1/info"; then return 0; fi
+    fi
+    kill -0 "$LK_PID" 2>/dev/null || return 1   # the forward died: never borrow another listener
     sleep 1
   done
   return 1
@@ -390,6 +402,12 @@ if [ "$code" != "200" ]; then
 fi
 leftovers="$(jq -r '.identifiers[]?.name | select(startswith("wap_gate"))' "$tmp/out.json")"
 for name in $leftovers; do
+  suffix="${name#wap_gate}"; suffix="${suffix#_}"
+  owner="verify-wap${suffix:+-$suffix}"
+  if kubectl -n "$NS" get pipeline "$owner" >/dev/null 2>&1; then
+    echo "  kept $CATALOG.$SCHEMA.$name: pipeline $owner is still there (another copy, or a leftover demo-inventory-check reports)" >&2
+    continue
+  fi
   code="$(catalog DELETE "/catalog/v1/$PREFIX/namespaces/$SCHEMA/tables/$name?purgeRequested=true")"
   case "$code" in
     200|204|404) echo "  dropped the leftover table $CATALOG.$SCHEMA.$name" >&2 ;;
