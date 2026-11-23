@@ -76,6 +76,13 @@ pub struct NewConnection {
     pub usable_by: Vec<String>,
     #[serde(default)]
     pub config: BTreeMap<String, String>,
+    /// `secrets.mode: external`: the path of the value in the enterprise store. A request with
+    /// this carries no values; Nova creates the `Connection` and the operator syncs it.
+    #[serde(default, rename = "remoteRef")]
+    pub remote_ref: Option<String>,
+    /// `secrets.mode: external`: the property names in the store entry, one per field.
+    #[serde(default, rename = "secretKeys")]
+    pub secret_keys: Vec<String>,
     /// The secret field values. Write-only: Nova stores them and never reads them back.
     #[schema(write_only)]
     pub secret: BTreeMap<String, String>,
@@ -238,6 +245,75 @@ pub fn validate_new(req: &NewConnection) -> Result<(), String> {
     )
 }
 
+/// Check a connection by reference (`secrets.mode: external`): a path and field names, and no
+/// value anywhere. Personal and managed connections stay out of this form.
+pub fn validate_reference(req: &NewConnection) -> Result<(), String> {
+    if req.scope != Scope::Group {
+        return Err("a connection by reference is a group connection: a personal connection's values live in the platform's store, and a managed one is the administrator's".into());
+    }
+    let Some(path) = req.remote_ref.as_deref() else {
+        return Err(
+            "a connection by reference needs remoteRef, the path in the enterprise store".into(),
+        );
+    };
+    if path.is_empty() || path.len() > 200 {
+        return Err("remoteRef must be 1 to 200 characters".into());
+    }
+    if path.contains("..") || path.contains("//") || path.starts_with('/') || path.ends_with('/') {
+        return Err(
+            "remoteRef must be a plain path: no `..`, no `//`, and no leading or trailing `/`"
+                .into(),
+        );
+    }
+    if !req.secret.is_empty() {
+        return Err("a connection by reference carries no values: put them in the store and send only remoteRef and secretKeys".into());
+    }
+    if req.secret_keys.is_empty() || req.secret_keys.len() > MAX_KEYS {
+        return Err(format!("secretKeys needs 1 to {MAX_KEYS} field names"));
+    }
+    for key in &req.secret_keys {
+        if !key_ok(key) {
+            return Err(format!(
+                "secret field name `{key}` must be letters, digits and underscore, starting with a letter"
+            ));
+        }
+    }
+    if let Some(group) = req.owner_group.as_deref() {
+        if !group_ok(group) {
+            return Err("a valid ownerGroup is needed".into());
+        }
+    } else {
+        return Err("a group connection needs a valid ownerGroup".into());
+    }
+    if !req.usable_by.is_empty() {
+        return Err("a group connection has no usableBy".into());
+    }
+    if req.config.len() > MAX_SETTINGS {
+        return Err(format!("at most {MAX_SETTINGS} settings"));
+    }
+    for (k, v) in &req.config {
+        if !setting_name_ok(k) || secret_like(k) {
+            return Err(format!("setting `{k}` is not allowed here"));
+        }
+        if v.len() > MAX_SETTING_BYTES {
+            return Err(format!(
+                "setting `{k}` is longer than {MAX_SETTING_BYTES} bytes"
+            ));
+        }
+    }
+    type_rules(
+        &req.kind,
+        &req.config,
+        req.secret_keys.iter().map(String::as_str).collect(),
+    )?;
+    if let Some(r) = req.refresh_interval.as_deref()
+        && !refresh_ok(r)
+    {
+        return Err("refreshInterval must be between 1m and 24h, for example 15m".into());
+    }
+    Ok(())
+}
+
 /// What each type needs; the operator's admission rules, written once more.
 fn type_rules(
     kind: &str,
@@ -380,12 +456,21 @@ pub fn merge_rotation(
 }
 
 /// The `Connection` resource for a group or managed connection (personal ones have none). Nova
-/// never sets `secret.remoteRef`: the operator derives the path, which is the point.
+/// never sets `secret.remoteRef` for a value connection: the operator derives the path. A
+/// connection by reference sets it and carries no value.
 pub fn connection_resource(req: &NewConnection, namespace: &str) -> Option<Value> {
+    let keys: Vec<&String> = match req.remote_ref {
+        Some(_) => req.secret_keys.iter().collect(),
+        None => req.secret.keys().collect(),
+    };
+    let mut secret = json!({ "keys": keys });
+    if let Some(path) = &req.remote_ref {
+        secret["remoteRef"] = json!(path);
+    }
     let mut spec = json!({
         "scope": match req.scope { Scope::Group => "group", Scope::Managed => "managed", Scope::Personal => return None },
         "type": req.kind,
-        "secret": { "keys": req.secret.keys().collect::<Vec<_>>() },
+        "secret": secret,
     });
     if let Some(g) = &req.owner_group {
         spec["ownerGroup"] = json!(g);
@@ -887,5 +972,78 @@ mod tests {
         );
         assert!(!view.member);
         assert_eq!(serde_json::to_value(view).unwrap()["member"], false);
+    }
+
+    /// A `POST /api/connections` body by reference: a path and field names, no values.
+    fn reference() -> NewConnection {
+        let mut req = crm();
+        req.secret.clear();
+        req.remote_ref = Some("apps/crm/db".into());
+        req.secret_keys = vec!["user".into(), "password".into()];
+        req
+    }
+
+    #[test]
+    fn a_reference_needs_a_path_and_keys() {
+        let mut req = reference();
+        req.remote_ref = None;
+        assert!(validate_reference(&req).unwrap_err().contains("remoteRef"));
+
+        let mut req = reference();
+        req.remote_ref = Some(String::new());
+        assert!(validate_reference(&req).unwrap_err().contains("1 to 200"));
+
+        let mut req = reference();
+        req.secret_keys.clear();
+        assert!(validate_reference(&req).unwrap_err().contains("secretKeys"));
+
+        assert!(validate_reference(&reference()).is_ok());
+    }
+
+    #[test]
+    fn a_reference_carries_no_values() {
+        let mut req = reference();
+        req.secret.insert("password".into(), "x".into());
+        let err = validate_reference(&req).unwrap_err();
+        assert!(err.contains("carries no values"), "{err}");
+    }
+
+    #[test]
+    fn a_reference_path_refuses_dot_dot_and_double_slash() {
+        for path in ["../other", "a//b", "/abs", "trail/"] {
+            let mut req = reference();
+            req.remote_ref = Some(path.into());
+            let err = validate_reference(&req).unwrap_err();
+            assert!(err.contains("plain path"), "{path}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_reference_is_a_group_connection() {
+        let mut req = reference();
+        req.scope = Scope::Personal;
+        req.owner_group = None;
+        let err = validate_reference(&req).unwrap_err();
+        assert!(err.contains("group connection"), "{err}");
+
+        let mut req = reference();
+        req.scope = Scope::Managed;
+        req.owner_group = None;
+        let err = validate_reference(&req).unwrap_err();
+        assert!(err.contains("group connection"), "{err}");
+    }
+
+    #[test]
+    fn a_reference_resource_carries_the_path_and_keys_and_no_value() {
+        let cr = connection_resource(&reference(), "stardelt").unwrap();
+        assert_eq!(cr["spec"]["secret"]["remoteRef"], "apps/crm/db");
+        assert_eq!(cr["spec"]["secret"]["keys"], json!(["user", "password"]));
+        assert_eq!(cr["spec"]["ownerGroup"], "analytics");
+        assert_eq!(cr["spec"]["config"]["host"], "crm.example.com");
+        let text = cr.to_string();
+        assert!(
+            !text.contains("\"p1\"") && !text.contains("\"etl\""),
+            "no value in the resource: {text}"
+        );
     }
 }

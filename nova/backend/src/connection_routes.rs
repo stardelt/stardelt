@@ -758,6 +758,50 @@ async fn create_connection(
     ))
 }
 
+/// `POST /api/connections` without a platform store (`secrets.mode: external`): the request
+/// names a path in the enterprise store, Nova creates the `Connection`, the operator syncs it.
+/// No value is read, written or logged here.
+async fn create_by_reference(
+    resources: Option<&Resources>,
+    who: &Identity,
+    req: NewConnection,
+) -> Result<(StatusCode, ConnectionView), Fail> {
+    connections::validate_reference(&req).map_err(|m| Fail::new(StatusCode::BAD_REQUEST, m))?;
+    let _scope = connections::authorize(who, req.scope, req.owner_group.as_deref(), Action::Create)
+        .map_err(|d| Fail::new(StatusCode::FORBIDDEN, d.0))?;
+    let Some(resources) = resources else {
+        return Err(no_cluster());
+    };
+    let resource = connections::connection_resource(&req, &crate::cluster::namespace())
+        .ok_or_else(|| {
+            Fail::new(
+                StatusCode::BAD_REQUEST,
+                "a connection by reference is a group connection".to_string(),
+            )
+        })?;
+    let answer = connections::view_from_store(
+        &req.name,
+        req.scope,
+        req.owner_group.as_deref(),
+        req.usable_by.clone(),
+        &meta_from_resource(&resource),
+        None,
+        true,
+    );
+    if let Err(e) = resources.create(resource.clone()).await {
+        return Err(cluster_fail(e));
+    }
+    audit::connection_event(
+        "create",
+        who,
+        scope_word(req.scope),
+        req.owner_group.as_deref(),
+        &req.name,
+        None,
+    );
+    Ok((StatusCode::CREATED, answer))
+}
+
 /// A rotation: merge the patch into the current fields, write a new version, answer the row.
 async fn rotate_connection(
     store: &StoreClient,
@@ -1648,7 +1692,7 @@ pub(crate) async fn break_glass_log(
     operation_id = "connections_create",
     path = "/api/connections",
     tag = "public",
-    description = "Create a connection. The values in `secret` are written to the platform's secret store with the caller's own token and are never returned by any route.",
+    description = "Create a connection. The values in `secret` are written to the platform's secret store with the caller's own token and are never returned by any route. In an install with `spec.secrets.mode: external` there is no platform store: the body names `remoteRef` (the path in the enterprise store) and `secretKeys`, carries no value, and the operator syncs the connection.",
     request_body = NewConnection,
     responses(
         (status = 201, description = "The created connection, without values", body = ConnectionView),
@@ -1664,19 +1708,35 @@ pub(crate) async fn create(
     signed: SignedIn,
     ConnectionJson(req): ConnectionJson<NewConnection>,
 ) -> Response {
-    let Some(store) = signed.store() else {
+    if let Some(store) = signed.store() {
+        if req.remote_ref.is_some() {
+            return Fail::new(
+                StatusCode::BAD_REQUEST,
+                "a connection by reference is for an install with `spec.secrets.mode: external`"
+                    .to_string(),
+            )
+            .into_response();
+        }
+        let resources = resources(&signed.state);
+        return match create_connection(
+            store,
+            resources.as_ref(),
+            &signed.identity,
+            &signed.access,
+            req,
+        )
+        .await
+        {
+            Ok((status, view)) => (status, Json(view)).into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
+    if req.remote_ref.is_none() {
+        // No store and no path: the install has no place to put values. Same answer as today.
         return not_configured().into_response();
-    };
+    }
     let resources = resources(&signed.state);
-    match create_connection(
-        store,
-        resources.as_ref(),
-        &signed.identity,
-        &signed.access,
-        req,
-    )
-    .await
-    {
+    match create_by_reference(resources.as_ref(), &signed.identity, req).await {
         Ok((status, view)) => (status, Json(view)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -2167,6 +2227,91 @@ mod tests {
             current["password"], "first",
             "the second create must not overwrite"
         );
+    }
+
+    /// A `POST /api/connections` body by reference (`secrets.mode: external`), with `patch` applied.
+    fn reference(patch: Value) -> NewConnection {
+        let mut v = json!({
+            "name": "crm-db", "type": "sqlserver", "scope": "group", "ownerGroup": "analytics",
+            "config": { "host": "crm.example.com" },
+            "secret": {},
+            "remoteRef": "apps/crm/db", "secretKeys": ["user", "password"]
+        });
+        for (k, val) in patch.as_object().unwrap() {
+            if val.is_null() {
+                v.as_object_mut().unwrap().remove(k);
+            } else {
+                v[k] = val.clone();
+            }
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_by_reference_without_a_store_writes_the_resource() {
+        let (resources, items) = memory();
+        let alice = who("sub-alice", &["analytics"], false);
+
+        let (status, view) = create_by_reference(Some(&resources), &alice, reference(json!({})))
+            .await
+            .expect("created");
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(view.scope, Scope::Group);
+        assert_eq!(view.secret_keys, ["user", "password"]);
+        let items = items.lock().unwrap();
+        let resource = items.get("crm-db").expect("the resource exists");
+        assert_eq!(resource["spec"]["secret"]["remoteRef"], "apps/crm/db");
+        assert_eq!(
+            resource["spec"]["secret"]["keys"],
+            json!(["user", "password"])
+        );
+        let answer = serde_json::to_string(&view).unwrap();
+        assert!(
+            !answer.contains("p1") && !answer.contains("etl"),
+            "no value in the answer: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_by_reference_needs_a_cluster() {
+        let alice = who("sub-alice", &["analytics"], false);
+
+        let err = create_by_reference(None, &alice, reference(json!({})))
+            .await
+            .expect_err("no cluster");
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.message(), "no cluster connection");
+    }
+
+    #[tokio::test]
+    async fn create_by_reference_is_refused_for_a_group_you_are_not_in() {
+        let (resources, items) = memory();
+        let alice = who("sub-alice", &["analytics"], false);
+
+        let err = create_by_reference(
+            Some(&resources),
+            &alice,
+            reference(json!({ "ownerGroup": "finance" })),
+        )
+        .await
+        .expect_err("not a member");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(items.lock().unwrap().is_empty(), "nothing was created");
+    }
+
+    #[tokio::test]
+    async fn create_by_reference_twice_is_a_conflict() {
+        let (resources, _items) = memory();
+        let alice = who("sub-alice", &["analytics"], false);
+
+        create_by_reference(Some(&resources), &alice, reference(json!({})))
+            .await
+            .expect("created");
+        let err = create_by_reference(Some(&resources), &alice, reference(json!({})))
+            .await
+            .expect_err("the name is taken");
+        assert_eq!(err.status, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -2833,6 +2978,51 @@ mod tests {
             let value: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(value["error"], "the secret store is not configured");
         }
+    }
+
+    #[tokio::test]
+    async fn create_without_a_store_needs_remote_ref() {
+        // A value body without a store: no place to put the values, so the answer says so.
+        let response = app(None, Some(principal()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/connections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"crm-db","type":"sqlserver","scope":"personal","config":{"host":"crm.example.com"},"secret":{"user":"etl","password":"p1"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "the secret store is not configured");
+
+        // A body by reference needs no store: it goes on to the cluster, which is absent here.
+        let caller = Principal {
+            identity: who("sub-alice", &["shop"], false),
+            ..principal()
+        };
+        let response = app(None, Some(caller))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/connections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"crm-db","type":"sqlserver","scope":"group","ownerGroup":"shop","config":{"host":"crm.example.com"},"secret":{},"remoteRef":"apps/shop/db","secretKeys":["user","password"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no cluster connection");
     }
 
     // -----------------------------------------------------------------------

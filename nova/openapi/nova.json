@@ -2971,7 +2971,7 @@
         "tags": [
           "public"
         ],
-        "description": "Create a connection. The values in `secret` are written to the platform's secret store with the caller's own token and are never returned by any route.",
+        "description": "Create a connection. The values in `secret` are written to the platform's secret store with the caller's own token and are never returned by any route. In an install with `spec.secrets.mode: external` there is no platform store: the body names `remoteRef` (the path in the enterprise store) and `secretKeys`, carries no value, and the operator syncs the connection.",
         "operationId": "connections_create",
         "requestBody": {
           "content": {
@@ -14136,6 +14136,13 @@
               "null"
             ]
           },
+          "remoteRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`secrets.mode: external`: the path of the value in the enterprise store. A request with\nthis carries no values; Nova creates the `Connection` and the operator syncs it."
+          },
           "scope": {
             "$ref": "#/components/schemas/Scope"
           },
@@ -14150,6 +14157,13 @@
               "type": "string",
               "writeOnly": true
             }
+          },
+          "secretKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`secrets.mode: external`: the property names in the store entry, one per field."
           },
           "type": {
             "type": "string"
