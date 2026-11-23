@@ -46,6 +46,8 @@ declare -A recipe=(
   [verify-spark-group-read]='bash scripts/verify-spark-cluster-read.sh'
   [verify-spark-group-write]='bash scripts/verify-spark-cluster-write.sh'
   [verify-superset-nova-identity]='bash scripts/verify-superset-nova-identity.sh'
+  [verify-compute]='bash scripts/verify-compute.sh'
+  [verify-deploy-stage]='bash scripts/verify-deploy-stage.sh'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -60,7 +62,7 @@ verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-c
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query
-verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity"
+verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
