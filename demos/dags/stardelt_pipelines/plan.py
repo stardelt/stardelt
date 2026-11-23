@@ -188,6 +188,9 @@ class TaskPlan:
     # The `Connection` a task names and the secret keys its pod gets as `CONN_<NAME>_<KEY>`.
     connection: str | None = None
     connection_keys: tuple[str, ...] = ()
+    # The connection's non-secret metadata, so a notebook pod can name it without the store.
+    connection_type: str | None = None
+    connection_config: tuple[tuple[str, str], ...] = ()
     # `dbt` tasks only: the project under the tool image's /opt/dbt/projects, its selectors, the
     # threads and the `--vars` text. Defaults keep every other kind unchanged.
     dbt_project: str | None = None
@@ -311,6 +314,8 @@ def plan(
             writes = _writes(task_name, kind, raw.get("writes"))
         connection = raw.get("connection")
         connection_keys: tuple[str, ...] = ()
+        connection_type: str | None = None
+        connection_config: tuple[tuple[str, str], ...] = ()
         if connection is not None:
             if not isinstance(connection, str) or not _CONNECTION_NAME.match(connection):
                 raise PlanError(
@@ -328,7 +333,9 @@ def plan(
                     f"task `{task_name}` names connection `{connection}`, which does not exist in "
                     f"namespace `{namespace}`"
                 )
-            connection_keys = _connection_for_pipeline(connection, found, spec.get("ownerGroup"))
+            connection_keys, connection_type, connection_config = _connection_for_pipeline(
+                connection, found, spec.get("ownerGroup")
+            )
         depends_on = tuple(raw.get("dependsOn") or ())
         if kind == "dbt" and len(dbt_select) > 1:
             # One task per batch, chained in order. The first batch carries what the task
@@ -347,6 +354,8 @@ def plan(
                         notebook_params=(),
                         connection=connection,
                         connection_keys=connection_keys,
+                        connection_type=connection_type,
+                        connection_config=connection_config,
                         dbt_project=dbt_project,
                         dbt_select=(dbt_select[index],),
                         dbt_threads=dbt_threads,
@@ -372,6 +381,8 @@ def plan(
                 notebook_params=notebook_params,
                 connection=connection,
                 connection_keys=connection_keys,
+                connection_type=connection_type,
+                connection_config=connection_config,
                 dbt_project=dbt_project,
                 dbt_select=dbt_select,
                 dbt_threads=dbt_threads,
@@ -673,13 +684,15 @@ def _dbt_vars(raw) -> None:
 
 def _connection_for_pipeline(
     name: str, connection: dict, owner_group: str | None
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], str | None, tuple[tuple[str, str], ...]]:
     """The secret keys a pipeline may hand to its task pod, or a `PlanError`.
 
     `group` connections belong to one group and the pipeline must run as that group's principal;
     `managed` connections are for platform-run work and name the groups in `usableBy`; `personal`
     connections belong to a person and are never handed to a pipeline. The Kubernetes Secret is
     `conn-<name>`; a connection with no `secret` block has no keys and needs no pod variable.
+    The connection's type and settings ride to the pod too, so the notebook reads them without
+    the platform's secret store.
 
     A connection whose `status.ready` is not true has no Secret to mount; it is refused with the
     Ready condition's sentence, not with a pod that never starts. A connection with no `secret`
@@ -719,7 +732,7 @@ def _connection_for_pipeline(
                 "environment variable: use letters, digits and underscores, starting with a "
                 "letter or an underscore"
             )
-    return keys
+    return keys, spec.get("type"), tuple(sorted((spec.get("config") or {}).items()))
 
 
 def _notebook_params(raw: str | None) -> tuple[tuple[str, str], ...]:

@@ -107,6 +107,8 @@ def pod_env(
     principal_secret: str,
     connection_name: str | None = None,
     connection_keys: tuple[str, ...] = (),
+    connection_type: str | None = None,
+    connection_config: tuple[tuple[str, str], ...] = (),
     wap_branch: str | None = None,
 ) -> list[k8s.V1EnvVar]:
     """The environment of the notebook pod: the wrapper's contract, and no storage credential.
@@ -119,7 +121,9 @@ def pod_env(
     on a busy node (the wrapper checks the range and defaults to 180); unset, the pod gets nothing.
 
     A named `Connection`'s values arrive as `CONN_<NAME>_<KEY>` `secretKeyRef`s to Secret
-    `conn-<name>`; nothing passes through Python.
+    `conn-<name>`; nothing passes through Python. Its type and settings arrive as
+    `STARDELT_CONNECTION_<NAME>_TYPE` and `..._SETTINGS`, so `stardelt.connection()` reads them in
+    the pod, where the platform's secret store is not reachable.
 
     The Secret is the engine's credential (Trino refuses the workload token, #1271 Q3/Q4); the
     catalog's is the kubelet's projected token at `STARDELT_CATALOG_TOKEN_FILE` (#492).
@@ -138,9 +142,20 @@ def pod_env(
     ]
     if connection_name is not None:
         # `crm-db` -> `CONN_CRM_DB_<KEY>`: the platform's promise for a connection's secret keys.
-        prefix = f"CONN_{connection_name.upper().replace('-', '_')}_"
+        suffix = connection_name.upper().replace("-", "_")
+        prefix = f"CONN_{suffix}_"
         for key in connection_keys:
             env.append(_secret_env(f"{prefix}{key.upper()}", f"conn-{connection_name}", key))
+        meta_prefix = f"STARDELT_CONNECTION_{suffix}_"
+        if connection_type:
+            env.append(k8s.V1EnvVar(name=f"{meta_prefix}TYPE", value=connection_type))
+        if connection_config:
+            env.append(
+                k8s.V1EnvVar(
+                    name=f"{meta_prefix}SETTINGS",
+                    value=json.dumps(dict(connection_config), sort_keys=True),
+                )
+            )
     kernel_timeout = (os.environ.get(KERNEL_TIMEOUT_ENV) or "").strip()
     if kernel_timeout:
         env.append(k8s.V1EnvVar(name="NOTEBOOK_KERNEL_TIMEOUT", value=kernel_timeout))
@@ -223,6 +238,8 @@ class NotebookPodOperator(KubernetesPodOperator):
         namespace: str,
         connection_name: str | None = None,
         connection_keys: tuple[str, ...] = (),
+        connection_type: str | None = None,
+        connection_config: tuple[tuple[str, str], ...] = (),
         wap: bool = False,
         **kwargs,
     ) -> None:
@@ -236,6 +253,8 @@ class NotebookPodOperator(KubernetesPodOperator):
         self.principal_sa = principal_sa
         self.connection_name = connection_name
         self.connection_keys = tuple(connection_keys)
+        self.connection_type = connection_type
+        self.connection_config = tuple(connection_config)
         self.wap = wap
         super().__init__(
             namespace=namespace,
@@ -344,6 +363,8 @@ class NotebookPodOperator(KubernetesPodOperator):
             principal_secret=self.principal_secret,
             connection_name=self.connection_name,
             connection_keys=self.connection_keys,
+            connection_type=self.connection_type,
+            connection_config=self.connection_config,
             wap_branch=wap_branch,
         )
         self.env_vars += [

@@ -281,6 +281,35 @@ def test_the_pod_carries_the_connections_values(monkeypatch):
     assert by_name["PIPELINE_CLIENT_ID"].value_from.secret_key_ref.name == "sp-p"
 
 
+def test_the_pod_carries_the_connections_type_and_settings(monkeypatch):
+    set_contract(monkeypatch)
+    env = pod_env(
+        run_date="2026-10-21",
+        run_id=RUN_ID,
+        params={},
+        principal_secret="sp-p",
+        connection_name="crm-db",
+        connection_type="postgresql",
+        connection_config=(("host", "db"),),
+    )
+    by_name = {item.name: item for item in env}
+    # The metadata is not secret: the notebook reads it in the pod, where no store is reachable.
+    assert by_name["STARDELT_CONNECTION_CRM_DB_TYPE"].value == "postgresql"
+    assert by_name["STARDELT_CONNECTION_CRM_DB_SETTINGS"].value == '{"host": "db"}'
+
+    # Without it, neither variable is added.
+    env = pod_env(
+        run_date="2026-10-21",
+        run_id=RUN_ID,
+        params={},
+        principal_secret="sp-p",
+        connection_name="crm-db",
+    )
+    names = [item.name for item in env]
+    assert "STARDELT_CONNECTION_CRM_DB_TYPE" not in names
+    assert "STARDELT_CONNECTION_CRM_DB_SETTINGS" not in names
+
+
 def test_the_pod_carries_the_owner_groups_label():
     """A group's `SparkCluster` admits pods labelled for that group (stardelt-platform#1425)."""
     pytest.importorskip(PROVIDER)
