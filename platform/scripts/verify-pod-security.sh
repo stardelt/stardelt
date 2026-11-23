@@ -149,9 +149,15 @@ fi
 cronjobs="$(jq -r '.items[].metadata.name' "$tmp/cj.list" | sort)" || {
   echo "✗ cannot read the CronJob list of $NS"; exit 1; }
 for cj in $cronjobs; do
-  if ! kubectl -n "$NS" get cronjob "$cj" -o json >"$tmp/cj.read" 2>/dev/null; then
-    echo "– cronjob/$cj: gone before the probe (skipped)"
-    continue
+  if ! kubectl -n "$NS" get cronjob "$cj" -o json >"$tmp/cj.read" 2>"$tmp/cj.read.err"; then
+    if grep -q "NotFound" "$tmp/cj.read.err"; then
+      echo "– cronjob/$cj: gone before the probe (skipped)"
+      continue
+    fi
+    # Anything but NotFound means the template was never probed; skipping it would let it
+    # report PASS without being admitted.
+    echo "✗ cannot read cronjob/$cj: $(head -1 "$tmp/cj.read.err")"
+    exit 1
   fi
   templates=$((templates + 1))
   jq --arg name "probe-cron-$templates" --arg ns "$PROBE" '
