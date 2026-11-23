@@ -53,8 +53,7 @@ BODY_FILE="$TMP/body"
 ERROR_FILE="$TMP/error"
 
 CURRENT_ROW=startup
-cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap 'rm -rf "$TMP"' EXIT
 trap 'exit 130' INT TERM
 
 fail() { # fail <reason>: a row that could not even be asked; nothing after it is proof.
