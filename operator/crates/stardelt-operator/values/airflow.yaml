@@ -401,7 +401,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:f5d4ce417ed13b2e626956868ceb5f77ec8506d6af4b815e1aae3918f17084b6
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:e3be52ae019c1c9e4771003e7b7b264004035ebabe754019e5e5e7d9e192c8a2
   # spark-pipeline tasks (#80 S2c-2): the same four variables as the platform's
   # helm-values/airflow.yaml. Short names, like every address in this file: the operator
   # installs into another namespace.
