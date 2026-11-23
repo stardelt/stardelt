@@ -65,6 +65,9 @@ USER ${NB_UID}
 # metadata), which is why 2.21.1 is pinned beside it; `notebook` 7.6.5 requires
 # `jupyterlab>=4.6.6,<4.7`, which is why the base's 7.2.2 (which requires
 # `jupyterlab<4.3`) is replaced rather than kept.
+# `jupyterhub` is the single-user client the hub spawns, and it must be 5.x while the hub is
+# 5.5.5: the 2026-11-16 base ships 6.2.0, so it is pinned below 6 here until the hub moves
+# (#68 Part 2).
 RUN python3 -m pip uninstall -y jupyterlab-git \
     && python3 -m pip install --no-cache-dir --upgrade-strategy only-if-needed \
         pandas==2.2.3 \
@@ -72,6 +75,7 @@ RUN python3 -m pip uninstall -y jupyterlab-git \
         notebook==7.6.5 \
         jupyterlab==4.6.6 \
         jupyter_server==2.21.1 \
+        'jupyterhub>=5.5,<6' \
         pyspark-client==4.1.4 \
         jupyterlab-git==0.55.0 \
         nbgitpuller==1.3.0 \
@@ -85,7 +89,7 @@ RUN python3 -m pip uninstall -y jupyterlab-git \
     && python3 -c "import jupyterlab_git, nbgitpuller; print('jupyterlab-git', jupyterlab_git.__version__, '| nbgitpuller', nbgitpuller.__version__)" \
     && python3 -c "import papermill; print('papermill', papermill.__version__)" \
     && python3 -c "import ipywidgets, sidecar; print('ipywidgets', ipywidgets.__version__, '| sidecar', sidecar.__version__)" \
-    && python3 -c "import jupyterlab, jupyter_server, notebook; print('notebook', notebook.__version__, '| jupyterlab', jupyterlab.__version__, '| jupyter_server', jupyter_server.__version__)" \
+    && python3 -c "import jupyterhub, jupyterlab, jupyter_server, notebook; print('jupyterhub', jupyterhub.__version__, '| notebook', notebook.__version__, '| jupyterlab', jupyterlab.__version__, '| jupyter_server', jupyter_server.__version__)" \
     && git --version \
     && { jupyter labextension list 2>&1 | tee /tmp/labext.txt | grep -i '@jupyterlab/git' || { echo '--- full labextension list ---'; cat /tmp/labext.txt; exit 1; }; } \
     && jupyter server extension list 2>&1 | grep -i 'nbgitpuller'
