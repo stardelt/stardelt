@@ -209,7 +209,7 @@ def test_missing_configuration_and_a_refused_sign_in_are_one_line_errors(store, 
         stardelt.connection("crm-db")
     assert "\n" not in str(err.value) and "header." not in str(err.value)
     monkeypatch.delenv("STARDELT_SECRET_STORE_URL")
-    with pytest.raises(ConnectionUnavailable, match="STARDELT_SECRET_STORE_URL is not set"):
+    with pytest.raises(ConnectionUnavailable, match="no platform secret store"):
         stardelt.connection("crm-db")
     monkeypatch.setenv("STARDELT_SECRET_STORE_URL", "http://127.0.0.1:9")
     with pytest.raises(ConnectionUnavailable, match="not reachable") as err:

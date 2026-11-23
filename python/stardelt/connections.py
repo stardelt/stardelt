@@ -18,6 +18,9 @@ reachable there: the pipeline hands the pod a named connection's fields as
 ``CONN_<NAME>_<KEY>`` and its type and settings as ``STARDELT_CONNECTION_<NAME>_TYPE`` and
 ``..._SETTINGS``. Such a connection works in every ``secrets.mode``, including ``external``.
 
+An install in ``secrets.mode: external`` has no platform store at all: an interactive
+notebook cannot read a connection there, and a scheduled task is the way to use one.
+
 A value is fetched **when you ask for it** and never kept: ``crm.value("password")`` reads the
 store every time, so a rotation is seen on the next call and nothing sits in a variable you
 did not create. Printing a connection shows its name, scope, type and the *names* of its
@@ -97,8 +100,10 @@ class _Store:
         self.url = os.environ.get("STARDELT_SECRET_STORE_URL", "").strip().rstrip("/")
         if not self.url:
             raise ConnectionUnavailable(
-                "STARDELT_SECRET_STORE_URL is not set — this server was started before the secret "
-                "store was configured; restart it from the hub."
+                "this notebook has no platform secret store: on an install with "
+                "`spec.secrets.mode: external` a connection's values never reach an interactive "
+                "notebook — run the notebook as a scheduled task and read CONN_<NAME>_<KEY>, or ask "
+                "an administrator."
             )
         self.user_token = os.environ.get("TRINO_TOKEN", "").strip()
         if not self.user_token:
