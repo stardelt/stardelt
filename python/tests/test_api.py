@@ -55,6 +55,19 @@ def test_query_posts_sql_with_bearer():
     assert result.row_count == 2 and result.query_id == "q1" and result.truncated is False
 
 
+def test_upload_posts_the_bytes_unchanged():
+    c, session = client(FakeResponse(payload={"databases": ["warehouse"]}))
+
+    answer = c.upload("/api/dashboards/import?bundle=shop", b"PK\x03\x04zip", content_type="application/zip")
+
+    method, url, kwargs = session.calls[0]
+    assert (method, url) == ("POST", "https://nova.example/api/dashboards/import?bundle=shop")
+    assert kwargs["data"] == b"PK\x03\x04zip"
+    assert kwargs["headers"] == {"Authorization": f"Bearer {CANARY}", "Content-Type": "application/zip"}
+    assert "json" not in kwargs
+    assert answer == {"databases": ["warehouse"]}
+
+
 def test_query_result_to_pandas():
     c, _ = client(FakeResponse(payload=RESULT))
     frame = c.query("select 1").to_pandas()

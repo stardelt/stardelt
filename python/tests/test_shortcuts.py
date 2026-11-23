@@ -53,6 +53,17 @@ def test_a_command_wins_over_its_resource_words():
     assert shortcuts.expand(["lineage", "mobility.gold.kpis"], OPS) == ["lineage", "mobility.gold.kpis"]
 
 
+def test_the_dashboards_command_wins_over_the_import_operation():
+    # `dashboards` is also a contract resource (`dashboards_import`); the command owns the word, so
+    # both of its verbs reach their own parser instead of becoming `api dashboards_import`.
+    assert shortcuts.expand(["dashboards", "export", "1", "-o", "out"], OPS) == [
+        "dashboards", "export", "1", "-o", "out",
+    ]
+    argv = ["dashboards", "import", "dashboards/shop", "--bundle", "shop", "--owner-group", "g", "--target", "dev"]
+    assert shortcuts.expand(argv, OPS) == argv
+    assert shortcuts.expand(["api", "dashboards_import"], OPS) == ["api", "dashboards_import"]
+
+
 def test_commands_options_and_unknown_words_are_left_alone():
     untouched = [["whoami"], ["sql", "select 1"], ["api", "--list"], ["mcp", "serve"]]
     untouched += [["--help"], ["nothing", "here"], []]
