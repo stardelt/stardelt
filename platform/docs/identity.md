@@ -519,6 +519,15 @@ stored audience, the device endpoint and the loopback redirect. The audience is 
 `stardelt-identity` ConfigMap's `publicUrl` plus `/mcp`; override it with
 `make sync-mcp-client MCP_AUDIENCE=…`.
 
+The engine token comes from a standard token exchange (RFC 8693) with the confidential client
+`nova` as the actor: `nova` carries `standard.token.exchange.enabled=true`, so it can exchange a
+person's MCP token (which names `nova` in its `aud`) for a `trino`-audience token. Keycloak keeps
+that switch per client and the realm import sets it on a fresh install;
+`scripts/keycloak-sync-mcp-exchange.sh` (`make sync-mcp-exchange`) converges it on a realm that
+already exists and proves the result end to end — the attribute, the exchange, the exchanged
+claims and a `SELECT 1` against the engine — so a missing attribute fails the check instead of
+silently leaving the agent without an engine token.
+
 The endpoint's switch is the `stardelt-identity` ConfigMap's `mcpEnabled` (default `0`) and
 `mcpAudience` (default `https://<base domain>/mcp`), read by Nova as `NOVA_MCP_ENABLED` and
 `NOVA_MCP_AUDIENCE`. Because the values live in the ConfigMap, re-applying
