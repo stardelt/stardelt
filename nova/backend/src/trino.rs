@@ -428,7 +428,11 @@ pub(crate) fn client_error(err: &Value) -> String {
 /// and the body is what names the cause — a proxy page or an HTML gateway is recognised the
 /// same way. The body is cut at 200 bytes and its line breaks become spaces, so one refusal is
 /// always one line in a log or a UI.
-fn refused_answer(status: reqwest::StatusCode, content_type: Option<&str>, body: &str) -> String {
+pub(crate) fn refused_answer(
+    status: reqwest::StatusCode,
+    content_type: Option<&str>,
+    body: &str,
+) -> String {
     let flat = body.replace(['\n', '\r'], " ");
     // Cut at 200 bytes without splitting a multi-byte character.
     let end = (0..=200.min(flat.len()))
