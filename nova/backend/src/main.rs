@@ -134,6 +134,7 @@ mod openapi;
 mod people;
 mod pipeline_notice;
 mod pipelines;
+mod token_exchange;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
 #[allow(dead_code)]
 mod query_log;
@@ -186,6 +187,12 @@ pub struct AppState {
     /// `NOVA_CATALOG_TOKEN_URL`, `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET`
     /// are all set: Lakekeeper is then called exactly as before, without a token.
     pub catalog_token: Option<catalog_token::CatalogToken>,
+    /// The engine token the MCP SQL tools run as (`token_exchange.rs`): the caller's MCP token
+    /// exchanged for one with `aud: trino`, stardelt/stardelt#1455. Off only when
+    /// `NOVA_MCP_EXCHANGE_AUDIENCE` is explicitly empty; `None` also without MCP, without
+    /// sign-in, or when the provider advertises no token endpoint. Then the caller's token is
+    /// forwarded as before.
+    pub exchange: Option<token_exchange::TokenExchange>,
     /// Superset and JupyterHub are embedded in Nova's own UI; Nova reads their
     /// headers (and probes them) where they actually run.
     pub superset_url: String,
@@ -1129,12 +1136,23 @@ async fn main() -> anyhow::Result<()> {
         info!(audience = %cfg.audience, "MCP endpoint enabled at /mcp");
     }
 
+    // The MCP tools' engine token (stardelt/stardelt#1455): the caller's MCP token is
+    // exchanged for one whose audience is `NOVA_MCP_EXCHANGE_AUDIENCE` (`trino`). Off only
+    // when the variable is explicitly empty; without MCP or without sign-in there is nothing
+    // to exchange, and the tools forward the caller's token as before.
+    let exchange_env = match token_exchange::TokenExchangeEnv::from_env() {
+        Ok(env) => env,
+        Err(e) => anyhow::bail!("refusing to start: token exchange configuration: {e}"),
+    };
+
     // The catalog's token endpoint: `NOVA_CATALOG_TOKEN_URL` when it is set, otherwise the
     // one the sign-in provider advertises (stardelt-platform#611). The discovery document
     // is the cached one the block above fetched; nothing is fetched per request. An
     // unreachable provider is not fatal — the service token stays off and Nova serves,
-    // exactly as when the variables are unset.
-    let need_discovery = catalog_env.as_ref().is_some_and(|env| !env.has_token_url());
+    // exactly as when the variables are unset. The exchange has no explicit URL variable, so
+    // it needs the same document.
+    let need_discovery =
+        catalog_env.as_ref().is_some_and(|env| !env.has_token_url()) || exchange_env.is_some();
     let discovery_token_url = match auth.as_ref().filter(|_| need_discovery) {
         Some(a) => match a.provider.discovery().await {
             Ok(d) => Some(d.token_endpoint.clone()),
@@ -1152,7 +1170,7 @@ async fn main() -> anyhow::Result<()> {
             );
             None
         }
-        Some(env) => match env.resolve(discovery_token_url) {
+        Some(env) => match env.resolve(discovery_token_url.clone()) {
             Ok(Some(cfg)) => {
                 info!(
                     token_url = %cfg.token_url,
@@ -1169,6 +1187,41 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => anyhow::bail!("refusing to start: catalog token configuration: {e}"),
         },
+    };
+
+    // The acting client is Nova's own confidential client (`NOVA_OIDC_CLIENT_ID`/`_SECRET`,
+    // the realm client `nova`), already loaded above: a person's MCP token is exchanged for an
+    // engine token *as Nova*. The endpoint is the discovered one; a provider that advertises
+    // none leaves the exchange off.
+    let exchange = match (exchange_env, mcp.is_some()) {
+        (Some(env), true) => match auth
+            .as_ref()
+            .map(|a| (a.config.client_id.clone(), a.config.client_secret.clone()))
+        {
+            Some((client_id, client_secret)) => {
+                match env.resolve(discovery_token_url.clone(), client_id, client_secret) {
+                    Ok(Some(cfg)) => {
+                        info!(audience = %cfg.audience, "MCP engine token exchange configured");
+                        Some(token_exchange::TokenExchange::new(http.clone(), cfg))
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "the identity provider advertises no token endpoint — MCP statements forward the caller's token"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            reason = %e,
+                            "the discovered token endpoint cannot be used — MCP statements forward the caller's token"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        },
+        _ => None,
     };
 
     let superset_url =
@@ -1195,6 +1248,7 @@ async fn main() -> anyhow::Result<()> {
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
             .unwrap_or_else(|_| "http://lakekeeper.stardelt.svc.cluster.local:8181".into()),
         catalog_token,
+        exchange,
         superset_url,
         superset_api_url,
         superset: superset::service_user(),
@@ -1446,8 +1500,29 @@ mod router_tests {
             None,
             stage_name,
             stage_kind,
+            None,
         )
     }
+    /// An `AppState` for the engine-token tests (`token_exchange.rs`, `mcp.rs`): the MCP
+    /// endpoint is on in spirit, the caller's token is exchanged at the fake IdP the
+    /// `TokenExchange` points at, and the engine is the server at `trino_url`.
+    pub(crate) fn test_state_with_exchange(
+        trino_url: &str,
+        exchange: token_exchange::TokenExchange,
+    ) -> Arc<AppState> {
+        build_test_state_full(
+            None,
+            trino_url,
+            "http://127.0.0.1:1",
+            false,
+            None,
+            None,
+            None,
+            "dev",
+            Some(exchange),
+        )
+    }
+
     fn build_test_state(
         db: Option<sqlx::PgPool>,
         trino_url: &str,
@@ -1465,6 +1540,7 @@ mod router_tests {
             kube,
             None,
             "dev",
+            None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -1477,6 +1553,7 @@ mod router_tests {
         kube: Option<kube::Client>,
         stage_name: Option<String>,
         stage_kind: &'static str,
+        exchange: Option<token_exchange::TokenExchange>,
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
@@ -1484,6 +1561,7 @@ mod router_tests {
             lakekeeper_url: lakekeeper_url.into(),
             shared_accounts: vec![],
             catalog_token,
+            exchange,
             superset_url: "http://127.0.0.1:1".into(),
             superset_api_url: "http://127.0.0.1:1".into(),
             superset: None,
