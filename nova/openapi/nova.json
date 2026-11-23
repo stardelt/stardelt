@@ -2922,7 +2922,7 @@
         "tags": [
           "public"
         ],
-        "description": "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names.",
+        "description": "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names. Without a configured store (an install with `spec.secrets.mode: external`) the answer is built from the `Connection` resources: the caller's groups' rows, the ones they are a viewer of, and managed ones for an administrator, with no value.",
         "operationId": "connections_list",
         "responses": {
           "200": {
