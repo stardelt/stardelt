@@ -302,6 +302,10 @@ verify-product-path: _context ## The visitor's whole path as `demo`: search, tab
 verify-product-path-create: _context ## The product-path test's create half as `product-path`: create, schedule, run, log, delete
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-product-path.sh --create
 
+.PHONY: verify-pipeline-validate
+verify-pipeline-validate: _context ## The validate route accepts, refuses with the named rule, and writes nothing
+	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-pipeline-validate.sh
+
 verify-maintenance: _context ## Every Catalog's maint-<catalog> CronJob, its staggered schedule and its principal (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-maintenance.sh
 
