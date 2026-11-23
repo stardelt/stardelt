@@ -153,13 +153,10 @@ verify-warehouse-scale: _context ## The three writers of a warehouse's scale sta
 verify-warehouse-autostop: _context ## The idle policy reaches 0 and wakes (patches the classes for ~10 minutes)
 	@bash scripts/verify-warehouse-autostop.sh
 
-# The `--allow` pattern is the one accepted exception of #1096 question 5, with its reason:
-# Lakekeeper's `opa` sidecar has no value key in chart 0.14.0. SeaweedFS carries both chart
-# keys (helm-values/seaweedfs.yaml, platform#1758) and needs no exception.
+# Every running pod passes `restricted`; the Kubernetes Pod Security floor has no exception.
 verify-pod-security: _context ## Every running pod is admitted by a `restricted` Pod Security namespace (#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh \
-	  --allow '^lakekeeper-' \
-	  --allow-namespace-level baseline   # Lakekeeper's opa sidecar does not pass restricted in chart 0.14.0 (#1095)
+	  --allow-namespace-level baseline   # the opa sidecar is patched by scripts/lakekeeper-opa-security.sh (#1095)
 
 verify-pod-security-baseline: _context ## Every running pod is admitted by a `baseline` Pod Security namespace (#1096)
 	@NS=$(NAMESPACE) bash scripts/verify-pod-security.sh --level baseline \
@@ -626,6 +623,7 @@ step-lakekeeper: ## The Iceberg REST catalog, its bootstrap and the ingress Netw
 	@kubectl apply -f manifests/lakekeeper-bootstrap.yaml
 	@echo "› catalog ingress NetworkPolicy (only the components that need it)"
 	@kubectl apply -f manifests/lakekeeper-network-policy.yaml
+	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
 	@echo "› Access sync: one warehouse per Catalog (platform#305)"
 	@if kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1; then \
 	  $(MAKE) --no-print-directory access-sync; \
@@ -744,6 +742,7 @@ install-core: deps _context _helm-repos ## Install the core only (storage+catalo
 	@kubectl apply -f manifests/lakekeeper-bootstrap.yaml
 	@echo "› [6/7] catalog ingress NetworkPolicy (only the components that need it)"
 	@kubectl apply -f manifests/lakekeeper-network-policy.yaml
+	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
 
 	@echo "› [7/7] Trino + Nova (state store first: the Deployment reads its Secret)"
 	@$(MAKE) --no-print-directory trino
