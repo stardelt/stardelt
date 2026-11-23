@@ -161,12 +161,15 @@ class OperatorQuietTest(unittest.TestCase):
         )
         self.assertNotIn("PASS", result.stdout)
 
-    def test_a_status_write_fails_and_names_the_object(self):
+    def test_a_changed_object_is_unverified_and_names_it(self):
+        # A busy window is not a quiet window: another session's deploy must read `?`, not `✗`.
         (self.dir / "objects_second.txt").write_text("bronze=1235\n")
         result = self.run_script()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("catalog/bronze: resourceVersion 1234 → 1235", result.stdout)
-        self.assertEqual(result.stdout.rstrip("\n").splitlines()[-1].split(" ")[1], "FAIL")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(
+            "UNVERIFIED (the window was not idle: 1 object(s) changed — catalog/bronze", result.stdout
+        )
+        self.assertNotIn("✗", result.stdout)
 
     def test_a_status_write_counter_moving_fails_and_names_the_count(self):
         (self.dir / "metrics_second.txt").write_text(
@@ -178,8 +181,22 @@ class OperatorQuietTest(unittest.TestCase):
         )
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("✗ the operator wrote 2 status(es) while nothing changed", result.stdout)
+        self.assertIn("✗ the operator wrote 2 status(es) while nothing changed: catalog 7 → 9", result.stdout)
         self.assertEqual(result.stdout.rstrip("\n").splitlines()[-1].split(" ")[1], "FAIL")
+
+    def test_a_write_after_a_changed_object_is_unverified(self):
+        # Nothing about quiet was measured once an object moved, even if the counter did too.
+        (self.dir / "objects_second.txt").write_text("bronze=1235\n")
+        (self.dir / "metrics_second.txt").write_text(
+            '# TYPE stardelt_operator_reconciles_total counter\n'
+            'stardelt_operator_reconciles_total{controller="catalog",result="ok"} 15\n'
+            '# TYPE stardelt_operator_status_writes_total counter\n'
+            'stardelt_operator_status_writes_total{controller="catalog"} 9\n'
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("UNVERIFIED (the window was not idle: 1 object(s) changed — catalog/bronze", result.stdout)
+        self.assertNotIn("✗", result.stdout)
 
     def test_an_unreachable_metrics_endpoint_is_unverified(self):
         (self.dir / "metrics.txt").write_text("")
