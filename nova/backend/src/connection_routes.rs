@@ -1003,6 +1003,53 @@ async fn list_connections(
     Ok(rows)
 }
 
+/// The rows a person sees without a platform store (`secrets.mode: external`): their groups'
+/// `Connection` resources, the ones whose `viewers` name a group of theirs, and — for an
+/// administrator — managed ones. Built from resources only; no secret value is reachable here.
+async fn list_from_resources(resources: Option<&Resources>, who: &Identity) -> Vec<ConnectionView> {
+    let rows = match resources {
+        Some(r) => r.list().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut views = Vec::new();
+    for row in &rows {
+        if row["spec"]["scope"] != "group" {
+            continue;
+        }
+        let Some(group) = row["spec"]["ownerGroup"].as_str() else {
+            continue;
+        };
+        if !who.groups.iter().any(|own| own == group) {
+            continue;
+        }
+        views.push(connections::view_from_store(
+            resource_name(row),
+            Scope::Group,
+            Some(group),
+            usable_by(row),
+            &meta_from_resource(row),
+            connections::sync_from_resource(row),
+            true,
+        ));
+    }
+    views.extend(viewed_connections(&rows, &who.groups));
+    if who.is_admin {
+        for row in rows.iter().filter(|r| r["spec"]["scope"] == "managed") {
+            views.push(connections::view_from_store(
+                resource_name(row),
+                Scope::Managed,
+                None,
+                usable_by(row),
+                &meta_from_resource(row),
+                connections::sync_from_resource(row),
+                true,
+            ));
+        }
+    }
+    views.sort_by(|a, b| (scope_rank(a.scope), &a.name).cmp(&(scope_rank(b.scope), &b.name)));
+    views
+}
+
 /// The emergency read of a group connection: administrator, a written reason, a rate limit, the
 /// store's `breakglass` role signed in with the administrator's **own** token, the notice on the
 /// `Connection`, then the values once. Every exit is audited and the record cannot hold a value.
@@ -1286,9 +1333,11 @@ async fn resource_rows(resources: Option<&Resources>, scope: Scope) -> Vec<Value
 // The handlers: sign-in, the store, the caller's token, then one of the functions above.
 // ---------------------------------------------------------------------------
 
-/// The signed-in caller and the store, checked **before** the body is parsed: a route that cannot
-/// serve this caller says so (`503` without a store, `401` without a token) rather than complaining
-/// about a body it was never going to use. Demo mode and `static-dev` have no principal at all.
+/// The signed-in caller, checked **before** the body is parsed: a route that cannot serve this
+/// caller says so (`401` without a token) rather than complaining about a body it was never going
+/// to use. Demo mode and `static-dev` have no principal at all. A caller without a configured store
+/// (an install with `spec.secrets.mode: external`) is a valid caller: the read answers from the
+/// `Connection` resources, and a write says `503` itself.
 pub(crate) struct SignedIn {
     state: Arc<AppState>,
     identity: Identity,
@@ -1299,12 +1348,10 @@ pub(crate) struct SignedIn {
 }
 
 impl SignedIn {
-    /// The store. Present: the extractor refused the request otherwise, and state never changes.
-    fn store(&self) -> &StoreClient {
-        self.state
-            .store
-            .as_ref()
-            .expect("the extractor checked the store")
+    /// The store, when this install has one: absent for `spec.secrets.mode: external`, where the
+    /// read answers from the `Connection` resources and a write answers `503`.
+    fn store(&self) -> Option<&StoreClient> {
+        self.state.store.as_ref()
     }
 
     /// The application state, for a route (like the pipelines one) that needs another client.
@@ -1328,9 +1375,6 @@ impl FromRequestParts<Arc<AppState>> for SignedIn {
         let Some(principal) = parts.extensions.get::<Principal>().cloned() else {
             return Err(not_configured());
         };
-        if state.store.is_none() {
-            return Err(not_configured());
-        }
         let Some(access) = principal.access_token else {
             return Err(sign_in_again());
         };
@@ -1382,7 +1426,7 @@ impl FromRequestParts<Arc<AppState>> for Caller {
     operation_id = "connections_list",
     path = "/api/connections",
     tag = "public",
-    description = "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names.",
+    description = "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names. Without a configured store (an install with `spec.secrets.mode: external`) the answer is built from the `Connection` resources: the caller's groups' rows, the ones they are a viewer of, and managed ones for an administrator, with no value.",
     responses(
         (status = 200, description = "Personal, then group, then managed connections, each sorted by name", body = ConnectionsResponse),
         (status = 401, description = "No token to sign in to the secret store with", body = crate::openapi::ErrorResponse),
@@ -1396,14 +1440,13 @@ pub(crate) async fn list(caller: Caller) -> Response {
         Caller::Signed(signed) => *signed,
     };
     let resources = resources(&signed.state);
-    match list_connections(
-        signed.store(),
-        resources.as_ref(),
-        &signed.identity,
-        &signed.access,
-    )
-    .await
-    {
+    let Some(store) = signed.store() else {
+        return Json(ConnectionsResponse {
+            connections: list_from_resources(resources.as_ref(), &signed.identity).await,
+        })
+        .into_response();
+    };
+    match list_connections(store, resources.as_ref(), &signed.identity, &signed.access).await {
         Ok(connections) => Json(ConnectionsResponse { connections }).into_response(),
         Err(e) => e.into_response(),
     }
@@ -1436,9 +1479,12 @@ pub(crate) async fn break_glass_group(
     Path((group, name)): Path<(String, String)>,
     ConnectionJson(req): ConnectionJson<BreakGlassRequest>,
 ) -> Response {
+    let Some(store) = signed.store() else {
+        return not_configured().into_response();
+    };
     let resources = resources(&signed.state);
     let result = break_glass_group_at(
-        signed.store(),
+        store,
         resources.as_ref(),
         &signed.state.break_glass_reads,
         signed.state.db.as_ref(),
@@ -1618,9 +1664,12 @@ pub(crate) async fn create(
     signed: SignedIn,
     ConnectionJson(req): ConnectionJson<NewConnection>,
 ) -> Response {
+    let Some(store) = signed.store() else {
+        return not_configured().into_response();
+    };
     let resources = resources(&signed.state);
     match create_connection(
-        signed.store(),
+        store,
         resources.as_ref(),
         &signed.identity,
         &signed.access,
@@ -1732,9 +1781,12 @@ async fn rotate_at(
     body: RotateRequest,
 ) -> Response {
     let scope = scope(&signed.identity);
+    let Some(store) = signed.store() else {
+        return not_configured().into_response();
+    };
     let resources = resources(&signed.state);
     match rotate_connection(
-        signed.store(),
+        store,
         resources.as_ref(),
         &signed.identity,
         &signed.access,
@@ -1831,9 +1883,12 @@ async fn delete_at(
     name: &str,
 ) -> Response {
     let scope = scope(&signed.identity);
+    let Some(store) = signed.store() else {
+        return not_configured().into_response();
+    };
     let resources = resources(&signed.state);
     match delete_connection(
-        signed.store(),
+        store,
         resources.as_ref(),
         &signed.identity,
         &signed.access,
@@ -2719,29 +2774,64 @@ mod tests {
 
     #[tokio::test]
     async fn not_configured_is_503() {
-        // A signed-in caller with a store missing, and a caller with no principal at all (demo
-        // mode): both answer the same sentence, and before the body is looked at.
-        for caller in [Some(principal()), None] {
-            let app = app(None, caller);
-            for method in ["GET", "POST"] {
-                let request = Request::builder()
-                    .method(method)
+        // A signed-in caller with no store: the write routes answer the sentence before the body
+        // is looked at; the list answers from the resources (empty here, there is no cluster).
+        let app_with_caller = app(None, Some(principal()));
+        let response = app_with_caller
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/connections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "GET");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["connections"], serde_json::json!([]), "no cluster");
+
+        let response = app_with_caller
+            .oneshot(
+                Request::builder()
+                    .method("POST")
                     .uri("/connections")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"x"}"#))
-                    .unwrap();
-                let response = app.clone().oneshot(request).await.unwrap();
-                assert_eq!(
-                    response.status(),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "{method}"
-                );
-                let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
-                    .await
-                    .unwrap();
-                let value: Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(value["error"], "the secret store is not configured");
-            }
+                    .body(Body::from(r#"{"name":"crm-db","type":"sqlserver","scope":"personal","config":{"host":"crm.example.com"},"secret":{"user":"etl","password":"p1"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "POST");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "the secret store is not configured");
+
+        // A caller with no principal at all (demo mode off, static-dev): both answer the sentence.
+        let app_without_caller = app(None, None);
+        for method in ["GET", "POST"] {
+            let request = Request::builder()
+                .method(method)
+                .uri("/connections")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"crm-db","type":"sqlserver","scope":"personal","config":{"host":"crm.example.com"},"secret":{"user":"etl","password":"p1"}}"#))
+                .unwrap();
+            let response = app_without_caller.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "the secret store is not configured");
         }
     }
 
@@ -3559,6 +3649,83 @@ mod tests {
             "a member gets the store row, not this one"
         );
         assert!(viewed_connections(&rows, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_without_a_store_answers_the_groups_connections() {
+        let (resources, items) = memory();
+        {
+            let mut items = items.lock().unwrap();
+            items.insert(
+                "shop-db".into(),
+                connection_row("shop-db", "group", Some("shop"), &[]),
+            );
+            items.insert(
+                "finance-db".into(),
+                connection_row("finance-db", "group", Some("finance"), &["shop"]),
+            );
+        }
+        let shop = who("sub-shop", &["shop"], false);
+
+        let views = list_from_resources(Some(&resources), &shop).await;
+        assert_eq!(
+            views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            ["finance-db", "shop-db"],
+            "group rows, sorted by name"
+        );
+        let shop_db = views.iter().find(|v| v.name == "shop-db").expect("shop-db");
+        let finance_db = views
+            .iter()
+            .find(|v| v.name == "finance-db")
+            .expect("finance-db");
+        assert!(shop_db.member, "a member's own group row is writable");
+        assert!(!finance_db.member, "a viewed row is read-only");
+        assert_eq!(shop_db.owner_group.as_deref(), Some("shop"));
+        assert_eq!(finance_db.owner_group.as_deref(), Some("finance"));
+        assert_eq!(shop_db.secret_keys, ["user", "password"]);
+        assert_eq!(finance_db.secret_keys, ["user", "password"]);
+    }
+
+    #[tokio::test]
+    async fn a_list_without_a_store_hides_another_groups_connection() {
+        let (resources, items) = memory();
+        {
+            let mut items = items.lock().unwrap();
+            items.insert(
+                "shop-db".into(),
+                connection_row("shop-db", "group", Some("shop"), &[]),
+            );
+            items.insert(
+                "finance-db".into(),
+                connection_row("finance-db", "group", Some("finance"), &["shop"]),
+            );
+        }
+        let analytics = who("sub-analytics", &["analytics"], false);
+
+        assert!(
+            list_from_resources(Some(&resources), &analytics)
+                .await
+                .is_empty(),
+            "no row of another group's, and no store row either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_without_a_store_never_contains_a_value() {
+        let (resources, items) = memory();
+        // The operator's synced Secret for this connection holds `hunter2`; the resource carries
+        // the field names only, and the list is built from resources.
+        items.lock().unwrap().insert(
+            "shop-db".into(),
+            connection_row("shop-db", "group", Some("shop"), &[]),
+        );
+        let shop = who("sub-shop", &["shop"], false);
+
+        let views = list_from_resources(Some(&resources), &shop).await;
+        assert_eq!(views.len(), 1);
+        let text = serde_json::to_string(&views).unwrap();
+        assert!(!text.contains("hunter2"), "no value may appear: {text}");
+        assert_eq!(views[0].secret_keys, ["user", "password"]);
     }
 
     /// Demo mode has neither a principal nor a store, so this goes through `Caller::Demo`; the
