@@ -21,8 +21,14 @@
 # Prometheus has too; resourceVersion catches a write the counter does not see (a writing
 # replica that restarted inside the window) and a write that changed the object some other way.
 #
-# Exit codes: 0 PASS (every row inside the budget), 1 FAIL (a row outside it, each changed
-# object named on its own ✗ line), 3 UNVERIFIED (no kubectl, no operator pod, the metrics
+# The object snapshot covers the 9 kinds the operator's controllers reconcile. A window in
+# which any of them changed is UNVERIFIED, not a failure: a deploy makes the cluster busy, and
+# a busy lab is not a defect (#1341). A status write with no such change is the failure, and
+# the counter's `controller` label is printed so the row names the writer.
+#
+# Exit codes: 0 PASS (every row inside the budget), 1 FAIL (a row outside it, the writing
+# controller and its before → after count named on the ✗ line), 3 UNVERIFIED (an object
+# changed inside the window, so the window was not idle, no kubectl, no operator pod, the metrics
 # endpoint answers nothing, or has neither its series nor its `# TYPE` line, kubectl top says
 # the Metrics API is not available, or the kubelet stats summary cannot be read — the check
 # proved nothing and must not be read as PASS).
@@ -38,7 +44,7 @@ eff_window=$(( WINDOW > 0 ? WINDOW : 1 ))
 command -v kubectl >/dev/null 2>&1 || { echo "verify-operator-quiet: UNVERIFIED (kubectl not found)"; exit 3; }
 command -v python3 >/dev/null 2>&1 || { echo "verify-operator-quiet: UNVERIFIED (python3 not found)"; exit 3; }
 
-KINDS=(catalogs connections serviceprincipals sparkclusters streamapps lakehouses platforminstances)
+KINDS=(catalogs connections serviceprincipals sparkclusters streamapps lakehouses platforminstances pipelines deploystages)
 singular() {
   case "$1" in
     catalogs) echo catalog ;;
@@ -48,6 +54,8 @@ singular() {
     streamapps) echo streamapp ;;
     lakehouses) echo lakehouse ;;
     platforminstances) echo platforminstance ;;
+    pipelines) echo pipeline ;;
+    deploystages) echo deploystage ;;
     *) echo "$1" ;;
   esac
 }
@@ -119,16 +127,18 @@ reconcile_sum() {  # -> total reconciles over every operator pod, or UNREACHABLE
   if [ "$scraped" -eq 0 ]; then echo UNREACHABLE; else echo "$total"; fi
 }
 
-status_write_sum() {  # -> total status writes over every operator pod, or UNREACHABLE
-  local pod out url total=0 scraped=0
+status_writes_by_controller() {  # -> "<controller> <count>" per series, summed over the pods, sorted; or UNREACHABLE
+  local pod out url scraped=0 acc="$tmp/writes.acc"
+  : > "$acc"
   for pod in "${op_pods[@]}"; do
     url="/api/v1/namespaces/$NS/pods/$pod:8082/proxy/metrics"
     if ! out="$(kubectl get --raw "$url" 2>&1)"; then continue; fi
     printf '%s\n' "$out" | grep -q '^# TYPE stardelt_operator_status_writes_total counter' || continue
     scraped=$((scraped + 1))
-    total=$((total + $(printf '%s\n' "$out" | awk '/^stardelt_operator_status_writes_total\{/ {s += $2} END {print s+0}')))
+    printf '%s\n' "$out" | awk '/^stardelt_operator_status_writes_total\{/ {c=$0; sub(/.*controller="/,"",c); sub(/"\}.*/,"",c); s[c]+=$2} END {for (k in s) print k, s[k]}' >> "$acc"
   done
-  if [ "$scraped" -eq 0 ]; then echo UNREACHABLE; else echo "$total"; fi
+  if [ "$scraped" -eq 0 ]; then echo UNREACHABLE; return 0; fi
+  awk '{s[$1]+=$2} END {for (k in s) print k, s[k]}' "$acc" | sort
 }
 
 # ---- measurement -----------------------------------------------------------
@@ -137,11 +147,11 @@ mkdir -p "$tmp/one" "$tmp/two"
 snap_objects "$tmp/one"
 snap_net "$tmp/net1"
 recon1="$(reconcile_sum)"
-write1="$(status_write_sum)"
+write1="$(status_writes_by_controller)"
 sleep "$WINDOW"
 snap_net "$tmp/net2"
 recon2="$(reconcile_sum)"
-write2="$(status_write_sum)"
+write2="$(status_writes_by_controller)"
 snap_objects "$tmp/two"
 
 problems=0
@@ -167,10 +177,10 @@ for kind in "${KINDS[@]}"; do
       { b[$1] = $2 }
       END {
         for (n in a) {
-          if (!(n in b)) printf "✗ %s/%s: resourceVersion %s → gone (deleted)\n", k, n, a[n]
-          else if (a[n] != b[n]) printf "✗ %s/%s: resourceVersion %s → %s\n", k, n, a[n], b[n]
+          if (!(n in b)) printf "! %s/%s: resourceVersion %s → gone (deleted)\n", k, n, a[n]
+          else if (a[n] != b[n]) printf "! %s/%s: resourceVersion %s → %s\n", k, n, a[n], b[n]
         }
-        for (n in b) if (!(n in a)) printf "✗ %s/%s: resourceVersion none → %s (created)\n", k, n, b[n]
+        for (n in b) if (!(n in a)) printf "! %s/%s: resourceVersion none → %s (created)\n", k, n, b[n]
       }' "$tmp/one/$kind" "$tmp/two/$kind")"$'\n'
   fi
 done
@@ -181,8 +191,13 @@ if [ -z "$per_kind" ]; then
 fi
 
 if [ -n "${changed_lines%$'\n'}" ]; then
+  # A busy window is not a quiet window: nothing about quiet was measured, so say that
+  # instead of failing. Another session's deploy must not turn the release row red (#1341).
   printf '%s' "$changed_lines"
-  problems=$((problems + 1))
+  changed_count="$(printf '%s' "$changed_lines" | grep -c .)"
+  first_changed="$(printf '%s' "$changed_lines" | sed -n '1s/^! \([^:]*\):.*/\1/p')"
+  echo "verify-operator-quiet: UNVERIFIED (the window was not idle: $changed_count object(s) changed — $first_changed; nothing about quiet was measured)"
+  exit 3
 else
   echo "✓ $total_objects resources unchanged in $WINDOW s ($per_kind)"
 fi
@@ -212,15 +227,48 @@ if [ "$write1" = UNREACHABLE ] || [ "$write2" = UNREACHABLE ]; then
   echo "verify-operator-quiet: UNVERIFIED (the operator metrics endpoint :8082 has no stardelt_operator_status_writes_total)"
   exit 3
 fi
-wrote=$((write2 - write1))
-if [ "$wrote" -lt 0 ]; then
-  note "the status-write counter went backwards (an operator pod restarted inside the window); delta read as 0"
-  wrote=0
-fi
+printf '%s\n' "$write1" > "$tmp/write1"
+printf '%s\n' "$write2" > "$tmp/write2"
+write1_total="$(printf '%s\n' "$write1" | awk 'NF==2 {s += $2} END {printf "%d", s + 0}')"
+write2_total="$(printf '%s\n' "$write2" | awk 'NF==2 {s += $2} END {printf "%d", s + 0}')"
+per_controller="$(python3 - "$tmp/write1" "$tmp/write2" <<'PY'
+import sys
+
+
+def read(path):
+    out = {}
+    with open(path) as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) == 2:
+                out[parts[0]] = int(parts[1])
+    return out
+
+
+one, two = read(sys.argv[1]), read(sys.argv[2])
+wrote, moved, backwards = 0, [], []
+for controller in sorted(set(one) | set(two)):
+    before, after = one.get(controller, 0), two.get(controller, 0)
+    if after > before:
+        wrote += after - before
+        moved.append("%s %d → %d" % (controller, before, after))
+    elif after < before:
+        backwards.append(controller)
+print(wrote)
+print(", ".join(moved))
+for controller in backwards:
+    print("BACK %s" % controller)
+PY
+)"
+wrote="$(printf '%s\n' "$per_controller" | sed -n '1p')"
+moved="$(printf '%s\n' "$per_controller" | sed -n '2p')"
+printf '%s\n' "$per_controller" | sed -n 's/^BACK /!/p' | while IFS= read -r line; do
+  echo "$line the status-write counter went backwards (an operator pod restarted inside the window); its delta is dropped"
+done
 if [ "$wrote" -eq 0 ]; then
-  echo "✓ no status write (counter $write1 → $write2)"
+  echo "✓ no status write (counter $write1_total → $write2_total)"
 else
-  echo "✗ the operator wrote $wrote status(es) while nothing changed"
+  echo "✗ the operator wrote $wrote status(es) while nothing changed: $moved"
   problems=$((problems + 1))
 fi
 
