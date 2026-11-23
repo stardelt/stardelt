@@ -14,7 +14,7 @@
 # `_token()`), while `_session()` sends a token to the *shared* Connect server as the person.
 # Neither a shared-server session opened with the projected file nor Trino's answer to the
 # projected token has been measured, so the loader slice that drops the secret cannot be
-# written. Six questions, one throwaway pod:
+# written. Six questions, one throwaway pod at a time:
 #
 #   Q1  does a session on the shared server read Iceberg with only the projected token?
 #   Q2  what does stardelt._token() do with no client secret?
@@ -30,20 +30,24 @@
 #
 # The pod is the shape a task pod takes after #1262: created as `sp-pipeline-demo`, no
 # automounted API-server token, one projected `catalog-token` volume (audience
-# `stardelt-catalog-workload`). The labels are task-pod labels, and they decide which questions
-# a run can take: `pipeline-spark-pipeline` is the only task-pod label spark-connect-ingress
-# admits (Q1), and its `pipeline-notebook-egress` policy denies the catalog's own port, so Q5 is
-# taken by a second run with the KubernetesExecutor label set a dbt task pod really carries
-# (`LABELS=component=worker,release=airflow,stardelt.io/spike=task-pod-catalog-token`), which
-# lakekeeper-ingress admits and no egress policy selects. One pod cannot do both.
+# `stardelt-catalog-workload`). A task pod's labels decide which questions one pod can take:
+# `pipeline-spark-pipeline` is the only task-pod label spark-connect-ingress admits (Q1), and
+# `pipeline-notebook-egress`, which that label selects, names no catalog port — so Q5 is taken
+# by a second short pass with the KubernetesExecutor labels a live dbt task pod really carries
+# (`component=worker,release=airflow`), which lakekeeper-ingress admits and no egress policy
+# selects. One pod cannot do both; the script runs them one after the other and each is deleted.
+#
 # Environment:
 #   NS         namespace, default stardelt (NAMESPACE is honoured as well)
 #   PRINCIPAL  the ServicePrincipal to launch as, default pipeline-demo
 #   AUDIENCE   the workload audience, default stardelt-catalog-workload
-#   LABELS     the probe pod's labels, default the task-pod set above
-#   TIMEOUT    how long the pod may run, default 600s
+#   LABELS     the first pass's labels, default `app.kubernetes.io/name=pipeline-spark-pipeline`
+#              plus the spike marker
+#   LABELS_Q5  the second pass's labels (only when pass 1 could not take Q5), default
+#              `component=worker,release=airflow` plus the spike marker
+#   TIMEOUT    how long one pod may run, default 900s (the per-row timeouts add up to ~610s)
 #
-# Exit 0 = the six rows are printed, 1 = a row could not be taken or the pod was refused,
+# Exit 0 = the six rows are printed, 1 = a row could not be taken or a pod was refused,
 # 3 = UNVERIFIED (no kubectl, no namespace, no principal Secret, no pinned notebook image).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -53,8 +57,9 @@ PRINCIPAL="${PRINCIPAL:-pipeline-demo}"
 SA="sp-${PRINCIPAL}"
 POD=spike-task-pod-credentials
 AUDIENCE="${AUDIENCE:-stardelt-catalog-workload}"
-LABELS="${LABELS:-component=worker,release=airflow,app.kubernetes.io/name=pipeline-spark-pipeline,stardelt.io/spike=task-pod-catalog-token}"
-TIMEOUT="${TIMEOUT:-600s}"
+LABELS="${LABELS:-app.kubernetes.io/name=pipeline-spark-pipeline,stardelt.io/spike=task-pod-catalog-token}"
+LABELS_Q5="${LABELS_Q5:-component=worker,release=airflow,stardelt.io/spike=task-pod-catalog-token}"
+TIMEOUT="${TIMEOUT:-900s}"
 
 unverified() { echo "UNVERIFIED ($*)"; exit 3; }
 
@@ -62,28 +67,21 @@ command -v kubectl >/dev/null 2>&1 || unverified "kubectl not found"
 command -v python3 >/dev/null 2>&1 || unverified "python3 not found"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/spike-task-pod-catalog.XXXXXX")"
-# No file here ever holds a token: the token is minted by the kubelet into the pod's projected
-# volume and read only from inside the pod.
-# shellcheck disable=SC2329  # called by the trap below
+# No file under $tmp ever holds a token: the token is minted by the kubelet into the pod's
+# projected volume and read only from inside the pod. `cleanup` is idempotent and quiet once the
+# pod is gone, so the normal path can run it before the final line and the trap covers the rest.
+# shellcheck disable=SC2329  # called by the traps below
 cleanup() {
   rm -rf "$tmp"
-  if ! kubectl -n "$NS" get pod "$POD" -o name >/dev/null 2>&1; then
-    return 0
+  # `delete_pod` is defined further down; an early exit (UNVERIFIED) reaches here before it.
+  if declare -F delete_pod >/dev/null 2>&1; then
+    delete_pod
   fi
-  kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  # `--wait=false` returns before the pod is gone and the next run would then be refused with
-  # AlreadyExists; the pod must be gone when the script ends, so the trap waits for it.
-  local gone=no
-  for _ in $(seq 1 150); do
-    if [ -z "$(kubectl -n "$NS" get pod "$POD" -o name 2>/dev/null || true)" ]; then
-      gone=yes
-      break
-    fi
-    sleep 1
-  done
-  echo "cleanup pod-deleted=$gone"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# A signal must end the run, not be swallowed and resumed by the wait loop below.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # L1. The principal's ServiceAccount and its Secret: the pod runs as it, and the client
@@ -93,28 +91,39 @@ kubectl -n "$NS" get sa "$SA" -o name >/dev/null 2>"$tmp/sa.err" \
   || unverified "no ServiceAccount $SA in $NS: $(tail -n 1 "$tmp/sa.err")"
 kubectl -n "$NS" get secret "$SA" -o name >/dev/null 2>"$tmp/secret.err" \
   || unverified "no Secret $SA (the principal's credentials) in $NS: $(tail -n 1 "$tmp/secret.err")"
+# The keys the pod's `secretKeyRef`s name, checked by name only; no value is read.
+keys="$(kubectl -n "$NS" get secret "$SA" -o jsonpath='{.data}' | python3 -c '
+import json, sys
+print(" ".join(sorted(json.load(sys.stdin).keys())))
+')"
+case " $keys " in
+  *" client-id "*) : ;;
+  *) unverified "Secret $SA has no client-id key" ;;
+esac
+case " $keys " in
+  *" client-secret "*) : ;;
+  *) unverified "Secret $SA has no client-secret key" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # L2. The image the live hub spawns: the notebook the platform really gives a person, read from
 #     the hub's rendered values (Secret `hub`, `singleuser.image`). A literal here would drift
 #     from the pinned digest (scripts/check-notebook-image-pin.sh guards the values file).
 # ---------------------------------------------------------------------------
-kubectl -n "$NS" get secret hub -o jsonpath='{.data.values\.yaml}' 2>"$tmp/hub.err" \
-  | base64 -d >"$tmp/values.yaml" \
-  || unverified "cannot read the hub's values: $(tail -n 1 "$tmp/hub.err")"
-image="$(python3 - "$tmp/values.yaml" <<'PY'
+image="$(kubectl -n "$NS" get secret hub -o jsonpath='{.data.values\.yaml}' 2>"$tmp/hub.err" \
+  | base64 -d \
+  | python3 -c '
 import sys, yaml
 
 try:
-    values = yaml.safe_load(open(sys.argv[1])) or {}
+    values = yaml.safe_load(sys.stdin) or {}
 except Exception:
     raise SystemExit(0)
 image = ((values.get("singleuser") or {}).get("image") or {})
 name, tag = image.get("name") or "", image.get("tag") or ""
 print(f"{name}:{tag}" if name and tag else "")
-PY
-)"
-[ -n "$image" ] || unverified "the hub's values name no singleuser.image"
+')"
+[ -n "$image" ] || unverified "the hub's values name no singleuser.image: $(tail -n 1 "$tmp/hub.err")"
 case "$image" in
   *@sha256:*) : ;;
   *) unverified "the singleuser image is not pinned by digest ($image)" ;;
@@ -125,10 +134,11 @@ echo "L sa=$SA automount=false"
 # ---------------------------------------------------------------------------
 # 3. The probe Pod, then the six questions from inside it.
 # ---------------------------------------------------------------------------
-python3 - "$POD" "$NS" "$SA" "$image" "$AUDIENCE" "$LABELS" >"$tmp/pod.json" <<'PY'
+pod_json() {  # $1 = the pod's labels, $2 = the rows this pass skips
+python3 - "$POD" "$NS" "$SA" "$image" "$AUDIENCE" "$1" "$2" <<'PY'
 import json, sys
 
-pod, namespace, sa, image, audience, labels = sys.argv[1:7]
+pod, namespace, sa, image, audience, labels, skip = sys.argv[1:8]
 pairs = dict(pair.split("=", 1) for pair in labels.split(",") if "=" in pair)
 
 PROBE = r'''
@@ -152,6 +162,18 @@ def no_credentials():
 def projected_token():
     with open(TOKEN_FILE) as handle:
         return handle.read().strip()
+
+
+def redacted(text):
+    """`text` with any copy of the pod's tokens removed: a message may echo a config value."""
+    for secret in (TOKEN_FILE,):
+        try:
+            value = open(secret).read().strip()
+        except OSError:
+            continue
+        if value:
+            text = text.replace(value, "<redacted>")
+    return text
 
 
 def trino_status(token):
@@ -185,7 +207,9 @@ def row(name, text):
 
 
 # Q1 — the shared server acts as the token's principal. The session names `gold` the way
-# `stardelt._session()` does, except that the token is the projected file's contents.
+# `stardelt._session()` does, except that the token is the projected file's contents. It sets one
+# catalog, `gold`: `defaultCatalog`, the WAP branch and the `setCurrentCatalog` load probe of
+# `_session()` are not reproduced (a probe answers a question, it does not re-run the library).
 Q1 = r"""
 import os
 from pyspark.sql import SparkSession
@@ -197,12 +221,12 @@ for key, value in (
     ("", "org.apache.iceberg.spark.SparkCatalog"),
     ("type", "rest"),
     ("rest-catalog-purge", "true"),
-    ("uri", os.environ.get("STARDELT_CATALOG_URI", "http://lakekeeper.stardelt.svc.cluster.local:8181/catalog")),
+    ("uri", os.environ["STARDELT_CATALOG_URI"]),
     ("warehouse", "gold"),
     ("token", token),
     ("io-impl", "org.apache.iceberg.aws.s3.S3FileIO"),
     ("header.X-Iceberg-Access-Delegation", "vended-credentials"),
-    ("s3.endpoint", os.environ.get("STARDELT_S3_ENDPOINT", "http://seaweedfs-s3.stardelt.svc.cluster.local:8333")),
+    ("s3.endpoint", os.environ["STARDELT_S3_ENDPOINT"]),
     ("s3.region", "us-east-1"),
     ("s3.path-style-access", "true"),
 ):
@@ -211,17 +235,21 @@ print("rows=%d" % session.table("gold.shop.daily_revenue").count(), flush=True)
 """
 
 try:
-    done = subprocess.run(
-        [sys.executable, "-u", "-c", Q1],
-        env=no_credentials(), capture_output=True, text=True, timeout=420,
-    )
-    rows = [line for line in done.stdout.splitlines() if line.startswith("rows=")]
-    if done.returncode == 0 and rows:
-        row("Q1", rows[-1])
+    if "Q1" in (os.environ.get("PROBE_SKIP") or ""):
+        # Pass 2 only adds Q5: a Spark session here would wait out the Connect port it may not use.
+        row("Q1", "skipped=second-pass")
     else:
-        first = (done.stderr.strip().splitlines() or ["no output"])[-1]
-        row("Q1", "refused=%s" % first[:240])
-        missing.append("Q1")
+        done = subprocess.run(
+            [sys.executable, "-u", "-c", Q1],
+            env=no_credentials(), capture_output=True, text=True, timeout=420,
+        )
+        rows = [line for line in done.stdout.splitlines() if line.startswith("rows=")]
+        if done.returncode == 0 and rows:
+            row("Q1", rows[-1])
+        else:
+            first = redacted((done.stderr.strip().splitlines() or ["no output"])[-1])
+            row("Q1", "refused=%s" % first[:240])
+            missing.append("Q1")
 except Exception as error:  # noqa: BLE001 - a row that cannot be taken is still printed
     row("Q1", "error=%s" % type(error).__name__)
     missing.append("Q1")
@@ -237,12 +265,16 @@ try:
         if "RuntimeError" in line:
             sentence = line.strip()
             break
-    if done.returncode != 0:
+    if done.returncode != 0 and sentence:
         row("Q2", "token=absent")
-        if sentence:
-            row("Q2", "error=%s" % sentence[:240])
+        row("Q2", "error=%s" % redacted(sentence)[:240])
+    elif done.returncode != 0:
+        # A failure that is not the library's own sentence: an import error, say.
+        last = redacted((done.stderr.strip().splitlines() or ["no output"])[-1])
+        row("Q2", "error=%s" % last[:240])
+        missing.append("Q2")
     else:
-        # _token() answered: the token was in the environment, not compared here.
+        # _token() answered: a token was in the environment, not compared here.
         row("Q2", "token=present")
         missing.append("Q2")
 except Exception as error:  # noqa: BLE001
@@ -279,7 +311,7 @@ except Exception as error:  # noqa: BLE001
 try:
     import re
     request = urllib.request.Request(
-        "http://lakekeeper.stardelt.svc.cluster.local:8181/management/v1/whoami",
+        os.environ["LAKEKEEPER_MANAGEMENT"] + "/management/v1/whoami",
         headers={"Authorization": "Bearer " + projected_token()},
     )
     status, body = None, ""
@@ -346,14 +378,19 @@ print(json.dumps({
                 {"name": "TRINO_URL", "valueFrom": {"configMapKeyRef": {
                     "name": "stardelt-identity", "key": "trinoUrl"}}},
                 {"name": "REQUESTS_CA_BUNDLE", "value": "/etc/stardelt/trino-ca/ca.crt"},
+                {"name": "PROBE_SKIP", "value": skip},
                 {"name": "SPARK_REMOTE", "value":
-                    "sc://spark-connect.stardelt.svc.cluster.local:15002"},
+                    "sc://spark-connect.%s.svc.cluster.local:15002" % namespace},
                 {"name": "STARDELT_CATALOG_URI", "value":
-                    "http://lakekeeper.stardelt.svc.cluster.local:8181/catalog"},
+                    "http://lakekeeper.%s.svc.cluster.local:8181/catalog" % namespace},
+                {"name": "STARDELT_S3_ENDPOINT", "value":
+                    "http://seaweedfs-s3.%s.svc.cluster.local:8333" % namespace},
+                {"name": "LAKEKEEPER_MANAGEMENT", "value":
+                    "http://lakekeeper.%s.svc.cluster.local:8181" % namespace},
                 {"name": "STARDELT_CATALOG_TOKEN_FILE", "value":
                     "/var/run/secrets/stardelt-catalog/token"},
-                {"name": "PIPELINE_TOKEN_URL", "value":
-                    "https://id.alpha.dev.stardelt.io/realms/stardelt/protocol/openid-connect/token"},
+                {"name": "PIPELINE_TOKEN_URL", "valueFrom": {"configMapKeyRef": {
+                    "name": "stardelt-identity", "key": "tokenEndpoint"}}},
                 {"name": "PIPELINE_CLIENT_ID", "valueFrom": {"secretKeyRef": {
                     "name": sa, "key": "client-id"}}},
                 {"name": "PIPELINE_CLIENT_SECRET", "valueFrom": {"secretKeyRef": {
@@ -380,45 +417,92 @@ print(json.dumps({
     },
 }, indent=2))
 PY
+}
 
-# A pod left behind by an interrupted run would turn the create into AlreadyExists.
-if [ -n "$(kubectl -n "$NS" get pod "$POD" -o name 2>/dev/null || true)" ]; then
+delete_pod() {
+  if [ -z "$(kubectl -n "$NS" get pod "$POD" -o name 2>/dev/null || true)" ]; then
+    return 0
+  fi
   kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # `--wait=false` returns before the pod is gone and the next pass would then be refused with
+  # AlreadyExists; the pod must be gone before the next one is created, so this waits for it.
+  local gone=no
   for _ in $(seq 1 150); do
-    [ -z "$(kubectl -n "$NS" get pod "$POD" -o name 2>/dev/null || true)" ] && break
+    if [ -z "$(kubectl -n "$NS" get pod "$POD" -o name 2>/dev/null || true)" ]; then
+      gone=yes
+      break
+    fi
     sleep 1
   done
-fi
+  echo "cleanup pod-deleted=$gone"
+}
 
-if ! applied="$(kubectl -n "$NS" apply -f "$tmp/pod.json" 2>&1)"; then
-  echo "L admitted=no reason=$(printf '%s' "$applied" | tail -n 1)"
-  exit 1
-fi
-
-phase=""
-end=$((SECONDS + ${TIMEOUT%s}))
-while [ "$SECONDS" -lt "$end" ]; do
-  phase="$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+run_pass() {  # $1 = labels, $2 = log file, $3 = rows to skip
+  local labels="$1" out="$2" skip="${3:-}" phase="" end applied
+  pod_json "$labels" "$skip" >"$tmp/pod.json"
+  delete_pod
+  if ! applied="$(kubectl -n "$NS" apply -f "$tmp/pod.json" 2>&1)"; then
+    echo "L admitted=no reason=$(printf '%s' "$applied" | tail -n 1)"
+    return 1
+  fi
+  end=$((SECONDS + ${TIMEOUT%s}))
+  while [ "$SECONDS" -lt "$end" ]; do
+    phase="$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    case "$phase" in
+      Succeeded|Failed) break ;;
+    esac
+    sleep 5
+  done
+  kubectl -n "$NS" logs "$POD" >"$out" 2>&1 || true
+  delete_pod
   case "$phase" in
-    Succeeded|Failed) break ;;
+    Succeeded|Failed) return 0 ;;
+    *) echo "L phase=${phase:-Unknown} after ${TIMEOUT}"; return 1 ;;
   esac
-  sleep 5
+}
+
+# A row is taken unless its answer is an error: `error=`, `refused=`, `no-answer=` or a timeout.
+taken() {  # $1 = Qn, $2 = log file
+  grep -h "^$1 " "$2" 2>/dev/null | grep -qv -E ' (error|refused|no-answer|not-taken|skipped)='
+}
+
+row_of() {  # $1 = Qn, $2 = log file: the first line that answers the question
+  grep -h "^$1 " "$2" 2>/dev/null | grep -v -E ' (error|refused|no-answer|not-taken|skipped)=' | head -n 1
+}
+
+# Pass 1 carries the task-pod label the Connect ingress admits, so Q1 is taken. That label also
+# selects `pipeline-notebook-egress`, whose rules name no catalog port, so Q5 cannot be taken
+# there; a second short pass then carries the KubernetesExecutor labels a live dbt task pod has
+# (`component=worker,release=airflow`), which `lakekeeper-ingress` admits and no egress policy
+# selects. One pod at a time; both are deleted.
+echo "L labels=$LABELS"
+run_pass "$LABELS" "$tmp/log-1" "" || exit 1
+passes=("$tmp/log-1")
+if ! taken Q5 "$tmp/log-1"; then
+  echo "L labels=$LABELS_Q5 (pass 2, for Q5)"
+  run_pass "$LABELS_Q5" "$tmp/log-2" Q1 || exit 1
+  passes+=("$tmp/log-2")
+fi
+
+missing=()
+for q in Q1 Q2 Q3 Q4 Q5 Q6; do
+  line=""
+  for log in "${passes[@]}"; do
+    if taken "$q" "$log"; then
+      line="$(row_of "$q" "$log")"
+      break
+    fi
+  done
+  if [ -n "$line" ]; then
+    echo "$line"
+  else
+    echo "$q not-taken=no-answer"
+    missing+=("$q")
+  fi
 done
 
-logs="$(kubectl -n "$NS" logs "$POD" 2>&1 || true)"
-printf '%s\n' "$logs" | grep -E '^(Q[1-6]|Q-error) ' || true
-
-case "$phase" in
-  Succeeded|Failed) ;;
-  *) echo "L phase=${phase:-Unknown} after ${TIMEOUT}"; exit 1 ;;
-esac
-
-exit_code="$(kubectl -n "$NS" get pod "$POD" \
-  -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)"
-echo "L exit-code=${exit_code:-unknown}"
-
-if [ "${exit_code:-1}" != 0 ]; then
-  echo "spike-task-pod-catalog-token: incomplete (${exit_code:-?} row(s) could not be taken)"
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "spike-task-pod-catalog-token: incomplete (${#missing[@]} row(s) could not be taken: ${missing[*]})"
   exit 1
 fi
 echo "spike-task-pod-catalog-token: done"
