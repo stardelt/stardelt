@@ -232,6 +232,15 @@ def _parser():
     )
     out.add_argument("dashboard_id", type=int, help="the dashboard's Superset id (the number in its URL)")
     out.add_argument("-o", "--out", required=True, metavar="DIR", help="the bundle folder to write, for example dashboards/shop")
+    into = board_commands.add_parser(
+        "import", help="import a dashboard folder for a bundle's target (the target's databases are remapped)"
+    )
+    into.add_argument("folder", metavar="DIR", help="the bundle folder to import, for example dashboards/shop")
+    into.add_argument("--bundle", required=True, metavar="NAME", help="the bundle that owns the dashboards")
+    into.add_argument("--owner-group", required=True, metavar="GROUP", help="the bundle's owner group")
+    into.add_argument("--target", required=True, metavar="STAGE", help="the stage the import is for (dev, prod, …)")
+    into.add_argument("--commit", default="", metavar="SHA", help="the commit the bundle was read at, for the provenance stamp")
+    into.add_argument("--overwrite", action="store_true", help="replace a dashboard of the same name")
     return parser
 
 
@@ -567,6 +576,19 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 stderr.write(f"stardelt: {err}\n")
                 return ERROR if not isinstance(err, ValueError) else USAGE
             stderr.write(f"stardelt: {dashboards.summary(target, written)}\n")
+            return OK
+        if args.command == "dashboards" and args.dashboards_command == "import":
+            try:
+                from stardelt import dashboards
+
+                answer = dashboards.import_folder(
+                    nova, args.folder, bundle=args.bundle, owner_group=args.owner_group,
+                    target=args.target, commit=args.commit, overwrite=args.overwrite,
+                )
+            except (ValueError, OSError, RuntimeError) as err:
+                stderr.write(f"stardelt: {err}\n")
+                return ERROR if not isinstance(err, ValueError) else USAGE
+            stderr.write(f"stardelt: {dashboards.import_summary(args.folder, args.target, answer)}\n")
             return OK
         if args.command == "apply":
             for spec in specs:

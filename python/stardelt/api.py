@@ -200,6 +200,12 @@ class Client:
         """GET a raw (non-JSON) answer, for example an archive; returns the body bytes."""
         return self._request("GET", path).content
 
+    def upload(self, path, data, content_type="application/zip"):
+        """POST raw bytes (not JSON), for example an archive; returns the decoded JSON answer."""
+        return self._request(
+            "POST", path, data=data, headers={"Content-Type": content_type}
+        ).json()
+
     def statement(self, sql, max_seconds=None):
         """Like ``query``, through the statement API: no request stays open, up to 100 000 rows, cancelled when it fails.
 

@@ -13,11 +13,14 @@ files.
 import io
 import pathlib
 import shutil
+import urllib.parse
 import zipfile
 
 NAME = "databases"
 
 CHUNK = 64 * 1024
+
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024  # the route's own limit (413 above it)
 
 
 class ExportError(RuntimeError):
@@ -76,3 +79,44 @@ def export(nova, dashboard_id, out):
 def summary(out, written):
     """The one line the command line prints after a successful export."""
     return f"wrote {len(written)} file(s) to {out}; databases/ is not stored"
+
+
+class UploadError(RuntimeError):
+    """The folder cannot be imported. The message is a sentence for the user."""
+
+
+def import_folder(nova, folder, *, bundle, owner_group, target, commit="", overwrite=False):
+    """Zip ``folder`` and import it as a bundle's dashboards for ``target``.
+
+    Returns Nova's answer: ``{"databases": [stems], "result": Superset's import result}``.
+    """
+    folder = pathlib.Path(folder)
+    for name, value in (("bundle", bundle), ("owner group", owner_group), ("target", target)):
+        if not str(value or "").strip():
+            raise ValueError(f"the {name} is required")
+    if not folder.is_dir():
+        raise UploadError(f"{folder} is not a directory")
+    files = sorted(path for path in folder.rglob("*") if path.is_file())
+    if not any(path.relative_to(folder).parts[0] == "dashboards" for path in files):
+        raise UploadError(f"{folder} has no dashboards/ folder to import")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+            archive.write(path, path.relative_to(folder).as_posix())
+    if buffer.tell() > MAX_UPLOAD_BYTES:
+        raise UploadError(f"the archive is larger than 16 MiB ({buffer.tell()} bytes)")
+    query = {"bundle": bundle.strip(), "ownerGroup": owner_group.strip(), "target": target.strip()}
+    if commit.strip():
+        query["commit"] = commit.strip()
+    if overwrite:
+        query["overwrite"] = "true"
+    return nova.upload(
+        "/api/dashboards/import?" + urllib.parse.urlencode(query), buffer.getvalue()
+    )
+
+
+def import_summary(folder, target, answer):
+    """The one line the command line prints after a successful import."""
+    dashboards = len(list(pathlib.Path(folder).glob("dashboards/*.yaml")))
+    databases = ", ".join(answer.get("databases") or []) or "none"
+    return f"imported {dashboards} dashboard file(s) for {target}; databases: {databases}"
