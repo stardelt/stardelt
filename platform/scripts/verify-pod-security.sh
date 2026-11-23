@@ -9,14 +9,17 @@
 #
 # Read-only for the platform: each live pod's spec is re-admitted with a server-side dry run into a
 # scratch namespace labelled `pod-security.kubernetes.io/enforce=$level`, which is deleted
-# again. `--allow <regex>` names a pod that is a known exception; the reason belongs in the comment
+# again. Every run uses its own probe namespace `stardelt-pss-probe-<pid>`, labelled
+# `stardelt.io/pod-security-probe=true`, and deletes only that one; older labelled leftovers of a
+# run killed before its trap are swept at start. `--allow <regex>` names a pod that is a known
+# exception; the reason belongs in the comment
 # beside the flag in the Makefile. A pattern that matches no refusal is reported (drop it), and a
 # refusal outside the list fails the run. `--allow-namespace-level <level>` names an accepted
 # `enforce` level of the platform namespace itself (its `audit` and `warn` must be `restricted`).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NS="${NS:-${NAMESPACE:-stardelt}}"
-PROBE="${POD_SECURITY_PROBE_NS:-stardelt-pss-probe}"
+PROBE="${POD_SECURITY_PROBE_NS:-stardelt-pss-probe-$$}"
 level=restricted
 allow=()
 allow_ns_level=()
@@ -43,25 +46,24 @@ cleanup() {
   kubectl delete namespace "$PROBE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-# A previous run killed before its trap: remove what it left, then wait until the name is gone.
-# `--wait=true` returns when the deletion is accepted; the namespace can stay Terminating for a
-# while, and recreating it then fails. Wait for NotFound, with a bound (platform#1211).
-kubectl delete namespace "$PROBE" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-for _ in $(seq 1 30); do
-  kubectl get namespace "$PROBE" >/dev/null 2>&1 || break
-  sleep 1
-done
-if kubectl get namespace "$PROBE" >/dev/null 2>&1; then
-  echo "the probe namespace $PROBE is still terminating after 30 s; wait and retry, or set POD_SECURITY_PROBE_NS to another name" >&2
-  exit 1
-fi
+# A run killed before its trap leaves its own probe namespace behind. Each one is labelled, so
+# remove the ones older than ten minutes; this run's namespace is new and is never selected.
+now="$(date -u +%s)"
+kubectl get namespace -l stardelt.io/pod-security-probe=true -o json 2>/dev/null \
+  | jq -r --argjson now "$now" \
+      '.items[] | select($now - (.metadata.creationTimestamp | fromdateiso8601) > 600) | .metadata.name' \
+      2>/dev/null \
+  | while read -r stale; do
+      kubectl delete namespace "$stale" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    done || true
 if ! kubectl create namespace "$PROBE" >/dev/null; then
-  echo "cannot create the probe namespace $PROBE (the API server's message is above)" >&2
+  echo "cannot create the probe namespace $PROBE (the API server's message is above); set POD_SECURITY_PROBE_NS to another name" >&2
   exit 1
 fi
 if ! kubectl label namespace "$PROBE" \
     pod-security.kubernetes.io/enforce="$level" \
-    pod-security.kubernetes.io/enforce-version=latest >/dev/null; then
+    pod-security.kubernetes.io/enforce-version=latest \
+    stardelt.io/pod-security-probe=true >/dev/null; then
   echo "cannot label the probe namespace $PROBE $level (the API server's message is above)" >&2
   exit 1
 fi
