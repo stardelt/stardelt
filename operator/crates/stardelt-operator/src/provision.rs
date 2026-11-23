@@ -2723,7 +2723,50 @@ pub async fn ensure_ingress(
             format!("planned (dry-run): Ingress {}", names.join(", ")),
         ));
     }
-    Some(status(NAME, true, format!("applied: {}", names.join(", "))))
+    let routes = Api::<DynamicObject>::namespaced_with(
+        ctx.client.clone(),
+        namespace,
+        &http_route::resource(),
+    );
+    let mut removed_routes = Vec::new();
+    for name in &names {
+        let name = name.clone();
+        match routes.get_opt(&name).await {
+            Ok(Some(existing)) => {
+                let ours = existing
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .map(|owners| owners.iter().any(|candidate| candidate.uid == owner.uid))
+                    .unwrap_or(false);
+                if !ours {
+                    continue;
+                }
+                match routes
+                    .delete(&name, &kube::api::DeleteParams::default())
+                    .await
+                {
+                    Ok(_) => removed_routes.push(name),
+                    Err(e) if is_not_found(&e) => {}
+                    Err(e) => return Some(status(NAME, false, e.to_string())),
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return Some(status(NAME, false, e.to_string())),
+        }
+    }
+    if removed_routes.is_empty() {
+        return Some(status(NAME, true, format!("applied: {}", names.join(", "))));
+    }
+    Some(status(
+        NAME,
+        true,
+        format!(
+            "applied: {}; removed HTTPRoute {}",
+            names.join(", "),
+            removed_routes.join(", ")
+        ),
+    ))
 }
 
 /// The `Ingress` objects `mode: ingress` would render for this spec, by name. The route names
@@ -2755,8 +2798,10 @@ fn is_not_found(err: &kube::Error) -> bool {
 /// The `mode: gateway` arm of [`ensure_ingress`]: one `HTTPRoute` per published application,
 /// attached to the Gateway in `spec.ingress.gateway`. No `Ingress` is rendered in this mode, and
 /// `className`, `allowedCidrs` and `tls` are ignored — the Gateway's listeners own TLS and source
-/// filtering. In `mode: gateway` the Ingresses `mode: ingress` would render are removed once
-/// every `HTTPRoute` reports `Accepted`, so a switch does not leave both paths published.
+/// filtering. The switch works both ways: in `mode: gateway` the Ingresses `mode: ingress` would
+/// render are removed once every `HTTPRoute` reports `Accepted`, and in `mode: ingress` the
+/// `HTTPRoute`s a previous `mode: gateway` instance owns are removed once the Ingresses are
+/// applied, so a switch does not leave both paths published.
 async fn ensure_http_routes(
     ctx: &Context,
     spec: &PlatformInstanceSpec,
@@ -4943,8 +4988,9 @@ mod tests {
         );
     }
 
-    /// An `HTTPRoute` document whose status reports `Accepted` (or not) for its single parent.
-    fn route_status(name: &str, accepted: bool) -> String {
+    /// An `HTTPRoute` document owned by `owner_uid` whose status reports `Accepted` (or not) for
+    /// its single parent.
+    fn route_status(name: &str, accepted: bool, owner_uid: &str) -> String {
         let conditions = if accepted {
             serde_json::json!([{ "type": "Accepted", "status": "True" }])
         } else {
@@ -4953,7 +4999,16 @@ mod tests {
         serde_json::json!({
             "apiVersion": "gateway.networking.k8s.io/v1",
             "kind": "HTTPRoute",
-            "metadata": { "name": name, "namespace": "stardelt" },
+            "metadata": {
+                "name": name,
+                "namespace": "stardelt",
+                "ownerReferences": [{
+                    "apiVersion": "stardelt.io/v1alpha1",
+                    "kind": "PlatformInstance",
+                    "name": "cluster",
+                    "uid": owner_uid,
+                }],
+            },
             "status": { "parents": [{ "conditions": conditions }] }
         })
         .to_string()
@@ -4998,7 +5053,11 @@ mod tests {
                 } else if path.contains("/httproutes/") {
                     (
                         200,
-                        route_status(&name, accepted.iter().any(|accepted| accepted == &name)),
+                        route_status(
+                            &name,
+                            accepted.iter().any(|accepted| accepted == &name),
+                            &ingress_owner,
+                        ),
                     )
                 } else if path.contains("/ingresses/") {
                     let document = serde_json::json!({
@@ -5111,6 +5170,53 @@ mod tests {
         assert!(
             paths_of(&requests, "DELETE").is_empty(),
             "an Ingress of another instance is not ours to delete: {:?}",
+            paths_of(&requests, "DELETE")
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_mode_removes_the_http_routes_of_the_previous_gateway_mode() {
+        let (client, requests) = route_client(&[], &owner().uid);
+        let status = ensure_ingress(
+            &context(client),
+            &platform_with_ingress("platform", true, false),
+            &owner(),
+        )
+        .await
+        .expect("a status");
+        assert!(status.ready, "{status:?}");
+        assert_eq!(
+            status.message.as_deref(),
+            Some("applied: nova, trino, keycloak; removed HTTPRoute nova, trino, keycloak")
+        );
+        assert_eq!(
+            paths_of(&requests, "DELETE"),
+            [
+                "/apis/gateway.networking.k8s.io/v1/namespaces/stardelt/httproutes/nova",
+                "/apis/gateway.networking.k8s.io/v1/namespaces/stardelt/httproutes/trino",
+                "/apis/gateway.networking.k8s.io/v1/namespaces/stardelt/httproutes/keycloak",
+            ]
+            .map(str::to_string)
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_mode_removes_no_http_route_of_another_instance() {
+        let (client, requests) = route_client(&[], "00000000-0000-4000-8000-0000000000ff");
+        let status = ensure_ingress(
+            &context(client),
+            &platform_with_ingress("platform", true, false),
+            &owner(),
+        )
+        .await
+        .expect("a status");
+        assert_eq!(
+            status.message.as_deref(),
+            Some("applied: nova, trino, keycloak")
+        );
+        assert!(
+            paths_of(&requests, "DELETE").is_empty(),
+            "a route of another instance is not ours to delete: {:?}",
             paths_of(&requests, "DELETE")
         );
     }
