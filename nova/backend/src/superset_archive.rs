@@ -186,8 +186,10 @@ fn strip_top<'a>(name: &'a str, top: &str) -> &'a str {
         .unwrap_or(name)
 }
 
-/// `Trino <catalog>`, with the spaces as the export names the file.
-fn database_stem(catalog: &str) -> String {
+/// `Trino <catalog>`, with the spaces as the export names the file: `Trino <catalog>` →
+/// `Trino_<catalog>`, the export's file stem; the import route maps a target database name the
+/// same way.
+pub(crate) fn database_stem(catalog: &str) -> String {
     // platform/scripts/superset-group-roles.py `database_name_for_catalog` names the target row
     // `Trino <Catalog>` (dashes and underscores become spaces, each word title-cased), and
     // Superset's export turns the spaces into `_`: `gold` -> `Trino_Gold`.

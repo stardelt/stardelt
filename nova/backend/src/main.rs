@@ -868,6 +868,9 @@ fn api_router() -> Router<Arc<AppState>> {
         .merge(migrations::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
         .merge(notebooks::router())
+        // One dashboard archive for a bundle's target (#115 a/3b2): the caller must be in
+        // the bundle's owner group; the deploy-principal rule is the deployments' rule.
+        .route("/dashboards/import", post(superset::import_dashboard))
         // The caller's own JupyterHub workspace (stardelt-nova#653): read, start, stop. The
         // hub user is the caller's own sign-in name; there is no path parameter, so nobody
         // reaches somebody else's server, and Nova has no `access:servers` scope.

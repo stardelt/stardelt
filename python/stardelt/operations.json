@@ -207,6 +207,19 @@
       "query_params": [],
       "body": true
     },
+    "dashboards_import": {
+      "method": "POST",
+      "path": "/api/dashboards/import",
+      "path_params": [],
+      "query_params": [
+        "bundle",
+        "ownerGroup",
+        "target",
+        "commit",
+        "overwrite"
+      ],
+      "body": true
+    },
     "deployments_get": {
       "method": "GET",
       "path": "/api/deployments/{id}",

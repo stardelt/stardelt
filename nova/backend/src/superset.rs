@@ -32,26 +32,31 @@
 //! expired token answers `401`, a new one works).
 //!
 //! Nova acts as its own Superset service user ([`SERVICE_USER`]): it could export or import
-//! any dashboard, so the routes are administrator-only. The bundle's own rules — the owner
-//! group guard, the synthesized `databases/` folder (an archive without one imports `200`
-//! and links none of its charts), the provenance stamp and the prune — belong to the import
-//! route (#115 a/3), not here.
+//! any dashboard, so the export route is administrator-only. The dashboard import route
+//! ([`import_dashboard`], `POST /api/dashboards/import`, #115 a/3b2) sits on the public table
+//! instead, because a bundle's author is not an administrator: it checks the caller against
+//! the bundle's owner group and, for a deploy principal, against its own stage.
 //!
 //! **No password and no token ever reach a log line, an error string or a `Debug`.** The
 //! password is held in [`crate::auth::Secret`] (`[redacted]`), every upstream message is
 //! scrubbed before it is stored, and no token-holding type derives `Debug`.
 
 use axum::{
-    Json,
-    extract::{Path, State},
+    Extension, Json,
+    body::Bytes,
+    extract::{Path, Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::Secret;
+use crate::superset_archive::{self, ArchiveError, Stamp};
 
 /// The Superset user Nova signs in as, unless `NOVA_SUPERSET_USER` names another.
 pub const SERVICE_USER: &str = "stardelt-nova";
@@ -61,6 +66,9 @@ const NO_SERVICE_USER: &str = "this instance has no Superset service user; run s
 
 /// Longest upstream sentence Nova repeats; the rest is cut.
 const MAX_DETAIL: usize = 200;
+
+/// Largest dashboard archive the import route accepts; larger is a `413`.
+const MAX_IMPORT_BYTES: usize = 16 * 1024 * 1024;
 
 /// A call that has not answered within this time is a failure, not a hanging screen.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -180,8 +188,6 @@ pub struct SupersetClient {
 
 /// One database the target Superset knows, as the import route needs it: the id to export and
 /// the name (`Trino Gold`) to match a dataset's catalog against.
-// The import route that reads this is #115 a/3b2.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupersetDatabase {
     pub id: i64,
@@ -289,8 +295,6 @@ impl SupersetClient {
     ///
     /// A `401` means the token from this call expired; Nova signs in once more and repeats the
     /// GET once. Every other non-`200` is Superset's status and message.
-    // The import route that calls this is #115 a/3b2.
-    #[allow(dead_code)]
     pub async fn databases(&self) -> Result<Vec<SupersetDatabase>, SupersetError> {
         let url = format!("{}/api/v1/database/?q=(page_size:200)", self.base);
         let mut token = self.login().await?;
@@ -341,8 +345,6 @@ impl SupersetClient {
     ///
     /// A `401` means the token from this call expired; Nova signs in once more and repeats the
     /// GET once.
-    // The import route that calls this is #115 a/3b2.
-    #[allow(dead_code)]
     pub async fn database_export(&self, id: i64) -> Result<Vec<u8>, SupersetError> {
         let url = format!("{}/api/v1/database/export/?q=[{id}]", self.base);
         let mut token = self.login().await?;
@@ -431,8 +433,6 @@ impl SupersetClient {
     /// A `401` means the session expired; Nova signs in once more, fetches a fresh CSRF token
     /// and sends the same body once more. Every other non-2xx is Superset's status and
     /// message; the CSRF token is scrubbed like the bearer.
-    // The import route that calls this is #115 a/3.
-    #[allow(dead_code)]
     pub async fn import(&self, archive: &[u8], overwrite: bool) -> Result<Value, SupersetError> {
         let url = format!("{}/api/v1/dashboard/import/", self.base);
         let referer = format!("{}/", self.base);
@@ -536,6 +536,104 @@ impl SupersetClient {
 // The route
 // ---------------------------------------------------------------------------
 
+/// Why the import refused: the archive itself (a 400 for the caller) or Superset (its own
+/// status and sentence).
+#[derive(Debug)]
+pub(crate) enum ImportError {
+    Archive(ArchiveError),
+    Superset(SupersetError),
+}
+
+impl From<ArchiveError> for ImportError {
+    fn from(error: ArchiveError) -> Self {
+        ImportError::Archive(error)
+    }
+}
+
+impl From<SupersetError> for ImportError {
+    fn from(error: SupersetError) -> Self {
+        ImportError::Superset(error)
+    }
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportError::Archive(error) => error.fmt(f),
+            ImportError::Superset(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
+
+impl ImportError {
+    pub(crate) fn into_response(self) -> Response {
+        match self {
+            // `UnsafePath`, `NotZip` and `NoCatalog` are the caller's upload, so 400; the
+            // missing database is the target's state, so 422 with the sentence naming it.
+            ImportError::Archive(error @ ArchiveError::MissingDatabase(_)) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+            ImportError::Archive(error) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+            ImportError::Superset(error) => error.into_response(),
+        }
+    }
+}
+
+/// What one import put on the target: the database stems that were mapped (`["Trino_Gold"]`)
+/// and Superset's own answer.
+#[derive(Debug)]
+pub(crate) struct ImportedDashboard {
+    pub databases: Vec<String>,
+    pub result: Value,
+}
+
+/// One dashboard archive for the target: every dataset points at the target's own database,
+/// the target's `databases/` file is added, every dashboard carries the stamp, then Superset
+/// imports it. Answers Superset's own JSON body.
+///
+/// The target database for a dataset's `catalog: gold` is the database whose name maps to the
+/// stem `Trino_Gold` (a space becomes `_`, the export's naming). Its uuid is read from the
+/// database's own export — never written by us — so the target keeps its connection URI.
+pub(crate) async fn import_archive(
+    client: &SupersetClient,
+    archive: &[u8],
+    stamp: &Stamp<'_>,
+    overwrite: bool,
+) -> Result<ImportedDashboard, ImportError> {
+    let catalogs = superset_archive::dataset_catalogs(archive)?;
+    let mut ids = BTreeMap::new();
+    for database in client.databases().await? {
+        ids.insert(database.name.replace(' ', "_"), database.id);
+    }
+    let mut databases = BTreeMap::new();
+    for catalog in &catalogs {
+        let stem = superset_archive::database_stem(catalog);
+        let Some(id) = ids.get(&stem).copied() else {
+            return Err(ArchiveError::MissingDatabase(stem).into());
+        };
+        let (member, bytes) =
+            superset_archive::database_member(&client.database_export(id).await?)?;
+        if member != stem {
+            return Err(ArchiveError::MissingDatabase(member).into());
+        }
+        databases.insert(stem, bytes);
+    }
+    let rewritten = superset_archive::rewrite(archive, &databases, stamp)?;
+    let result = client.import(&rewritten, overwrite).await?;
+    Ok(ImportedDashboard {
+        databases: databases.keys().cloned().collect(),
+        result,
+    })
+}
+
 /// `GET /api/admin/dashboards/{id}/export`: the ZIP Superset exports for one dashboard,
 /// exactly as Superset sends it (including its `databases/` folder). Administrator-only.
 /// Nova acts as its own Superset service user (`stardelt-nova`).
@@ -588,6 +686,132 @@ pub async fn export_dashboard(State(state): State<Arc<AppState>>, Path(id): Path
     }
 }
 
+/// `POST /api/dashboards/import`: one dashboard archive for the target, for dashboard bundles
+/// (#115 a/3b2). The query names the bundle, its owner group and the target; the body is the
+/// ZIP the CLI exported (or zipped from `dashboards/<slug>/`).
+///
+/// The caller must be a member of the bundle's owner group, and a deploy principal (#57) may
+/// only import to the stage its client names, the same rule `POST /api/deployments` uses.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardImportQuery {
+    /// The bundle that owns the dashboards, 1 to 64 characters.
+    pub bundle: String,
+    /// The bundle's owner group; the caller must be a member.
+    pub owner_group: String,
+    /// The stage the import is for (`dev`, `prod`, …).
+    pub target: String,
+    /// The commit the bundle was read at, for the provenance stamp.
+    #[serde(default)]
+    pub commit: String,
+    /// Replace a dashboard of the same name (`stardelt bundle deploy` passes its own flag).
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "dashboards_import",
+    path = "/api/dashboards/import",
+    tag = "public",
+    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. The answer is Superset's own import result plus the database stems that were mapped.",
+    params(
+        ("bundle" = String, Query, description = "The bundle whose dashboards these are"),
+        ("ownerGroup" = String, Query, description = "The bundle's owner group"),
+        ("target" = String, Query, description = "The stage the import is for"),
+        ("commit" = Option<String>, Query, description = "The commit the bundle was read at"),
+        ("overwrite" = Option<bool>, Query, description = "Replace a dashboard of the same name"),
+    ),
+    request_body(content = Vec<u8>, content_type = "application/zip", description = "The dashboard archive (Superset's export, `databases/` optional)"),
+    responses(
+        (status = 200, description = "Superset's import result and the mapped database stems", body = serde_json::Value),
+        (status = 400, description = "The body is not a dashboard archive, or a name is empty or too long", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
+        (status = 413, description = "The archive is larger than 16 MiB", body = crate::openapi::ErrorResponse),
+        (status = 422, description = "The target has no database for one of the archive's catalogs", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn import_dashboard(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<crate::auth::Principal>>,
+    Query(query): Query<DashboardImportQuery>,
+    // The body extractor has to be last: axum consumes the request for it.
+    body: Bytes,
+) -> Response {
+    if query.bundle.trim().is_empty()
+        || query.owner_group.trim().is_empty()
+        || query.target.trim().is_empty()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "bundle, ownerGroup and target are required" })),
+        )
+            .into_response();
+    }
+    if body.len() > MAX_IMPORT_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "the dashboard archive is larger than 16 MiB" })),
+        )
+            .into_response();
+    }
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "sign in to import a dashboard" })),
+        )
+            .into_response();
+    };
+    let identity = match crate::deployments::deploy_identity(&state, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": sentence }))).into_response();
+        }
+    };
+    if let Some(sentence) = crate::deployments::deploy_refusal(
+        &identity,
+        &query.owner_group,
+        &query.target,
+        caller.client_id.as_deref(),
+        "import",
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(user) = state.superset.as_ref() else {
+        return SupersetError::NoServiceUser.into_response();
+    };
+    let user = ServiceUser {
+        username: user.username.clone(),
+        password: Secret::new(user.password.expose().to_string()),
+    };
+    let client = SupersetClient::new(&state.superset_api_url, user);
+    let stamp = Stamp {
+        bundle: query.bundle.trim(),
+        target: query.target.trim(),
+        commit: query.commit.trim(),
+    };
+    match import_archive(&client, &body, &stamp, query.overwrite).await {
+        Ok(imported) => {
+            tracing::info!(
+                bundle = %stamp.bundle,
+                target = %stamp.target,
+                owner_group = %query.owner_group,
+                databases = ?imported.databases,
+                "dashboard archive imported"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "databases": imported.databases, "result": imported.result })),
+            )
+                .into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -617,7 +841,23 @@ mod fake {
     pub(super) const TOKEN: &str = "tok-canary-4e7b";
     pub(super) const CSRF: &str = "csrf-canary";
     pub(super) const ARCHIVE: &[u8] = b"PK\x03\x04canary";
-    pub(super) const DATABASE_ARCHIVE: &[u8] = b"PK\x03\x04database-canary";
+
+    /// A real one-member ZIP (the database file for `Trino Gold`, `uuid: target-gold`), because
+    /// the import reads the uuid out of it (#115 a/3b2).
+    pub(super) fn database_zip() -> Vec<u8> {
+        let mut written = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut written));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("database_export/databases/Trino_Gold.yaml", options)
+                .unwrap();
+            std::io::Write::write_all(&mut zip, b"database_name: Trino Gold\nuuid: target-gold\n")
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        written
+    }
 
     #[derive(Default)]
     pub(super) struct Fake {
@@ -832,7 +1072,7 @@ mod fake {
         (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/zip")],
-            Body::from(DATABASE_ARCHIVE),
+            Body::from(database_zip()),
         )
             .into_response()
     }
@@ -866,8 +1106,71 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::StatusCode;
 
-    use super::fake::{self, ARCHIVE, DATABASE_ARCHIVE, PASSWORD, TOKEN};
+    use super::fake::{self, ARCHIVE, PASSWORD, TOKEN};
     use super::*;
+
+    /// The members of a ZIP as `(name, text)`, in archive order.
+    fn unzip(archive: &[u8]) -> Vec<(String, String)> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a ZIP");
+        let mut out = Vec::new();
+        for index in 0..zip.len() {
+            let mut file = zip.by_index(index).expect("a member");
+            let name = file.name().expect("a member name").to_string();
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut file, &mut text).expect("member text");
+            out.push((name, text));
+        }
+        out
+    }
+
+    /// One member of a ZIP, by the end of its name.
+    fn member(archive: &[u8], suffix: &str) -> String {
+        unzip(archive)
+            .into_iter()
+            .find(|(name, _)| name.ends_with(suffix))
+            .unwrap_or_else(|| panic!("the archive has no member ending {suffix}"))
+            .1
+    }
+
+    /// The archive a recorded multipart body carried: from the ZIP's first local header to the
+    /// end of its end-of-central-directory record.
+    fn archive_in(multipart: &[u8]) -> Vec<u8> {
+        let start = multipart
+            .windows(4)
+            .position(|w| w == b"PK\x03\x04")
+            .expect("the body carries a ZIP part");
+        let end = multipart
+            .windows(4)
+            .rposition(|w| w == b"PK\x05\x06")
+            .expect("the ZIP part ends")
+            + 22;
+        multipart[start..end].to_vec()
+    }
+
+    /// The ZIP the CLI uploads: the folder as-is under one top directory.
+    fn zipped(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut written = Vec::new();
+        {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut written));
+            for (name, bytes) in files {
+                writer.start_file(*name, options).expect("write member");
+                std::io::Write::write_all(&mut writer, bytes).expect("write bytes");
+            }
+            writer.finish().expect("finish the ZIP");
+        }
+        written
+    }
+
+    /// A dataset member of the shop bundle's export, pointing at `catalog`.
+    fn dataset(catalog: &str) -> Vec<u8> {
+        format!("table_name: orders\ndatabase_uuid: old-uuid\ncatalog: {catalog}\n").into_bytes()
+    }
+
+    fn dashboard() -> Vec<u8> {
+        b"dashboard_title: Shop\ncertified_by: null\ncertification_details: null\n".to_vec()
+    }
 
     /// Serialises the tests that set/remove `NOVA_SUPERSET_*`: the environment is
     /// process-global. Tokio's mutex, because the guard is held across an await.
@@ -897,7 +1200,177 @@ mod tests {
     async fn database_export_returns_the_archive_bytes() {
         let (client, _fake) = fake::start().await;
         let bytes = client.database_export(3).await.unwrap();
-        assert_eq!(bytes, DATABASE_ARCHIVE);
+        let database = member(&bytes, "databases/Trino_Gold.yaml");
+        assert!(
+            database.contains("uuid: target-gold"),
+            "the export is the target's own database file: {database}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_import_remaps_each_dataset_and_stamps_the_dashboard() {
+        let (client, fake) = fake::start().await;
+        let archive = zipped(&[
+            (
+                "shop-export/datasets/Trino_Gold/orders.yaml",
+                &dataset("gold"),
+            ),
+            ("shop-export/dashboards/Shop.yaml", &dashboard()),
+        ]);
+        let imported = import_archive(
+            &client,
+            &archive,
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc123",
+            },
+            false,
+        )
+        .await
+        .expect("the import");
+        assert_eq!(imported.databases, vec!["Trino_Gold".to_string()]);
+        assert_eq!(
+            imported.result["result"]["dashboard_count"], 1,
+            "Superset's own answer comes back: {}",
+            imported.result
+        );
+
+        let sent = archive_in(&fake.lock().unwrap().import_body);
+        let dataset = member(&sent, "datasets/Trino_Gold/orders.yaml");
+        assert!(
+            dataset.contains("database_uuid: \"target-gold\""),
+            "the dataset points at the target database: {dataset}"
+        );
+        assert!(
+            !dataset.contains("old-uuid"),
+            "the export's own database uuid is gone: {dataset}"
+        );
+        let dashboard = member(&sent, "dashboards/Shop.yaml");
+        assert!(
+            dashboard.contains("certified_by: \"stardelt bundle shop\""),
+            "the dashboard names the bundle: {dashboard}"
+        );
+        assert!(
+            dashboard.contains("certification_details: \"prod @ abc123\""),
+            "the dashboard names the target and the commit: {dashboard}"
+        );
+        let database = member(&sent, "databases/Trino_Gold.yaml");
+        assert!(
+            database.contains("uuid: target-gold"),
+            "the target's own database file was added: {database}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_archive_without_datasets_is_an_error() {
+        let (client, _fake) = fake::start().await;
+        let archive = zipped(&[("shop-export/dashboards/Shop.yaml", &dashboard())]);
+        match import_archive(
+            &client,
+            &archive,
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc123",
+            },
+            false,
+        )
+        .await
+        {
+            Err(ImportError::Archive(ArchiveError::NoDatasets)) => {}
+            other => panic!("expected NoDatasets, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_catalog_the_target_lacks_names_the_database() {
+        let (client, _fake) = fake::start().await;
+        // The fake's list has only `Trino Gold`, so `silver` has no database.
+        let archive = zipped(&[
+            (
+                "shop-export/datasets/Trino_Silver/orders.yaml",
+                &dataset("silver"),
+            ),
+            ("shop-export/dashboards/Shop.yaml", &dashboard()),
+        ]);
+        match import_archive(
+            &client,
+            &archive,
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc123",
+            },
+            false,
+        )
+        .await
+        {
+            Err(ImportError::Archive(ArchiveError::MissingDatabase(name))) => {
+                assert_eq!(name, "Trino_Silver", "the answer names the database")
+            }
+            other => panic!("expected MissingDatabase, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_archive_member_is_refused() {
+        let (client, _fake) = fake::start().await;
+        let archive = zipped(&[
+            ("shop-export/../evil.yaml", &dataset("gold")),
+            ("shop-export/dashboards/Shop.yaml", &dashboard()),
+        ]);
+        match import_archive(
+            &client,
+            &archive,
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc123",
+            },
+            false,
+        )
+        .await
+        {
+            Err(ImportError::Archive(ArchiveError::UnsafePath(_))) => {}
+            other => panic!("expected UnsafePath, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_import_never_logs_the_password_or_the_token() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().failing = true;
+        let archive = zipped(&[
+            (
+                "shop-export/datasets/Trino_Gold/orders.yaml",
+                &dataset("gold"),
+            ),
+            ("shop-export/dashboards/Shop.yaml", &dashboard()),
+        ]);
+        let error = import_archive(
+            &client,
+            &archive,
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc123",
+            },
+            false,
+        )
+        .await
+        .expect_err("the fake refuses");
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        for text in [&display, &debug] {
+            assert!(!text.contains(PASSWORD), "the password reached: {text}");
+            assert!(!text.contains(TOKEN), "the token reached: {text}");
+            assert!(!text.contains(fake::CSRF), "the CSRF token reached: {text}");
+        }
+        assert!(
+            display.contains("500"),
+            "the upstream status stays in the sentence: {display}"
+        );
     }
 
     #[tokio::test]
