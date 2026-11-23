@@ -1012,22 +1012,22 @@ pub async fn reconcile_spark_cluster(
         }
     }
 
-    patch_status(
-        &clusters,
-        &name,
-        status_with_identity(
-            status_value(
-                phase,
-                endpoint.as_deref(),
-                started_at.as_deref(),
-                last_activity.as_deref(),
-                message.as_deref(),
-                generation,
-            ),
-            &driver_account,
+    let next = status_with_identity(
+        status_value(
+            phase,
+            endpoint.as_deref(),
+            started_at.as_deref(),
+            last_activity.as_deref(),
+            message.as_deref(),
+            generation,
         ),
-    )
-    .await?;
+        &driver_account,
+    );
+    // An unchanged status must not be patched (#274 rule 1): the 300 s requeue would otherwise
+    // write the same status forever and the release gate would see a busy operator (#1340).
+    if !crate::conditions::status_is_current(cluster.status.as_ref(), &next) {
+        patch_status(&clusters, &name, next).await?;
+    }
 
     if stop_for_idle {
         clusters
@@ -1838,6 +1838,21 @@ mod tests {
         log.lines().any(|line| line.starts_with("DELETE"))
     }
 
+    /// The status patches the mock recorded, each body parsed. A request line is
+    /// `METHOD path?query body`.
+    fn status_patches(requests: &Arc<Mutex<Vec<String>>>) -> Vec<Value> {
+        requests
+            .lock()
+            .expect("requests poisoned")
+            .iter()
+            .filter(|line| {
+                line.starts_with("PATCH ") && line.contains("/sparkclusters/trial/status?")
+            })
+            .filter_map(|line| line.splitn(3, ' ').nth(2).map(str::to_string))
+            .map(|body| serde_json::from_str(&body).expect("a patch body is JSON"))
+            .collect()
+    }
+
     #[tokio::test]
     async fn a_changed_owner_group_prunes_the_previous_driver_identity() {
         let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "new")]));
@@ -1860,6 +1875,65 @@ mod tests {
                 "{path} is pruned: {log}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_no_op_reconcile_sends_no_status_patch() {
+        let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "new")]));
+        let cluster = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver-new",
+        );
+        reconcile_spark_cluster(Arc::new(cluster), ctx(client.clone()))
+            .await
+            .expect("reconcile");
+        let first = status_patches(&requests);
+        assert_eq!(first.len(), 1, "the first reconcile writes the status");
+        let status: crate::crd::SparkClusterStatus =
+            serde_json::from_value(first[0]["status"].clone())
+                .expect("the patch body carries a SparkClusterStatus");
+
+        // The controller reads the status back on the next event: nothing changed, so nothing is
+        // written (#274 rule 1). Without the guard the 300 s requeue patches forever (#1340).
+        let mut current = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver-new",
+        );
+        current.status = Some(status);
+        requests.lock().expect("requests poisoned").clear();
+        let action = reconcile_spark_cluster(Arc::new(current), ctx(client))
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+        let patches = status_patches(&requests);
+        assert!(
+            patches.is_empty(),
+            "no status patch for an unchanged status: {patches:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_spark_cluster_status_is_patched() {
+        // A stored status whose phase is stale: the next phase must be written.
+        let mut cluster = cluster_with_status(
+            SparkClusterState::Running,
+            Some("new"),
+            "spark-cluster-driver-new",
+        );
+        cluster.status.as_mut().expect("status").phase = "Running".into();
+        let (client, requests) = prune_mock(cluster_list(vec![listed_cluster("trial", "new")]));
+        reconcile_spark_cluster(Arc::new(cluster), ctx(client))
+            .await
+            .expect("reconcile");
+        let patches = status_patches(&requests);
+        assert_eq!(
+            patches.len(),
+            1,
+            "the changed phase is written: {patches:?}"
+        );
+        assert_eq!(patches[0]["status"]["phase"], json!("Starting"));
     }
 
     #[tokio::test]
