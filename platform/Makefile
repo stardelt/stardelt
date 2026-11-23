@@ -81,7 +81,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 .PHONY: chart-deps chart-template chart-install
 .PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale verify-warehouse-autostop sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
-.PHONY: sync-oidc-clients verify-oidc-clients verify-mcp verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
+.PHONY: sync-oidc-clients verify-oidc-clients verify-mcp verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-mcp-exchange sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
 .PHONY: perf-baseline
 
@@ -1460,6 +1460,9 @@ sync-dev-client: _context ## Converge the live realm's stardelt-dev client (devi
 # device grant, tokens carrying only the MCP resource audience <Nova publicUrl>/mcp.
 sync-mcp-client: _context ## Converge the live realm's stardelt-mcp client (MCP audience, PKCE, loopback redirects; idempotent)
 	@NAMESPACE=$(NAMESPACE) MCP_AUDIENCE=$(MCP_AUDIENCE) bash scripts/keycloak-sync-mcp-client.sh
+
+sync-mcp-exchange: _context ## Enable the realm's MCP token exchange (actor nova) and prove the exchanged token against Trino
+	@NAMESPACE=$(NAMESPACE) bash scripts/keycloak-sync-mcp-exchange.sh
 
 .PHONY: sync-github-idp
 sync-github-idp: _context ## Converge the realm's GitHub Actions identity provider a DeployStage names (#57; idempotent)

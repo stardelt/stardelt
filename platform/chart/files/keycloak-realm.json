@@ -89,6 +89,7 @@
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
+        "standard.token.exchange.enabled": "true",
         "post.logout.redirect.uris": "https://__NOVA_HOST__/*"
       },
       "protocolMappers": [
