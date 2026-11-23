@@ -28,6 +28,13 @@ def policy(name="trial", owner=("mobility-analytics", None), port=15002):
     }
 
 
+def executor_rule(ports=(7078, 7079), peer=None):
+    return {
+        "from": [peer or {"podSelector": {"matchLabels": {"spark-role": "executor"}}}],
+        "ports": [{"port": port, "protocol": "TCP"} for port in ports],
+    }
+
+
 class CheckTest(unittest.TestCase):
     def test_a_group_owned_cluster_passes(self):
         self.assertEqual(check(policy(), "trial", group="mobility-analytics"), [])
@@ -48,6 +55,31 @@ class CheckTest(unittest.TestCase):
     def test_a_policy_for_another_cluster_fails(self):
         problems = check(policy(), "shared", group="mobility-analytics")
         self.assertTrue(any("spc-shared" in problem for problem in problems), problems)
+
+    def test_the_executor_rule_is_accepted(self):
+        document = policy()
+        document["spec"]["ingress"].append(executor_rule())
+        self.assertEqual(check(document, "trial", group="mobility-analytics"), [])
+
+    def test_a_third_ingress_rule_fails(self):
+        document = policy()
+        document["spec"]["ingress"].extend([executor_rule(), executor_rule()])
+        problems = check(document, "trial", group="mobility-analytics")
+        self.assertTrue(any("or two" in problem for problem in problems), problems)
+
+    def test_an_executor_rule_with_a_namespace_selector_fails(self):
+        document = policy()
+        document["spec"]["ingress"].append(
+            executor_rule(peer={"podSelector": {"matchLabels": {"spark-role": "executor"}}, "namespaceSelector": {}})
+        )
+        problems = check(document, "trial", group="mobility-analytics")
+        self.assertTrue(any("spark-role=executor" in problem for problem in problems), problems)
+
+    def test_an_executor_rule_that_opens_connect_fails(self):
+        document = policy()
+        document["spec"]["ingress"].append(executor_rule(ports=(7078, 15002)))
+        problems = check(document, "trial", group="mobility-analytics")
+        self.assertTrue(any("7078" in problem for problem in problems), problems)
 
 
 if __name__ == "__main__":

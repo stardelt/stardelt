@@ -281,11 +281,11 @@ for item in (json.load(sys.stdin).get("items") or []):
         fi
       elif ! policy_problems="$(printf '%s' "$policy" | python3 scripts/check_spark_policy.py --name "$name" \
              ${owner_group:+--group "$owner_group"} ${owner_user:+--user "$owner_user"} 2>&1)"; then
-        echo "✗ $name   NetworkPolicy spc-$name-ingress does not admit exactly the owner, Nova and Airflow:"
+        echo "✗ $name   NetworkPolicy spc-$name-ingress does not admit the owner, Nova, Airflow and the cluster's own executors:"
         printf '%s\n' "$policy_problems" | sed 's/^/            /'
         problems=$((problems + 1))
       else
-        echo "✓ $name   NetworkPolicy spc-$name-ingress admits $([ -n "$owner_group" ] && echo "group $owner_group" || echo "user $owner_user"), Nova and Airflow"
+        echo "✓ $name   NetworkPolicy spc-$name-ingress admits $([ -n "$owner_group" ] && echo "group $owner_group" || echo "user $owner_user"), Nova, Airflow and the cluster's own executors"
       fi
     elif [ "$state" = "Stopped" ]; then
       if kubectl -n "$NS" get sparkconnects.sparkoperator.k8s.io "spc-$name" >/dev/null 2>&1 && [ "$old" -eq 1 ]; then

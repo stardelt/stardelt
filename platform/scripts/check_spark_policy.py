@@ -13,11 +13,37 @@ import json
 import sys
 
 PORT = 15002
+DRIVER_RPC_PORT = 7078
+BLOCK_MANAGER_PORT = 7079
+EXECUTOR_LABEL = {"spark-role": "executor"}
 CONNECT_LABEL = "sparkoperator.k8s.io/connect-name"
 
 
 def _labels(peer):
     return ((peer or {}).get("podSelector") or {}).get("matchLabels") or {}
+
+
+def _executor_rule_problems(rule):
+    """Why the optional second rule is not the cluster's own executors; [] when it is."""
+    problems = []
+    peers = rule.get("from") or []
+    peer = peers[0] if len(peers) == 1 else {}
+    selector = peer.get("podSelector") or {}
+    if (
+        set(peer) != {"podSelector"}
+        or set(selector) != {"matchLabels"}
+        or selector.get("matchLabels") != EXECUTOR_LABEL
+    ):
+        problems.append(
+            "the executor rule must admit exactly podSelector spark-role=executor "
+            "(no namespaceSelector, no ipBlock, no matchExpressions)"
+        )
+    ports = [p.get("port") for p in rule.get("ports") or []]
+    if not ports or any(port not in (DRIVER_RPC_PORT, BLOCK_MANAGER_PORT) for port in ports):
+        problems.append(
+            f"the executor rule may open only TCP {DRIVER_RPC_PORT} and {BLOCK_MANAGER_PORT} (got {ports!r})"
+        )
+    return problems
 
 
 def check(policy, name, group=None, user=None):
@@ -33,8 +59,10 @@ def check(policy, name, group=None, user=None):
     if "Ingress" not in (spec.get("policyTypes") or []):
         problems.append("policyTypes does not include Ingress")
     rules = spec.get("ingress") or []
-    if len(rules) != 1:
-        problems.append(f"expected one ingress rule, found {len(rules)}")
+    if len(rules) not in (1, 2):
+        problems.append(
+            f"expected one ingress rule or two (the second for the cluster's own executors), found {len(rules)}"
+        )
         return problems
     rule = rules[0]
     ports = [p.get("port") for p in rule.get("ports") or []]
@@ -53,6 +81,8 @@ def check(policy, name, group=None, user=None):
         problems.append("no peer admits Nova (app.kubernetes.io/name=nova)")
     if not any(_labels(peer).get("release") == "airflow" and _labels(peer).get("component") == "worker" for peer in peers):
         problems.append("no peer admits the Airflow worker (release=airflow, component=worker)")
+    if len(rules) == 2:
+        problems.extend(_executor_rule_problems(rules[1]))
     return problems
 
 
