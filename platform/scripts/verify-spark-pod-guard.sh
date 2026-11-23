@@ -153,11 +153,19 @@ metadata:
   name: spark-guard-probe-default-sa
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: default
   restartPolicy: Never
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
 EOF
 
 # 2. A Secret volume: the pod would read a Secret the executors never need.
@@ -168,6 +176,11 @@ metadata:
   name: spark-guard-probe-secret
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: spark-executor
   restartPolicy: Never
   volumes:
@@ -177,6 +190,9 @@ spec:
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       volumeMounts:
         - name: probe-secret
           mountPath: /probe
@@ -190,11 +206,19 @@ metadata:
   name: spark-guard-probe-secret-env
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: spark-executor
   restartPolicy: Never
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       env:
         - name: PROBE_PASSWORD
           valueFrom:
@@ -211,11 +235,19 @@ metadata:
   name: spark-guard-probe-secret-envfrom
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: spark-executor
   restartPolicy: Never
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       envFrom:
         - secretRef:
             name: keycloak-admin
@@ -229,6 +261,11 @@ metadata:
   name: spark-guard-probe-host-network
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: spark-executor
   hostNetwork: true
   restartPolicy: Never
@@ -238,6 +275,9 @@ spec:
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       volumeMounts:
         - name: spark-local-dir-1
           mountPath: /tmp
@@ -301,11 +341,19 @@ metadata:
   name: spark-guard-probe-stream-default-sa
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: default
   restartPolicy: Never
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
 EOF
 
 deny_configmap "$SA_STREAM" spark-stream-configmaps "a foreign ConfigMap created by the stream driver"
@@ -321,11 +369,19 @@ metadata:
   name: spark-guard-probe-batch-default-sa
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: default
   restartPolicy: Never
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
 EOF
 
 deny_configmap "$SA_BATCH" spark-batch-configmaps "a foreign ConfigMap created by the batch driver"
@@ -343,11 +399,19 @@ metadata:
   name: spark-guard-probe-cluster-default-sa
   namespace: ${NS}
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: default
   restartPolicy: Never
   containers:
     - name: probe
       image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
 EOF
 
 deny_configmap "$SA_CLUSTER" spark-cluster-configmaps "a foreign ConfigMap created by the SparkCluster driver"

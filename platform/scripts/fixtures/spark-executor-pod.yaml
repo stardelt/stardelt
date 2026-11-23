@@ -8,6 +8,11 @@ metadata:
   name: spark-executor-probe
   namespace: stardelt
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185
+    fsGroup: 185
+    seccompProfile: { type: RuntimeDefault }
   serviceAccountName: spark-executor
   restartPolicy: Never
   volumes:
@@ -17,6 +22,9 @@ spec:
     # The digest is the one in `manifests/spark.yaml`; `scripts/pin-image.sh spark` moves both.
     - name: spark-kubernetes-executor
       image: ghcr.io/stardelt/spark:dev@sha256:f1f21f2eef2885bc3138d00a79060375d66a6a05a3f86e0ebb95edad462ac4e2
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
       volumeMounts:
         - name: spark-local-dir-1
           mountPath: /tmp
