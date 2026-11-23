@@ -12655,7 +12655,8 @@
         "type": "object",
         "description": "`GET /api/connections` answer.",
         "required": [
-          "connections"
+          "connections",
+          "store"
         ],
         "properties": {
           "connections": {
@@ -12663,6 +12664,10 @@
             "items": {
               "$ref": "#/components/schemas/ConnectionView"
             }
+          },
+          "store": {
+            "type": "boolean",
+            "description": "Whether this install has the platform's own secret store. `false` in\n`spec.secrets.mode: external`, where a connection names a path in the\nenterprise's store and the operator syncs it."
           }
         }
       },
