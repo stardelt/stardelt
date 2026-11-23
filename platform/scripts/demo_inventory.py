@@ -40,6 +40,10 @@ NOVA_DEFAULT = "https://alpha.dev.stardelt.io"
 ISSUER_DEFAULT = "https://id.alpha.dev.stardelt.io/realms/stardelt"
 GROUP = "visitors"
 
+# A `make verify-*` check that creates an object on the demo labels it with this key; its value
+# is the check's name. A leftover is reported, never counted as demo content (#1274).
+CHECK_LABEL = "stardelt.io/check"
+
 # The twelve one-statement pipelines the shop bundle replaced, verbatim from
 # `scripts/demo-shop.sh`; stage 2 of that script deletes exactly this list.
 LEGACY = (
@@ -194,6 +198,11 @@ def _spec(obj):
     return obj.get("spec") or {}
 
 
+def _check(obj):
+    """The name of the release check that owns this object, or `None`."""
+    return (obj.get("metadata", {}).get("labels") or {}).get(CHECK_LABEL)
+
+
 def _status(obj):
     return obj.get("status") or {}
 
@@ -293,13 +302,19 @@ def _demo_objects(pipelines, streams, clusters):
         (kind, obj)
         for kind, objects in (("pipeline", pipelines), ("stream", streams), ("cluster", clusters))
         for obj in sorted(objects, key=_name)
-        if _owner(obj, kind) == "demo"
+        if _owner(obj, kind) == "demo" and _check(obj) is None
     ]
 
 
 def check(pipelines, streams, clusters, runs, connections=None) -> list[str]:
     """The convergence list of stardelt#79; pure. `runs` is `None` for `--runs crd`."""
     problems = []
+    for obj in pipelines:
+        if _check(obj):
+            problems.append(
+                f"the release check's pipeline {_name(obj)} is still on the demo — "
+                f"kubectl delete pipeline {_name(obj)} -n stardelt"
+            )
     names = {_name(obj) for obj in pipelines}
     for name in LEGACY:
         if name in names:

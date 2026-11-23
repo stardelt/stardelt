@@ -24,6 +24,7 @@ def pipeline(
     runs=None,
     tasks=None,
     description="Loads the demo's seed data.",
+    labels=None,
 ):
     spec = {
         "tasks": tasks if tasks is not None else [{"name": "load", "kind": "sql"}],
@@ -37,7 +38,7 @@ def pipeline(
     if description is not None:
         spec["description"] = description
     return {
-        "metadata": {"name": name, "namespace": "stardelt"},
+        "metadata": {"name": name, "namespace": "stardelt", "labels": labels or {}},
         "spec": spec,
         "status": {"runs": runs if runs is not None else []},
     }
@@ -171,6 +172,25 @@ class CheckTest(unittest.TestCase):
             "the legacy pipeline shop-01-bronze is still there — run make demo-shop YES=1",
             problems,
         )
+
+    def test_check_names_a_leftover_check_pipeline(self):
+        problems = demo_inventory.check(
+            [pipeline("verify-wap", labels={"stardelt.io/check": "verify-wap"})], [], [], {}
+        )
+        assert problems == [
+            "the release check's pipeline verify-wap is still on the demo — "
+            "kubectl delete pipeline verify-wap -n stardelt"
+        ]
+
+    def test_check_does_not_count_a_check_pipeline_as_demo_content(self):
+        # No viewers, no description and no schedule: fine for a check's object, never reported.
+        problems = demo_inventory.check(
+            [pipeline("verify-wap", viewers=None, description=None, labels={"stardelt.io/check": "verify-wap"})],
+            [],
+            [],
+            {},
+        )
+        assert [p for p in problems if "viewers" in p or "description" in p or "on demand" in p] == []
 
     def test_check_names_a_demo_object_without_visitors(self):
         """When: a demo-owned pipeline, stream and cluster lack `visitors`. Then: one message
