@@ -29,6 +29,17 @@ if [ "$i" = absent ]; then
   echo "lakekeeper-opa-security: no opa sidecar (allowall install) — nothing to patch"
   exit 0
 fi
+if kubectl -n "$NS" get deployment lakekeeper -o json \
+    | jq -r --argjson i "$i" '.spec.template.spec.containers[$i].securityContext
+             | ((.allowPrivilegeEscalation == false)
+                and ((.capabilities.drop // []) | index("ALL") != null))' \
+    | grep -qx true; then
+  echo "lakekeeper-opa-security: already patched — nothing to do"
+  kubectl -n "$NS" get deployment lakekeeper -o json \
+    | jq -c --argjson i "$i" '.spec.template.spec.containers[$i].securityContext'
+  echo "lakekeeper-opa-security: PASS"
+  exit 0
+fi
 kubectl -n "$NS" patch deployment lakekeeper --type=json -p "[
   {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/$i/securityContext/allowPrivilegeEscalation\",\"value\":false},
   {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/$i/securityContext/capabilities\",\"value\":{\"drop\":[\"ALL\"]}}
