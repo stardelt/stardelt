@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Converge the live Keycloak realm onto the public client `stardelt-mcp` that an MCP-capable agent
 # signs in with (stardelt-nova#112, stardelt-operator#69): PKCE to a loopback address and the
-# device grant, no secret, no service account. Its tokens carry the audience `<nova publicUrl>/mcp`
-# and the `groups` claim and nothing else that grants data access — the token is for the `/mcp`
-# endpoint only. Nova forwards this token to the engine today (there is no exchange yet,
-# platform#174), and the engine accepts it because it checks no audience, so the same token can be
-# replayed against the engine directly — the read-only tool surface is a guardrail, not a boundary
-# (`design/agent-access.md` §4, platform#1365).
+# device grant, no secret, no service account. Its tokens carry two audiences: `<nova publicUrl>/mcp`
+# (mapper `aud-mcp`), which Nova's `/mcp` endpoint validates, and `nova` (mapper `aud-nova`), because
+# `nova` is the actor that exchanges the token (RFC 8693, `design/agent-access.md` §"Downstream
+# calls", platform#1442). They carry the `groups` claim and no engine audience — the engine token is
+# minted by that exchange — so the read-only tool surface stays a guardrail, not a boundary (#1365).
 #
 #   NAMESPACE=stardelt bash scripts/keycloak-sync-mcp-client.sh
 #   MCP_AUDIENCE=https://nova.example.com/mcp NAMESPACE=stardelt bash scripts/keycloak-sync-mcp-client.sh
@@ -120,7 +119,7 @@ client, audience = sys.argv[1], sys.argv[2]
 json.dump({
     "clientId": client,
     "name": "MCP agents",
-    "description": "Public client for MCP-capable agents (stardelt-nova#112): PKCE to a loopback address and the device grant. Tokens carry the audience <nova host>/mcp only; the engine token is minted by exchange (platform#174).",
+    "description": "Public client for MCP-capable agents (stardelt-nova#112): browser PKCE to loopback and the device grant. Tokens carry <nova host>/mcp (aud-mcp) and nova (aud-nova, the exchange actor); the engine audience is minted by exchange.",
     "enabled": True,
     "protocol": "openid-connect",
     "publicClient": True,
@@ -136,6 +135,10 @@ json.dump({
         {"name": "aud-mcp", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
          "consentRequired": False,
          "config": {"included.custom.audience": audience, "id.token.claim": "false",
+                    "access.token.claim": "true", "introspection.token.claim": "true"}},
+        {"name": "aud-nova", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
+         "consentRequired": False,
+         "config": {"included.client.audience": "nova", "id.token.claim": "false",
                     "access.token.claim": "true", "introspection.token.claim": "true"}},
         {"name": "groups", "protocol": "openid-connect", "protocolMapper": "oidc-group-membership-mapper",
          "consentRequired": False,
@@ -218,9 +221,10 @@ client = json.load(open(sys.argv[1]))
 audience = sys.argv[2]
 m = {x["name"]: x for x in client.get("protocolMappers") or []}
 assert m.get("aud-mcp", {}).get("config", {}).get("included.custom.audience") == audience, "aud-mcp audience drifted"
+assert m.get("aud-nova", {}).get("config", {}).get("included.client.audience") == "nova", "aud-nova mapper drifted"
 assert "groups" in m, "the groups mapper is missing"
 assert "aud-trino" not in m, "the MCP token must not carry the engine audience"
-print("› client %s: aud-mcp=%s, groups" % (client["clientId"], audience))
+print("› client %s: aud-mcp=%s, aud-nova=nova, groups" % (client["clientId"], audience))
 PY
 
 # 5d. The read scope. `/mcp` requires `stardelt:read`; the realm import only runs on a fresh
@@ -328,6 +332,15 @@ scope = json.load(open(sys.argv[1])).get("scope") or ""
 if sys.argv[2] not in scope.split():
     sys.exit("scope is %r" % scope)
 print("› client %s: example access token carries scope %s" % (sys.argv[3], sys.argv[2]))
+PY
+  python3 - "$tmp/example-scope.json" "$MCP_AUDIENCE" "$MCP_CLIENT" <<'PY' || fail "the example access token of $MCP_CLIENT does not carry the audiences $MCP_AUDIENCE and nova"
+import json, sys
+token = json.load(open(sys.argv[1]))
+aud = token.get("aud")
+auds = aud if isinstance(aud, list) else [aud]
+if sys.argv[2] not in auds or "nova" not in auds:
+    sys.exit("aud is %r" % aud)
+print("› client %s: example access token carries the audiences %s and nova" % (sys.argv[3], sys.argv[2]))
 PY
   python3 - "$tmp/example-scope.json" "$READ_SCOPE" "$WRITE_SCOPE" "$MCP_CLIENT" <<'PY' || fail "the example access token of $MCP_CLIENT carries the optional write scope $WRITE_SCOPE"
 import json, sys
