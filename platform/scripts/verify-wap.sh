@@ -27,6 +27,9 @@
 #     a task parked in `up_for_reschedule` can still be re-queued; `make demo-inventory-check`
 #     reports that leftover with its delete command (#1279). The `scratch` schema is the demo's
 #     and stays; no other table is touched;
+#   - one table per run (`wap_gate_<UTC timestamp>`, #1319): a killed run's table and refs are
+#     never measured again; every `wap_gate*` table in `scratch` is dropped at the start, and a
+#     drop that fails is UNVERIFIED instead of a silent `|| true`;
 #   - `airflow tasks logs` does not exist in Airflow 3.2 (#1025), so every assertion reads the
 #     run state, the per-task states and the catalog's `metadata.refs` — never a task log.
 set -euo pipefail
@@ -38,7 +41,9 @@ PIPELINE="${PIPELINE:-verify-wap}"
 DAG="${DAG:-stardelt__$PIPELINE}"
 CATALOG="${CATALOG:-playground}"
 SCHEMA="${SCHEMA:-scratch}"
-TABLE_NAME="${TABLE_NAME:-wap_gate}"
+# One table per run (#1319): a run that was killed half-way leaves a table, and its refs,
+# that the next run must never measure. Leftovers of that shape are swept at the start.
+TABLE_NAME="${TABLE_NAME:-wap_gate_$(date -u +%Y%m%d%H%M%S)}"
 TABLE="$CATALOG.$SCHEMA.$TABLE_NAME"
 GROUP="${GROUP:-demo}"
 PRINCIPAL_SECRET="${PRINCIPAL_SECRET:-sp-pipeline-$GROUP}"
@@ -378,7 +383,27 @@ main_snapshot() {
 
 # --- start clean: a leftover pipeline or table would collide with this run ----------------
 kubectl -n "$NS" delete pipeline "$PIPELINE" --ignore-not-found >/dev/null 2>&1 || true
-catalog DELETE "/catalog/v1/$PREFIX/namespaces/$SCHEMA/tables/$TABLE_NAME?purgeRequested=true" >/dev/null 2>&1 || true
+code="$(catalog GET "/catalog/v1/$PREFIX/namespaces/$SCHEMA/tables")"
+if [ "$code" != "200" ]; then
+  echo "verify-wap: UNVERIFIED (could not list $CATALOG.$SCHEMA: HTTP $code)"
+  exit 3
+fi
+leftovers="$(jq -r '.identifiers[]?.name | select(startswith("wap_gate"))' "$tmp/out.json")"
+for name in $leftovers; do
+  code="$(catalog DELETE "/catalog/v1/$PREFIX/namespaces/$SCHEMA/tables/$name?purgeRequested=true")"
+  case "$code" in
+    200|204|404) echo "  dropped the leftover table $CATALOG.$SCHEMA.$name" >&2 ;;
+    *) echo "verify-wap: UNVERIFIED (the leftover table $CATALOG.$SCHEMA.$name could not be dropped: HTTP $code)"; exit 3 ;;
+  esac
+done
+
+own_branch() { # <run-id> -> audit_<16 hex>, the same name as wap.branch_name (wap.py:18-20)
+  printf 'audit_%s' "$(printf '%s' "$1" | sha256sum | cut -c1-16)"
+}
+refs_line() { # every ref of the last main_snapshot read: name, type, snapshot, TTL
+  jq -r '(.metadata.refs // {}) | to_entries[] | "    \(.key) type=\(.value.type) snapshot=\(.value["snapshot-id"]) ttl=\(.value["max-ref-age-ms"] // "none")"' \
+    "$tmp/refs.json" 2>/dev/null || true
+}
 
 # --- run 1: publish: direct ---------------------------------------------------------------
 echo "run 1: publish: direct" >&2
@@ -448,6 +473,8 @@ if [ "$RUN_STATE" = "success" ] \
 else
   echo "FAIL publish"
   echo "  run $RUN state=$RUN_STATE main${S2:+=}${S2:-none} audit=${audit2:-none}" >&2
+  echo "  the run's own branch is $(own_branch "$RUN"); the table's refs:" >&2
+  refs_line >&2
   bad="$bad publish"
 fi
 
@@ -480,12 +507,14 @@ if [ "$RUN_STATE" = "failed" ] && [ "$check_state" = "failed" ] \
    && [ "$publish_state" != "success" ] \
    && [ -n "$S3" ] && [ "$S3" = "${S2:-}" ] \
    && [ "$audit_count" = "1" ] \
-   && printf '%s' "$audit3" | grep -qE '^audit_[0-9a-f]{16}$' \
+   && [ "$audit3" = "$(own_branch "$RUN")" ] \
    && [ "$audit_ttl" = "604800000" ]; then
   echo "PASS refusal"
   echo "  main stayed $S3, $audit3 kept for 7 days" >&2
 else
   echo "FAIL refusal"
+  echo "  the run's own branch is $(own_branch "$RUN"); the table's refs:" >&2
+  refs_line >&2
   bad="$bad refusal"
 fi
 
