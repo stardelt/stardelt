@@ -27,6 +27,10 @@ PUT_KEY = f"_runs/analytics/nbtest/{RUN_ID}/report.ipynb"
 class DagRun:
     run_id = RUN_ID
     run_after = RUN_AFTER
+    # A `DagRun` built by Airflow carries `conf`, the run's parameters (a dict by default; the
+    # database column is nullable). The loader reads `run_values(dag_run.conf, …)`, which a real
+    # run always provides.
+    conf = {}
 
 
 def context():
