@@ -302,6 +302,10 @@ verify-product-path: _context ## The visitor's whole path as `demo`: search, tab
 verify-product-path-create: _context ## The product-path test's create half as `product-path`: create, schedule, run, log, delete
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-product-path.sh --create
 
+.PHONY: verify-ask
+verify-ask: _context ## Ask answers end to end: a stub ModelEndpoint is probed Ready, and one question comes back as checked SQL
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-ask.sh
+
 .PHONY: verify-pipeline-validate
 verify-pipeline-validate: _context ## The validate route accepts, refuses with the named rule, and writes nothing
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-pipeline-validate.sh
