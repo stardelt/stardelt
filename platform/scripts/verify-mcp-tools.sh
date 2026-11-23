@@ -12,7 +12,8 @@
 # `/mcp` answering 401 to every signed-in call while the gate stays green.
 #
 #   sign-in        the token `mint-user-token.py` mints for `$MCP_USER` on `$MCP_CLIENT`: its
-#                  `aud` is `$HOST/mcp` and its `azp` is `$MCP_CLIENT`
+#                  `azp` is `$MCP_CLIENT`, `$HOST/mcp` is among its audiences, and the only
+#                  other audience is `nova` (the exchange actor #1442/#1455 needs)
 #   tools/list     POST $HOST/mcp {"jsonrpc":"2.0","id":1,"method":"tools/list"} → 200 and the
 #                  names carry `platform_status`, `sql_read` and `pipeline_start`
 #   platform_status tools/call `platform_status` → 200, `status` is `ok`, `db` is `up|disabled`
@@ -151,8 +152,19 @@ def field(name):
 
 want_aud, want_azp, user = sys.argv[1], sys.argv[2], sys.argv[3]
 aud, azp = field('aud'), field('azp')
-if aud != want_aud or azp != want_azp:
-    print(\"the token is not the MCP client's: aud=%s azp=%s\" % (aud, azp))
+# The MCP token names its own audience and the exchange actor (nova, which the realm must
+# see on the subject token before it mints the engine audience). It never names the engine.
+allowed = {want_aud, 'nova'}
+audiences = [a for a in (aud or '').split(',') if a]
+if azp != want_azp:
+    print(\"the token is not the MCP client's: azp=%s\" % (azp,))
+    sys.exit(1)
+if want_aud not in audiences:
+    print(\"the token does not name the MCP resource: aud=%s\" % (aud,))
+    sys.exit(1)
+extra = sorted(set(audiences) - allowed)
+if extra:
+    print(\"the token carries an audience it must not: %s\" % (', '.join(extra),))
     sys.exit(1)
 print('%s as %s (aud=%s)' % (user, azp, aud))
 " "$HOST/mcp" "$MCP_CLIENT" "$MCP_USER" <<< "$claims")"; then
