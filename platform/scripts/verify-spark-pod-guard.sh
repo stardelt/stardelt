@@ -77,7 +77,7 @@ deny_msg() {  # <sa> <policy> <label> <message>; the YAML to apply is on stdin
 }
 
 deny_or_pss() {  # <sa> <policy> <label>; the YAML to apply is on stdin.
-  # In a namespace with `pod-security.kubernetes.io/enforce: baseline` Pod Security refuses
+  # In a namespace with `pod-security.kubernetes.io/enforce: restricted` Pod Security refuses
   # hostNetwork before any ValidatingAdmissionPolicy sees the pod (platform#1455), so both
   # refusals are the expected answer and the line says which one answered.
   local sa="$1" policy="$2" label="$3" out
