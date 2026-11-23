@@ -18,11 +18,14 @@
 #   table  Lakekeeper's REST catalog answers 200 for the table, with a main snapshot — the
 #          write reached the catalog through the principal's token and the vended credential
 #          (the spec carries no S3 key at all);
-#   rows   a fresh session from the same configuration counts 10 rows, so the commit is readable.
+#   rows   a fresh session from the same configuration counts 10 rows, so the commit is readable;
+#   python-rows  a Python source (`python/mv_python.py`, `@dp.materialized_view`) produced its
+#                dataset too: a fresh session counts 20 rows of `verify_python_view` (#1355, #80
+#                point 6 — SQL sources first, Python after they are proven);
 #   credential  the pod carries one projected ServiceAccount token for the catalog audience and
 #               no Secret reference; the token is the principal's ServiceAccount
 #
-# Exit 0 = PASS (all four), 1 = FAIL (one of the four did not hold), 3 = UNVERIFIED (no kubectl,
+# Exit 0 = PASS (all six), 1 = FAIL (one of the six did not hold), 3 = UNVERIFIED (no kubectl,
 # the server or the principal is not installed, the pod never started or never reached the
 # server — nothing about the task pod was measured then).
 #
@@ -233,14 +236,33 @@ name: verify-spark-pipeline
 libraries:
   - glob:
       include: tables.sql
+  - glob:
+      include: python/**
 EOF
 cat > "$tmp/tables.sql" <<EOF
 CREATE MATERIALIZED VIEW $TABLE AS SELECT id FROM range(10);
 EOF
+mkdir -p "$tmp/graph/python"
+cat > "$tmp/graph/python/mv_python.py" <<'PY'
+from pyspark import pipelines as dp
+from pyspark.sql import SparkSession, functions as F
 
+# Spark does not inject a global `spark` into a pipeline module (its own `spark-pipelines init`
+# sample does this line); without it the decorator raises NameError: name 'spark' is not defined.
+spark = SparkSession.active()
+
+@dp.materialized_view(name="verify_python_view")
+def verify_python_view():
+    return spark.range(20).withColumn("x", F.col("id") + 1)
+PY
+# A ConfigMap key cannot hold `/` (the API server refuses `python/mv_python.py` as a key), so the
+# file rides the loader's own flat key (`f01`, see `spark_pipeline.py::key_paths`) and the pod's
+# volume mounts it under its flat key and the runner copies it to `python/mv_python.py` — the
+# shape the loader and the operator render for a graph.
 kubectl -n "$NS" create configmap "$CM" \
   --from-file=spark-pipeline.yml="$tmp/spark-pipeline.yml" \
   --from-file=tables.sql="$tmp/tables.sql" \
+  --from-file=f01="$tmp/graph/python/mv_python.py" \
   --dry-run=client -o yaml 2>/dev/null \
   | kubectl apply -f - >/dev/null && cm_created=yes
 [ "$cm_created" = "yes" ] || { echo "verify-spark-pipeline: FAIL (could not create ConfigMap $CM)"; exit 1; }
@@ -268,8 +290,16 @@ TABLE = os.environ["SPARK_TABLE"]
 
 work = WORK / "graph"
 work.mkdir(parents=True, exist_ok=True)
-for name in ("spark-pipeline.yml", "tables.sql"):
-    (work / name).write_bytes((GRAPH / name).read_bytes())
+# The loader's path: ConfigMap key -> graph path (`spark_pipeline.py::key_paths`; `f01` is the
+# Python module, whose key cannot spell its path).
+for key, path in (
+    ("spark-pipeline.yml", "spark-pipeline.yml"),
+    ("tables.sql", "tables.sql"),
+    ("f01", "python/mv_python.py"),
+):
+    target = work / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes((GRAPH / key).read_bytes())
 
 spec = work / "spark-pipeline.yml"
 document = yaml.safe_load(spec.read_text())
@@ -334,6 +364,7 @@ for key, value in plan["configuration"].items():
 session = builder.create()
 try:
     print("rows=%d" % session.table(plan["table"]).count())
+    print("python-rows=%d" % session.table(plan["python_table"]).count())
 finally:
     session.stop()
 """
@@ -352,6 +383,7 @@ if result.returncode == 0 and "Run is COMPLETED" in result.stdout:
                     if key != "spark.remote"
                 },
                 "table": f"{CATALOG}.{DATABASE}.{TABLE}",
+                "python_table": f"{CATALOG}.{DATABASE}.verify_python_view",
             }
         ).encode(),
     )
@@ -430,6 +462,7 @@ spec:
         items:
           - { key: spark-pipeline.yml, path: spark-pipeline.yml }
           - { key: tables.sql, path: tables.sql }
+          - { key: f01, path: f01 }
     - name: tmp
       emptyDir: {}
     - name: catalog-token
@@ -523,7 +556,14 @@ else
   bad="$bad rows"
 fi
 
-# PASS 5 — the pod held only the projected catalog token.
+# PASS 5 — the Python source's materialized view is readable too (#1355).
+if printf '%s\n' "$logs" | grep -qx 'python-rows=20'; then
+  printf 'PASS %-12s%s\n' python-rows "count(*) = 20 from the Python source through a fresh session"
+else
+  bad="$bad python-rows"
+fi
+
+# PASS 6 — the pod held only the projected catalog token.
 if printf '%s\n' "$logs" | grep -q '^credential=projected'; then
   printf 'PASS %-12s%s\n' credential "one projected catalog token, no Secret in the pod"
 else
@@ -545,5 +585,5 @@ if [ -n "$bad" ]; then
   echo "verify-spark-pipeline: FAIL (did not hold:$bad)"
   exit 1
 fi
-echo "verify-spark-pipeline: PASS (5 of 5)"
+echo "verify-spark-pipeline: PASS (6 of 6)"
 exit 0
