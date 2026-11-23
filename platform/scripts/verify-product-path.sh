@@ -181,10 +181,15 @@ if not isinstance(location, str) or not location:
 metadata = document.get("metadata")
 if not isinstance(metadata, dict):
     print("FAIL bronze.shop.customers carries no metadata document")
-elif "current-schema-id" not in metadata:
+    raise SystemExit
+if "current-schema-id" not in metadata:
     print("FAIL bronze.shop.customers' metadata has no current-schema-id")
-else:
-    print("✓ table bronze.shop.customers")
+    raise SystemExit
+for stored in ("config", "storage-credentials"):
+    if stored in document:
+        print("FAIL the table answer carries %r: a storage credential must not reach a browser or an agent" % (stored,))
+        raise SystemExit
+print("✓ table bronze.shop.customers")
 PY
 )"
   printf '%s\n' "$verdict"

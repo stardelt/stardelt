@@ -1080,6 +1080,20 @@ pub async fn list_tables(
     Json(TablesResponse { identifiers }).into_response()
 }
 
+/// A table's metadata as a page or an agent may see it: no storage credential.
+///
+/// Lakekeeper's `loadTable` answer carries `config` and `storage-credentials` when the
+/// warehouse vends (bronze/silver/gold do). Vending exists so a session reaches the object
+/// store itself; Nova's route answers a page and the `catalog_describe` tool, and neither may
+/// hold a key (agent-access.md T5). Everything else — `metadata`, `metadata-location`, and
+/// any field a later catalog adds — passes through.
+fn strip_storage_credentials(body: &mut serde_json::Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("config");
+        object.remove("storage-credentials");
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/catalog/tables/{ns}/{tbl}",
@@ -1099,6 +1113,7 @@ pub async fn list_tables(
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
+
 pub async fn table_metadata(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
@@ -1124,7 +1139,13 @@ pub async fn table_metadata(
     let (Some(ns), Some(tbl)) = (path_segment(&ns), path_segment(&tbl)) else {
         return bad_segment(&format!("{ns}.{tbl}"));
     };
-    proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}")).await
+    match catalog_json(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}")).await {
+        Ok(mut body) => {
+            strip_storage_credentials(&mut body);
+            Json(body).into_response()
+        }
+        Err(response) => response,
+    }
 }
 
 /// The last 100 snapshots of a table, newest first (Trino 480 Iceberg syntax).
@@ -1538,6 +1559,73 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    /// A Lakekeeper that lists one warehouse (`bronze`) and answers `loadTable` for
+    /// `shop.customers` with the vended credential fields, as a `sts-enabled` warehouse does.
+    async fn fake_lakekeeper_bronze_table() -> String {
+        let app = Router::new()
+            .route(
+                "/management/v1/warehouse",
+                get(|| async {
+                    Json(json!({
+                        "warehouses": [{"id": "wid-bronze", "name": "bronze"}]
+                    }))
+                }),
+            )
+            .route(
+                "/catalog/v1/wid-bronze/namespaces/shop/tables/customers",
+                get(|| async {
+                    Json(json!({
+                        "metadata": {"current-schema-id": 0},
+                        "metadata-location": "s3://warehouse/bronze/shop/customers/metadata/v1",
+                        "config": {
+                            "s3.access-key-id": "AKIA-test",
+                            "s3.secret-access-key": "secret-test"
+                        },
+                        "storage-credentials": [{"prefix": "s3://warehouse/bronze/shop/customers/"}]
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_table_answer_carries_no_storage_credential() {
+        let (trino, _) = fake_trino(&[("ada", &["bronze"])]).await;
+        let lakekeeper = fake_lakekeeper_bronze_table().await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let response = table_metadata(
+            State(state),
+            axum::extract::Path(("shop".to_string(), "customers".to_string())),
+            axum::extract::Query(CatalogParam {
+                catalog: Some("bronze".into()),
+            }),
+            Some(Extension(person("ada"))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let body: Value = serde_json::from_slice(&bytes).expect("json");
+        // The page's half survives.
+        assert_eq!(
+            body["metadata-location"],
+            json!("s3://warehouse/bronze/shop/customers/metadata/v1")
+        );
+        assert_eq!(body["metadata"], json!({"current-schema-id": 0}));
+        // The credential's half is gone, by key and by text.
+        assert!(body.get("config").is_none(), "{body}");
+        assert!(body.get("storage-credentials").is_none(), "{body}");
+        assert!(!text.contains("AKIA-test"), "{text}");
+        assert!(!text.contains("secret-test"), "{text}");
     }
 
     #[tokio::test]
