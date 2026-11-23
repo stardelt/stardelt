@@ -252,13 +252,18 @@ pub fn validate_reference(req: &NewConnection) -> Result<(), String> {
         return Err("a connection by reference is a group connection: a personal connection's values live in the platform's store, and a managed one is the administrator's".into());
     }
     let Some(path) = req.remote_ref.as_deref() else {
-        return Err("a connection by reference needs remoteRef, the path in the enterprise store".into());
+        return Err(
+            "a connection by reference needs remoteRef, the path in the enterprise store".into(),
+        );
     };
     if path.is_empty() || path.len() > 200 {
         return Err("remoteRef must be 1 to 200 characters".into());
     }
     if path.contains("..") || path.contains("//") || path.starts_with('/') || path.ends_with('/') {
-        return Err("remoteRef must be a plain path: no `..`, no `//`, and no leading or trailing `/`".into());
+        return Err(
+            "remoteRef must be a plain path: no `..`, no `//`, and no leading or trailing `/`"
+                .into(),
+        );
     }
     if !req.secret.is_empty() {
         return Err("a connection by reference carries no values: put them in the store and send only remoteRef and secretKeys".into());
@@ -291,7 +296,9 @@ pub fn validate_reference(req: &NewConnection) -> Result<(), String> {
             return Err(format!("setting `{k}` is not allowed here"));
         }
         if v.len() > MAX_SETTING_BYTES {
-            return Err(format!("setting `{k}` is longer than {MAX_SETTING_BYTES} bytes"));
+            return Err(format!(
+                "setting `{k}` is longer than {MAX_SETTING_BYTES} bytes"
+            ));
         }
     }
     type_rules(

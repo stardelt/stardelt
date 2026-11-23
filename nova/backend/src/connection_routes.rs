@@ -773,7 +773,12 @@ async fn create_by_reference(
         return Err(no_cluster());
     };
     let resource = connections::connection_resource(&req, &crate::cluster::namespace())
-        .ok_or_else(|| Fail::new(StatusCode::BAD_REQUEST, "a connection by reference is a group connection".to_string()))?;
+        .ok_or_else(|| {
+            Fail::new(
+                StatusCode::BAD_REQUEST,
+                "a connection by reference is a group connection".to_string(),
+            )
+        })?;
     let answer = connections::view_from_store(
         &req.name,
         req.scope,
@@ -2257,7 +2262,10 @@ mod tests {
         let items = items.lock().unwrap();
         let resource = items.get("crm-db").expect("the resource exists");
         assert_eq!(resource["spec"]["secret"]["remoteRef"], "apps/crm/db");
-        assert_eq!(resource["spec"]["secret"]["keys"], json!(["user", "password"]));
+        assert_eq!(
+            resource["spec"]["secret"]["keys"],
+            json!(["user", "password"])
+        );
         let answer = serde_json::to_string(&view).unwrap();
         assert!(
             !answer.contains("p1") && !answer.contains("etl"),
