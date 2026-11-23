@@ -3135,6 +3135,9 @@ pub async fn ensure_external_store(
     spec: &PlatformInstanceSpec,
 ) -> Option<ComponentStatus> {
     const NAME: &str = "secret-store";
+    if secrets::cluster_store_is_left_over(spec) {
+        return remove_leftover_cluster_store(ctx, spec).await;
+    }
     let store = match secrets::external_store(spec) {
         Ok(None) => return None,
         Err(e) => return Some(status(NAME, false, e.to_string())),
@@ -3166,6 +3169,69 @@ pub async fn ensure_external_store(
             true,
             "published ClusterSecretStore enterprise",
         )),
+    }
+}
+
+/// Deletes `ClusterSecretStore enterprise` when `spec.secrets.groups` replaces it. Only a store
+/// this operator published is deleted; a store with other labels is reported, never touched.
+async fn remove_leftover_cluster_store(
+    ctx: &Context,
+    spec: &PlatformInstanceSpec,
+) -> Option<ComponentStatus> {
+    const NAME: &str = "secret-store";
+    if spec.dry_run {
+        return Some(status(
+            NAME,
+            false,
+            "planned (dry-run): remove ClusterSecretStore enterprise",
+        ));
+    }
+    let api = Api::<DynamicObject>::all_with(
+        ctx.client.clone(),
+        &secrets::cluster_secret_store_resource(),
+    );
+    let existing = match api.get_opt(secrets::ENTERPRISE_STORE).await {
+        Ok(Some(object)) => object,
+        Ok(None) => {
+            return Some(status(
+                NAME,
+                true,
+                "no cluster-scoped store to remove (one store per owner group)",
+            ));
+        }
+        Err(e) => return Some(status(NAME, false, e.to_string())),
+    };
+    let labels = existing.labels();
+    let ours = labels.get("stardelt.io/component").map(String::as_str) == Some("secret-store")
+        && labels
+            .get("app.kubernetes.io/managed-by")
+            .map(String::as_str)
+            == Some("stardelt-operator");
+    if !ours {
+        return Some(status(
+            NAME,
+            false,
+            "ClusterSecretStore enterprise exists and is not managed by stardelt-operator; remove it by hand to keep the per-group boundary",
+        ));
+    }
+    match api
+        .delete(
+            secrets::ENTERPRISE_STORE,
+            &kube::api::DeleteParams::default(),
+        )
+        .await
+    {
+        Ok(_) => Some(status(
+            NAME,
+            true,
+            "removed the leftover ClusterSecretStore enterprise (one store per owner group)",
+        )),
+        Err(kube::Error::Api(e)) if e.code == 404 => Some(status(
+            NAME,
+            true,
+            "no cluster-scoped store to remove (one store per owner group)",
+        )),
+        Err(e) => Some(status(NAME, false, e.to_string())),
     }
 }
 
@@ -3728,6 +3794,153 @@ mod tests {
             }
         });
         (kube::Client::new(service, "stardelt"), requests)
+    }
+
+    /// A kube client for the leftover cluster store: `GET` and `DELETE` on
+    /// `/apis/external-secrets.io/v1/clustersecretstores/enterprise`. `present: false` answers 404
+    /// to both; `labels` is the document's label map.
+    fn mock_cluster_store(labels: serde_json::Value, present: bool) -> (kube::Client, Recorded) {
+        let requests: Recorded = Arc::default();
+        let recorder = requests.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let recorder = recorder.clone();
+            let labels = labels.clone();
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            async move {
+                let body = request
+                    .into_body()
+                    .collect_bytes()
+                    .await
+                    .expect("mock body");
+                recorder.lock().expect("requests poisoned").push((
+                    method.clone(),
+                    path.clone(),
+                    String::from_utf8_lossy(&body).to_string(),
+                ));
+                let (status, document) = if !present {
+                    (
+                        404,
+                        r#"{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"not found"}"#.to_string(),
+                    )
+                } else if method == "DELETE" {
+                    (
+                        200,
+                        r#"{"apiVersion":"v1","kind":"Status","status":"Success"}"#.to_string(),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "external-secrets.io/v1",
+                            "kind": "ClusterSecretStore",
+                            "metadata": { "name": "enterprise", "labels": labels },
+                        })
+                        .to_string(),
+                    )
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(document.into_bytes()))
+                        .expect("valid mock response"),
+                )
+            }
+        });
+        (kube::Client::new(service, "stardelt"), requests)
+    }
+
+    fn external_with_groups() -> PlatformInstanceSpec {
+        let mut spec = platform("external", false);
+        spec.secrets.mode = SecretsMode::External;
+        spec.secrets.groups = vec!["shop".into()];
+        spec
+    }
+
+    #[tokio::test]
+    async fn a_leftover_cluster_store_is_removed() {
+        let (client, requests) = mock_cluster_store(
+            serde_json::json!({
+                "app.kubernetes.io/managed-by": "stardelt-operator",
+                "stardelt.io/component": "secret-store",
+            }),
+            true,
+        );
+        let status = ensure_external_store(&context(client), &external_with_groups())
+            .await
+            .expect("a status");
+        assert!(status.ready, "{:?}", status.message);
+        assert!(
+            status.message.as_deref().unwrap_or("").contains("removed"),
+            "{:?}",
+            status.message
+        );
+        let seen = requests.lock().expect("requests poisoned").clone();
+        assert_eq!(seen[0].0, "GET");
+        assert_eq!(
+            seen[0].1,
+            "/apis/external-secrets.io/v1/clustersecretstores/enterprise"
+        );
+        assert!(
+            seen.iter().any(|(m, p, _)| m == "DELETE"
+                && p == "/apis/external-secrets.io/v1/clustersecretstores/enterprise"),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cluster_store_of_another_install_is_not_deleted() {
+        let (client, requests) = mock_cluster_store(
+            serde_json::json!({ "app.kubernetes.io/managed-by": "someone-else" }),
+            true,
+        );
+        let status = ensure_external_store(&context(client), &external_with_groups())
+            .await
+            .expect("a status");
+        assert!(!status.ready);
+        assert!(
+            status
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("not managed by stardelt-operator"),
+            "{:?}",
+            status.message
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("requests poisoned")
+                .iter()
+                .all(|(m, _, _)| m != "DELETE"),
+            "a foreign store must never be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_cluster_store_is_not_an_error() {
+        let (client, requests) = mock_cluster_store(serde_json::json!({}), false);
+        let status = ensure_external_store(&context(client), &external_with_groups())
+            .await
+            .expect("a status");
+        assert!(status.ready, "{:?}", status.message);
+        assert!(
+            status
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("no cluster-scoped store to remove"),
+            "{:?}",
+            status.message
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("requests poisoned")
+                .iter()
+                .all(|(m, _, _)| m != "DELETE")
+        );
     }
 
     /// A kube client for group stores: the init Secret is present or 404, the Kubernetes auth
