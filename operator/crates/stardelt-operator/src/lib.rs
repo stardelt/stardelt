@@ -12,6 +12,7 @@ pub mod connection;
 pub mod controller;
 pub mod crd;
 pub mod deploy_stage_keycloak;
+pub mod grpc_route;
 pub mod helm;
 pub mod http_route;
 pub mod identity;

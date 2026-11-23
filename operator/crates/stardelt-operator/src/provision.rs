@@ -30,7 +30,7 @@ use crate::{
         PlatformInstanceSpec, PrincipalAudience, PrincipalPurpose, SecretsMode, ServicePrincipal,
         StorageImpl,
     },
-    http_route, identity, ingress, kafka, keycloak, network_policy, nova,
+    grpc_route, http_route, identity, ingress, kafka, keycloak, network_policy, nova,
     objects::{
         apply, apply_cluster, apply_dynamic, apply_dynamic_cluster, barman_object_store_resource,
         cert_manager_certificate_resource, cert_manager_issuer_resource, cnpg_cluster_resource,
@@ -931,18 +931,61 @@ pub async fn ensure_spark(
             {
                 return Some(status(NAME, false, e.to_string()));
             }
-            // The public name comes from the instance's ingress settings; `ingress::spark`
-            // returns `None` without `spec.ingress.enabled` or `spec.baseDomain`. With
-            // `spec.ingress.mode: gateway` no Ingress is rendered at all, and Spark Connect
-            // gets no HTTPRoute in this slice: an HTTPRoute carries neither the backend
-            // protocol nor the per-route timeouts a gRPC front needs (`GRPCRoute` is a later
-            // slice), so the public name waits for that slice instead of falling back to an
-            // Ingress that would honour the ignored `className`/`allowedCidrs`/`tls`.
-            if instance.spec.ingress.mode != IngressMode::Gateway
-                && let Some(route) = ingress::spark(&instance.spec)
-                && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
-            {
-                return Some(status(NAME, false, e.to_string()));
+            // The public name comes from the instance's ingress settings, and each mode renders
+            // its own kind: `mode: ingress` an `Ingress` (which honours `className`,
+            // `allowedCidrs` and `tls`), `mode: gateway` a `GRPCRoute` attached to the Gateway in
+            // `spec.ingress.gateway` (the Gateway's listener owns TLS, source filtering and the
+            // request timeouts this gRPC front needs). Both return `None` without
+            // `spec.ingress.enabled` or `spec.baseDomain`.
+            if instance.spec.ingress.mode == IngressMode::Gateway {
+                if let Some(route) = grpc_route::spark(&instance.spec)
+                    && let Err(e) =
+                        apply_dynamic(client, namespace, &grpc_route::resource(), &route, dry_run)
+                            .await
+                {
+                    return Some(status(NAME, false, e.to_string()));
+                }
+            } else {
+                if let Some(route) = ingress::spark(&instance.spec)
+                    && let Err(e) = apply::<Ingress>(client, namespace, &route, dry_run).await
+                {
+                    return Some(status(NAME, false, e.to_string()));
+                }
+                // The reverse direction: a previous `mode: gateway` instance published this front
+                // as a `GRPCRoute`. Nothing in this block carries an owner reference, so the
+                // `part-of` label is the identity that tells our route from somebody else's.
+                if !dry_run {
+                    let routes = Api::<DynamicObject>::namespaced_with(
+                        client.clone(),
+                        namespace,
+                        &grpc_route::resource(),
+                    );
+                    match routes.get_opt("spark-connect").await {
+                        Ok(Some(existing)) => {
+                            let ours = existing
+                                .metadata
+                                .labels
+                                .as_ref()
+                                .map(|labels| {
+                                    labels.get("app.kubernetes.io/part-of").map(String::as_str)
+                                        == Some("stardelt")
+                                })
+                                .unwrap_or(false);
+                            if ours {
+                                match routes
+                                    .delete("spark-connect", &kube::api::DeleteParams::default())
+                                    .await
+                                {
+                                    Ok(_) => {}
+                                    Err(e) if is_not_found(&e) => {}
+                                    Err(e) => return Some(status(NAME, false, e.to_string())),
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Some(status(NAME, false, e.to_string())),
+                    }
+                }
             }
             // Only the platform's own realm has an audience to create; an external provider's
             // is the customer's to register.
