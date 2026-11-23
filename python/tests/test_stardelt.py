@@ -845,6 +845,23 @@ def test_the_group_token_file_is_configurable(fake_spark, visible_catalogs, monk
     )
 
 
+def test_a_task_pods_token_file_is_the_catalogs_token(fake_spark, visible_catalogs, monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("workload-canary-42\n")
+    monkeypatch.setenv("STARDELT_CATALOG_TOKEN_FILE", str(token_file))
+    monkeypatch.setattr(stardelt, "_token", lambda: "person-canary-17")
+    session = stardelt.spark("app")
+    for name in ("warehouse", "bronze"):
+        assert session.configs[f"spark.sql.catalog.{name}.token"] == "workload-canary-42"
+        assert f"spark.sql.catalog.{name}.rest.auth.type" not in session.configs
+
+
+def test_a_missing_task_token_file_is_a_sentence(fake_spark, visible_catalogs, monkeypatch, tmp_path):
+    monkeypatch.setenv("STARDELT_CATALOG_TOKEN_FILE", str(tmp_path / "absent"))
+    with pytest.raises(RuntimeError, match="unreadable"):
+        stardelt.spark("app")
+
+
 def test_hidden_and_invalid_names_skipped(fake_spark, monkeypatch):
     monkeypatch.setattr(
         stardelt,

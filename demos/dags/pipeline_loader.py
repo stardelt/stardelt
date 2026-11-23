@@ -341,6 +341,9 @@ def _build_dag(p) -> DAG:
                 task_params=dict(t.notebook_params),
                 pipeline_params=p.params,
                 principal_secret=p.principal.secret_name,
+                # The ServiceAccount the operator creates for the principal (`sp-<name>`); the
+                # worker may `use` it (#1260). The pod's catalog credential is its projected token.
+                principal_sa=f"sp-{p.principal.name}",
                 connection_name=t.connection,
                 connection_keys=t.connection_keys,
                 wap=p.publish == "wap",

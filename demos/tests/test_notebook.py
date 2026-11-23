@@ -62,6 +62,7 @@ def operator(**overrides):
         "task_params": {"days": "3"},
         "pipeline_params": {"region": "eu", "days": "1"},
         "principal_secret": "sp-pipeline-analytics",
+        "principal_sa": "sp-pipeline-analytics",
         "namespace": "stardelt",
     }
     kwargs.update(overrides)
@@ -151,6 +152,15 @@ def test_pod_env_has_no_s3_names_and_no_secret_values(monkeypatch):
         assert by_name[name].value_from.secret_key_ref.name == "sp-pipeline-analytics"
     values = [item.value for item in env if item.value]
     assert canary not in values and "AKIA-CANARY" not in values
+
+
+def test_the_catalog_token_is_the_projected_file(monkeypatch):
+    set_contract(monkeypatch)
+    env = pod_env(run_date="2026-10-21", run_id=RUN_ID, params={}, principal_secret="sp-pipeline-analytics")
+    by_name = {item.name: item for item in env}
+    assert by_name["STARDELT_CATALOG_TOKEN_FILE"].value == "/var/run/secrets/stardelt-catalog/token"
+    # The Secret is still the engine's: Trino refuses the workload token (#1271 Q3).
+    assert by_name["PIPELINE_CLIENT_SECRET"].value_from.secret_key_ref.name == "sp-pipeline-analytics"
 
 
 def test_the_kernel_timeout_of_the_loader_reaches_the_pod(monkeypatch):
@@ -276,6 +286,24 @@ def test_the_pod_carries_the_owner_groups_label():
     assert labels["app.kubernetes.io/name"] == "pipeline-notebook"
     assert labels["stardelt.io/pipeline"] == "nbtest"
     assert len(labels) == 3
+
+
+def test_the_pod_runs_as_the_principal_with_the_projected_token(monkeypatch):
+    pytest.importorskip(PROVIDER)
+    set_contract(monkeypatch)
+    monkeypatch.setattr(notebook, "_s3_client", fake_client(FakeS3()))
+    # The pod is not created here: the sibling test's seam (the cluster API is not this test's).
+    monkeypatch.setattr(notebook.KubernetesPodOperator, "execute", lambda self, context: None)
+    op = operator()
+    op.execute(context())
+    assert op.service_account_name == "sp-pipeline-analytics"
+    assert [v.name for v in op.volumes] == ["trino-ca", "catalog-token"]
+    mount = {m.name: m.mount_path for m in op.volume_mounts}
+    assert mount["catalog-token"] == "/var/run/secrets/stardelt-catalog"
+    projection = op.volumes[1].projected.sources[0].service_account_token
+    assert projection.audience == "stardelt-catalog-workload"
+    assert projection.expiration_seconds == 3600
+    assert projection.path == "token"
 
 
 def test_an_invalid_owner_group_never_becomes_a_label():

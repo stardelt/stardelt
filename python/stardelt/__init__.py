@@ -972,8 +972,22 @@ def _session(app_name="stardelt-notebook", cluster=None):
 
     catalog_uri = os.environ.get("STARDELT_CATALOG_URI", CATALOG_URI_DEFAULT).strip()
     s3_endpoint = os.environ.get("STARDELT_S3_ENDPOINT", S3_ENDPOINT_DEFAULT).strip()
-    token_file = (os.environ.get("STARDELT_CATALOG_TOKEN_FILE") or "").strip()
-    token_file = token_file or CATALOG_TOKEN_FILE_DEFAULT
+    token_file_env = (os.environ.get("STARDELT_CATALOG_TOKEN_FILE") or "").strip()
+    token_file = token_file_env or CATALOG_TOKEN_FILE_DEFAULT
+    # A task pod carries the kubelet's projected ServiceAccount token (#492, #1271 Q1: the
+    # shared server acts as that principal, 365 rows). It is the catalog's credential; the
+    # token above stays the engine's (Trino refuses the workload token: #1271 Q3 401, Q4 200).
+    catalog_token = token
+    if cluster is None and token_file_env:
+        try:
+            with open(token_file_env, encoding="utf-8") as handle:
+                catalog_token = handle.read().strip()
+        except OSError as err:
+            raise RuntimeError(
+                f"STARDELT_CATALOG_TOKEN_FILE {token_file_env} is unreadable: {err.strerror}"
+            ) from err
+        if not catalog_token:
+            raise RuntimeError(f"STARDELT_CATALOG_TOKEN_FILE {token_file_env} is empty")
 
     session = None
     try:
@@ -1006,7 +1020,7 @@ def _session(app_name="stardelt-notebook", cluster=None):
                 # naming the file-auth class makes the driver read it and ignore any token in this set
                 # (#493, #1169: file-auth=365 as spark-cluster-driver-<group>).
                 *(
-                    (("token", token),)
+                    (("token", catalog_token),)
                     if cluster is None
                     else (
                         ("rest.auth.type", "io.stardelt.iceberg.TokenFileAuthManager"),
