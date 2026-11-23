@@ -10,6 +10,13 @@
 #                 its prefix
 #   session-out   the same session is REFUSED under the sibling prefix of the same table
 #
+# All three write into the platform's warehouse bucket — `lakehouse` by default, the
+# `S3_STS_BUCKET` variable names another — under a per-run table prefix (`t<epoch>`, its
+# sibling `<prefix>-out`), and the pod removes those two prefixes again. No bucket is created
+# or deleted: an S3 bucket is a SeaweedFS collection with seven volumes of the volume server's
+# slot budget (`-max`, chart `volume.dataDirs[0].maxVolumes`), and a bucket per run leaked 56 of
+# the then-100 slots (#1350).
+#
 # The session policy is the one Lakekeeper will send: one table's bare prefix and `prefix/*`
 # (a table-shaped policy needs both, spike stardelt#245). The role trusts exactly the platform
 # identity (arn:aws:iam::000000000000:user/stardelt, #407), so the session policy is the second
@@ -26,6 +33,7 @@ NAMESPACE="${NS:-${NAMESPACE:-stardelt}}"   # `make` passes NS; NAMESPACE works 
 # The pin scripts/create-backup-bucket.sh uses (same image, same digest).
 S3_CHECK_IMAGE="${S3_CHECK_IMAGE:-amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73}"
 pod="s3-sts-verify-$$"
+volume_pod="${S3_STS_VOLUME_POD:-seaweedfs-volume-0}"   # the StatefulSet the chart renders
 
 command -v kubectl >/dev/null 2>&1 || { echo "verify-s3-sts: UNVERIFIED (kubectl not found)"; exit 3; }
 
@@ -70,12 +78,19 @@ spec:
         - |
           set -e
           EP="http://seaweedfs-s3.$NAMESPACE.svc.cluster.local:8333"
-          B="sts-verify-\$(date -u +%s)"
-          POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],\"Resource\":[\"arn:aws:s3:::\$B/warehouse/ns/t\",\"arn:aws:s3:::\$B/warehouse/ns/t/*\"]}]}"
+          B="\${S3_STS_BUCKET:-lakehouse}"
+          T="t\$(date -u +%s)"
+          SIB="\$T-out"
+          POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],\"Resource\":[\"arn:aws:s3:::\$B/warehouse/ns/\$T\",\"arn:aws:s3:::\$B/warehouse/ns/\$T/*\"]}]}"
           s3() { aws --cli-connect-timeout 10 --cli-read-timeout 45 --endpoint-url "\$EP" "\$@"; }
+          # The trap runs after the session was assumed; the session policy cannot touch the
+          # sibling prefix, so the platform credentials are kept for the removal.
+          BASE_AK="\$AWS_ACCESS_KEY_ID" BASE_SK="\$AWS_SECRET_ACCESS_KEY" BASE_ST="\$AWS_SESSION_TOKEN"
           cleanup() {
-            s3 s3 rm "s3://\$B" --recursive >/dev/null 2>&1 || true
-            s3 s3api delete-bucket --bucket "\$B" >/dev/null 2>&1 || true
+            AWS_ACCESS_KEY_ID="\$BASE_AK" AWS_SECRET_ACCESS_KEY="\$BASE_SK" AWS_SESSION_TOKEN="\$BASE_ST" \
+              s3 s3 rm "s3://\$B/warehouse/ns/\$T" --recursive >/dev/null 2>&1 || true
+            AWS_ACCESS_KEY_ID="\$BASE_AK" AWS_SECRET_ACCESS_KEY="\$BASE_SK" AWS_SESSION_TOKEN="\$BASE_ST" \
+              s3 s3 rm "s3://\$B/warehouse/ns/\$SIB" --recursive >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
           n=0
@@ -84,8 +99,7 @@ spec:
             if [ "\$n" -ge 30 ]; then echo "unreachable \$EP"; exit 1; fi
             sleep 2
           done
-          s3 s3api create-bucket --bucket "\$B" >/dev/null
-          if s3 s3api put-object --bucket "\$B" --key warehouse/ns/t/data/x --body /etc/hostname >/dev/null; then
+          if s3 s3api put-object --bucket "\$B" --key "warehouse/ns/\$T/data/x" --body /etc/hostname >/dev/null; then
             echo "pass identity-put"
           else
             echo "fail identity-put"
@@ -93,12 +107,12 @@ spec:
           creds="\$(s3 sts assume-role --role-arn arn:aws:iam::000000000000:role/stardelt --role-session-name verify --policy "\$POLICY" --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)" || { echo "fail assume"; exit 1; }
           set -- \$creds
           export AWS_ACCESS_KEY_ID=\$1 AWS_SECRET_ACCESS_KEY=\$2 AWS_SESSION_TOKEN=\$3
-          if s3 s3api put-object --bucket "\$B" --key warehouse/ns/t/data/session --body /etc/hostname >/dev/null 2>&1; then
+          if s3 s3api put-object --bucket "\$B" --key "warehouse/ns/\$T/data/session" --body /etc/hostname >/dev/null 2>&1; then
             echo "pass session-in"
           else
             echo "fail session-in"
           fi
-          if s3 s3api put-object --bucket "\$B" --key warehouse/ns/t2/data/out --body /etc/hostname >/dev/null 2>&1; then
+          if s3 s3api put-object --bucket "\$B" --key "warehouse/ns/\$SIB/data/out" --body /etc/hostname >/dev/null 2>&1; then
             echo "fail session-out"
           else
             echo "pass session-out"
@@ -156,9 +170,32 @@ if grep -q '^fail ' <<<"$output"; then
   failed=$((failed + 1))
 fi
 
+# The volume server's slot budget: a bucket is a SeaweedFS collection of seven volumes out of
+# `-max N` (chart: `volume.dataDirs[0].maxVolumes`). A full budget lets the master assign no
+# volume, so a write into a new collection blocks until the client read timeout.
+volume_status() {
+  local json total ro collections max
+  json="$(kubectl -n "$NAMESPACE" exec "$volume_pod" -- \
+    sh -c 'wget -qO- "http://localhost:8080/status?pretty=y"' 2>/dev/null || true)"
+  if ! printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
+    echo "storage: unknown (the volume server's /status did not answer)"
+    return 0
+  fi
+  total="$(printf '%s' "$json" | jq -r '.Volumes | length')"
+  ro="$(printf '%s' "$json" | jq -r '[.Volumes[] | select(.ReadOnly)] | length')"
+  collections="$(printf '%s' "$json" | jq -r '[.Volumes[].Collection] | unique | length')"
+  max="$(kubectl -n "$NAMESPACE" get pod "$volume_pod" -o jsonpath='{.spec.containers[0].command}' 2>/dev/null \
+    | grep -oE -- '-max[ =]+[0-9]+' | grep -oE '[0-9]+' | head -n 1 || true)"
+  echo "storage: $total/${max:-?} volume slots used, $ro read-only, $collections collections"
+}
+volume_status
+
 if [ "$passed" -eq 3 ] && [ "$failed" -eq 0 ]; then
   echo "verify-s3-sts: PASS (3 of 3)"
   exit 0
+fi
+if grep -q 'Read timeout' <<<"$output"; then
+  echo "the volume server has no free slot; a new collection cannot be written (see make verify-storage-capacity)"
 fi
 echo "verify-s3-sts: FAIL ($passed of 3)"
 exit 1
