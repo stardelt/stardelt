@@ -40,7 +40,7 @@
 # Exit 0 = PASS, 1 = FAIL (one ✗ row, and every row still ran), 3 = UNVERIFIED (no usable host,
 # or curl/python3 missing: nothing was asked, so nothing was proved).
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 MCP_USER="${MCP_USER:-demo}"
 MCP_CLIENT="${MCP_CLIENT:-stardelt-mcp}"
