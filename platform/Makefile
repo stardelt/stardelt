@@ -1462,7 +1462,7 @@ sync-mcp-client: _context ## Converge the live realm's stardelt-mcp client (MCP 
 	@NAMESPACE=$(NAMESPACE) MCP_AUDIENCE=$(MCP_AUDIENCE) bash scripts/keycloak-sync-mcp-client.sh
 
 sync-mcp-exchange: _context ## Enable the realm's MCP token exchange (actor nova) and prove the exchanged token against Trino
-	@NAMESPACE=$(NAMESPACE) bash scripts/keycloak-sync-mcp-exchange.sh
+	@NAMESPACE=$(NAMESPACE) SUBJECT_USER=$(SUBJECT_USER) SUBJECT_PASSWORD_FILE=$(SUBJECT_PASSWORD_FILE) bash scripts/keycloak-sync-mcp-exchange.sh
 
 .PHONY: sync-github-idp
 sync-github-idp: _context ## Converge the realm's GitHub Actions identity provider a DeployStage names (#57; idempotent)
