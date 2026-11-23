@@ -354,6 +354,8 @@ enum Step {
     Unreachable,
     /// The engine refused the token (it expired, or the engine does not accept it).
     Unauthorized,
+    /// The engine answered, but not with JSON: its status and body in one sentence.
+    Refused(String),
     Malformed(String),
 }
 
@@ -365,9 +367,34 @@ impl Step {
                 StatusCode::UNAUTHORIZED,
                 "the query engine refused the sign-in; sign in again and poll the statement again",
             ),
+            Step::Refused(m) => fail(StatusCode::BAD_REQUEST, m),
             Step::Malformed(m) => fail(StatusCode::BAD_GATEWAY, m),
         }
     }
+}
+
+/// Read one page of the engine's answer: its JSON, or the step that names why not.
+///
+/// The status and content type are read before the body is consumed, so a plain-text refusal
+/// (`401 Invalid credentials`) answers the sentence `trino::refused_answer` builds instead of
+/// "malformed Trino response". A `2xx` answer that is not JSON is still malformed.
+async fn decode_page(response: reqwest::Response) -> Result<trino::TrinoResponse, Step> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(Step::Refused(trino::refused_answer(
+            status,
+            content_type.as_deref(),
+            &body,
+        )));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| Step::Malformed(format!("malformed Trino response: {e}")))
 }
 
 /// Poll the engine, with the token of the request in hand, until the statement ends or `wait` is up.
@@ -405,10 +432,7 @@ async fn advance(
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(Step::Unauthorized),
             _ => {}
         }
-        let page: TrinoResponse = response
-            .json()
-            .await
-            .map_err(|e| Step::Malformed(format!("malformed Trino paginated response: {e}")))?;
+        let page = decode_page(response).await?;
         if let Some(cut) = absorb(s, page) {
             // Rows past the cap: the engine need not finish the rest.
             let _ = trino::trino_request(state, caller, state.http.delete(&cut))
@@ -492,9 +516,9 @@ async fn submit(
             return Step::Unreachable.response();
         }
     };
-    let page: TrinoResponse = match initial.json().await {
+    let page = match decode_page(initial).await {
         Ok(p) => p,
-        Err(e) => return Step::Malformed(format!("malformed Trino response: {e}")).response(),
+        Err(step) => return step.response(),
     };
     let Some(id) = page.id.clone() else {
         return Step::Malformed("the engine named no query id".into()).response();
@@ -737,6 +761,8 @@ mod tests {
         sources: Mutex<Vec<String>>,
         /// Answer every poll with this status instead of a page.
         poll_status: Mutex<Option<StatusCode>>,
+        /// Answer the submit POST with this status and plain-text body, instead of a page.
+        submit_refusal: Mutex<Option<(StatusCode, &'static str)>>,
     }
 
     impl FakeTrino {
@@ -771,19 +797,23 @@ mod tests {
             deletes: Mutex::new(0),
             sources: Mutex::new(Vec::new()),
             poll_status: Mutex::new(None),
+            submit_refusal: Mutex::new(None),
         });
         let app = Router::new()
             .route(
                 "/v1/statement",
                 post(
                     |State(f): State<Arc<FakeTrino>>, headers: axum::http::HeaderMap| async move {
+                        if let Some((status, body)) = *f.submit_refusal.lock().unwrap() {
+                            return (status, body).into_response();
+                        }
                         let source = headers
                             .get("x-trino-source")
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("")
                             .to_string();
                         f.sources.lock().unwrap().push(source);
-                        Json(f.page(0))
+                        Json(f.page(0)).into_response()
                     },
                 ),
             )
@@ -902,6 +932,28 @@ mod tests {
             *fake.sources.lock().unwrap(),
             vec!["stardelt-api".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_plain_text_submit_refusal_names_the_engine_and_its_status() {
+        let fake = serve(vec![("FINISHED", true, rows(0))], false).await;
+        *fake.submit_refusal.lock().unwrap() =
+            Some((StatusCode::UNAUTHORIZED, "Invalid credentials"));
+        let app = app(
+            crate::router_tests::test_state_with_trino(&fake.base),
+            "alice",
+        );
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/statements",
+            Some(json!({ "sql": "select 1" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(error.contains("HTTP 401"), "{error}");
+        assert!(error.contains("Invalid credentials"), "{error}");
     }
 
     #[tokio::test]
