@@ -547,11 +547,18 @@ async fn catalog_json(state: &AppState, path: String) -> Result<serde_json::Valu
                 ))
             }
         }
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response()),
+        Err(e) => {
+            // As in `proxy`: the reqwest error names the Lakekeeper URL it tried, and every
+            // signed-in user sees this body.
+            warn!("lakekeeper proxy error: {e}");
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({"error": "the catalog is not answering; try again in a minute"}),
+                ),
+            )
+                .into_response())
+        }
     }
 }
 
@@ -1113,7 +1120,6 @@ fn strip_storage_credentials(body: &mut serde_json::Value) {
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
-
 pub async fn table_metadata(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
@@ -1626,6 +1632,27 @@ mod tests {
         assert!(body.get("storage-credentials").is_none(), "{body}");
         assert!(!text.contains("AKIA-test"), "{text}");
         assert!(!text.contains("secret-test"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_catalog_is_a_sentence_not_its_address() {
+        // Nothing answers: `catalog_json`'s transport arm, which `table_metadata` now uses.
+        let state = crate::router_tests::catalog_scope_test_state(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+        );
+        let response = catalog_json(
+            &state,
+            "/catalog/v1/wid-bronze/namespaces/shop/tables/customers".into(),
+        )
+        .await
+        .expect_err("nothing answers");
+        let (status, sentence) = error_sentence(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            sentence,
+            "the catalog is not answering; try again in a minute"
+        );
     }
 
     #[tokio::test]
