@@ -367,6 +367,30 @@ verify-contract: _context ## The live Nova contract matches nova/openapi/nova.js
 verify-s3-sts: _context ## The gateway speaks STS: identity put, an AssumeRole session at one table prefix, a sibling prefix refused
 	@NS=$(NAMESPACE) bash scripts/verify-s3-sts.sh
 
+.PHONY: verify-storage-capacity
+verify-storage-capacity: _context ## The volume budget: a free slot for a new bucket, and no collection verify-s3-sts leaked (#1354)
+	@NS=$(NAMESPACE) bash scripts/verify-storage-capacity.sh
+
+# A collection is one bucket's volumes (7 slots each). `make verify-s3-sts` deletes its bucket but
+# not its collection, so every run leaves `sts-verify-<digits>` behind; the volume server forgets
+# nothing (#1350). This is the reclaim: the collection list comes from the check above, so the
+# table it prints and the deletions cannot drift apart.
+.PHONY: reclaim-sts-collections
+reclaim-sts-collections: _context ## Delete the sts-verify collections verify-s3-sts leaked, then re-measure (deletes volumes; needs YES=1)
+	@[ "$${YES:-}" = 1 ] || { echo "✗ this deletes volumes; run: YES=1 make reclaim-sts-collections" >&2; exit 1; }
+	@leaked="$$(NS=$(NAMESPACE) bash scripts/verify-storage-capacity.sh --list-leaked)"; \
+	if [ -z "$$leaked" ]; then echo "› no leaked sts-verify collection"; exit 0; fi; \
+	before="$$(NS=$(NAMESPACE) bash scripts/verify-storage-capacity.sh 2>&1 | head -n 1)"; \
+	echo "› before: $${before#✗ }"; \
+	reclaimed=""; n=0; \
+	for name in $$leaked; do \
+	  printf 'lock\ncollection.delete -collection %s -apply\nunlock\n' "$$name" | \
+	    kubectl -n $(NAMESPACE) exec -i seaweedfs-master-0 -- /usr/bin/weed shell -master=localhost:9333 >/dev/null || exit 1; \
+	  reclaimed="$${reclaimed:+$$reclaimed, }$$name"; n=$$((n + 1)); \
+	done; \
+	echo "› reclaimed $$reclaimed ($$n collections)"; \
+	NS=$(NAMESPACE) bash scripts/verify-storage-capacity.sh
+
 .PHONY: verify-restarts
 verify-restarts: _context ## Restart counts of the restart-prone Deployments (read-only; a not-Ready pod fails)
 	@NS=$(NAMESPACE) bash scripts/verify-restarts.sh
