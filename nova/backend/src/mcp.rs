@@ -663,6 +663,23 @@ fn tools() -> Value {
     ])
 }
 
+/// The caller as the engine sees them: the MCP token is exchanged for the audience Trino
+/// wants (#1442/#1455), exactly as `run_statement` does, so `SHOW CATALOGS` runs as the
+/// person. Without an exchange (off, dev mode, no token) the caller is used as it is.
+async fn engine_caller(state: &Arc<AppState>, caller: &Principal) -> Result<Principal, String> {
+    let Some(exchange) = state.exchange.as_ref() else {
+        return Ok(caller.clone());
+    };
+    let Some(subject) = caller.access_token.as_ref() else {
+        return Ok(caller.clone());
+    };
+    let token = exchange.exchange(subject).await.map_err(|e| e.sentence())?;
+    Ok(Principal {
+        access_token: Some(token),
+        ..caller.clone()
+    })
+}
+
 /// `tools/call`: run one read tool as the caller and answer in MCP's shape.
 async fn call_tool(
     state: &Arc<AppState>,
@@ -726,12 +743,20 @@ async fn call_tool(
     let (status, body) = match name {
         "platform_status" => (StatusCode::OK, platform_status(state)),
         "catalog_list" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let response =
                 catalog::list_catalogs(State(state.clone()), Some(Extension(principal.clone())))
                     .await;
             body_of(response).await
         }
         "catalog_describe" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let ns = argument("namespace").unwrap_or_default();
             let tbl = argument("table").unwrap_or_default();
             let response = catalog::table_metadata(
@@ -746,6 +771,10 @@ async fn call_tool(
             body_of(response).await
         }
         "catalog_search" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let query = arguments
                 .get("query")
                 .and_then(Value::as_str)
@@ -2130,6 +2159,55 @@ mod tests {
             hits.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "a refused exchange sends no statement to the engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_tool_exchanges_the_mcp_token_for_the_engine() {
+        // The IdP refuses the exchange: the sentence must be the exchange's, not the engine's.
+        async fn serve(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            format!("http://{addr}")
+        }
+        let idp = format!(
+            "{}/token",
+            serve(Router::new().route(
+                "/token",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_request"})),
+                    )
+                }),
+            ))
+            .await
+        );
+        let exchange = crate::token_exchange::TokenExchange::new(
+            reqwest::Client::new(),
+            crate::token_exchange::TokenExchangeConfig {
+                token_url: idp,
+                client_id: "nova".into(),
+                client_secret: Secret::new("client-secret"),
+                audience: "trino".into(),
+            },
+        );
+        let state = crate::router_tests::test_state_with_exchange("http://127.0.0.1:1", exchange);
+        let principal = Principal {
+            identity: validate("good").expect("identity"),
+            via: "bearer",
+            access_token: Some(Secret::new("mcp-token")),
+            client_id: Some("stardelt-mcp".into()),
+        };
+        let error = engine_caller(&state, &principal)
+            .await
+            .expect_err("the exchange is refused");
+        assert_eq!(
+            error,
+            "the engine token could not be minted: exchange refused (HTTP 400 invalid_request)"
         );
     }
 
