@@ -59,6 +59,8 @@ declare -A recipe=(
   [verify-cron-schedule]='bash scripts/verify-cronjobs.sh --max-age'
   [verify-metrics]='bash scripts/verify-metrics.sh'
   [verify-seaweedfs-ports]='bash scripts/verify-seaweedfs-ports.sh'
+  [verify-airflow-actions]='bash scripts/verify-airflow-actions.sh'
+  [verify-operator-quiet]='bash scripts/verify-operator-quiet.sh'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -74,7 +76,7 @@ verify-operator-values verify-connections verify-maintenance verify-pod-security
 verify-trino-tls verify-oidc-clients verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query verify-spark-janitor verify-spark-demo-security
 verify-wap verify-product-path verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
-verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports"
+verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports verify-airflow-actions verify-operator-quiet"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
