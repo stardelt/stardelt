@@ -36,6 +36,10 @@ log = logging.getLogger(__name__)
 
 TRINO_CA_MOUNT = "/etc/stardelt/trino-ca"
 TRINO_CA_FILE = f"{TRINO_CA_MOUNT}/ca.crt"
+# The projected ServiceAccount token the kubelet writes for the catalog audience (#492). A
+# notebook task pod reads it as its catalog credential; the engine keeps the client secret.
+CATALOG_TOKEN_DIR = "/var/run/secrets/stardelt-catalog"
+CATALOG_TOKEN_AUDIENCE = "stardelt-catalog-workload"
 QUERY_IDS_FILE = "/tmp/stardelt-query-ids"
 SIGNED_URL_TTL_SECONDS = 7200
 DEFAULT_S3_CONN = "stardelt_s3"
@@ -116,6 +120,9 @@ def pod_env(
 
     A named `Connection`'s values arrive as `CONN_<NAME>_<KEY>` `secretKeyRef`s to Secret
     `conn-<name>`; nothing passes through Python.
+
+    The Secret is the engine's credential (Trino refuses the workload token, #1271 Q3/Q4); the
+    catalog's is the kubelet's projected token at `STARDELT_CATALOG_TOKEN_FILE` (#492).
     """
     env = [
         k8s.V1EnvVar(name="NOTEBOOK_PARAMS", value=json.dumps(dict(params), sort_keys=True)),
@@ -127,6 +134,7 @@ def pod_env(
         _secret_env("PIPELINE_CLIENT_ID", principal_secret, "client-id"),
         _secret_env("PIPELINE_CLIENT_SECRET", principal_secret, "client-secret"),
         k8s.V1EnvVar(name="STARDELT_QUERY_IDS", value=QUERY_IDS_FILE),
+        k8s.V1EnvVar(name="STARDELT_CATALOG_TOKEN_FILE", value=f"{CATALOG_TOKEN_DIR}/token"),
     ]
     if connection_name is not None:
         # `crm-db` -> `CONN_CRM_DB_<KEY>`: the platform's promise for a connection's secret keys.
@@ -211,6 +219,7 @@ class NotebookPodOperator(KubernetesPodOperator):
         task_params: Mapping[str, str],
         pipeline_params: Mapping[str, str],
         principal_secret: str,
+        principal_sa: str,
         namespace: str,
         connection_name: str | None = None,
         connection_keys: tuple[str, ...] = (),
@@ -224,6 +233,7 @@ class NotebookPodOperator(KubernetesPodOperator):
         self.task_params = dict(task_params)
         self.pipeline_params = dict(pipeline_params)
         self.principal_secret = principal_secret
+        self.principal_sa = principal_sa
         self.connection_name = connection_name
         self.connection_keys = tuple(connection_keys)
         self.wap = wap
@@ -249,6 +259,7 @@ class NotebookPodOperator(KubernetesPodOperator):
                 capabilities=k8s.V1Capabilities(drop=["ALL"]),
             ),
             automount_service_account_token=False,
+            service_account_name=principal_sa,
             container_resources=k8s.V1ResourceRequirements(
                 requests={"cpu": "250m", "memory": "512Mi"},
                 limits={"cpu": "2", "memory": "2Gi"},
@@ -285,10 +296,27 @@ class NotebookPodOperator(KubernetesPodOperator):
                     secret_name=ca_secret,
                     items=[k8s.V1KeyToPath(key="ca.crt", path="ca.crt")],
                 ),
-            )
+            ),
+            k8s.V1Volume(
+                name="catalog-token",
+                projected=k8s.V1ProjectedVolumeSource(
+                    sources=[
+                        k8s.V1VolumeProjection(
+                            service_account_token=k8s.V1ServiceAccountTokenProjection(
+                                audience=CATALOG_TOKEN_AUDIENCE,
+                                expiration_seconds=3600,
+                                path="token",
+                            )
+                        )
+                    ]
+                ),
+            ),
         ]
         self.volume_mounts = [
-            k8s.V1VolumeMount(name="trino-ca", mount_path=TRINO_CA_MOUNT, read_only=True)
+            k8s.V1VolumeMount(name="trino-ca", mount_path=TRINO_CA_MOUNT, read_only=True),
+            k8s.V1VolumeMount(
+                name="catalog-token", mount_path=CATALOG_TOKEN_DIR, read_only=True
+            ),
         ]
 
         dag_run = context["dag_run"]
