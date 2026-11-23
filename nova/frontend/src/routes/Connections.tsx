@@ -46,6 +46,8 @@ const ADMIN_GROUP_NOTE =
   'You see this because you are an administrator. You cannot create or rotate here; you can delete it in an incident or read it with a break-glass read, which tells the group.'
 const MANAGED_NOTE =
   'For platform services only. Nobody can read the values.'
+const EXTERNAL_GROUP_NOTE =
+  'Every member of the group can use these. Their values are synced from the enterprise store; rotate them there.'
 
 /** Name order, so the sections do not reshuffle between two reads of the same list. */
 function byName(a: Connection, b: Connection): number {
@@ -59,6 +61,9 @@ export default function Connections() {
   // Demo mode has no secret store, so every write route answers 503 (#500): offer none.
   const demo = me.data?.demo === true
   const list = useQuery({ queryKey: ['connections'], queryFn: api.connections })
+  // `store: false` is `spec.secrets.mode: external`: the list is built from the Connection
+  // resources and a new one names a path in the enterprise's store (#1428).
+  const external = list.data?.store === false
   const [dialog, setDialog] = useState<OpenDialog | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const breakGlassNonce = useRef(0)
@@ -102,6 +107,12 @@ export default function Connections() {
           <p className="text-text-dim text-sm mt-1">
             Credentials for systems outside the platform. The values are write-only: nobody can read them back here.
           </p>
+          {external && (
+            <p className="text-text-dim text-sm mt-1">
+              This install reads connections from your enterprise's secret store. A new connection
+              names a path there; the operator syncs the values.
+            </p>
+          )}
           {demo && (
             <p className="text-text-dim text-sm mt-1">
               Demo mode shows sample connections. Creating, rotating or deleting one needs a secret store.
@@ -138,6 +149,7 @@ export default function Connections() {
             rows={personal}
             admin={admin}
             demo={demo}
+            external={external}
             onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
             onDelete={(connection) => setDialog({ kind: 'delete', connection })}
             onBreakGlass={openBreakGlass}
@@ -156,7 +168,7 @@ export default function Connections() {
           <Section
             key={group}
             title={`Group: ${group}`}
-            note={otherGroup ? ADMIN_GROUP_NOTE : GROUP_NOTE}
+            note={external ? EXTERNAL_GROUP_NOTE : otherGroup ? ADMIN_GROUP_NOTE : GROUP_NOTE}
             badge={otherGroup ? 'Not your group' : undefined}
           >
             <ConnectionTable
@@ -164,6 +176,7 @@ export default function Connections() {
               rows={groupRows}
               admin={admin}
               demo={demo}
+              external={external}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
               onBreakGlass={openBreakGlass}
@@ -182,6 +195,7 @@ export default function Connections() {
               rows={managed}
               admin={admin}
               demo={demo}
+              external={external}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
               onBreakGlass={openBreakGlass}
@@ -193,6 +207,7 @@ export default function Connections() {
       {dialog?.kind === 'new' && (
         <NewConnectionDialog
           me={me.data}
+          external={external}
           onClose={() => setDialog(null)}
           onCreated={(name) => done(`Created ${name}.`)}
         />
@@ -277,6 +292,7 @@ function ConnectionTable({
   rows,
   admin,
   demo,
+  external,
   onRotate,
   onDelete,
   onBreakGlass,
@@ -285,6 +301,7 @@ function ConnectionTable({
   rows: Connection[]
   admin: boolean
   demo: boolean
+  external: boolean
   onRotate: (connection: Connection) => void
   onDelete: (connection: Connection) => void
   onBreakGlass: (connection: Connection) => void
@@ -328,6 +345,7 @@ function ConnectionTable({
               row={row}
               admin={admin}
               demo={demo}
+              external={external}
               onRotate={() => onRotate(row)}
               onDelete={() => onDelete(row)}
               onBreakGlass={() => onBreakGlass(row)}
@@ -433,10 +451,11 @@ function UseDisclosure({ row }: { row: Connection }) {
   )
 }
 
-function Row({ row, admin, demo, onRotate, onDelete, onBreakGlass }: {
+function Row({ row, admin, demo, external, onRotate, onDelete, onBreakGlass }: {
   row: Connection
   admin: boolean
   demo: boolean
+  external: boolean
   onRotate: () => void
   onDelete: () => void
   onBreakGlass: () => void
@@ -445,7 +464,8 @@ function Row({ row, admin, demo, onRotate, onDelete, onBreakGlass }: {
   const settings = Object.entries(row.config)
   // An administrator who is not a member of a group may delete its connection and read it
   // through break-glass, but not rotate it: rotation belongs to the group's members (#204).
-  const rotatable = row.scope !== 'group' || row.member !== false
+  // In external mode the value lives in the enterprise store, so there is nothing to rotate here.
+  const rotatable = !external && (row.scope !== 'group' || row.member !== false)
   return (
     <tr className="border-t border-border/70 hover:bg-bg-soft/30">
       <td className="td px-5">

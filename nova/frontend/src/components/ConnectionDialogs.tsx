@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiError, api, errorMessage, type BreakGlassAnswer, type Connection, type Me } from '../api'
-import { CONNECTION_TYPES, type Field } from '../connectionTypes'
+import { CONNECTION_TYPES, type Field, type TypeSpec } from '../connectionTypes'
 import { isAdmin } from '../roles'
 import { ConfirmNameField, useConfirmName } from './ConfirmName'
 
@@ -38,6 +38,19 @@ function refreshOk(value: string): boolean {
   if (!match) return false
   const minutes = Number(match[1]) * (match[2] === 'h' ? 60 : 1)
   return minutes >= 1 && minutes <= 1440
+}
+
+/** A path in the enterprise's secret store (`spec.secrets.mode: external`). */
+const REMOTE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9_./-]*$/
+/** One property name in a store entry. */
+const STORE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]*$/
+/** The field names a type's first variant carries, as the store-key field starts out. */
+function secretNames(spec: TypeSpec | undefined): string {
+  return spec?.variants[0]?.secret.map((field) => field.name).join(', ') ?? ''
+}
+/** The comma-separated store-key field, split; blank entries are ignored. */
+function splitStoreKeys(value: string): string[] {
+  return value.split(',').map((key) => key.trim()).filter((key) => key !== '')
 }
 
 /** The route for one connection; `secret` appends the rotation suffix. */
@@ -277,10 +290,12 @@ function GenericRows({
 
 export function NewConnectionDialog({
   me,
+  external,
   onClose,
   onCreated,
 }: {
   me?: Me
+  external?: boolean
   onClose: () => void
   onCreated: (name: string) => void
 }) {
@@ -290,7 +305,7 @@ export function NewConnectionDialog({
   const groups = me?.groups ?? []
   const admin = isAdmin(me)
 
-  const [scope, setScope] = useState<Connection['scope']>('personal')
+  const [scope, setScope] = useState<Connection['scope']>(external ? 'group' : 'personal')
   const [ownerGroup, setOwnerGroup] = useState(groups[0] ?? '')
   const [usableBy, setUsableBy] = useState<string[]>([])
   const [usableInput, setUsableInput] = useState('')
@@ -305,6 +320,10 @@ export function NewConnectionDialog({
   const [refreshTouched, setRefreshTouched] = useState(false)
   const [genericConfig, setGenericConfig] = useState<Row[]>([{ name: '', value: '' }])
   const [genericSecrets, setGenericSecrets] = useState<Row[]>([{ name: '', value: '' }])
+  const [remoteRef, setRemoteRef] = useState('')
+  const [secretKeysDraft, setSecretKeysDraft] = useState(() =>
+    external ? secretNames(CONNECTION_TYPES.postgresql) : '',
+  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -325,6 +344,7 @@ export function NewConnectionDialog({
     setVariantId(nextSpec?.variants[0]?.id ?? '')
     setGenericConfig([{ name: '', value: '' }])
     setGenericSecrets([{ name: '', value: '' }])
+    setSecretKeysDraft(secretNames(nextSpec))
     setError(null)
   }
 
@@ -348,24 +368,39 @@ export function NewConnectionDialog({
     setUsableError(null)
   }
 
-  const genericIncomplete = generic && (
-    !genericSecrets.some((row) => row.name.trim() !== '' && row.value !== '')
-    || genericSecrets.some((row) => {
-      const filled = row.name.trim() !== '' || row.value !== ''
-      return filled && (row.name.trim() === '' || row.value === '' || !SECRET_KEY_RE.test(row.name.trim()))
-    })
-    || genericConfig.some((row) => {
+  const genericSettingsIncomplete = generic && (
+    genericConfig.some((row) => {
       const filled = row.name.trim() !== '' || row.value !== ''
       return filled && (row.name.trim() === '' || row.value === '' || !SETTING_RE.test(row.name.trim()))
     })
     || genericConfig.some((row) => row.name.trim() !== '' && SECRET_WORD_RE.test(row.name))
   )
 
-  const fixedIncomplete = !generic && (
+  const genericSecretsIncomplete = generic && (
+    !genericSecrets.some((row) => row.name.trim() !== '' && row.value !== '')
+    || genericSecrets.some((row) => {
+      const filled = row.name.trim() !== '' || row.value !== ''
+      return filled && (row.name.trim() === '' || row.value === '' || !SECRET_KEY_RE.test(row.name.trim()))
+    })
+  )
+
+  const fixedSettingsIncomplete = !generic && (
     !spec
     || !variant
     || spec.config.some((field) => field.required && !config[field.name]?.trim())
-    || variant.secret.some((field) => field.required && !secrets[field.name])
+  )
+
+  const fixedSecretsIncomplete = !generic
+    && !!variant
+    && variant.secret.some((field) => field.required && !secrets[field.name])
+
+  const storeKeys = splitStoreKeys(secretKeysDraft)
+  const storeIncomplete = external && (
+    !REMOTE_REF_RE.test(remoteRef.trim())
+    || remoteRef.trim().length > 200
+    || storeKeys.length < 1
+    || storeKeys.length > MAX_SECRET_FIELDS
+    || storeKeys.some((key) => !STORE_KEY_RE.test(key))
   )
 
   const disabled = submitting
@@ -374,8 +409,10 @@ export function NewConnectionDialog({
     || (scope === 'group' && !ownerGroup)
     || (scope === 'managed' && usableBy.length === 0)
     || (scope !== 'personal' && !refreshOk(refresh))
-    || genericIncomplete
-    || fixedIncomplete
+    || genericSettingsIncomplete
+    || fixedSettingsIncomplete
+    || (!external && (genericSecretsIncomplete || fixedSecretsIncomplete))
+    || storeIncomplete
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -408,16 +445,30 @@ export function NewConnectionDialog({
     }
 
     try {
-      await api.createConnection({
-        name,
-        type,
-        scope,
-        ...(scope === 'group' ? { ownerGroup } : {}),
-        ...(scope === 'managed' ? { usableBy } : {}),
-        config: configPayload,
-        secret: secretPayload,
-        ...(scope !== 'personal' ? { refreshInterval: refresh.trim() } : {}),
-      })
+      if (external) {
+        await api.createConnection({
+          name,
+          type,
+          scope: 'group',
+          ownerGroup,
+          config: configPayload,
+          secret: {},
+          remoteRef: remoteRef.trim(),
+          secretKeys: splitStoreKeys(secretKeysDraft),
+          refreshInterval: refresh.trim(),
+        })
+      } else {
+        await api.createConnection({
+          name,
+          type,
+          scope,
+          ...(scope === 'group' ? { ownerGroup } : {}),
+          ...(scope === 'managed' ? { usableBy } : {}),
+          config: configPayload,
+          secret: secretPayload,
+          ...(scope !== 'personal' ? { refreshInterval: refresh.trim() } : {}),
+        })
+      }
       onCreated(name)
     } catch (e: unknown) {
       setError(errorMessage(e))
@@ -441,38 +492,42 @@ export function NewConnectionDialog({
       }
     >
       <form id={formId} className="space-y-5" onSubmit={(event) => void submit(event)}>
-        <fieldset>
-          <legend className="label mb-2">Scope</legend>
-          <div className="space-y-2">
-            <ScopeOption
-              name={`${prefix}-scope`}
-              value="personal"
-              label="Personal"
-              hint="Only you"
-              checked={scope === 'personal'}
-              autoFocus
-              onChange={() => setScope('personal')}
-            />
-            <ScopeOption
-              name={`${prefix}-scope`}
-              value="group"
-              label="Group"
-              hint="Everyone in a group you belong to"
-              checked={scope === 'group'}
-              onChange={() => setScope('group')}
-            />
-            {admin && (
+        {external ? (
+          <p className="text-sm text-text-dim">Group connection, synced from your enterprise's secret store.</p>
+        ) : (
+          <fieldset>
+            <legend className="label mb-2">Scope</legend>
+            <div className="space-y-2">
               <ScopeOption
                 name={`${prefix}-scope`}
-                value="managed"
-                label="Managed"
-                hint="Platform services only. Administrators only."
-                checked={scope === 'managed'}
-                onChange={() => setScope('managed')}
+                value="personal"
+                label="Personal"
+                hint="Only you"
+                checked={scope === 'personal'}
+                autoFocus
+                onChange={() => setScope('personal')}
               />
-            )}
-          </div>
-        </fieldset>
+              <ScopeOption
+                name={`${prefix}-scope`}
+                value="group"
+                label="Group"
+                hint="Everyone in a group you belong to"
+                checked={scope === 'group'}
+                onChange={() => setScope('group')}
+              />
+              {admin && (
+                <ScopeOption
+                  name={`${prefix}-scope`}
+                  value="managed"
+                  label="Managed"
+                  hint="Platform services only. Administrators only."
+                  checked={scope === 'managed'}
+                  onChange={() => setScope('managed')}
+                />
+              )}
+            </div>
+          </fieldset>
+        )}
 
         {scope === 'group' && (
           <div className="space-y-2">
@@ -587,10 +642,12 @@ export function NewConnectionDialog({
               <legend className="label mb-2">Settings</legend>
               <GenericRows rows={genericConfig} onChange={setGenericConfig} />
             </fieldset>
-            <fieldset>
-              <legend className="label mb-2">Secret fields</legend>
-              <GenericRows rows={genericSecrets} onChange={setGenericSecrets} secret />
-            </fieldset>
+            {!external && (
+              <fieldset>
+                <legend className="label mb-2">Secret fields</legend>
+                <GenericRows rows={genericSecrets} onChange={setGenericSecrets} secret />
+              </fieldset>
+            )}
           </>
         ) : (
           <>
@@ -629,7 +686,7 @@ export function NewConnectionDialog({
               </fieldset>
             )}
 
-            {variant && (
+            {variant && !external && (
               <fieldset className="space-y-3">
                 <legend className="label mb-2">Secret fields</legend>
                 {variant.secret.map((field) => (
@@ -645,6 +702,39 @@ export function NewConnectionDialog({
               </fieldset>
             )}
           </>
+        )}
+
+        {external && (
+          <fieldset className="space-y-3">
+            <legend className="label mb-2">Store entry</legend>
+            <label htmlFor={`${prefix}-remote-ref`} className="block">
+              <span className="label block mb-1.5">Path in the store</span>
+              <input
+                id={`${prefix}-remote-ref`}
+                className="input font-mono"
+                value={remoteRef}
+                placeholder="apps/shop/db"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => setRemoteRef(event.target.value)}
+              />
+            </label>
+            <label htmlFor={`${prefix}-secret-keys`} className="block">
+              <span className="label block mb-1.5">Field names in the store</span>
+              <input
+                id={`${prefix}-secret-keys`}
+                className="input font-mono"
+                value={secretKeysDraft}
+                autoComplete="off"
+                spellCheck={false}
+                aria-describedby={`${prefix}-secret-keys-hint`}
+                onChange={(event) => setSecretKeysDraft(event.target.value)}
+              />
+            </label>
+            <p id={`${prefix}-secret-keys-hint`} className="text-xs text-text-mute">
+              The store entry must carry these property names.
+            </p>
+          </fieldset>
         )}
 
         {scope !== 'personal' && (

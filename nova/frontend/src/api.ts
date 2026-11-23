@@ -1337,6 +1337,10 @@ export type NewConnectionRequest = {
   config: Record<string, string>
   secret: Record<string, string>
   refreshInterval?: string
+  /** `secrets.mode: external`: the path in the enterprise's store; `secret` must then be `{}`. */
+  remoteRef?: string
+  /** `secrets.mode: external`: the field names the store entry must carry. */
+  secretKeys?: string[]
 }
 
 /** A non-2xx answer from the backend; `status` lets callers tell 404 from 5xx. */
@@ -1806,7 +1810,7 @@ export const api = {
     jpost<Destination>('/api/destinations', req),
   deleteDestination: (id: number)             => jdel(`/api/destinations/${id}`),
   testDestination: (id: number)               => jpost<DestinationTest>(`/api/destinations/${id}/test`, {}),
-  connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
+  connections:  ()                            => jget<{ connections: Connection[]; store: boolean }>('/api/connections'),
   createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
   rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),
   deleteConnection: (path: string)           => jdel(path),

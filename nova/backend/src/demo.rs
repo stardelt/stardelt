@@ -1026,6 +1026,7 @@ pub fn connections() -> crate::connection_routes::ConnectionsResponse {
                 &["accessKey", "secretKey"],
             ),
         ],
+        store: true,
     }
 }
 

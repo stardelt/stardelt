@@ -348,6 +348,10 @@ fn cluster_fail(e: ResourceError) -> Fail {
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct ConnectionsResponse {
     pub connections: Vec<ConnectionView>,
+    /// Whether this install has the platform's own secret store. `false` in
+    /// `spec.secrets.mode: external`, where a connection names a path in the
+    /// enterprise's store and the operator syncs it.
+    pub store: bool,
 }
 
 /// `PUT …/secret` body: the field values to write. Write-only, like the create body, and never
@@ -1487,11 +1491,16 @@ pub(crate) async fn list(caller: Caller) -> Response {
     let Some(store) = signed.store() else {
         return Json(ConnectionsResponse {
             connections: list_from_resources(resources.as_ref(), &signed.identity).await,
+            store: false,
         })
         .into_response();
     };
     match list_connections(store, resources.as_ref(), &signed.identity, &signed.access).await {
-        Ok(connections) => Json(ConnectionsResponse { connections }).into_response(),
+        Ok(connections) => Json(ConnectionsResponse {
+            connections,
+            store: true,
+        })
+        .into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -2938,6 +2947,11 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["connections"], serde_json::json!([]), "no cluster");
+        assert_eq!(
+            value["store"],
+            serde_json::json!(false),
+            "no platform store"
+        );
 
         let response = app_with_caller
             .oneshot(
@@ -2978,6 +2992,27 @@ mod tests {
             let value: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(value["error"], "the secret store is not configured");
         }
+    }
+
+    #[tokio::test]
+    async fn list_names_the_platform_store() {
+        let (store, _fake) = fake::start().await;
+        let app = app(Some(store), Some(principal()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/connections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["store"], serde_json::json!(true));
     }
 
     #[tokio::test]
