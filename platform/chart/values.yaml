@@ -474,7 +474,9 @@ lakekeeperBootstrap:
   # Plain manifest (not a sub-chart): Job that accepts the Lakekeeper terms of
   # use and creates the default `warehouse` on S3. Idempotent: skips when
   # already bootstrapped, skips warehouse creation on 409 Conflict.
-  # Equivalent to manifests/lakekeeper-bootstrap.yaml.
+  # Equivalent to manifests/lakekeeper-bootstrap.yaml — including the catalog sign-in and
+  # the `restricted` pod fields; `tests/test_chart_bootstrap_signin.py` renders both and
+  # compares them, so a change to one without the other fails CI.
   enabled: true
   image: curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b
   ttlSecondsAfterFinished: 600
