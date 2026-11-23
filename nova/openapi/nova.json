@@ -3113,7 +3113,7 @@
         "tags": [
           "public"
         ],
-        "description": "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
+        "description": "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried. In an install with `spec.secrets.mode: external` it deletes the `Connection` resource; the value in the enterprise's store is left alone.",
         "operationId": "connections_group_delete",
         "parameters": [
           {

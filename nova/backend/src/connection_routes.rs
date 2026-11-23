@@ -935,6 +935,26 @@ async fn delete_connection(
     Ok(())
 }
 
+/// `DELETE` of a group connection in `secrets.mode: external`: the `Connection` resource is
+/// Nova's, the value in the enterprise store is not, and the operator's `ExternalSecret`
+/// carries an owner reference, so deleting the resource removes the sync and leaves the
+/// enterprise's value alone.
+async fn delete_group_resource(
+    resources: Option<&Resources>,
+    who: &Identity,
+    group: &str,
+    name: &str,
+) -> Result<(), Fail> {
+    connections::authorize(who, Scope::Group, Some(group), Action::Delete)
+        .map_err(|d| Fail::new(StatusCode::FORBIDDEN, d.0))?;
+    let Some(resources) = resources else {
+        return Err(no_cluster());
+    };
+    resources.delete(name).await.map_err(cluster_fail)?;
+    audit::connection_event("delete", who, "group", Some(group), name, None);
+    Ok(())
+}
+
 /// `GET /api/connections`: personal, then group, then managed, each sorted by name. An
 /// administrator sees every group's connections, not only their own groups': the incident case is
 /// exactly the one where the owning group is unavailable (ticket #203, D27).
@@ -1903,7 +1923,7 @@ pub(crate) async fn delete_personal(signed: SignedIn, Path(name): Path<String>) 
     operation_id = "connections_group_delete",
     path = "/api/connections/group/{group}/{name}",
     tag = "public",
-    description = "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
+    description = "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried. In an install with `spec.secrets.mode: external` it deletes the `Connection` resource; the value in the enterprise's store is left alone.",
     params(
         ("group" = String, Path, description = "Owner group"),
         ("name" = String, Path, description = "Connection name"),
@@ -1952,10 +1972,19 @@ async fn delete_at(
     name: &str,
 ) -> Response {
     let scope = scope(&signed.identity);
-    let Some(store) = signed.store() else {
-        return not_configured().into_response();
-    };
     let resources = resources(&signed.state);
+    let Some(store) = signed.store() else {
+        // A personal connection exists only in the platform store and a managed one is the
+        // platform's value; neither can be deleted without a store.
+        let StoreScope::Group { group } = &scope else {
+            return not_configured().into_response();
+        };
+        return match delete_group_resource(resources.as_ref(), &signed.identity, group, name).await
+        {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(e) => e.into_response(),
+        };
+    };
     match delete_connection(
         store,
         resources.as_ref(),
@@ -1979,7 +2008,7 @@ mod tests {
         Router,
         body::Body,
         http::{Request, StatusCode},
-        routing::{get, post},
+        routing::{delete, get, post},
     };
     use serde_json::json;
     use tower::ServiceExt;
@@ -2280,6 +2309,39 @@ mod tests {
             !answer.contains("p1") && !answer.contains("etl"),
             "no value in the answer: {answer}"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_group_in_external_mode_removes_the_resource() {
+        let (resources, items) = memory_with(&[("crm-db", group_resource())]);
+        let alice = who("sub-alice", &["analytics"], false);
+
+        delete_group_resource(Some(&resources), &alice, "analytics", "crm-db")
+            .await
+            .expect("deleted");
+        assert!(!items.lock().unwrap().contains_key("crm-db"), "gone");
+
+        delete_group_resource(Some(&resources), &alice, "analytics", "crm-db")
+            .await
+            .expect("a repeated delete is success");
+    }
+
+    #[tokio::test]
+    async fn delete_group_in_external_mode_for_a_foreign_group_is_403() {
+        let (resources, items) = memory_with(&[(
+            "ledger",
+            json!({
+                "metadata": { "name": "ledger" },
+                "spec": { "scope": "group", "ownerGroup": "finance" },
+            }),
+        )]);
+        let alice = who("sub-alice", &["analytics"], false);
+
+        let err = delete_group_resource(Some(&resources), &alice, "finance", "ledger")
+            .await
+            .expect_err("not a member");
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(items.lock().unwrap().contains_key("ledger"), "it stays");
     }
 
     #[tokio::test]
@@ -2802,6 +2864,7 @@ mod tests {
     fn app(store: Option<StoreClient>, caller: Option<Principal>) -> Router {
         let router = Router::new()
             .route("/connections", get(list).post(create))
+            .route("/connections/personal/{name}", delete(delete_personal))
             .route(
                 "/connections/personal/{name}/break-glass",
                 post(break_glass_personal),
@@ -2952,6 +3015,25 @@ mod tests {
             serde_json::json!(false),
             "no platform store"
         );
+
+        // A personal connection exists only in the store: delete answers the sentence too.
+        let response = app_with_caller
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/connections/personal/x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "DELETE");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "the secret store is not configured");
 
         let response = app_with_caller
             .oneshot(
