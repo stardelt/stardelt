@@ -1270,12 +1270,12 @@ catalogs: _context ## Converge Catalogs into Trino catalogs + bridge mappings (r
 	@$(MAKE) --no-print-directory access-sync-now
 	@helm upgrade --install lakekeeper lakekeeper/lakekeeper \
 	  --version $(LAKEKEEPER_VERSION) \
-	  $(HELM_FLAGS) \
+	  $(HELM_FLAGS_NOWAIT) \
 	  -f helm-values/lakekeeper.yaml \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh bridge-arg) \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh admin-arg)
-	@kubectl -n $(NAMESPACE) rollout status deploy/lakekeeper --timeout=5m
 	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
+	@kubectl -n $(NAMESPACE) rollout status deployment/lakekeeper --timeout=10m
 	@$(MAKE) --no-print-directory trino
 
 # ---------------------------------------------------------------------------
@@ -1374,12 +1374,12 @@ catalog-enforce: deps _context ## Switch Trino to the permission bridge and the 
 	@echo "› Lakekeeper: the bridge's administrators, from the group file"
 	@helm upgrade --install lakekeeper lakekeeper/lakekeeper \
 	  --version $(LAKEKEEPER_VERSION) \
-	  $(HELM_FLAGS) \
+	  $(HELM_FLAGS_NOWAIT) \
 	  -f helm-values/lakekeeper.yaml \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh bridge-arg) \
 	  $$(NAMESPACE=$(NAMESPACE) bash scripts/render-catalogs.sh admin-arg)
-	@kubectl -n $(NAMESPACE) rollout status deploy/lakekeeper --timeout=5m
 	@NAMESPACE=$(NAMESPACE) bash scripts/lakekeeper-opa-security.sh
+	@kubectl -n $(NAMESPACE) rollout status deployment/lakekeeper --timeout=10m
 	@$(MAKE) --no-print-directory trino
 	@kubectl -n $(NAMESPACE) rollout status deploy/trino-coordinator --timeout=5m
 	@echo ""
