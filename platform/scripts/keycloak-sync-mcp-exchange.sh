@@ -5,6 +5,7 @@
 #
 #   make sync-mcp-exchange
 #   REALM_URL=https://id.example.com/realms/stardelt NAMESPACE=stardelt bash scripts/keycloak-sync-mcp-exchange.sh
+#   SUBJECT_USER=demo SUBJECT_PASSWORD_FILE=/path/to/0600-file make sync-mcp-exchange
 #
 # The design (`design/agent-access.md`, "Downstream calls") says Nova exchanges a person's MCP
 # token for a `trino`-audience token with RFC 8693 token exchange. Keycloak 26 keeps standard
@@ -27,6 +28,8 @@
 #   claims     the exchanged token's `aud` contains `trino` and `exp` is in the future
 #   trino      POST /v1/statement through a port-forward with the exchanged token and
 #              `SELECT 1` → 200 with a JSON `id`
+# SUBJECT_USER and SUBJECT_PASSWORD_FILE (mode 0600) name the person whose MCP token is exchanged;
+# without them the check exits 3 UNVERIFIED, so a non-lab install is not a FAIL.
 #
 # Exit 0 = PASS (4 of 4), 1 = FAIL (one ✗ row and every row still ran), 3 = UNVERIFIED (a tool is
 # missing: nothing was asked, nothing proved).
@@ -47,6 +50,8 @@ AUDIENCE="${AUDIENCE:-trino}"
 MASTER_SECRET="${MASTER_SECRET:-keycloak-admin}"
 REALM_URL="${REALM_URL:-}"
 REALM="${REALM:-stardelt}"
+SUBJECT_USER="${SUBJECT_USER:-}"
+SUBJECT_PASSWORD_FILE="${SUBJECT_PASSWORD_FILE:-}"
 
 CURL=(curl --fail-with-body --silent --show-error --max-time 30)
 
@@ -54,6 +59,15 @@ for tool in kubectl curl python3 base64 jq; do
   command -v "$tool" >/dev/null 2>&1 \
     || { echo "keycloak-sync-mcp-exchange: UNVERIFIED (missing tool: $tool)"; exit 3; }
 done
+
+if [ -z "$SUBJECT_USER" ] || [ -z "$SUBJECT_PASSWORD_FILE" ]; then
+  echo "keycloak-sync-mcp-exchange: UNVERIFIED (no subject credential: pass SUBJECT_USER and SUBJECT_PASSWORD_FILE)" >&2
+  exit 3
+fi
+if [ ! -r "$SUBJECT_PASSWORD_FILE" ]; then
+  echo "keycloak-sync-mcp-exchange: UNVERIFIED (cannot read SUBJECT_PASSWORD_FILE)" >&2
+  exit 3
+fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/mcp-exchange.XXXXXX")" \
   || { echo "keycloak-sync-mcp-exchange: UNVERIFIED (cannot create a temp dir)"; exit 3; }
@@ -188,10 +202,10 @@ REALM_URL="${REALM_URL%/}"
 ok attribute "actor $ACTOR carries standard.token.exchange.enabled=true"
 
 # --- the subject token ------------------------------------------------------------------
-printf 'demo\n' > "$tmp/password"
+cp "$SUBJECT_PASSWORD_FILE" "$tmp/password"
 chmod 600 "$tmp/password"
 subject_ok=""
-if ISSUER="$REALM_URL" USER="${SUBJECT_USER:-demo}" PASSWORD_FILE="$tmp/password" TOKEN_FILE="$tmp/subject" \
+if ISSUER="$REALM_URL" USER="$SUBJECT_USER" PASSWORD_FILE="$tmp/password" TOKEN_FILE="$tmp/subject" \
      CLIENT_ID="$MCP_CLIENT" python3 scripts/mint-user-token.py > "$tmp/mint.log" 2>&1 \
    && [ -s "$tmp/subject" ]; then
   chmod 600 "$tmp/subject"
@@ -295,7 +309,7 @@ else
   else
     trino_status="$(curl -sk -X POST "https://127.0.0.1:$trino_port/v1/statement" \
       -H "Authorization: Bearer $(cat "$tmp/exchanged")" \
-      -H 'Content-Type: text/plain' -H "X-Trino-User: ${SUBJECT_USER:-demo}" -H 'X-Trino-Source: stardelt-mcp' \
+      -H 'Content-Type: text/plain' -H "X-Trino-User: $SUBJECT_USER" -H 'X-Trino-Source: stardelt-mcp' \
       -H "X-Trino-Client-Tags: $ACTOR" --data 'SELECT 1' \
       -o "$tmp/statement" -w '%{http_code}' 2>/dev/null)" || trino_status="000"
     [ -n "$trino_status" ] || trino_status="000"
