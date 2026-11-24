@@ -70,7 +70,7 @@ def main():
                 sm.add_permission_role(role, pv)
         for n, v in remove:
             sm.del_permission_role(role, sm.find_permission_view_menu(n, v))   # drift: the role is exactly this set
-        sm.get_session.commit()
+        db.session.commit()
 
         user = sm.find_user(username=USER)
         if user:
@@ -80,7 +80,7 @@ def main():
         else:
             sm.add_user(USER, "stardelt", "Nova", "nova@stardelt.local", role, password)
             state = "created"
-        sm.get_session.commit()
+        db.session.commit()
         print("user %s: %s, role %s: %d permissions, %d dataset(s)"
               % (USER, state, ROLE, len(role.permissions), len(tables)))
 
