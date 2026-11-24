@@ -1463,6 +1463,10 @@ bridge-latency: _context ## Measure FilterCatalogs and one single question on th
 test-bridge-policies: ## Prove the decision-table policy against a stub Lakekeeper (needs helm with the lakekeeper repo + the opa binary)
 	@bash scripts/test-bridge-policies.sh
 
+.PHONY: verify-bridge-policy
+verify-bridge-policy: _context ## Prove the deployed OPA bridge loaded the policy document and answers both entry points
+	@NAMESPACE=$(NAMESPACE) bash scripts/verify-bridge-policy.sh
+
 # The public client developer tools on a laptop sign in with (platform#157): the device grant and
 # PKCE to a loopback address. `make sync-dev-client DEV_CLIENT_ENABLED=false` switches it off.
 sync-dev-client: _context ## Converge the live realm's stardelt-dev client (device grant, PKCE, loopback redirects; idempotent)
