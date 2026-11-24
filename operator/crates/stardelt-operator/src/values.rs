@@ -1492,7 +1492,7 @@ mod tests {
         assert_eq!(
             values["image"]["tag"],
             serde_json::json!(
-                "dev@sha256:23c57d88b92c56356efd9b4021ca6652f6f6889b98f2136760972730b8137b4f"
+                "dev@sha256:84c8656a46fa227c9c5a8b9150909f07f2c36873ea9a07614f4977a4ec316e9f"
             )
         );
         let config_overrides = values["configOverrides"].as_object().unwrap();
