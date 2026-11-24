@@ -109,7 +109,7 @@ manifests/            Plain Kubernetes manifests (kubectl apply)
 
 images/
   spark/Dockerfile      Spark 4.1.4 + Iceberg 1.12 runtime + AWS bundle
-  superset/Dockerfile   Superset 5.0.0 + psycopg2 + trino driver
+  superset/Dockerfile   Superset 6.1.0 + psycopg2 + trino driver
   jupyter/Dockerfile    scipy-notebook + trino, pyspark, pandas, pyarrow
   jupyter/notebooks/    warehouse-quickstart.ipynb (seeded into each user's home)
 
@@ -176,7 +176,7 @@ Collaboration/release branches are planned later (issue #38).
 | OpenFGA | 0.4.1 | v1.22.1 |
 | Trino | 1.45.0 | 484 |
 | Apache Airflow | 1.22.0 | 3.2.2 |
-| Apache Superset | 0.15.5 | 5.0.0 |
+| Apache Superset | 0.15.5 | 6.1.0 |
 | Apache Spark (image, no chart) | — | 4.1.4 (Iceberg 1.12.0) |
 | Keycloak (image, no chart) | — | 26.8.2 |
 
@@ -244,7 +244,7 @@ For persistent overrides, modify the files in `helm-values/` directly and commit
 ## Superset image
 
 The Superset image adds `psycopg2-binary` and the `trino` SQLAlchemy driver to the
-upstream Superset 5.0.0 base. **CI builds it** — the `Image` workflow in this repo
+upstream Superset 6.1.0 base. **CI builds it** — the `Image` workflow in this repo
 publishes `ghcr.io/stardelt/superset:dev` (plus `sha-<short>`) on merge to `main`, and
 `helm-values/superset.yaml` points at it with the `ghcr-creds` pull secret. A local
 `make build-superset-image` + `make push-superset-image` is only for iteration.

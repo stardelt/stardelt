@@ -1,4 +1,4 @@
-# stardelt's Superset image: baseline Apache Superset 5.0 + the python
+# stardelt's Superset image: baseline Apache Superset 6.1 + the python
 # drivers the upstream image does not ship in its venv:
 #   - psycopg2-binary: needed to connect to the chart's bundled Postgres
 #     backend. Without it the init-db job and gunicorn workers crash.
@@ -10,7 +10,7 @@
 #
 # Built with the user-managed image so we don't pay a `pip install` cost on
 # every pod startup, and so the chart's bootstrapScript can stay minimal.
-FROM apachesuperset.docker.scarf.sh/apache/superset:5.0.0@sha256:09735adaae3945c5a8fabbeca31a7954c8c74de195702ba61622aee8604d5c55
+FROM apachesuperset.docker.scarf.sh/apache/superset:6.1.0@sha256:16b50bbef6648912a79e3293d418fefa743ce555d36c5af6b85d859119ed7f88
 
 USER root
 ENV UV_CACHE_DIR=/tmp/uv-cache

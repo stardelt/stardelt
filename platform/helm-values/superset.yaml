@@ -1,5 +1,5 @@
 # Apache Superset — BI / dashboards.
-# Chart: superset/superset 0.15.5, appVersion 5.0.0.
+# Chart: superset/superset 0.15.5, appVersion 6.1.0.
 #
 # kind tuning:
 #   - Single replica everywhere; celery-beat + websockets off.
@@ -12,7 +12,7 @@
 #   - import_datasources.yaml pre-creates the Trino warehouse database
 #     connection so SQL Lab works immediately after install.
 
-# stardelt's Superset image (images/superset/Dockerfile): upstream Superset 5.0.0
+# stardelt's Superset image (images/superset/Dockerfile): upstream Superset 6.1.0
 # plus psycopg2-binary + the Trino SQLAlchemy driver, pre-installed in /app/.venv/.
 # Built and published by CI (the `Image` workflow), not by hand — a local
 # `make build-superset-image` is for iteration only.

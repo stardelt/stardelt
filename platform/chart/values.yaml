@@ -822,7 +822,7 @@ nova:
 # ===========================================================================
 
 superset:
-  # BI / dashboards (chart: superset 0.15.5, appVersion 5.0.0).
+  # BI / dashboards (chart: superset 0.15.5, appVersion 6.1.0).
   #
   # kind tuning:
   #   - Single replica everywhere; celery-beat + websockets off.
