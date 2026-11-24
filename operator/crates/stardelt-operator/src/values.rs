@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(secret["valueFrom"]["secretKeyRef"]["key"], "superset");
         assert!(text.contains("superset-analyst-role.py"));
         assert!(!text.contains("superset-group-roles.py"));
-        let init_script = values["init"]["initscript"].as_str().unwrap();
+        let init_script = values["extraConfigs"]["superset_init.sh"].as_str().unwrap();
         assert!(!init_script.contains("superset-group-roles.py"));
         let import = values["extraConfigs"]["import_datasources.yaml"]
             .as_str()
@@ -1645,12 +1645,16 @@ mod tests {
         assert!(script.contains("catalog_from_uri"));
         assert!(script.contains("\"shared\""));
         assert!(script.contains("stardelt-analyst"));
-        let init_script = values["init"]["initscript"].as_str().unwrap();
-        assert!(
-            init_script
-                .contains("python \"{{ .Values.extraConfigMountPath }}/superset-analyst-role.py\"")
-        );
+        // 0.22.8 ignores `init.initscript`; our script is an `extraConfigs` file that the
+        // init Job's command sources, and it runs from that mount, so paths are relative.
+        let init_script = values["extraConfigs"]["superset_init.sh"].as_str().unwrap();
+        assert!(init_script.contains("python \"superset-analyst-role.py\""));
         assert!(init_script.contains("Converging the analyst role"));
+        let command = values["init"]["command"].as_array().unwrap();
+        assert_eq!(
+            command[2].as_str().unwrap(),
+            ". {{ .Values.configMountPath }}/superset_bootstrap.sh; . {{ .Values.extraConfigMountPath }}/superset_init.sh"
+        );
         let text = include_str!("../values/superset.yaml");
         assert!(!text.contains("catalog_from_uri"));
         let import = values["extraConfigs"]["import_datasources.yaml"]

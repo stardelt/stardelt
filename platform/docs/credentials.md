@@ -42,9 +42,9 @@ left untouched, so re-running an install never rotates a key under a running sta
 The Airflow chart has no Secret reference for `createUserJob.defaultUser` and the Superset
 chart has no `supersetSecretKeySecretName` (its `extraSecretEnv` writes literals), so both
 values files use the charts' next-smallest hooks instead: `createUserJob.env` plus custom
-`args`, and `extraEnvRaw` plus a copy of the default `init.initscript` that reads the
-password from the environment. Usernames and profile fields stay in values; only
-credentials come from Secrets.
+`args`, and `extraEnvRaw` plus an init script that reads the password from the environment
+(a file in the chart's `extraConfigs`, which `init.command` sources). Usernames and profile
+fields stay in values; only credentials come from Secrets.
 
 The Secrets carry `app.kubernetes.io/part-of=stardelt` and belong to no Helm release, so
 `make uninstall` / `helm uninstall` keep them (like the PVCs). Read one back deliberately —

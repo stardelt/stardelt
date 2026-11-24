@@ -1,5 +1,5 @@
 # Apache Superset — BI / dashboards.
-# Chart: superset/superset 0.15.5, appVersion 6.1.0.
+# Chart: superset/superset 0.22.8, appVersion 6.1.0.
 #
 # Curated by the operator for the dashboards pillar: the local administrator stays as
 # break-glass; people sign in through the platform IdP (O7b). Group roles come from
@@ -15,7 +15,7 @@ imagePullSecrets:
 
 # The pods and the chart's init Job run as the operator-created ServiceAccount (src/superset.rs
 # `SERVICE_ACCOUNT`), which may also list Catalogs for the group-roles CronJob. The chart
-# 0.15.5 does not create a ServiceAccount of its own.
+# creates no ServiceAccount of its own (`serviceAccount.create: false`).
 serviceAccountName: superset
 
 # Pod Security `restricted` (platform#1096 question 5, twin of platform#1183). The chart
@@ -108,6 +108,36 @@ extraConfigs:
         {"allow_multi_catalog": true, "metadata_params": {}, "engine_params": {},
          "metadata_cache_timeout": {}, "schemas_allowed_for_csv_upload": []}
       tables: []
+  # The init script itself (0.22.8 ignores `init.initscript`, see `init.command`).
+  # It runs from this mount, so the role scripts and the datasource file are named
+  # relative to it and every Go template placeholder is resolved here.
+  superset_init.sh: |
+    #!/bin/sh
+    set -eu
+    cd /app/configs
+    echo "Upgrading DB schema..."
+    superset db upgrade
+    echo "Initializing roles..."
+    superset init
+    echo "Creating admin user..."
+    superset fab create-admin \
+                    --username admin \
+                    --firstname stardelt \
+                    --lastname Admin \
+                    --email admin@stardelt.local \
+                    --password "$SUPERSET_ADMIN_PASSWORD" \
+                    || true
+    if [ -f import_datasources.yaml ]; then
+      echo "Importing database connections.... "
+      superset import_datasources -p import_datasources.yaml
+    fi
+    # The role the IdP mapping gives every member of stardelt-users ("Gamma", "stardelt-analyst");
+    # it must exist before the first sign-in. Needs the "Trino Shared" database that
+    # import_datasources.yaml above created. Idempotent: converges the exact permission set.
+    echo "Converging the analyst role..."
+    python "superset-analyst-role.py"
+    echo "Converging Nova's Superset user..."
+    python "superset-nova-user.py"
 
 init:
   podSecurityContext:
@@ -140,38 +170,13 @@ init:
     firstname: stardelt
     lastname: Admin
     email: admin@stardelt.local
-  initscript: |
-    #!/bin/sh
-    set -eu
-    echo "Upgrading DB schema..."
-    superset db upgrade
-    echo "Initializing roles..."
-    superset init
-    {{ if .Values.init.createAdmin }}
-    echo "Creating admin user..."
-    superset fab create-admin \
-                    --username {{ .Values.init.adminUser.username }} \
-                    --firstname {{ .Values.init.adminUser.firstname }} \
-                    --lastname {{ .Values.init.adminUser.lastname }} \
-                    --email {{ .Values.init.adminUser.email }} \
-                    --password "$SUPERSET_ADMIN_PASSWORD" \
-                    || true
-    {{- end }}
-    {{ if .Values.init.loadExamples }}
-    echo "Loading examples..."
-    superset load_examples
-    {{- end }}
-    if [ -f "{{ .Values.extraConfigMountPath }}/import_datasources.yaml" ]; then
-      echo "Importing database connections.... "
-      superset import_datasources -p {{ .Values.extraConfigMountPath }}/import_datasources.yaml
-    fi
-    # The role the IdP mapping gives every member of stardelt-users ("Gamma", "stardelt-analyst");
-    # it must exist before the first sign-in. Needs the "Trino Shared" database that
-    # import_datasources.yaml above created. Idempotent: converges the exact permission set.
-    echo "Converging the analyst role..."
-    python "{{ .Values.extraConfigMountPath }}/superset-analyst-role.py"
-    echo "Converging Nova's Superset user..."
-    python "{{ .Values.extraConfigMountPath }}/superset-nova-user.py"
+  # 0.22.8 ignores `initscript` (the chart's own script is sourced instead), so our script is a
+  # file in `extraConfigs` and this command sources it. This list is templated; keep the
+  # placeholders.
+  command:
+    - "/bin/sh"
+    - "-c"
+    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; . {{ .Values.extraConfigMountPath }}/superset_init.sh"
   loadExamples: false
 
 supersetNode:
@@ -239,7 +244,7 @@ supersetWorker:
   command:
     - "/bin/sh"
     - "-c"
-    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; celery --app=superset.tasks.celery_app:app worker --concurrency=2"
+    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; exec celery --app=superset.tasks.celery_app:app worker --concurrency=2"
   resources:
     requests: { cpu: "100m", memory: "512Mi" }
     limits:   { cpu: "2",    memory: "1Gi"  }

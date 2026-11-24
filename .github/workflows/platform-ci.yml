@@ -319,7 +319,7 @@ jobs:
       - name: helm template — superset
         run: |
           bash scripts/retry.sh helm template superset superset/superset \
-            --version 0.15.5 \
+            --version 0.22.8 \
             --namespace stardelt \
             -f helm-values/superset.yaml > /dev/null
 

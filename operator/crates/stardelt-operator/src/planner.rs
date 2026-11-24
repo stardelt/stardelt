@@ -205,7 +205,7 @@ pub fn chart_version(chart: &str) -> Option<&'static str> {
         "trino/trino" => Some("1.45.0"),
         "jupyterhub/jupyterhub" => Some("4.4.5"),
         "apache-airflow/airflow" => Some("1.22.0"),
-        "superset/superset" => Some("0.15.5"),
+        "superset/superset" => Some("0.22.8"),
         "openfga/openfga" => Some("0.4.1"),
         "external-secrets/external-secrets" => Some("2.15.0"),
         "openbao/openbao" => Some("0.30.7"),

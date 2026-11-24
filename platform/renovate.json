@@ -83,7 +83,7 @@
       "registryUrlTemplate": "https://airflow.apache.org"
     },
     {
-      "description": "Makefile pin `SUPERSET_VERSION` -> Helm chart `superset`. datasource=helm because chart 0.15.5 is unrelated to the Superset image tag (5.0.0) that the companion images/superset/Dockerfile builds on; that image is handled separately by the built-in dockerfile manager.",
+      "description": "Makefile pin `SUPERSET_VERSION` -> Helm chart `superset`. datasource=helm because chart 0.22.8 is unrelated to the Superset image tag (5.0.0) that the companion images/superset/Dockerfile builds on; that image is handled separately by the built-in dockerfile manager.",
       "customType": "regex",
       "fileMatch": ["/(^|/)Makefile$/"],
       "matchStrings": ["SUPERSET_VERSION\\s*:=\\s*(?<currentValue>[^\\s#]+)"],
