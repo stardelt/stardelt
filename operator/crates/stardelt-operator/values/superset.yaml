@@ -1,5 +1,5 @@
 # Apache Superset — BI / dashboards.
-# Chart: superset/superset 0.15.5, appVersion 5.0.0.
+# Chart: superset/superset 0.15.5, appVersion 6.1.0.
 #
 # Curated by the operator for the dashboards pillar: the local administrator stays as
 # break-glass; people sign in through the platform IdP (O7b). Group roles come from
