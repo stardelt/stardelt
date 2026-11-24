@@ -54,6 +54,60 @@ data:
       | replace "__SUPERSET_HOST__" (include "stardelt.appHost" (list . "superset" "superset"))
       | replace "__AIRFLOW_HOST__" (include "stardelt.appHost" (list . "airflow" "airflow"))
       | replace "__JUPYTER_HOST__" (include "stardelt.appHost" (list . "jupyterhub" "jupyter")) }}
+{{- /*
+  Keycloak's read-only LDAP federation (#39): the same object the operator's `ldap_components`
+  renders. Its shape is measured on 26.8.2 (#1516) — `subComponents` is a sibling of `config`,
+  a components entry carries no `providerType`, and the `username` mapper is what makes an
+  imported user signable. Empty `host` leaves the realm exactly as the file has it.
+*/}}
+{{- $ldap := $kc.ldap }}
+{{- if and $ldap $ldap.host }}
+{{- $sync := $ldap.syncSeconds | int | toString }}
+{{- $components := dict "org.keycloak.storage.UserStorageProvider" (list
+      (dict
+        "name" "ldap"
+        "providerId" "ldap"
+        "config" (dict
+          "enabled" (list "true")
+          "vendor" (list "other")
+          "connectionUrl" (list (printf "ldap://%s:%d" $ldap.host (int $ldap.port)))
+          "usersDn" (list $ldap.usersDn)
+          "authType" (list "simple")
+          "bindDn" (list "${STARDELT_LDAP_BIND_DN}")
+          "bindCredential" (list "${STARDELT_LDAP_BIND_PASSWORD}")
+          "editMode" (list "READ_ONLY")
+          "usernameLDAPAttribute" (list "cn")
+          "rdnLDAPAttribute" (list "cn")
+          "uuidLDAPAttribute" (list "entryUUID")
+          "userObjectClasses" (list "inetOrgPerson, organizationalPerson")
+          "searchScope" (list "2")
+          "importEnabled" (list "true")
+          "fullSyncPeriod" (list $sync)
+          "changedSyncPeriod" (list $sync))
+        "subComponents" (dict "org.keycloak.storage.ldap.mappers.LDAPStorageMapper" (list
+          (dict
+            "name" "username"
+            "providerId" "user-attribute-ldap-mapper"
+            "config" (dict
+              "ldap.attribute" (list "cn")
+              "user.model.attribute" (list "username")
+              "read.only" (list "true")
+              "is.mandatory.in.ldap" (list "true")
+              "always.read.value.from.ldap" (list "false")))
+          (dict
+            "name" "groups"
+            "providerId" "group-ldap-mapper"
+            "config" (dict
+              "groups.dn" (list $ldap.groupDn)
+              "group.object.classes" (list "groupOfNames")
+              "group.name.ldap.attribute" (list "cn")
+              "membership.ldap.attribute" (list "member")
+              "membership.user.ldap.attribute" (list "cn")
+              "groups.path" (list "/")
+              "mode" (list "READ_ONLY")
+              "drop.non.existing.groups.during.sync" (list "false"))))))) }}
+{{- $realm = (merge (fromJson $realm) (dict "components" $components)) | toJson }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -220,6 +274,14 @@ spec:
             # Scheduled pipelines run as this service-account client (platform#118).
             - name: STARDELT_PIPELINE_RUNNER_CLIENT_SECRET
               valueFrom: { secretKeyRef: { name: stardelt-oidc-clients, key: pipeline-runner } }
+            {{- if and $kc.ldap $kc.ldap.host }}
+            # The directory bind (#39): Keycloak resolves ${STARDELT_LDAP_BIND_DN} and
+            # ${STARDELT_LDAP_BIND_PASSWORD} in the realm import from these two.
+            - name: STARDELT_LDAP_BIND_DN
+              valueFrom: { secretKeyRef: { name: {{ $kc.ldap.bindSecretName }}, key: {{ $kc.ldap.bindDnKey }} } }
+            - name: STARDELT_LDAP_BIND_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $kc.ldap.bindSecretName }}, key: {{ $kc.ldap.bindPasswordKey }} } }
+            {{- end }}
           ports:
             - { name: http, containerPort: 8080 }
             - { name: management, containerPort: 9000 }

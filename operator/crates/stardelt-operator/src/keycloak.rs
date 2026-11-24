@@ -29,7 +29,7 @@ use k8s_openapi::{
 use kube::api::ObjectMeta;
 
 use crate::{
-    crd::PlatformInstanceSpec,
+    crd::{IdentityLdap, PlatformInstanceSpec},
     identity::{self, IdentityError},
 };
 
@@ -205,6 +205,72 @@ pub fn identity_secret(desired: &IdentitySecret, namespace: &str) -> Result<Secr
     })
 }
 
+/// The realm's `components` object for a customer directory: one read-only LDAP federation and
+/// the two mappers that make an imported user signable (`#39`, measured in `#1516` on 26.8.2).
+///
+/// Three shapes are refused by Keycloak's realm import and must not be "simplified":
+/// `subComponents` is a sibling of `config` (inside it: `Cannot deserialize value of type
+/// ArrayList<String> from Object value`); a components entry has no `providerType` key (the map
+/// key is the provider type); and without the `username` `user-attribute-ldap-mapper` the import
+/// succeeds but every sign-in fails `User returned from LDAP has null username`. The factory
+/// creates seven mappers for an API-created provider; the five others only fill names, mail and
+/// timestamps and are not needed for the `groups` claim the platform reads.
+fn ldap_components(ldap: &IdentityLdap) -> serde_json::Value {
+    let sync = ldap.sync_seconds.to_string();
+    serde_json::json!({
+        "org.keycloak.storage.UserStorageProvider": [{
+            "name": "ldap",
+            "providerId": "ldap",
+            "config": {
+                "enabled": ["true"],
+                "vendor": ["other"],
+                "connectionUrl": [format!("ldap://{}:{}", ldap.host, ldap.port)],
+                "usersDn": [ldap.users_dn.clone()],
+                "authType": ["simple"],
+                // Resolved by Keycloak's ${...} placeholders from the container env, so the
+                // bind DN and its password are never written into the ConfigMap.
+                "bindDn": ["${STARDELT_LDAP_BIND_DN}"],
+                "bindCredential": ["${STARDELT_LDAP_BIND_PASSWORD}"],
+                "editMode": ["READ_ONLY"],
+                "usernameLDAPAttribute": ["cn"],
+                "rdnLDAPAttribute": ["cn"],
+                "uuidLDAPAttribute": ["entryUUID"],
+                "userObjectClasses": ["inetOrgPerson, organizationalPerson"],
+                "searchScope": ["2"],
+                "importEnabled": ["true"],
+                "fullSyncPeriod": [sync.clone()],
+                "changedSyncPeriod": [sync],
+            },
+            "subComponents": {
+                "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [{
+                    "name": "username",
+                    "providerId": "user-attribute-ldap-mapper",
+                    "config": {
+                        "ldap.attribute": ["cn"],
+                        "user.model.attribute": ["username"],
+                        "read.only": ["true"],
+                        "is.mandatory.in.ldap": ["true"],
+                        "always.read.value.from.ldap": ["false"],
+                    },
+                }, {
+                    "name": "groups",
+                    "providerId": "group-ldap-mapper",
+                    "config": {
+                        "groups.dn": [ldap.group_dn.clone()],
+                        "group.object.classes": ["groupOfNames"],
+                        "group.name.ldap.attribute": ["cn"],
+                        "membership.ldap.attribute": ["member"],
+                        "membership.user.ldap.attribute": ["cn"],
+                        "groups.path": ["/"],
+                        "mode": ["READ_ONLY"],
+                        "drop.non.existing.groups.during.sync": ["false"],
+                    },
+                }],
+            },
+        }],
+    })
+}
+
 /// The Realm import of this instance, or the reason it cannot be rendered.
 fn realm_json(spec: &PlatformInstanceSpec) -> Result<String, IdentityError> {
     let domain = identity::base_domain(spec)?;
@@ -221,7 +287,18 @@ fn realm_json(spec: &PlatformInstanceSpec) -> Result<String, IdentityError> {
     ] {
         realm = realm.replace(placeholder, host);
     }
-    Ok(realm)
+    // Without a directory the function returns the template as it is: the chart does not
+    // re-serialise either, and the two must render the same realm.
+    let Some(ldap) = spec.identity.ldap.as_ref() else {
+        return Ok(realm);
+    };
+    let mut parsed: serde_json::Value = serde_json::from_str(&realm)
+        .map_err(|e| IdentityError(format!("keycloak_realm.json is not a JSON document: {e}")))?;
+    if let Some(object) = parsed.as_object_mut() {
+        object.insert("components".into(), ldap_components(ldap));
+    }
+    serde_json::to_string_pretty(&parsed)
+        .map_err(|e| IdentityError(format!("the realm cannot be serialised: {e}")))
 }
 
 /// Metadata of an object that belongs to the platform rather than to a Lakehouse.
@@ -363,7 +440,89 @@ fn resources() -> ResourceRequirements {
     }
 }
 
-fn container() -> Container {
+fn container(ldap: Option<&IdentityLdap>) -> Container {
+    let mut env = vec![
+        value_env("KC_DB", "postgres"),
+        value_env(
+            "KC_DB_URL",
+            "jdbc:postgresql://keycloak-pg-rw:5432/keycloak",
+        ),
+        secret_env("KC_DB_USERNAME", "keycloak-pg-app", "username"),
+        secret_env("KC_DB_PASSWORD", "keycloak-pg-app", "password"),
+        // TLS terminates at the ingress; trust its X-Forwarded-* headers.
+        value_env("KC_HTTP_ENABLED", "true"),
+        value_env("KC_PROXY_HEADERS", "xforwarded"),
+        value_env("KC_HEALTH_ENABLED", "true"),
+        // Prometheus text on the management port (#607).
+        value_env("KC_METRICS_ENABLED", "true"),
+        value_env("KC_CACHE", "local"),
+        value_env(
+            "JAVA_OPTS_KC_HEAP",
+            "-XX:MaxRAMPercentage=65 -XX:InitialRAMPercentage=25",
+        ),
+        secret_env("KC_BOOTSTRAP_ADMIN_USERNAME", "keycloak-admin", "username"),
+        secret_env("KC_BOOTSTRAP_ADMIN_PASSWORD", "keycloak-admin", "password"),
+        // Resolved by Keycloak's ${...} placeholders in the realm import, so no secret is
+        // ever written into the ConfigMap.
+        secret_env(
+            "STARDELT_REALM_ADMIN_PASSWORD",
+            "stardelt-realm-admin",
+            "password",
+        ),
+        secret_env(
+            "STARDELT_NOVA_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "nova",
+        ),
+        secret_env(
+            "STARDELT_SUPERSET_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "superset",
+        ),
+        secret_env(
+            "STARDELT_AIRFLOW_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "airflow",
+        ),
+        secret_env(
+            "STARDELT_JUPYTERHUB_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "jupyterhub",
+        ),
+        // Trino authenticates its OAuth2 client with this secret (Trino 480 rejects a
+        // public client at startup).
+        secret_env(
+            "STARDELT_TRINO_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "trino",
+        ),
+        // The continuous group-file sync (platform#167) and the scheduled pipelines
+        // (platform#118) each run as their own service-account client.
+        secret_env(
+            "STARDELT_TRINO_GROUP_SYNC_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "trino-group-sync",
+        ),
+        secret_env(
+            "STARDELT_PIPELINE_RUNNER_CLIENT_SECRET",
+            "stardelt-oidc-clients",
+            "pipeline-runner",
+        ),
+    ];
+    // The bind DN and its password live in the Secret the spec names; Keycloak resolves them
+    // from these two variables while it imports the realm (#39).
+    if let Some(ldap) = ldap {
+        env.push(secret_env(
+            "STARDELT_LDAP_BIND_DN",
+            &ldap.bind_secret_ref.name,
+            &ldap.bind_secret_ref.dn_key,
+        ));
+        env.push(secret_env(
+            "STARDELT_LDAP_BIND_PASSWORD",
+            &ldap.bind_secret_ref.name,
+            &ldap.bind_secret_ref.password_key,
+        ));
+    }
     Container {
         name: NAME.into(),
         image: Some(IMAGE.into()),
@@ -378,74 +537,7 @@ fn container() -> Container {
             }),
             ..EnvFromSource::default()
         }]),
-        env: Some(vec![
-            value_env("KC_DB", "postgres"),
-            value_env(
-                "KC_DB_URL",
-                "jdbc:postgresql://keycloak-pg-rw:5432/keycloak",
-            ),
-            secret_env("KC_DB_USERNAME", "keycloak-pg-app", "username"),
-            secret_env("KC_DB_PASSWORD", "keycloak-pg-app", "password"),
-            // TLS terminates at the ingress; trust its X-Forwarded-* headers.
-            value_env("KC_HTTP_ENABLED", "true"),
-            value_env("KC_PROXY_HEADERS", "xforwarded"),
-            value_env("KC_HEALTH_ENABLED", "true"),
-            // Prometheus text on the management port (#607).
-            value_env("KC_METRICS_ENABLED", "true"),
-            value_env("KC_CACHE", "local"),
-            value_env(
-                "JAVA_OPTS_KC_HEAP",
-                "-XX:MaxRAMPercentage=65 -XX:InitialRAMPercentage=25",
-            ),
-            secret_env("KC_BOOTSTRAP_ADMIN_USERNAME", "keycloak-admin", "username"),
-            secret_env("KC_BOOTSTRAP_ADMIN_PASSWORD", "keycloak-admin", "password"),
-            // Resolved by Keycloak's ${...} placeholders in the realm import, so no secret is
-            // ever written into the ConfigMap.
-            secret_env(
-                "STARDELT_REALM_ADMIN_PASSWORD",
-                "stardelt-realm-admin",
-                "password",
-            ),
-            secret_env(
-                "STARDELT_NOVA_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "nova",
-            ),
-            secret_env(
-                "STARDELT_SUPERSET_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "superset",
-            ),
-            secret_env(
-                "STARDELT_AIRFLOW_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "airflow",
-            ),
-            secret_env(
-                "STARDELT_JUPYTERHUB_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "jupyterhub",
-            ),
-            // Trino authenticates its OAuth2 client with this secret (Trino 480 rejects a
-            // public client at startup).
-            secret_env(
-                "STARDELT_TRINO_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "trino",
-            ),
-            // The continuous group-file sync (platform#167) and the scheduled pipelines
-            // (platform#118) each run as their own service-account client.
-            secret_env(
-                "STARDELT_TRINO_GROUP_SYNC_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "trino-group-sync",
-            ),
-            secret_env(
-                "STARDELT_PIPELINE_RUNNER_CLIENT_SECRET",
-                "stardelt-oidc-clients",
-                "pipeline-runner",
-            ),
-        ]),
+        env: Some(env),
         ports: Some(vec![port("http", 8080), port("management", 9000)]),
         startup_probe: Some(probe("/health/started", 5, Some(60))),
         readiness_probe: Some(probe("/health/ready", 10, None)),
@@ -470,7 +562,7 @@ fn container() -> Container {
 }
 
 /// The Keycloak Deployment. Single replica: `KC_CACHE=local`, no clustering.
-pub fn deployment(namespace: &str) -> Deployment {
+pub fn deployment(namespace: &str, ldap: Option<&IdentityLdap>) -> Deployment {
     Deployment {
         metadata: ObjectMeta {
             labels: Some(workload_labels()),
@@ -501,7 +593,7 @@ pub fn deployment(namespace: &str) -> Deployment {
                         }),
                         ..PodSecurityContext::default()
                     }),
-                    containers: vec![container()],
+                    containers: vec![container(ldap)],
                     volumes: Some(vec![Volume {
                         name: "realm".into(),
                         config_map: Some(ConfigMapVolumeSource {
@@ -865,7 +957,7 @@ mod tests {
 
     #[test]
     fn the_deployment_mirrors_the_platform_manifest() {
-        let deployment = deployment("stardelt");
+        let deployment = deployment("stardelt", None);
         assert_eq!(deployment.metadata.name.as_deref(), Some("keycloak"));
         assert_eq!(deployment.metadata.namespace.as_deref(), Some("stardelt"));
         let (container, pod) = pod(&deployment);
@@ -993,7 +1085,7 @@ mod tests {
 
     #[test]
     fn the_deployment_reads_every_secret_the_realm_needs() {
-        let (container, _) = pod(&deployment("stardelt"));
+        let (container, _) = pod(&deployment("stardelt", None));
         let env = container.env.expect("env");
         let named: Vec<(&str, Option<&str>)> = env
             .iter()
@@ -1246,5 +1338,146 @@ mod tests {
         assert!(!key.chars().any(|c| c.is_ascii_uppercase()));
         assert_ne!(key, generate_hex(32).expect("a second key"));
         assert_eq!(generate_secret().expect("secret").len(), 48);
+    }
+
+    /// The directory of the two tests below: #1516's spike realm, as measured.
+    fn ldap() -> IdentityLdap {
+        use crate::crd::IdentityLdapBindSecret;
+        IdentityLdap {
+            host: "dir.example.com".into(),
+            port: 389,
+            base_dn: "dc=example,dc=org".into(),
+            users_dn: "ou=users,dc=example,dc=org".into(),
+            group_dn: "ou=groups,dc=example,dc=org".into(),
+            bind_secret_ref: IdentityLdapBindSecret {
+                name: "corp-directory".into(),
+                dn_key: "bind-dn".into(),
+                password_key: "bind-password".into(),
+            },
+            sync_seconds: 3600,
+        }
+    }
+
+    fn spec_with_ldap() -> PlatformInstanceSpec {
+        let mut spec = spec(Some("data.example.com"));
+        spec.identity.ldap = Some(ldap());
+        spec
+    }
+
+    fn realm_of(spec: &PlatformInstanceSpec) -> serde_json::Value {
+        let realm = realm_config_map(spec)
+            .expect("a ConfigMap")
+            .data
+            .expect("data")
+            .remove("stardelt-realm.json")
+            .expect("the realm");
+        serde_json::from_str(&realm).expect("the realm is JSON")
+    }
+
+    /// The `components` object is the import form measured in #1516: `subComponents` is a sibling
+    /// of `config`, no entry carries `providerType`, and the `username` mapper is what makes an
+    /// imported user signable.
+    #[test]
+    fn the_ldap_federation_renders_only_when_configured() {
+        let plain = realm_of(&spec(Some("data.example.com")));
+        assert!(
+            plain.get("components").is_none(),
+            "a realm without a directory carries no components: {}",
+            plain
+                .get("components")
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        );
+
+        let realm = realm_of(&spec_with_ldap());
+        let provider = &realm["components"]["org.keycloak.storage.UserStorageProvider"][0];
+        assert_eq!(provider["providerId"], "ldap");
+        assert!(
+            provider.get("providerType").is_none(),
+            "no providerType key"
+        );
+        assert_eq!(
+            provider["config"]["connectionUrl"],
+            serde_json::json!(["ldap://dir.example.com:389"])
+        );
+        assert_eq!(
+            provider["config"]["editMode"],
+            serde_json::json!(["READ_ONLY"])
+        );
+        assert_eq!(
+            provider["config"]["fullSyncPeriod"],
+            serde_json::json!(["3600"])
+        );
+        assert_eq!(
+            provider["config"]["bindDn"],
+            serde_json::json!(["${STARDELT_LDAP_BIND_DN}"])
+        );
+        assert_eq!(
+            provider["config"]["bindCredential"],
+            serde_json::json!(["${STARDELT_LDAP_BIND_PASSWORD}"])
+        );
+        let mappers =
+            provider["subComponents"]["org.keycloak.storage.ldap.mappers.LDAPStorageMapper"]
+                .as_array()
+                .expect("the two mappers");
+        assert_eq!(mappers.len(), 2, "the username mapper and the group mapper");
+        assert_eq!(mappers[0]["providerId"], "user-attribute-ldap-mapper");
+        assert_eq!(
+            mappers[0]["config"]["user.model.attribute"],
+            serde_json::json!(["username"])
+        );
+        assert_eq!(mappers[1]["providerId"], "group-ldap-mapper");
+        assert_eq!(
+            mappers[1]["config"]["groups.dn"],
+            serde_json::json!(["ou=groups,dc=example,dc=org"])
+        );
+    }
+
+    #[test]
+    fn the_keycloak_container_reads_the_bind_secret_only_when_ldap_is_set() {
+        let bind = ldap();
+        let (container, _) = pod(&deployment("stardelt", Some(&bind)));
+        let env = container.env.expect("env");
+        let selector = |name: &str| {
+            env.iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("no {name} env var"))
+                .value_from
+                .as_ref()
+                .and_then(|v| v.secret_key_ref.as_ref())
+                .map(|s| (s.name.clone(), s.key.clone()))
+        };
+        assert_eq!(
+            selector("STARDELT_LDAP_BIND_PASSWORD"),
+            Some(("corp-directory".into(), "bind-password".into()))
+        );
+        assert_eq!(
+            selector("STARDELT_LDAP_BIND_DN"),
+            Some(("corp-directory".into(), "bind-dn".into()))
+        );
+
+        let (plain, _) = pod(&deployment("stardelt", None));
+        let names: Vec<String> = plain
+            .env
+            .expect("env")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.starts_with("STARDELT_LDAP_")),
+            "a realm without a directory gets no bind variables: {names:?}"
+        );
+    }
+
+    #[test]
+    fn ldap_needs_platform_mode() {
+        let message = "ldap only works with mode platform, which runs the Keycloak that imports it";
+        let mut external = spec_with_ldap();
+        external.identity.mode = crate::crd::IdentityMode::External;
+        assert_eq!(identity::validate(&external).unwrap_err().0, message);
+        let mut none = spec_with_ldap();
+        none.identity.mode = crate::crd::IdentityMode::None;
+        assert_eq!(identity::validate(&none).unwrap_err().0, message);
+        identity::validate(&spec_with_ldap()).expect("platform mode accepts a directory");
     }
 }

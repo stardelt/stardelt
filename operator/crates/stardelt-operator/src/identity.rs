@@ -46,6 +46,11 @@ impl std::error::Error for IdentityError {}
 /// reports when the schema was bypassed.
 pub fn validate(spec: &PlatformInstanceSpec) -> Result<(), IdentityError> {
     let identity = &spec.identity;
+    if identity.ldap.is_some() && identity.mode != IdentityMode::Platform {
+        return Err(IdentityError(
+            "ldap only works with mode platform, which runs the Keycloak that imports it".into(),
+        ));
+    }
     if identity.mode != IdentityMode::External {
         if identity.provider != IdentityProvider::Oidc
             || identity.api_audience.is_some()

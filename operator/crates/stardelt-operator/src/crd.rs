@@ -212,6 +212,70 @@ pub struct IdentityClient {
     pub client_secret_ref: Option<ClientSecretRef>,
 }
 
+/// A customer directory reached through Keycloak's LDAP federation (design #39, measured in #1516).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct IdentityLdap {
+    /// Directory host name, without a scheme or port.
+    #[schemars(
+        length(min = 1, max = 253),
+        regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
+    )]
+    pub host: String,
+    /// LDAP port; 389 or 636 (LDAPS) in practice.
+    #[serde(default = "default_ldap_port")]
+    #[schemars(range(min = 1, max = 65535))]
+    pub port: i32,
+    /// Base DN of the directory, for example `dc=example,dc=org`.
+    #[serde(rename = "baseDn")]
+    #[schemars(length(min = 3, max = 512), regex(pattern = r"^\S.*=\S.*$"))]
+    pub base_dn: String,
+    /// Subtree that holds people, for example `ou=users,dc=example,dc=org`.
+    #[serde(rename = "usersDn")]
+    #[schemars(length(min = 3, max = 512), regex(pattern = r"^\S.*=\S.*$"))]
+    pub users_dn: String,
+    /// Subtree that holds groups, for example `ou=groups,dc=example,dc=org`.
+    #[serde(rename = "groupDn")]
+    #[schemars(length(min = 3, max = 512), regex(pattern = r"^\S.*=\S.*$"))]
+    pub group_dn: String,
+    /// The Secret with the bind DN and its password; never the values themselves.
+    #[serde(rename = "bindSecretRef")]
+    pub bind_secret_ref: IdentityLdapBindSecret,
+    /// Full sync interval in seconds. A revoked group keeps its access until the next sync,
+    /// so `0` is refused: 60 to 86400, default 3600 (measured in #1516).
+    #[serde(default = "default_ldap_sync_seconds", rename = "syncSeconds")]
+    #[schemars(range(min = 60, max = 86400))]
+    pub sync_seconds: i32,
+}
+
+/// The Secret a directory bind uses: the DN in one key, the password in another.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub struct IdentityLdapBindSecret {
+    #[schemars(
+        length(min = 1, max = 253),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+    )]
+    pub name: String,
+    #[serde(default = "default_ldap_dn_key", rename = "dnKey")]
+    #[schemars(length(min = 1, max = 253))]
+    pub dn_key: String,
+    #[serde(default = "default_ldap_password_key", rename = "passwordKey")]
+    #[schemars(length(min = 1, max = 253))]
+    pub password_key: String,
+}
+
+fn default_ldap_port() -> i32 {
+    389
+}
+fn default_ldap_sync_seconds() -> i32 {
+    3600
+}
+fn default_ldap_dn_key() -> String {
+    "bind-dn".into()
+}
+fn default_ldap_password_key() -> String {
+    "bind-password".into()
+}
+
 /// Identity settings of a platform instance; the operator publishes them to the components as
 /// the ConfigMap `stardelt-identity` (see [`crate::identity::contract`]).
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
@@ -247,6 +311,10 @@ pub struct IdentityClient {
     {
         "rule": "!has(self.clients) || self.clients.all(k, k == 'lakekeeper' || has(self.clients[k].clientSecretRef))",
         "message": "every client except lakekeeper needs a clientSecretRef"
+    },
+    {
+        "rule": "!has(self.ldap) || self.mode == 'platform'",
+        "message": "ldap only works with mode platform, which runs the Keycloak that imports it"
     }
 ]))]
 pub struct IdentitySpec {
@@ -288,6 +356,10 @@ pub struct IdentitySpec {
     /// `external` only: the app registrations the customer made, one entry per client.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub clients: BTreeMap<String, IdentityClient>,
+    /// `platform` only: a directory the platform-IdP imports people and groups from, through
+    /// Keycloak's read-only LDAP federation (#39).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ldap: Option<IdentityLdap>,
     /// Name of the token claim that carries group (or role) names. Defaults to `roles` for
     /// `entra` and `groups` otherwise.
     #[serde(
@@ -321,6 +393,7 @@ impl Default for IdentitySpec {
             provider: IdentityProvider::Oidc,
             api_audience: None,
             clients: BTreeMap::new(),
+            ldap: None,
             group_claim: None,
             admin_group: default_admin_group(),
         }
