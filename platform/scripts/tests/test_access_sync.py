@@ -337,8 +337,9 @@ class FakeKeycloak:
 
     `groups` is `{name: [(sub, username)]}`; 404 for an unknown group and a page slice
     for `first`/`max` reproduce the two calls `keycloak_token()`-authenticated code
-    makes. `forbidden` makes every read answer 403 — the case that must fail the tick
-    before it writes anything.
+    makes, and `groups` (the top-level listing) comes from the same dict. `forbidden`
+    makes every read answer 403 — the case that must fail the tick before it writes
+    anything.
     """
 
     def __init__(self, groups):
@@ -370,6 +371,22 @@ class FakeKeycloak:
                     self._reply(403, {"error": "forbidden"})
                     return
                 path, _, query = self.path.partition("?")
+                listing = re.fullmatch(r"/admin/realms/stardelt/groups", path)
+                if listing:
+                    params = dict(
+                        item.split("=", 1) for item in query.split("&") if "=" in item
+                    )
+                    first = int(params.get("first") or 0)
+                    size = int(params.get("max") or 100)
+                    names = sorted(state.groups)
+                    self._reply(
+                        200,
+                        [
+                            {"id": state.groups[name]["id"], "name": name}
+                            for name in names[first : first + size]
+                        ],
+                    )
+                    return
                 group_by_path = re.fullmatch(r"/admin/realms/stardelt/group-by-path/(.+)", path)
                 if group_by_path:
                     group = state.groups.get(group_by_path.group(1))
@@ -2276,9 +2293,29 @@ class RenderGroupsTxtTest(JobTestCase):
         text = access_sync.render_groups_txt({"sub-9"}, {"a": {"sub-1"}})
         self.assertEqual(text.splitlines()[0], "stardelt-admins:sub-9")
 
+    def test_the_group_file_carries_the_realms_other_groups(self):
+        text = access_sync.render_groups_txt(
+            {"sub-a"},
+            {"small": {"sub-b"}},
+            {
+                "visitors": {"sub-c"},
+                "demo": {"sub-d"},
+                "wh-small": {"sub-x"},
+                "empty": set(),
+            },
+        )
+        self.assertEqual(
+            text,
+            "stardelt-admins:sub-a\ndemo:sub-d\nvisitors:sub-c\nwh-small:sub-b\n",
+        )
+
 
 class WarehouseMainTest(JobTestCase):
     """`main()` renders SqlWarehouses into both ConfigMaps and writes their status."""
+
+    # The group file's lines between the admin line and the warehouses: every other
+    # top-level group of the realm below, by name (stardelt/stardelt#50).
+    REALM_LINES = "analytics:sub-a\nfinops:sub-f\nstardelt-users:sub-1,sub-2\n"
 
     def setUp(self):
         super().setUp()
@@ -2311,7 +2348,8 @@ class WarehouseMainTest(JobTestCase):
         )
         self.assertEqual(
             cluster.configmap("trino-group-file", "groups.txt"),
-            "stardelt-admins:sub-admin\nwh-small:sub-1,sub-2,sub-admin\n",
+            "stardelt-admins:sub-admin\n" + self.REALM_LINES
+            + "wh-small:sub-1,sub-2,sub-admin\n",
         )
 
     def test_the_second_tick_writes_nothing(self):
@@ -2330,7 +2368,8 @@ class WarehouseMainTest(JobTestCase):
         self.assertEqual(access_sync.main(), 0)
         self.assertEqual(
             cluster.configmap("trino-group-file", "groups.txt"),
-            "stardelt-admins:sub-admin\nwh-medium:sub-f\nwh-small:sub-1,sub-2,sub-admin\n",
+            "stardelt-admins:sub-admin\n" + self.REALM_LINES
+            + "wh-medium:sub-f\nwh-small:sub-1,sub-2,sub-admin\n",
         )
 
     def test_an_invalid_warehouse_is_skipped_and_the_others_still_render(self):
@@ -2350,7 +2389,8 @@ class WarehouseMainTest(JobTestCase):
         )
         self.assertEqual(
             cluster.configmap("trino-group-file", "groups.txt"),
-            "stardelt-admins:sub-admin\nwh-small:sub-1,sub-2,sub-admin\n",
+            "stardelt-admins:sub-admin\n" + self.REALM_LINES
+            + "wh-small:sub-1,sub-2,sub-admin\n",
         )
 
     def test_two_defaults_make_both_invalid(self):
@@ -2388,7 +2428,7 @@ class WarehouseMainTest(JobTestCase):
         )
         self.assertEqual(
             cluster.configmap("trino-group-file", "groups.txt"),
-            "stardelt-admins:sub-admin\n",
+            "stardelt-admins:sub-admin\n" + self.REALM_LINES,
         )
 
     def test_a_missing_configmap_fails_the_tick(self):
@@ -2405,7 +2445,7 @@ class WarehouseMainTest(JobTestCase):
         self.assertEqual(access_sync.main(), 0)
         self.assertEqual(
             cluster.configmap("trino-group-file", "groups.txt"),
-            "stardelt-admins:sub-admin\n",
+            "stardelt-admins:sub-admin\n" + self.REALM_LINES,
         )
         document = json.loads(cluster.configmap("trino-warehouses", "resource-groups.json"))
         self.assertEqual(document["rootGroups"][0]["subGroups"], [])

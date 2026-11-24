@@ -87,7 +87,9 @@ single writer of both:
   "no-warehouse"` instead of silently sharing a class.
 * `trino-group-file`, key `groups.txt` — the file group provider (re-read within 30 s,
   no restart): the `stardelt-admins` line the query-visibility rules have always used,
-  plus one `wh-<name>:<subs>` line per rendered warehouse, members sorted.
+  the realm's other top-level groups by name (so a row rule or column mask can name a
+  platform group, stardelt/stardelt#50), then one `wh-<name>:<subs>` line per rendered
+  warehouse, members sorted.
 
 The class defaults are the architect decision of this ticket — `xs` 2/10/10%, `small`
 10/100/20%, `medium` 5/50/40%, `large` 6/70/70%, scheduling `fair` — and the spec's
@@ -583,6 +585,38 @@ def group_members(group):
         subs.update(user["id"] for user in page if user.get("id"))
         if len(page) < MEMBER_PAGE:
             return subs
+        first += len(page)
+
+
+def realm_group_members():
+    """Every top-level group of the realm, as {name: set of sub} (`groups.txt` lines).
+
+    The groups a Catalog or SqlWarehouse names are fetched by `main()`; this lists the
+    rest so Trino's `identity.groups` carries the platform's groups (stardelt/stardelt#50:
+    a row filter or column mask keyed on a group). Paginated like `group_members`. A name
+    with the file's separators (`,` or `:`) is skipped, not refused: it cannot be written
+    there, and one odd group must not stop the tick. Subgroups are not listed: the
+    platform's groups are top-level.
+    """
+    api = "/admin/realms/%s" % REALM
+    found = {}
+    first = 0
+    while True:
+        status, page = kc(
+            "%s/groups?briefRepresentation=true&first=%d&max=%d"
+            % (api, first, MEMBER_PAGE)
+        )
+        if status != 200 or page is None:
+            fail("cannot list the realm's groups (HTTP %s)" % status)
+        for entry in page:
+            name = entry.get("name") or ""
+            if not name or name == ADMIN_GROUP:
+                continue
+            if name.startswith(WAREHOUSE_GROUP_PREFIX) or "," in name or ":" in name:
+                continue
+            found[name] = group_members(name)
+        if len(page) < MEMBER_PAGE:
+            return found
         first += len(page)
 
 
@@ -1477,20 +1511,31 @@ def warehouse_members(warehouses, members):
     }
 
 
-def render_groups_txt(admin_subs, warehouse_members):
-    """The `groups.txt` text: the admin line, then one line per rendered warehouse.
+def render_groups_txt(admin_subs, warehouse_members, realm_members=None):
+    """The `groups.txt` text: the admin line, the realm's other groups by name, then one
+    line per rendered warehouse.
 
     `admin_subs` is the admin group's members — the line the query-visibility rules and
-    the bridge's administrator list have always read — and `warehouse_members` maps a
-    warehouse name to the members of its `wh-<name>` group. Members are sorted, and a
-    group with no members is left out: a line with an empty list would name an empty
-    principal. Deterministic: the admin line first, then the warehouses by name.
+    the bridge's administrator list have always read — `realm_members` maps every other
+    top-level group of the realm to its members (so a row rule or column mask can name a
+    platform group, stardelt/stardelt#50), and `warehouse_members` maps a warehouse name
+    to the members of its `wh-<name>` group. A `realm_members` name the file already
+    carries (`ADMIN_GROUP`, a `wh-` group) is skipped. Members are sorted, and a group
+    with no members is left out: a line with an empty list would name an empty principal.
+    Deterministic: the admin line first, then the realm's groups by name, then the
+    warehouses by name. `realm_members=None` renders exactly the text before #50.
     """
-    lines = []
-    for group, members in [(ADMIN_GROUP, admin_subs)] + [
+    members_by_group = [(ADMIN_GROUP, admin_subs)]
+    for name in sorted(realm_members or {}):
+        if name == ADMIN_GROUP or name.startswith(WAREHOUSE_GROUP_PREFIX):
+            continue
+        members_by_group.append((name, realm_members[name]))
+    members_by_group += [
         (WAREHOUSE_GROUP_PREFIX + name, warehouse_members[name])
         for name in sorted(warehouse_members)
-    ]:
+    ]
+    lines = []
+    for group, members in members_by_group:
         members = sorted(members)
         if members:
             lines.append("%s:%s" % (group, ",".join(members)))
@@ -1878,14 +1923,15 @@ def converge_scale(warehouses, now=None):
     return 0
 
 
-def converge_warehouses(warehouses, members, unknown):
+def converge_warehouses(warehouses, members, unknown, realm_members=None):
     """Render the warehouses into both ConfigMaps and write their statuses.
 
     Returns the number of failures (always 0 here: every problem is a verdict on the
     object, and a refused write raises or fails the tick). The verdicts come first, so
     one broken `SqlWarehouse` never stops the others; only the objects that passed reach
     the two files. The group file is written even with no warehouse at all, because the
-    `stardelt-admins` line is what the query-visibility rules read.
+    `stardelt-admins` line is what the query-visibility rules read, and the realm's other
+    groups (`realm_members`) go into it beside that line.
     """
     defaults = two_defaults(warehouses)
     valid, invalid = [], []
@@ -1921,7 +1967,9 @@ def converge_warehouses(warehouses, members, unknown):
     converge_configmap(
         GROUP_CONFIGMAP,
         GROUP_CONFIGMAP_KEY,
-        render_groups_txt(members.get(ADMIN_GROUP, set()), rendered_members),
+        render_groups_txt(
+            members.get(ADMIN_GROUP, set()), rendered_members, realm_members
+        ),
     )
     for name, _ in valid:
         rendered_group = WAREHOUSE_GROUP_PREFIX + name
@@ -1979,6 +2027,13 @@ def main():
     print(
         "access-sync: %d group(s) declared, %d member(s) in Keycloak"
         % (len(groups), sum(len(subs) for subs in members.values()))
+    )
+    # The realm's other top-level groups (stardelt/stardelt#50): read here, with the
+    # declared groups and before the first write, and written into `groups.txt` so a
+    # row filter or column mask can key on a platform group.
+    realm_members = realm_group_members()
+    print(
+        "realm groups: %d extra line(s) in the group file" % len(realm_members)
     )
 
     # 2. One role per group, its assignees converged, once — membership does not
@@ -2106,7 +2161,7 @@ def main():
     #    fresh; `trino-warehouses` is loaded once by the coordinator, so a changed
     #    file restarts it (Reloader, platform#313) — writing only on a difference
     #    keeps a converged tick from restarting the engine.
-    failures += converge_warehouses(warehouses, members, unknown)
+    failures += converge_warehouses(warehouses, members, unknown, realm_members)
 
     # 5b. The engine's workers (platform#131 step A): the classes' annotations are Nova's
     #     report; scale the one worker Deployment and write `status.scale` on every class.
