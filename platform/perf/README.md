@@ -66,3 +66,47 @@ The comparison is advisory: a statement above `PERF_MAX_RATIO` (default `3.0`)
 is printed as `SLOW` and the command still exits 0, because the dev node is
 noisy. Set `PERF_STRICT=1` to make a slow statement fail the run; that is the
 form a release gate would take.
+
+## Pipelines at once: `perf-pipelines`
+
+`make perf-pipelines` is the third Sizing workload (#53 decisions 1(e) and 4): **N
+pipeline runs started at the same moment**, as one person, through Nova. It times
+start to terminal state with `time.monotonic()`, from the `POST /api/pipelines/{namespace}/{name}/runs`
+to the poll that saw `success`/`failed` — client wall-clock, not Airflow's own
+`durationSeconds`. It needs no `tpch` catalog and writes nothing to the cluster beyond the
+runs' own task pods; a DagRun is history, so there is no cleanup step.
+
+| variable | default | meaning |
+|---|---|---|
+| `STARDELT_NOVA_URL` | `https://alpha.dev.stardelt.io` | Nova (a trailing `/` is trimmed) |
+| `ISSUER` | `https://id.alpha.dev.stardelt.io/realms/stardelt` | token issuer |
+| `PERF_PERSON` | `demo` | the person the run is started as (its password is `demo`, public on purpose) |
+| `PERF_NAMESPACE` | `stardelt` | the pipeline's namespace |
+| `PERF_PIPELINE` | `shop-1-bronze` | the pipeline |
+| `PERF_LEVELS` | `1,2` | runs at once, comma separated, each 1..10 (`0` runs nothing) |
+| `PERF_TIMEOUT` | `900` | seconds one run may take before it counts as an error |
+| `PERF_POLL` | `2` | seconds between polls |
+| `PERF_OUT_DIR` | `$HOME/.cache/stardelt-perf` | where the JSON goes |
+
+One line per level (`runs` started, `ok` reached `success`, then p50/p95/max of the
+successful runs):
+
+```text
+level 1  runs=1  ok=1  p50=38.9s  p95=38.9s  max=38.9s
+level 2  runs=2  ok=2  p50=41.2s  p95=44.7s  max=44.7s
+perf-pipelines: PASS (3 run(s) as demo on shop-1-bronze)
+```
+
+The JSON goes to `<PERF_OUT_DIR>/pipelines-<UTC timestamp>.json` and never overwrites an
+earlier one (`-2`, `-3` are added). Exit 0 means every run reached `success`; exit 1 names
+the level and the state that did not, e.g. `perf-pipelines: FAIL level 4: 1 run(s) did not
+succeed (failed)`.
+
+**No level above ten:** Nova refuses more than ten starts per user per minute (`429`), so a
+bigger level measures the refusal, not the platform. A refused start is counted as an error
+(`start-429`), not a crash. The level where p95 bends under a real team's schedule is the
+number the sizing guide uses; tables for a release belong in `stardelt-internal`, like the
+baseline's.
+
+`python3 perf/pipelines.py --self-test` proves the measurement against a stub HTTP server:
+no cluster, no token.
