@@ -67,6 +67,51 @@ is printed as `SLOW` and the command still exits 0, because the dev node is
 noisy. Set `PERF_STRICT=1` to make a slow statement fail the run; that is the
 form a release gate would take.
 
+## The Spark workload: `perf-spark`
+
+`make perf-spark` is the fourth Sizing workload (#53 decisions 1(d) and 4):
+**one fixed Spark Connect workload**, as the pod shape a notebook client has.
+It starts a session against the shared Connect server and times five rows —
+`session` (build to first use), `aggregate` (`count`, `sum`), `shuffle`
+(`GROUP BY` + `ORDER BY` + `LIMIT`), `join` (self-join on a 1/50 slice) and
+`write` (parquet, overwrite). Each row is `{"id", "ms", "rows", "ok"}`, and
+`rowsPerSecond` is the generated row count over the slowest operation.
+
+The data is **generated** with `spark.range`: a bare session on the shared
+server has only `spark_catalog` and cannot address `gold.shop`, whose wiring is
+the notebook helper's per-catalog config (`docs/spark.md`, "Catalog wiring"). An
+Iceberg read therefore needs a session with that config and is not measured
+here; that belongs to the session-identity work.
+
+The write goes to `/tmp/perf-write` **inside the Connect server's pod**, and is
+overwritten each run. It is never `saveAsTable`: the session catalog is shared
+with every notebook on the server, so a table would be a leftover.
+
+| variable | default | meaning |
+|---|---|---|
+| `NS` | `stardelt` | the namespace the client pod runs in |
+| `TIMEOUT` | `240s` | how long the client pod may take |
+| `PERF_SPARK_ROWS` | `5000000` | the row count of the generated data |
+| `PERF_OUT_DIR` | `$HOME/.cache/stardelt-perf` | where the JSON goes |
+
+The JSON goes to `<PERF_OUT_DIR>/spark-<UTC timestamp>.json` and carries the
+operations and the row count (`perf-row:` lines are the reader's progress,
+`perf-json:` the document, `perf-verdict:` the judgement):
+
+```text
+perf-row: session 540ms
+perf-row: aggregate 805ms
+perf-row: shuffle 2110ms
+perf-row: join 1637ms
+perf-row: write 2128ms
+perf-spark: PASS (5 operations, 5000000 rows, 2370 rows/s, JSON at /home/<user>/.cache/stardelt-perf/spark-2026-11-25T00:12:34Z.json)
+```
+
+Exit 0 means all five operations finished; exit 1 names the ones that did not
+(`perf-verdict: FAIL join`); exit 3 is `UNVERIFIED` — the client pod never
+started or never reached the server, so nothing was measured. Timings are the
+dev node's and vary with its load.
+
 ## Pipelines at once: `perf-pipelines`
 
 `make perf-pipelines` is the third Sizing workload (#53 decisions 1(e) and 4): **N
