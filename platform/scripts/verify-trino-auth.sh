@@ -79,7 +79,13 @@ else
   [ -s "$tmp/trino-secret" ] || fail "stardelt-oidc-clients has no 'trino' key — run scripts/identity-bootstrap.sh"
   ISSUER="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.issuerUrl}')"
   [ -n "$ISSUER" ] || fail "ConfigMap stardelt-identity has no issuerUrl — run 'make install-identity'"
+  if [ -z "${GROUPS_FILE:-}" ]; then
+    GROUPS_FILE="$tmp/groups.txt"
+    kubectl -n "$NAMESPACE" get configmap trino-group-file -o jsonpath='{.data.groups\.txt}' >"$GROUPS_FILE"
+  fi
+  [ -s "$GROUPS_FILE" ] || fail "the group file is empty — run make access-sync (or unset GROUPS_FILE)"
   ISSUER="$ISSUER" TRINO_URL="$TRINO_URL" USER="$TRINO_VERIFY_USER" PASSWORD="$USER_PASSWORD" \
+    GROUPS_FILE="$GROUPS_FILE" \
     CLIENT_SECRET_FILE="$tmp/trino-secret" python3 scripts/verify-trino-auth.py
 fi
 
