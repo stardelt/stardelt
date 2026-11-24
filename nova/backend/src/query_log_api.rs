@@ -600,6 +600,7 @@ fn estimate(cpu_ms: i64, showback: Option<&Showback>) -> Option<f64> {
 /// One line of the usage answer: a person, a warehouse or a day, and what it cost.
 #[derive(Debug, Serialize, ToSchema, FromRow)]
 #[serde(rename_all = "camelCase")]
+#[schema(as = QueryUsageRow)]
 pub struct UsageRow {
     /// The principal (engine user), the warehouse name, the UTC day as `YYYY-MM-DD`, or the
     /// group a person's token carried.

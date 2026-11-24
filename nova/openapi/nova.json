@@ -16142,6 +16142,58 @@
           }
         }
       },
+      "QueryUsageRow": {
+        "type": "object",
+        "description": "One line of the usage answer: a person, a warehouse or a day, and what it cost.",
+        "required": [
+          "key",
+          "queries",
+          "failed",
+          "cpuMs",
+          "wallMs",
+          "inputBytes",
+          "writtenBytes"
+        ],
+        "properties": {
+          "cpuMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "estimatedCost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "CPU time at the configured price, rounded to cents; `null` when no price is configured."
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of `queries` failed."
+          },
+          "inputBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "key": {
+            "type": "string",
+            "description": "The principal (engine user), the warehouse name, the UTC day as `YYYY-MM-DD`, or the\ngroup a person's token carried."
+          },
+          "queries": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "wallMs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "writtenBytes": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "ReadTable": {
         "type": "object",
         "description": "One table a person read most, with its newest write.",
@@ -18003,7 +18055,7 @@
           "items": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/UsageRow"
+              "$ref": "#/components/schemas/QueryUsageRow"
             }
           },
           "price": {
@@ -18022,7 +18074,7 @@
             "format": "int64"
           },
           "total": {
-            "$ref": "#/components/schemas/UsageRow",
+            "$ref": "#/components/schemas/QueryUsageRow",
             "description": "Every item added together; its `key` is `total`."
           }
         }
