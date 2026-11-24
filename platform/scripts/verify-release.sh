@@ -12,7 +12,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
 # The command each Makefile target runs. `scripts/tests/test_verify_release.py` reads the Makefile
 # and fails when this table and the recipes drift apart.
 declare -A recipe=(
-  [verify-trino-auth]='bash scripts/verify-trino-auth.sh'
+  [verify-trino-auth]='TRINO_VERIFY_USER=demo TRINO_VERIFY_USER_PASSWORD=demo bash scripts/verify-trino-auth.sh'
   [verify-catalog-permissions]='bash scripts/verify-catalog-permissions.sh'
   [verify-backups-all]='bash scripts/verify-backups-all.sh'
   [verify-streaming]='bash scripts/verify-streaming.sh'
