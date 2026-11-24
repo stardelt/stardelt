@@ -110,3 +110,36 @@ baseline's.
 
 `python3 perf/pipelines.py --self-test` proves the measurement against a stub HTTP server:
 no cluster, no token.
+
+## Memory high-water: `perf-highwater`
+
+`make perf-highwater` answers what a workload **cost the node**: it wraps a command
+(`perf/highwater.py -- python3 perf/pipelines.py`, so one `shop-1-bronze` run by
+default) and samples `kubectl -n <PERF_NAMESPACE> top pods` every `PERF_SAMPLE`
+seconds (default `2`) until the child exits, then takes one final sample and the pods'
+restart counts. One row per pod, sorted by peak memory:
+
+```text
+peak  pod                                              CPU(m)  MEM(MiB)  restarts  OOM
+1590  spark-connect-6d9f8c9f7f-abcde                      40      1590         0  no
+812   trino-coordinator-55c95f5bdd-26mwc                 120       812         0  no
+highwater: 2 pods, 13 samples, JSON at ~/.cache/stardelt-perf/highwater-2026-11-25T00:20:00Z.json
+```
+
+| column | meaning |
+|---|---|
+| `peak` | the pod's peak memory in MiB — the order of the table |
+| `CPU(m)` | peak CPU over the samples, in millicores |
+| `MEM(MiB)` | peak memory over the samples, in MiB (MiB and KiB rows round up) |
+| `restarts` | the sum of the containers' `restartCount` at the end |
+| `OOM` | `yes` when a container's `lastState.terminated.reason` is `OOMKilled` |
+
+A peak is the maximum over the samples, so a pod that disappears (a finished task pod)
+keeps its last row instead of falling to zero. The JSON goes to
+`<PERF_OUT_DIR>/highwater-<UTC timestamp>.json` with `samples` counting only the samples
+that returned data, and the command exits with the child's exit code.
+
+`kubectl top` needs metrics-server: a pod whose row reads `<unknown>` is skipped, not
+counted as zero. `PERF_SAMPLE`, `PERF_LEVELS` and `PERF_OUT_DIR` pass through to the
+harness and the child. `python3 perf/highwater.py --self-test` proves the parsing with
+canned text: no cluster.
