@@ -1528,7 +1528,7 @@ export type UsageRow = {
 
 /** `GET /api/query-log/usage` — the rows of the window and their total (its `key` is `total`). */
 export type UsagePage = {
-  by: 'principal' | 'warehouse' | 'day'
+  by: 'principal' | 'warehouse' | 'day' | 'group'
   from: number
   to: number
   items: UsageRow[]

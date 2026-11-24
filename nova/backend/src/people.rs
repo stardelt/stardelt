@@ -62,7 +62,8 @@ fn claim_slot(limiter: &TouchLimiter, sub: &str, now: Instant) -> bool {
 /// `username` is the sign-in name the engine knows; `display_name` is what a person reads.
 /// The token's `name` is the human name; `Identity::display_name` (preferred_username, else
 /// email) is the fallback, so a provider that sends no `name` still shows something better
-/// than the `sub`.
+/// than the `sub`. `groups` is the token's `groups` claim as last written, so usage can be
+/// added up by group; it is never read as an authority.
 async fn write(db: &PgPool, identity: &Identity) -> sqlx::Result<()> {
     let display_name = identity
         .name
@@ -71,16 +72,17 @@ async fn write(db: &PgPool, identity: &Identity) -> sqlx::Result<()> {
         .filter(|name| !name.is_empty())
         .unwrap_or(&identity.display_name);
     sqlx::query(
-        "INSERT INTO person (sub, username, display_name, email, last_seen) \
-         VALUES ($1, $2, $3, $4, now()) \
+        "INSERT INTO person (sub, username, display_name, email, groups, last_seen) \
+         VALUES ($1, $2, $3, $4, $5, now()) \
          ON CONFLICT (sub) DO UPDATE SET \
             username = EXCLUDED.username, display_name = EXCLUDED.display_name, \
-            email = EXCLUDED.email, last_seen = now()",
+            email = EXCLUDED.email, groups = EXCLUDED.groups, last_seen = now()",
     )
     .bind(&identity.sub)
     .bind(&identity.display_name)
     .bind(display_name)
     .bind(&identity.email)
+    .bind(&identity.groups)
     .execute(db)
     .await
     .map(|_| ())

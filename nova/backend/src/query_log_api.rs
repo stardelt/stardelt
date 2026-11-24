@@ -492,6 +492,7 @@ enum By {
     Principal,
     Warehouse,
     Day,
+    Group,
 }
 
 impl By {
@@ -500,6 +501,7 @@ impl By {
             Self::Principal => "principal",
             Self::Warehouse => "warehouse",
             Self::Day => "day",
+            Self::Group => "group",
         }
     }
 }
@@ -520,7 +522,8 @@ fn parse_usage_params(raw: &HashMap<String, String>, now_ms: i64) -> Result<Usag
         None | Some("principal") => By::Principal,
         Some("warehouse") => By::Warehouse,
         Some("day") => By::Day,
-        Some(_) => return Err("by must be principal, warehouse or day".into()),
+        Some("group") => By::Group,
+        Some(_) => return Err("by must be principal, warehouse, day or group".into()),
     };
     Ok(UsageParams {
         scope: params.scope,
@@ -542,7 +545,8 @@ fn now_ms() -> i64 {
 #[derive(Debug, Serialize, ToSchema, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRow {
-    /// The principal (engine user), the warehouse name, or the UTC day as `YYYY-MM-DD`.
+    /// The principal (engine user), the warehouse name, the UTC day as `YYYY-MM-DD`, or the
+    /// group a person's token carried.
     key: String,
     queries: i64,
     /// How many of `queries` failed.
@@ -571,7 +575,7 @@ impl UsageRow {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePage {
-    /// principal, warehouse or day.
+    /// principal, warehouse, day or group.
     by: String,
     /// The window that was added up, epoch milliseconds.
     from: i64,
@@ -593,16 +597,74 @@ impl UsagePage {
     }
 }
 
+/// The totals row of a `by=group` window, read by its own query so a person in two groups is
+/// not counted twice. It has no `key` column; [`UsageTotals::into_row`] names it `total`.
+#[derive(FromRow)]
+struct UsageTotals {
+    queries: i64,
+    failed: i64,
+    cpu_ms: i64,
+    wall_ms: i64,
+    input_bytes: i64,
+    written_bytes: i64,
+}
+
+impl UsageTotals {
+    fn into_row(self) -> UsageRow {
+        UsageRow {
+            key: "total".into(),
+            queries: self.queries,
+            failed: self.failed,
+            cpu_ms: self.cpu_ms,
+            wall_ms: self.wall_ms,
+            input_bytes: self.input_bytes,
+            written_bytes: self.written_bytes,
+        }
+    }
+}
+
+/// The scope, warehouse and window predicates of the usage route, in one place so the rows and
+/// the `by=group` total cannot drift.
+fn push_usage_predicates(
+    q: &mut QueryBuilder<Postgres>,
+    params: &UsageParams,
+    who: &Caller,
+    owners: &HashMap<String, String>,
+) {
+    if params.scope == Scope::Mine {
+        q.push(" AND (principal = ")
+            .push_bind(who.username.clone())
+            .push(" OR principal = ")
+            .push_bind(who.sub.clone())
+            .push(")");
+    }
+    if params.scope == Scope::Team {
+        let subjects: Vec<String> = owners.keys().cloned().collect();
+        q.push(" AND principal = ANY(")
+            .push_bind(subjects)
+            .push(")");
+    }
+    if let Some(w) = &params.warehouse {
+        q.push(" AND warehouse = ").push_bind(w.clone());
+    }
+    q.push(" AND created_at >= 'epoch'::timestamptz + (")
+        .push_bind(params.from_ms)
+        .push("::bigint * interval '1 millisecond')");
+    q.push(" AND created_at <= 'epoch'::timestamptz + (")
+        .push_bind(params.to_ms)
+        .push("::bigint * interval '1 millisecond')");
+}
+
 /// `GET /api/query-log/usage?scope=&by=&warehouse=&from=&to=` — compute and bytes added up.
 #[utoipa::path(
     get,
     operation_id = "query_log_usage",
     path = "/api/query-log/usage",
     tag = "public",
-    description = "Compute and bytes added up per person, warehouse or day, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. The window defaults to the last 7 days.",
+    description = "Compute and bytes added up per person, warehouse, day or group, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. A group is the `groups` claim the person's token carried at the last write to the person directory; a principal the directory does not know, such as the superset service account, and a person with no group fall into one honest 'unknown' row. A person in several groups appears in each of them, so the total counts every query once. The window defaults to the last 7 days.",
     params(
         ("scope" = Option<String>, Query, description = "mine (default), team or all. team is the service principals owned by the caller's groups; all is for administrators"),
-        ("by" = Option<String>, Query, description = "principal (default), warehouse or day (UTC)"),
+        ("by" = Option<String>, Query, description = "principal (default), warehouse, day (UTC) or group (the groups the sign-in token carried)"),
         ("warehouse" = Option<String>, Query, description = "Only usage of this warehouse"),
         ("from" = Option<i64>, Query, description = "Created at or after this time; the last 7 days by default"),
         ("to" = Option<i64>, Query, description = "Created at or before this time; now by default"),
@@ -644,6 +706,19 @@ pub async fn usage(
         By::Principal => "principal",
         By::Warehouse => "warehouse",
         By::Day => "to_char(date_trunc('day', created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')",
+        // A group is not a log column: it lives on the person row the token wrote. A principal
+        // the directory does not know, a `superset` service account, or a person with no group
+        // is still usage, so it lands in one honest `unknown` row instead of vanishing.
+        By::Group => "COALESCE(g.name, 'unknown')",
+    };
+    let from = match params.by {
+        By::Group => {
+            "query_log \
+             LEFT JOIN person p ON p.sub = query_log.principal OR p.username = query_log.principal \
+             LEFT JOIN LATERAL unnest(p.groups) AS g(name) ON true \
+             WHERE true"
+        }
+        _ => "query_log WHERE true",
     };
     // As in `list`, the engine user is the sub once authz 8/8 is live; rows written before it
     // still carry the sign-in name.
@@ -654,32 +729,13 @@ pub async fn usage(
          COALESCE(sum(wall_ms), 0)::bigint AS wall_ms, \
          COALESCE(sum(input_bytes), 0)::bigint AS input_bytes, \
          COALESCE(sum(written_bytes), 0)::bigint AS written_bytes \
-         FROM query_log WHERE true"
+         FROM {from}"
     ));
-    if params.scope == Scope::Mine {
-        q.push(" AND (principal = ")
-            .push_bind(who.username.clone())
-            .push(" OR principal = ")
-            .push_bind(who.sub.clone())
-            .push(")");
-    }
-    if params.scope == Scope::Team {
-        let subjects: Vec<String> = owners.keys().cloned().collect();
-        q.push(" AND principal = ANY(")
-            .push_bind(subjects)
-            .push(")");
-    }
-    if let Some(w) = &params.warehouse {
-        q.push(" AND warehouse = ").push_bind(w.clone());
-    }
-    q.push(" AND created_at >= 'epoch'::timestamptz + (")
-        .push_bind(params.from_ms)
-        .push("::bigint * interval '1 millisecond')");
-    q.push(" AND created_at <= 'epoch'::timestamptz + (")
-        .push_bind(params.to_ms)
-        .push("::bigint * interval '1 millisecond')");
+    push_usage_predicates(&mut q, &params, &who, &owners);
     q.push(match params.by {
-        By::Principal | By::Warehouse => " GROUP BY 1 ORDER BY cpu_ms DESC, key ASC LIMIT ",
+        By::Principal | By::Warehouse | By::Group => {
+            " GROUP BY 1 ORDER BY cpu_ms DESC, key ASC LIMIT "
+        }
         By::Day => " GROUP BY 1 ORDER BY key ASC LIMIT ",
     })
     .push_bind(USAGE_LIMIT);
@@ -696,7 +752,26 @@ pub async fn usage(
             Err(e) => return store_failed(e),
         }
     }
-    let total = UsageRow::total(&items);
+    // A person in two groups appears in two rows, so adding the rows up would count them twice.
+    // For `by=group` the total is its own query over the window, without the person join.
+    let total = if params.by == By::Group {
+        let mut t: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT count(*) AS queries, \
+             count(*) FILTER (WHERE state = 'FAILED') AS failed, \
+             COALESCE(sum(cpu_ms), 0)::bigint AS cpu_ms, \
+             COALESCE(sum(wall_ms), 0)::bigint AS wall_ms, \
+             COALESCE(sum(input_bytes), 0)::bigint AS input_bytes, \
+             COALESCE(sum(written_bytes), 0)::bigint AS written_bytes \
+             FROM query_log WHERE true",
+        );
+        push_usage_predicates(&mut t, &params, &who, &owners);
+        match t.build_query_as::<UsageTotals>().fetch_one(pool).await {
+            Ok(totals) => totals.into_row(),
+            Err(e) => return store_failed(e),
+        }
+    } else {
+        UsageRow::total(&items)
+    };
     Json(UsagePage {
         by: params.by.as_str().into(),
         from: params.from_ms,
@@ -1402,6 +1477,16 @@ mod tests {
             is_admin: false,
         };
         assert!(!in_scope(Scope::Team, &row, &outsider));
+    }
+
+    #[test]
+    fn by_group_is_parsed_and_an_unknown_dimension_is_named() {
+        let params = parse_usage_params(&raw(&[("by", "group")]), 1_000).unwrap();
+        assert_eq!(params.by, By::Group);
+        assert_eq!(
+            parse_usage_params(&raw(&[("by", "week")]), 1_000).unwrap_err(),
+            "by must be principal, warehouse, day or group"
+        );
     }
 
     #[test]
