@@ -188,6 +188,18 @@ identity:
       resources:
         requests: { cpu: "50m",  memory: "128Mi" }
         limits:   { cpu: "500m", memory: "256Mi" }
+    # A directory the platform IdP imports people and groups from, through Keycloak's
+    # read-only LDAP federation (#39). Empty `host` disables it.
+    ldap:
+      host: ""
+      port: 389
+      baseDn: ""
+      usersDn: ""
+      groupDn: ""
+      bindSecretName: ""
+      bindDnKey: bind-dn
+      bindPasswordKey: bind-password
+      syncSeconds: 3600
 
 # ===========================================================================
 # Core stack

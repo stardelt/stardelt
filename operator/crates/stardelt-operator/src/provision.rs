@@ -1840,7 +1840,7 @@ pub async fn ensure_keycloak(
         Ok(env) => env,
         Err(e) => return Some(status(NAME, false, e.to_string())),
     };
-    let deployment = keycloak::deployment(namespace);
+    let deployment = keycloak::deployment(namespace, spec.identity.ldap.as_ref());
     for config_map in [&realm, &env] {
         if let Err(e) =
             apply_owned::<ConfigMap>(&ctx.client, namespace, owner, config_map, spec.dry_run).await
