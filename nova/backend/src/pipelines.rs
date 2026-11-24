@@ -851,6 +851,13 @@ fn now_rfc3339() -> String {
     format_rfc3339(now_seconds() as i64)
 }
 
+/// Now, UTC, with microseconds, for Airflow's `logical_date`: Airflow's `dag_run` is unique
+/// on `(dag_id, logical_date)`, so two starts inside one whole second must not share a date
+/// (stardelt/stardelt#1537). Whole seconds stay the rule everywhere else.
+fn now_rfc3339_micros() -> String {
+    now_utc().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
+}
+
 /// The resource's `metadata.creationTimestamp`, as the cluster wrote it.
 fn created_at_of(resource: &Value) -> Option<&str> {
     resource
@@ -5191,6 +5198,13 @@ fn concurrency_of(spec: &Value) -> &str {
         .unwrap_or("Forbid")
 }
 
+/// Serialises "read the active runs, then trigger": without it two requests that arrive
+/// together both see no active run and both start on a `Forbid` pipeline (measured
+/// 2026-11-24, stardelt/stardelt#1537). A trigger is one Airflow round trip (~50 ms), and
+/// starts are rare, so one process-wide gate is enough; it deliberately does not hold across
+/// the run itself.
+static RUN_START_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `POST …/runs`: start a run now. Refusals happen before Airflow is asked to trigger:
 /// not loaded (409), paused (409), rate limit (429), an active run under `Forbid`/`Replace`
 /// (409). `Allow` skips the activity check. `start` carries the run date and parameter values
@@ -5223,6 +5237,7 @@ async fn run_now_inner(
     name: &str,
     start: &RunStart,
 ) -> Result<RunView, ActionError> {
+    let _start = RUN_START_GATE.lock().await;
     let resources = resources
         .ok_or_else(no_cluster)
         .map_err(ActionError::error)?;
@@ -5264,13 +5279,14 @@ async fn run_now_inner(
         }
     }
 
-    // Always now, whole seconds, UTC: Airflow accepts any date and makes a run with no tasks for
-    // one that is not now (#255). The date the person asked for travels as `conf`, which the
-    // loader reads (`dag_run.conf`, nova#817), never as the logical date.
+    // Always now, UTC, with microseconds: Airflow accepts any date and makes a run with no tasks
+    // for one that is not now (#255), and its dag_run is unique on (dag_id, logical_date), so two
+    // starts in one second need two dates (#1537). The date the person asked for travels as
+    // `conf`, which the loader reads (`dag_run.conf`, nova#817), never as the logical date.
     let note = run_note(who, deployment_of_with(&resource, spec_digest).as_ref());
     let conf = run_conf(start);
     match airflow
-        .trigger(&dag_id, &now_rfc3339(), Some(&note), conf.as_ref())
+        .trigger(&dag_id, &now_rfc3339_micros(), Some(&note), conf.as_ref())
         .await
     {
         Ok(run) => Ok(run_view(&run)),
@@ -7989,7 +8005,7 @@ fn run_start(body: &[u8]) -> Result<RunStart, Fail> {
     operation_id = "pipelines_run_trigger",
     path = "/api/pipelines/{namespace}/{name}/runs",
     tag = "public",
-    description = "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). The body is optional: `runDate` (a `YYYY-MM-DD` calendar date, past or future) applies to this run only, as does `params`, this run's values of the schedule's `${params.<name>}` placeholders (at most 16, lower-case names, values up to 256 characters); the stored schedule never changes, and neither value is audited. `logicalDate` stays now, UTC, whole seconds, so the run has tasks — the date travels as Airflow's `dag_run.conf` instead. An absent body or `{}` starts a run for now with the schedule's parameters, exactly as before. Every attempt that reaches the run logic, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+    description = "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). The body is optional: `runDate` (a `YYYY-MM-DD` calendar date, past or future) applies to this run only, as does `params`, this run's values of the schedule's `${params.<name>}` placeholders (at most 16, lower-case names, values up to 256 characters); the stored schedule never changes, and neither value is audited. `logicalDate` stays now, UTC, with microseconds so two starts in one second are two runs and the run still has tasks — the date travels as Airflow's `dag_run.conf` instead. An absent body or `{}` starts a run for now with the schedule's parameters, exactly as before. Every attempt that reaches the run logic, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -11596,8 +11612,11 @@ mod tests {
             "always UTC with a Z: {logical_date}"
         );
         assert!(
-            !logical_date.contains('.'),
-            "whole seconds only: {logical_date}"
+            logical_date
+                .split('.')
+                .nth(1)
+                .is_some_and(|f| f.len() == 7 && f.ends_with('Z')),
+            "microseconds: {logical_date}"
         );
         let at = parse_rfc3339(logical_date).expect("RFC 3339");
         assert!(
@@ -11733,8 +11752,11 @@ mod tests {
         let logical_date = body["logical_date"].as_str().expect("a logical_date");
         assert_ne!(logical_date, "2026-11-13", "the logical date stays now");
         assert!(
-            logical_date.ends_with('Z') && !logical_date.contains('.'),
-            "now, whole seconds, UTC: {logical_date}"
+            logical_date
+                .split('.')
+                .nth(1)
+                .is_some_and(|f| f.len() == 7 && f.ends_with('Z')),
+            "now, with microseconds, UTC: {logical_date}"
         );
         let at = parse_rfc3339(logical_date).expect("RFC 3339");
         assert!(
@@ -11932,6 +11954,122 @@ mod tests {
         .expect("Allow skips the activity check");
         assert_eq!(run.state, "queued");
         assert_eq!(fake.lock().unwrap().trigger_bodies.len(), 1);
+    }
+
+    /// Two starts inside one second are two runs: Airflow's `dag_run` is unique on
+    /// `(dag_id, logical_date)`, so Nova sends microseconds in the logical date
+    /// (stardelt/stardelt#1537).
+    #[tokio::test]
+    async fn two_starts_in_one_second_are_two_runs() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+
+        let first = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter,
+            &member,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("the first start");
+        let second = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter,
+            &member,
+            &namespace,
+            "smoke",
+            &RunStart::default(),
+        )
+        .await
+        .expect("the second start");
+
+        assert_ne!(first.run_id, second.run_id, "two runs, two run ids");
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 2, "two triggers");
+        let dates: Vec<&str> = fake
+            .trigger_bodies
+            .iter()
+            .map(|body| {
+                body["logical_date"]
+                    .as_str()
+                    .expect("the trigger carries a logical_date")
+            })
+            .collect();
+        assert_ne!(dates[0], dates[1], "two starts, two logical dates");
+        for date in dates {
+            let fraction = date
+                .split_once('.')
+                .unwrap_or_else(|| panic!("a fractional part: {date}"))
+                .1;
+            let digits = fraction
+                .strip_suffix('Z')
+                .unwrap_or_else(|| panic!("microseconds before Z: {date}"));
+            assert!(
+                digits.len() == 6 && digits.chars().all(|c| c.is_ascii_digit()),
+                "exactly six digits of microseconds: {date}"
+            );
+        }
+    }
+
+    /// The `Forbid` check and the trigger are one critical section: two requests that arrive
+    /// together do not both start a run (stardelt/stardelt#1537).
+    #[tokio::test]
+    async fn run_now_serialises_a_forbid_race() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+        let start = RunStart::default();
+
+        let (first, second) = tokio::join!(
+            run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &member,
+                &namespace,
+                "smoke",
+                &start,
+            ),
+            run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &member,
+                &namespace,
+                "smoke",
+                &start,
+            ),
+        );
+
+        let starts = usize::from(first.is_ok()) + usize::from(second.is_ok());
+        assert_eq!(starts, 1, "exactly one start: {first:?} {second:?}");
+        let refused = match (&first, &second) {
+            (Ok(_), Err(error)) | (Err(error), Ok(_)) => error,
+            _ => panic!("one Ok and one refusal: {first:?} {second:?}"),
+        };
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            refused.message(),
+            "a run is already active: wait for it or stop it"
+        );
+        assert_eq!(
+            fake.lock().unwrap().trigger_bodies.len(),
+            1,
+            "only one start reached Airflow"
+        );
     }
 
     #[tokio::test]
