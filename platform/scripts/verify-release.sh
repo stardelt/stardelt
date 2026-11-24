@@ -13,6 +13,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
 # and fails when this table and the recipes drift apart.
 declare -A recipe=(
   [verify-trino-auth]='bash scripts/verify-trino-auth.sh'
+  [verify-bridge-policy]='bash scripts/verify-bridge-policy.sh'
   [verify-catalog-permissions]='bash scripts/verify-catalog-permissions.sh'
   [verify-backups-all]='bash scripts/verify-backups-all.sh'
   [verify-streaming]='bash scripts/verify-streaming.sh'
@@ -78,7 +79,8 @@ if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
 fi
 
 # verify-spark-driver-identity's subject is the demo's permanent SparkCluster (#1157, #493).
-default_targets="verify-trino-auth verify-catalog-permissions verify-backups-all verify-streaming
+# #1490's entry points are useless if the bridge never loaded them.
+default_targets="verify-trino-auth verify-bridge-policy verify-catalog-permissions verify-backups-all verify-streaming
 verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-mcp verify-mcp-tools verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
