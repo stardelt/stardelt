@@ -72,6 +72,7 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
   const perDay = days.data?.items ?? []
   const maxDay = Math.max(...perDay.map(r => r.cpuMs), 1)
   const total = page.total
+  const price = page.price
   const heading =
     scope === 'mine'
       ? 'By warehouse'
@@ -85,6 +86,9 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
       <p className="text-sm text-text-dim" aria-live="polite">
         {formatCount(total.queries)} queries · {cpuText(total.cpuMs)} CPU ·{' '}
         {formatBytes(total.inputBytes)} read · {formatCount(total.failed)} failed
+        {price && total.estimatedCost != null && (
+          <> · ≈ {total.estimatedCost.toFixed(2)} {price.currency}</>
+        )}
       </p>
 
       <h2 className="text-sm font-semibold">{heading}</h2>
@@ -113,6 +117,7 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
               <th className="th px-3 py-2.5">{firstColumn}</th>
               <th className="th px-3 py-2.5 text-right">Queries</th>
               <th className="th px-3 py-2.5">CPU time</th>
+              {price && <th className="th px-3 py-2.5 text-right">Est. cost</th>}
               <th className="th px-3 py-2.5 text-right">Data read</th>
               <th className="th px-3 py-2.5 text-right hidden sm:table-cell">Data written</th>
               <th className="th px-3 py-2.5 text-right hidden sm:table-cell">Failed</th>
@@ -131,6 +136,11 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
                   />
                   <span className="text-text-dim">{cpuText(row.cpuMs)}</span>
                 </td>
+                {price && (
+                  <td className="td px-3 text-right text-text-dim whitespace-nowrap">
+                    {row.estimatedCost == null ? '—' : `${row.estimatedCost.toFixed(2)} ${price.currency}`}
+                  </td>
+                )}
                 <td className="td px-3 text-right text-text-dim whitespace-nowrap">{formatBytes(row.inputBytes)}</td>
                 <td className="td px-3 text-right text-text-dim whitespace-nowrap hidden sm:table-cell">{formatBytes(row.writtenBytes)}</td>
                 <td className="td px-3 text-right text-text-dim whitespace-nowrap hidden sm:table-cell">{formatCount(row.failed)}</td>
@@ -139,6 +149,13 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
           </tbody>
         </table>
       </div>
+
+      {price && (
+        <p className="text-xs text-text-mute">
+          Estimate: CPU time × {price.cpuHourPrice} {price.currency} per CPU-hour. Storage and
+          infrastructure costs are not included.
+        </p>
+      )}
 
       <section>
         <h2 className="text-sm font-semibold mb-2">CPU time per day</h2>

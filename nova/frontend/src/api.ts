@@ -1524,6 +1524,8 @@ export type UsageRow = {
   wallMs: number
   inputBytes: number
   writtenBytes: number
+  /** CPU time at the configured price, rounded to cents; `null` when no price is configured. */
+  estimatedCost: number | null
 }
 
 /** `GET /api/query-log/usage` — the rows of the window and their total (its `key` is `total`). */
@@ -1533,6 +1535,8 @@ export type UsagePage = {
   to: number
   items: UsageRow[]
   total: UsageRow
+  /** The rate `estimatedCost` uses; `null` when showback is off. */
+  price: { cpuHourPrice: number; currency: string } | null
 }
 
 /** Everything stored about one query (`GET /api/query-log/{id}`). */

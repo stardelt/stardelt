@@ -215,6 +215,16 @@ spec:
             - name: NOVA_MCP_WRITES_PER_HOUR
               valueFrom:
                 configMapKeyRef: { name: stardelt-identity, key: mcpWritesPerHour, optional: true }
+            # The optional showback rate (stardelt/stardelt#1489): a price per CPU-hour and
+            # its currency. Both or neither; absent means the usage answer has no estimate.
+            # Same ConfigMap rule as the settings above, so a re-apply cannot prune a price
+            # an administrator set.
+            - name: NOVA_CPU_HOUR_PRICE
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: cpuHourPrice, optional: true }
+            - name: NOVA_CPU_HOUR_CURRENCY
+              valueFrom:
+                configMapKeyRef: { name: stardelt-identity, key: cpuHourCurrency, optional: true }
             # ---- Sign-in (contract: docs/architecture/identity) --------------
             # `dev` keeps the no-login behaviour (CI, `make demo`, the kind gate).
             # To turn on SSO on a manifest install: run scripts/identity-bootstrap.sh

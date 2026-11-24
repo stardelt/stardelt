@@ -256,6 +256,9 @@ pub struct AppState {
     /// Show the statement of somebody else's query with its string literals replaced by `'?'`
     /// (`NOVA_QUERY_LOG_REDACT_LITERALS=1`). Off by default; the owner always sees their own text.
     pub redact_query_log_literals: bool,
+    /// The optional showback rate (`query_log_api.rs`): CPU time at a price, so the usage
+    /// answer carries an estimate per row. Off by default; the estimate is never a bill.
+    pub showback: Option<query_log_api::Showback>,
     /// The hosted MCP endpoint (`mcp.rs`, stardelt-nova#112). `None` unless
     /// `NOVA_MCP_ENABLED` is on: every MCP route then answers 404, never the SPA.
     pub mcp: Option<mcp::McpConfig>,
@@ -1090,6 +1093,17 @@ async fn main() -> anyhow::Result<()> {
     // The caller's own JupyterHub workspace (stardelt-nova#653). Both variables or neither:
     // without them the Notebooks page's workspace card says `unavailable` and still renders.
     // The service token is a `Secret` and never printed.
+    // The optional showback rate (#1489). Both variables or neither: half a setting refuses
+    // to start rather than showing an estimate in a currency nobody chose.
+    let showback = match query_log_api::Showback::from_env() {
+        Ok(Some(s)) => {
+            info!(currency = %s.currency, price = s.cpu_hour_price, "showback configured");
+            Some(s)
+        }
+        Ok(None) => None,
+        Err(e) => anyhow::bail!("refusing to start: showback: {e}"),
+    };
+
     let workspace = match workspace::WorkspaceConfig::from_env() {
         Some(cfg) => {
             info!(api = %cfg.api, idle_seconds = cfg.idle_seconds, "JupyterHub workspace configured");
@@ -1278,6 +1292,7 @@ async fn main() -> anyhow::Result<()> {
         shared_accounts: shared_accounts::from_env(),
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         redact_query_log_literals: env_flag("NOVA_QUERY_LOG_REDACT_LITERALS"),
+        showback,
         mcp,
         auth: auth.clone(),
         jobs: Mutex::new(Vec::new()),
@@ -1582,6 +1597,7 @@ mod router_tests {
             demo: demo_mode,
             forward_identity: false,
             redact_query_log_literals: false,
+            showback: None,
             mcp: None,
             auth: None,
             jobs: Mutex::new(Vec::new()),
