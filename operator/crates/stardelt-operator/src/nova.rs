@@ -322,6 +322,10 @@ fn env(namespace: &str, base_domain: Option<&str>, airflow: bool, mcp: &McpSpec)
         ),
         secret_env("NOVA_SESSION_SECRET", SESSION_SECRET, "session", true),
         identity_env("NOVA_OIDC_ADMIN_GROUP", "adminGroup"),
+        // The optional showback rate (stardelt/stardelt#1489): a price per CPU-hour and its
+        // currency, both in the identity ConfigMap so a re-apply cannot prune them.
+        identity_env("NOVA_CPU_HOUR_PRICE", "cpuHourPrice"),
+        identity_env("NOVA_CPU_HOUR_CURRENCY", "cpuHourCurrency"),
         value_env("NOVA_S3_URL", &s3_endpoint(namespace)),
         secret_env("NOVA_S3_ACCESS_KEY", S3_SECRET, "access-key", false),
         secret_env("NOVA_S3_SECRET_KEY", S3_SECRET, "secret-key", false),
@@ -939,6 +943,8 @@ mod tests {
                 "NOVA_OIDC_CLIENT_SECRET",
                 "NOVA_SESSION_SECRET",
                 "NOVA_OIDC_ADMIN_GROUP",
+                "NOVA_CPU_HOUR_PRICE",
+                "NOVA_CPU_HOUR_CURRENCY",
                 "NOVA_S3_URL",
                 "NOVA_S3_ACCESS_KEY",
                 "NOVA_S3_SECRET_KEY",

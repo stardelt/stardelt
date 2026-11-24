@@ -9121,6 +9121,7 @@ mod tests {
             demo: false,
             forward_identity: false,
             redact_query_log_literals: false,
+            showback: None,
             mcp: None,
             auth: None,
             jobs: Mutex::new(Vec::new()),

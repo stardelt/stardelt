@@ -8602,7 +8602,7 @@
           "public"
         ],
         "summary": "`GET /api/query-log/usage?scope=&by=&warehouse=&from=&to=` — compute and bytes added up.",
-        "description": "Compute and bytes added up per person, warehouse, day or group, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. A group is the `groups` claim the person's token carried at the last write to the person directory; a principal the directory does not know, such as the superset service account, and a person with no group fall into one honest 'unknown' row. A person in several groups appears in each of them, so the total counts every query once. The window defaults to the last 7 days.",
+        "description": "Compute and bytes added up per person, warehouse, day or group, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. A group is the `groups` claim the person's token carried at the last write to the person directory; a principal the directory does not know, such as the superset service account, and a person with no group fall into one honest 'unknown' row. A person in several groups appears in each of them, so the total counts every query once. The window defaults to the last 7 days. When a price per CPU-hour is configured, each row carries an estimated cost — an estimate, never a bill.",
         "operationId": "query_log_usage",
         "parameters": [
           {
@@ -18006,6 +18006,17 @@
               "$ref": "#/components/schemas/UsageRow"
             }
           },
+          "price": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UsagePrice",
+                "description": "The rate `estimatedCost` uses; absent when showback is off."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "to": {
             "type": "integer",
             "format": "int64"
@@ -18013,6 +18024,23 @@
           "total": {
             "$ref": "#/components/schemas/UsageRow",
             "description": "Every item added together; its `key` is `total`."
+          }
+        }
+      },
+      "UsagePrice": {
+        "type": "object",
+        "description": "The rate `estimatedCost` uses; absent when showback is off.",
+        "required": [
+          "cpuHourPrice",
+          "currency"
+        ],
+        "properties": {
+          "cpuHourPrice": {
+            "type": "number",
+            "format": "double"
+          },
+          "currency": {
+            "type": "string"
           }
         }
       },

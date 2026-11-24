@@ -541,6 +541,62 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The optional showback rate: CPU time at a price, an estimate and never a bill.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Showback {
+    pub cpu_hour_price: f64,
+    pub currency: String,
+}
+
+impl Showback {
+    /// Both install settings or neither (`NOVA_CPU_HOUR_PRICE`, `NOVA_CPU_HOUR_CURRENCY`).
+    pub fn from_env() -> Result<Option<Self>, String> {
+        parse_showback(
+            std::env::var("NOVA_CPU_HOUR_PRICE").ok().as_deref(),
+            std::env::var("NOVA_CPU_HOUR_CURRENCY").ok().as_deref(),
+        )
+    }
+}
+
+/// The parsing half of [`Showback::from_env`], so it is testable without touching the
+/// process environment.
+fn parse_showback(price: Option<&str>, currency: Option<&str>) -> Result<Option<Showback>, String> {
+    let (raw_price, raw_currency) = match (price, currency) {
+        (None, None) => return Ok(None),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "NOVA_CPU_HOUR_PRICE and NOVA_CPU_HOUR_CURRENCY must be set together".into(),
+            );
+        }
+        (Some(p), Some(c)) => (p.trim(), c),
+    };
+    let cpu_hour_price: f64 = raw_price
+        .parse()
+        .map_err(|_| format!("NOVA_CPU_HOUR_PRICE is not a positive number: {raw_price}"))?;
+    if !cpu_hour_price.is_finite() || cpu_hour_price <= 0.0 {
+        return Err(format!(
+            "NOVA_CPU_HOUR_PRICE is not a positive number: {raw_price}"
+        ));
+    }
+    // Not lowercased: a currency is shown as the administrator wrote it.
+    let currency = raw_currency.trim();
+    if currency.is_empty() || currency.chars().count() > 8 {
+        return Err(format!(
+            "NOVA_CPU_HOUR_CURRENCY must be 1 to 8 characters, got: {currency}"
+        ));
+    }
+    Ok(Some(Showback {
+        cpu_hour_price,
+        currency: currency.to_string(),
+    }))
+}
+
+/// CPU time at the configured rate, rounded to cents. `None` when showback is off.
+fn estimate(cpu_ms: i64, showback: Option<&Showback>) -> Option<f64> {
+    let value = cpu_ms as f64 / 3_600_000.0 * showback?.cpu_hour_price;
+    Some((value * 100.0).round() / 100.0)
+}
+
 /// One line of the usage answer: a person, a warehouse or a day, and what it cost.
 #[derive(Debug, Serialize, ToSchema, FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -555,18 +611,40 @@ pub struct UsageRow {
     wall_ms: i64,
     input_bytes: i64,
     written_bytes: i64,
+    /// CPU time at the configured price, rounded to cents; `null` when no price is configured.
+    #[sqlx(default)]
+    estimated_cost: Option<f64>,
 }
 
 impl UsageRow {
-    fn total(items: &[UsageRow]) -> Self {
+    fn total(items: &[UsageRow], showback: Option<&Showback>) -> Self {
+        let cpu_ms: i64 = items.iter().map(|i| i.cpu_ms).sum();
         Self {
             key: "total".into(),
             queries: items.iter().map(|i| i.queries).sum(),
             failed: items.iter().map(|i| i.failed).sum(),
-            cpu_ms: items.iter().map(|i| i.cpu_ms).sum(),
+            cpu_ms,
             wall_ms: items.iter().map(|i| i.wall_ms).sum(),
             input_bytes: items.iter().map(|i| i.input_bytes).sum(),
             written_bytes: items.iter().map(|i| i.written_bytes).sum(),
+            estimated_cost: estimate(cpu_ms, showback),
+        }
+    }
+}
+
+/// The rate `estimatedCost` uses; absent when showback is off.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UsagePrice {
+    cpu_hour_price: f64,
+    currency: String,
+}
+
+impl From<&Showback> for UsagePrice {
+    fn from(s: &Showback) -> Self {
+        Self {
+            cpu_hour_price: s.cpu_hour_price,
+            currency: s.currency.clone(),
         }
     }
 }
@@ -583,16 +661,19 @@ pub struct UsagePage {
     items: Vec<UsageRow>,
     /// Every item added together; its `key` is `total`.
     total: UsageRow,
+    /// The rate `estimatedCost` uses; absent when showback is off.
+    price: Option<UsagePrice>,
 }
 
 impl UsagePage {
-    fn empty(by: By, from_ms: i64, to_ms: i64) -> Self {
+    fn empty(by: By, from_ms: i64, to_ms: i64, showback: Option<&Showback>) -> Self {
         Self {
             by: by.as_str().into(),
             from: from_ms,
             to: to_ms,
             items: vec![],
-            total: UsageRow::total(&[]),
+            total: UsageRow::total(&[], showback),
+            price: showback.map(UsagePrice::from),
         }
     }
 }
@@ -610,7 +691,7 @@ struct UsageTotals {
 }
 
 impl UsageTotals {
-    fn into_row(self) -> UsageRow {
+    fn into_row(self, showback: Option<&Showback>) -> UsageRow {
         UsageRow {
             key: "total".into(),
             queries: self.queries,
@@ -619,6 +700,7 @@ impl UsageTotals {
             wall_ms: self.wall_ms,
             input_bytes: self.input_bytes,
             written_bytes: self.written_bytes,
+            estimated_cost: estimate(self.cpu_ms, showback),
         }
     }
 }
@@ -661,7 +743,7 @@ fn push_usage_predicates(
     operation_id = "query_log_usage",
     path = "/api/query-log/usage",
     tag = "public",
-    description = "Compute and bytes added up per person, warehouse, day or group, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. A group is the `groups` claim the person's token carried at the last write to the person directory; a principal the directory does not know, such as the superset service account, and a person with no group fall into one honest 'unknown' row. A person in several groups appears in each of them, so the total counts every query once. The window defaults to the last 7 days.",
+    description = "Compute and bytes added up per person, warehouse, day or group, with the query log's visibility: your own, your team's service principals, or everyone's for administrators. A group is the `groups` claim the person's token carried at the last write to the person directory; a principal the directory does not know, such as the superset service account, and a person with no group fall into one honest 'unknown' row. A person in several groups appears in each of them, so the total counts every query once. The window defaults to the last 7 days. When a price per CPU-hour is configured, each row carries an estimated cost — an estimate, never a bill.",
     params(
         ("scope" = Option<String>, Query, description = "mine (default), team or all. team is the service principals owned by the caller's groups; all is for administrators"),
         ("by" = Option<String>, Query, description = "principal (default), warehouse, day (UTC) or group (the groups the sign-in token carried)"),
@@ -699,7 +781,13 @@ pub async fn usage(
         HashMap::new()
     };
     if params.scope == Scope::Team && owners.is_empty() {
-        return Json(UsagePage::empty(params.by, params.from_ms, params.to_ms)).into_response();
+        return Json(UsagePage::empty(
+            params.by,
+            params.from_ms,
+            params.to_ms,
+            s.showback.as_ref(),
+        ))
+        .into_response();
     }
 
     let key = match params.by {
@@ -746,6 +834,9 @@ pub async fn usage(
         Ok(rows) => rows,
         Err(e) => return store_failed(e),
     };
+    for row in &mut items {
+        row.estimated_cost = estimate(row.cpu_ms, s.showback.as_ref());
+    }
     if matches!(params.by, By::Principal) {
         match person_names(pool).await {
             Ok(names) => name_principals(&mut items, &names),
@@ -766,11 +857,11 @@ pub async fn usage(
         );
         push_usage_predicates(&mut t, &params, &who, &owners);
         match t.build_query_as::<UsageTotals>().fetch_one(pool).await {
-            Ok(totals) => totals.into_row(),
+            Ok(totals) => totals.into_row(s.showback.as_ref()),
             Err(e) => return store_failed(e),
         }
     } else {
-        UsageRow::total(&items)
+        UsageRow::total(&items, s.showback.as_ref())
     };
     Json(UsagePage {
         by: params.by.as_str().into(),
@@ -778,6 +869,7 @@ pub async fn usage(
         to: params.to_ms,
         items,
         total,
+        price: s.showback.as_ref().map(UsagePrice::from),
     })
     .into_response()
 }
@@ -1490,6 +1582,48 @@ mod tests {
     }
 
     #[test]
+    fn showback_parses_a_price_and_refuses_half_a_setting() {
+        assert_eq!(parse_showback(None, None), Ok(None));
+        assert_eq!(
+            parse_showback(Some("0.12"), Some("EUR")),
+            Ok(Some(Showback {
+                cpu_hour_price: 0.12,
+                currency: "EUR".into(),
+            }))
+        );
+        assert_eq!(
+            parse_showback(Some("0.12"), None),
+            Err("NOVA_CPU_HOUR_PRICE and NOVA_CPU_HOUR_CURRENCY must be set together".into())
+        );
+        assert_eq!(
+            parse_showback(None, Some("EUR")),
+            Err("NOVA_CPU_HOUR_PRICE and NOVA_CPU_HOUR_CURRENCY must be set together".into())
+        );
+        for bad in ["0", "abc"] {
+            assert_eq!(
+                parse_showback(Some(bad), Some("EUR")),
+                Err(format!(
+                    "NOVA_CPU_HOUR_PRICE is not a positive number: {bad}"
+                ))
+            );
+        }
+        assert_eq!(
+            parse_showback(Some("0.12"), Some("")),
+            Err("NOVA_CPU_HOUR_CURRENCY must be 1 to 8 characters, got: ".into())
+        );
+    }
+
+    #[test]
+    fn an_estimate_is_cpu_time_at_the_rate_rounded_to_cents() {
+        let showback = Showback {
+            cpu_hour_price: 0.12,
+            currency: "EUR".into(),
+        };
+        assert_eq!(estimate(3_600_000, Some(&showback)), Some(0.12));
+        assert_eq!(estimate(3_600_000, None), None);
+    }
+
+    #[test]
     fn a_principal_key_is_named_and_an_unknown_one_is_left_alone() {
         let row = |key: &str| UsageRow {
             key: key.into(),
@@ -1499,6 +1633,7 @@ mod tests {
             wall_ms: 1,
             input_bytes: 1,
             written_bytes: 1,
+            estimated_cost: None,
         };
         let mut items = [row("5549059e-d41f-4706-ba9b-d1b4c5948492"), row("superset")];
         let names = HashMap::from([(

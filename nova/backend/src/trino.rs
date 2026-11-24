@@ -780,6 +780,7 @@ mod tests {
             demo: false,
             forward_identity: forward,
             redact_query_log_literals: false,
+            showback: None,
             mcp: None,
             auth: None,
             jobs: std::sync::Mutex::new(Vec::new()),
