@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-11-24T04:12:41Z",
+  "nova": "https://alpha.dev.stardelt.io",
+  "person": "demo",
+  "repeats": 3,
+  "statements": [
+    {"id": "scan", "sql": "SELECT count(*) FROM bronze.shop.customers", "runs": [1007, 458, 464], "p50": 464, "p95": 1007, "rows": 1, "state": "SUCCEEDED"},
+    {"id": "cpu", "sql": "SELECT count(*), sum(cast(mod(a.x * b.y, 1000000) AS bigint)) FROM UNNEST(sequence(1, 1000)) AS a(x) CROSS JOIN UNNEST(sequence(1, 1000)) AS b(y)", "runs": [457, 614, 459], "p50": 459, "p95": 614, "rows": 1, "state": "SUCCEEDED"},
+    {"id": "shuffle", "sql": "SELECT count(*) FROM (SELECT mod(a.x * b.y, 100000) AS k, count(*) AS c FROM UNNEST(sequence(1, 1000)) AS a(x) CROSS JOIN UNNEST(sequence(1, 1000)) AS b(y) GROUP BY 1) s", "runs": [457, 461, 459], "p50": 459, "p95": 461, "rows": 1, "state": "SUCCEEDED"},
+    {"id": "nodepage", "sql": "SELECT count(*) FROM system.runtime.nodes", "runs": [456, 454, 469], "p50": 456, "p95": 469, "rows": 1, "state": "SUCCEEDED"},
+    {"id": "metadata", "sql": "DESCRIBE bronze.shop.customers", "runs": [2257, 481, 531], "p50": 531, "p95": 2257, "rows": 5, "state": "SUCCEEDED"}
+  ],
+  "note": "client wall-clock through Nova's statement API; no engine stats in StatementView yet"
+}
