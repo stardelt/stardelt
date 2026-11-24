@@ -822,7 +822,7 @@ nova:
 # ===========================================================================
 
 superset:
-  # BI / dashboards (chart: superset 0.15.5, appVersion 6.1.0).
+  # BI / dashboards (chart: superset 0.22.8, appVersion 6.1.0).
   #
   # kind tuning:
   #   - Single replica everywhere; celery-beat + websockets off.
@@ -927,19 +927,8 @@ superset:
       - database_name: Trino Warehouse
         sqlalchemy_uri: trino://superset@trino.alpha.dev.stardelt.io:443/warehouse
         tables: []
-
-  # init Job creates admin user + imports the datasource above. The chart's
-  # `init.adminUser.password` is a literal interpolated into the init script, so
-  # the script is overridden (a supported values field) to read the password from
-  # SUPERSET_ADMIN_PASSWORD, i.e. the superset-admin Secret. Username/profile are
-  # not credentials and stay here.
-  init:
-    adminUser:
-      username: admin
-      firstname: stardelt
-      lastname: Admin
-      email: admin@stardelt.local
-    initscript: |
+    # The init script (0.22.8 ignores `init.initscript`, see `init.command` below).
+    superset_init.sh: |
       #!/bin/sh
       set -eu
       echo "Upgrading DB schema..."
@@ -966,6 +955,23 @@ superset:
       fi
       # The password is supplied at connect time by SQLALCHEMY_CUSTOM_PASSWORD_STORE
       # (configOverrides above); the URI above stays credential-free on purpose.
+
+  # init Job creates admin user + imports the datasource above. The chart's
+  # `init.adminUser.password` is a literal interpolated into the init script, so
+  # the script is overridden to read the password from SUPERSET_ADMIN_PASSWORD,
+  # i.e. the superset-admin Secret. Username/profile are not credentials and stay
+  # here. 0.22.8 renders the Job's command from `init.command` and ignores
+  # `init.initscript`, so the script is the `extraConfigs` file above.
+  init:
+    adminUser:
+      username: admin
+      firstname: stardelt
+      lastname: Admin
+      email: admin@stardelt.local
+    command:
+      - "/bin/sh"
+      - "-c"
+      - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; . {{ .Values.extraConfigMountPath }}/superset_init.sh"
     loadExamples: false
 
   # Components

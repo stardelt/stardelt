@@ -90,7 +90,7 @@ ensure_secret airflow-admin username=admin password=@rand
 # installed (helm-values/airflow.yaml, platform#476).
 ensure_secret airflow-nova-api username=nova-api password=@rand
 
-# Superset. `superset 0.15.5` has no Secret-name field for its secret key; the
+# Superset. The superset chart has no Secret-name field for its secret key; the
 # chart passes extraEnvRaw through to every pod including the init Job.
 ensure_secret superset-secret-key secret-key=@rand
 ensure_secret superset-admin username=admin password=@rand \

@@ -176,7 +176,7 @@ Collaboration/release branches are planned later (issue #38).
 | OpenFGA | 0.4.1 | v1.22.1 |
 | Trino | 1.45.0 | 484 |
 | Apache Airflow | 1.22.0 | 3.2.2 |
-| Apache Superset | 0.15.5 | 6.1.0 |
+| Apache Superset | 0.22.8 | 6.1.0 |
 | Apache Spark (image, no chart) | — | 4.1.4 (Iceberg 1.12.0) |
 | Keycloak (image, no chart) | — | 26.8.2 |
 

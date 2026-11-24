@@ -1,5 +1,5 @@
 # Apache Superset — BI / dashboards.
-# Chart: superset/superset 0.15.5, appVersion 6.1.0.
+# Chart: superset/superset 0.22.8, appVersion 6.1.0.
 #
 # kind tuning:
 #   - Single replica everywhere; celery-beat + websockets off.
@@ -264,7 +264,7 @@ configOverrides:
 
 # No secrets in this file: scripts/app-secrets.sh generates them per cluster
 # (the install targets run it before this chart) and keeps them across installs
-# and uninstalls. `superset 0.15.5` has no `supersetSecretKeySecretName` field,
+# and uninstalls. The chart has no `supersetSecretKeySecretName` field,
 # and `extraSecretEnv` writes its values into a Secret as literals (a `valueFrom`
 # map would render as garbage), so the key is passed as a raw env entry instead:
 # `extraEnvRaw` reaches every Superset pod and the init Job.
@@ -381,58 +381,63 @@ extraConfigs:
         {"allow_multi_catalog": true, "metadata_params": {}, "engine_params": {},
         "metadata_cache_timeout": {}, "schemas_allowed_for_file_upload": []}
       tables: []
+  # The init script itself (0.22.8 ignores `init.initscript`, see `init.command`).
+  # It runs from this mount, so the role scripts and the datasource file are named
+  # relative to it and every Go template placeholder is resolved here.
+  superset_init.sh: |
+    #!/bin/sh
+    set -eu
+    cd /app/configs
+    echo "Upgrading DB schema..."
+    superset db upgrade
+    echo "Initializing roles..."
+    superset init
+    echo "Creating admin user..."
+    superset fab create-admin \
+                    --username admin \
+                    --firstname stardelt \
+                    --lastname Admin \
+                    --email admin@stardelt.local \
+                    --password "$SUPERSET_ADMIN_PASSWORD" \
+                    || true
+    if [ -f import_datasources.yaml ]; then
+      echo "Importing database connections.... "
+      superset import_datasources -p import_datasources.yaml
+    fi
+    # Normal users' role (#287), after `superset init` and the datasource import
+    # so the built-in roles and the database exist. Idempotent: it converges the
+    # role to the exact permission set and prints one line.
+    echo "Converging the analyst role..."
+    python "superset-analyst-role.py"
+    echo "Converging Nova's Superset user..."
+    python "superset-nova-user.py"
+    if [ -f "superset-group-roles.py" ]; then
+      echo "Converging the group roles..."
+      python "superset-group-roles.py"
+    fi
+    # The password is supplied at connect time by SQLALCHEMY_CUSTOM_PASSWORD_STORE
+    # (configOverrides above); the URI above stays credential-free on purpose.
 
 # init Job creates admin user + imports the datasource above.
 # The chart only offers `init.adminUser.password`, a literal that is interpolated
-# into the init script, so it cannot come from a Secret. `init.initscript` is a
-# supported values field: below is the chart 0.15.5 default script with the
-# `--password` argument read from SUPERSET_ADMIN_PASSWORD (extraEnvRaw above,
-# from the superset-admin Secret). Username and profile are not credentials and
-# stay in values.
+# into the init script, so it cannot come from a Secret. The chart's own init
+# script is `superset_init.sh` in the config Secret mounted at `configMountPath`;
+# ours is the file in `extraConfigs` above, and `init.command` sources it. The
+# `--password` argument reads SUPERSET_ADMIN_PASSWORD (extraEnvRaw above, from the
+# superset-admin Secret). Username and profile are not credentials and stay in values.
 init:
   adminUser:
     username: admin
     firstname: stardelt
     lastname: Admin
     email: admin@stardelt.local
-  initscript: |
-    #!/bin/sh
-    set -eu
-    echo "Upgrading DB schema..."
-    superset db upgrade
-    echo "Initializing roles..."
-    superset init
-    {{ if .Values.init.createAdmin }}
-    echo "Creating admin user..."
-    superset fab create-admin \
-                    --username {{ .Values.init.adminUser.username }} \
-                    --firstname {{ .Values.init.adminUser.firstname }} \
-                    --lastname {{ .Values.init.adminUser.lastname }} \
-                    --email {{ .Values.init.adminUser.email }} \
-                    --password "$SUPERSET_ADMIN_PASSWORD" \
-                    || true
-    {{- end }}
-    {{ if .Values.init.loadExamples }}
-    echo "Loading examples..."
-    superset load_examples
-    {{- end }}
-    if [ -f "{{ .Values.extraConfigMountPath }}/import_datasources.yaml" ]; then
-      echo "Importing database connections.... "
-      superset import_datasources -p {{ .Values.extraConfigMountPath }}/import_datasources.yaml
-    fi
-    # Normal users' role (#287), after `superset init` and the datasource import
-    # so the built-in roles and the database exist. Idempotent: it converges the
-    # role to the exact permission set and prints one line.
-    echo "Converging the analyst role..."
-    python "{{ .Values.extraConfigMountPath }}/superset-analyst-role.py"
-    echo "Converging Nova's Superset user..."
-    python "{{ .Values.extraConfigMountPath }}/superset-nova-user.py"
-    if [ -f "{{ .Values.extraConfigMountPath }}/superset-group-roles.py" ]; then
-      echo "Converging the group roles..."
-      python "{{ .Values.extraConfigMountPath }}/superset-group-roles.py"
-    fi
-    # The password is supplied at connect time by SQLALCHEMY_CUSTOM_PASSWORD_STORE
-    # (configOverrides above); the URI above stays credential-free on purpose.
+  # 0.22.8 ignores `initscript` (the chart's own script is sourced instead), so our script is a
+  # file in `extraConfigs` and this command sources it. This list is templated; keep the
+  # placeholders.
+  command:
+    - "/bin/sh"
+    - "-c"
+    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; . {{ .Values.extraConfigMountPath }}/superset_init.sh"
   loadExamples: false
   podSecurityContext:
     runAsNonRoot: true
@@ -516,7 +521,7 @@ supersetWorker:
   command:
     - "/bin/sh"
     - "-c"
-    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; celery --app=superset.tasks.celery_app:app worker --concurrency=2"
+    - ". {{ .Values.configMountPath }}/superset_bootstrap.sh; exec celery --app=superset.tasks.celery_app:app worker --concurrency=2"
   resources:
     requests: { cpu: "100m", memory: "512Mi" }
     limits:   { cpu: "2",    memory: "1Gi"  }
