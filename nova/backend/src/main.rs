@@ -2604,7 +2604,10 @@ mod router_tests {
         // (d) Anything else than principal, warehouse, day or group is refused with a sentence.
         let (status, body) = call(&alice, "GET", "/api/query-log/usage?by=week", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "by must be principal, warehouse, day or group");
+        assert_eq!(
+            body["error"],
+            "by must be principal, warehouse, day or group"
+        );
     }
 
     /// A profile follows the rule of the detail it belongs to: the owner sees it, another
