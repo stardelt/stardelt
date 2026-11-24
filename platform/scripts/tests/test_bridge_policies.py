@@ -27,6 +27,7 @@ between the two representations fails the differential instead of hiding.
 """
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -342,6 +343,27 @@ def filter_columns_body(user, catalog, namespace, table, columns):
     }
 
 
+def row_filter_body(user, groups, catalog, namespace, table):
+    """The body Trino sends for `GetRowFilters`: the filter question is per table."""
+    body = table_body(user, "GetRowFilters", catalog, namespace, table)
+    body["context"]["identity"]["groups"] = list(groups)
+    return body
+
+
+def column_mask_body(user, groups, catalog, namespace, table, column):
+    """The body Trino sends for `GetColumnMask`: one call per referenced column."""
+    return {
+        "context": {"identity": {"user": user, "groups": list(groups)},
+                    "softwareStack": {"trinoVersion": "484"}, "properties": {}},
+        "action": {
+            "operation": "GetColumnMask",
+            "resource": {"column": {"catalogName": catalog, "schemaName": namespace,
+                                    "tableName": table, "columnName": column,
+                                    "columnType": "varchar"}},
+        },
+    }
+
+
 def access_table(drift=(), now=None, omit=()):
     """The document access-sync publishes, built by the job's own function."""
     import time
@@ -399,8 +421,8 @@ class BridgePolicyTest(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return str(path)
 
-    def _eval(self, query, body, table):
-        args = [OPA, "eval", "--format=json", "-d", POLICY_DIR]
+    def _eval(self, query, body, table, policy_dir=None):
+        args = [OPA, "eval", "--format=json", "-d", policy_dir or POLICY_DIR]
         if table is not None:
             args += ["-d", self._file({"stardelt": {"access": table}})]
         args += ["-i", self._file(body), query]
@@ -414,6 +436,23 @@ class BridgePolicyTest(unittest.TestCase):
         if not payload.get("result"):
             return {}
         return payload["result"][0]["expressions"][0]["value"]
+
+    def _policy_dir(self, row_filters, column_masks):
+        """A copy of the rendered bundle with one policy document (`package stardelt.policy`).
+
+        The shipped file is replaced, not extended: a case must not inherit another's rule.
+        """
+        target = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        for entry in Path(POLICY_DIR).iterdir():
+            if entry.name == "stardelt.policy.rego":
+                continue
+            shutil.copy2(entry, target / entry.name)
+        (target / "stardelt.policy.rego").write_text(
+            "package stardelt.policy\n\nrow_filters := %s\n\ncolumn_masks := %s\n"
+            % (json.dumps(row_filters), json.dumps(column_masks)),
+            encoding="utf-8",
+        )
+        return str(target)
 
     def front(self, body, table, batched=False):
         """The front entry point's answer, without asking the chart's rules."""
@@ -637,6 +676,80 @@ class BridgePolicyTest(unittest.TestCase):
         body = filter_catalogs_body("sub-finops", ["gold", "silver", "system"])
         self.assertEqual(self.front(body, access_table(now=0), batched=True), [0, 2])
         self.assertGreater(self.stub.authorized(), 0)
+
+    def test_the_shipped_policy_answers_no_rule(self):
+        body = row_filter_body("sub-demo", ["wh-demo"], "bronze", "shop", "customers")
+        self.assertEqual(self._eval("data.stardelt.row_filters", body, None), [])
+        mask = column_mask_body("sub-demo", ["wh-demo"], "bronze", "shop", "customers", "name")
+        self.assertEqual(self._eval("data.stardelt.column_masks", mask, None), {})
+
+    def test_a_group_rule_filters_the_table(self):
+        policy = self._policy_dir(
+            {"bronze.shop.customers": {"groups": ["wh-demo"],
+                                       "expression": "country = 'de'"}},
+            {},
+        )
+        body = row_filter_body("sub-demo", ["wh-demo"], "bronze", "shop", "customers")
+        self.assertEqual(
+            self._eval("data.stardelt.row_filters", body, None, policy_dir=policy),
+            [{"expression": "country = 'de'"}],
+        )
+
+    def test_a_group_rule_does_not_reach_another_group(self):
+        policy = self._policy_dir(
+            {"bronze.shop.customers": {"groups": ["wh-demo"],
+                                       "expression": "country = 'de'"}},
+            {},
+        )
+        body = row_filter_body("sub-visitor", ["visitors"], "bronze", "shop", "customers")
+        self.assertEqual(
+            self._eval("data.stardelt.row_filters", body, None, policy_dir=policy), []
+        )
+
+    def test_a_user_rule_matches_that_sub_only(self):
+        policy = self._policy_dir(
+            {"bronze.shop.customers": {"users": ["sub-demo"],
+                                       "expression": "country = 'de'"}},
+            {},
+        )
+        matching = row_filter_body("sub-demo", [], "bronze", "shop", "customers")
+        self.assertEqual(
+            self._eval("data.stardelt.row_filters", matching, None, policy_dir=policy),
+            [{"expression": "country = 'de'"}],
+        )
+        other = row_filter_body("sub-visitor", [], "bronze", "shop", "customers")
+        self.assertEqual(
+            self._eval("data.stardelt.row_filters", other, None, policy_dir=policy), []
+        )
+
+    def test_a_column_mask_names_the_replacement_only_for_its_column(self):
+        policy = self._policy_dir(
+            {},
+            {"bronze.shop.customers": {"name": {"groups": ["wh-demo"],
+                                                "expression": "'masked'"}}},
+        )
+        masked = column_mask_body("sub-demo", ["wh-demo"], "bronze", "shop",
+                                  "customers", "name")
+        self.assertEqual(
+            self._eval("data.stardelt.column_masks", masked, None, policy_dir=policy),
+            {"expression": "'masked'"},
+        )
+        untouched = column_mask_body("sub-demo", ["wh-demo"], "bronze", "shop",
+                                     "customers", "id")
+        self.assertEqual(
+            self._eval("data.stardelt.column_masks", untouched, None, policy_dir=policy), {}
+        )
+
+    def test_a_rule_for_another_table_answers_no_filter(self):
+        policy = self._policy_dir(
+            {"gold.retail_demo.taxi_daily_metrics": {"groups": ["wh-demo"],
+                                                     "expression": "day > DATE '2026-01-01'"}},
+            {},
+        )
+        body = row_filter_body("sub-demo", ["wh-demo"], "bronze", "shop", "customers")
+        self.assertEqual(
+            self._eval("data.stardelt.row_filters", body, None, policy_dir=policy), []
+        )
 
     # -- the differential --------------------------------------------------
 

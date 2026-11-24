@@ -413,6 +413,56 @@ OPABridge:
       	some index in trino.batch
       		with input.action.filterResources as _columns_upstream_resources
       }
+
+      # Row filters and column masks (stardelt/stardelt#50; #1485 measured every shape below).
+      # Trino asks `row_filters` once per query (operation GetRowFilters, resource.table) and
+      # `column_masks` once per referenced column (GetColumnMask, resource.column). The answer
+      # is an array of objects for a filter (`[]` = no filter) and ONE object for a mask
+      # (undefined = no mask; `[]` fails the plugin's deserializer and the query).
+      _table_name := concat(".", [t.catalogName, t.schemaName, t.tableName]) if {
+      	t := input.action.resource.table
+      }
+
+      _column_table_name := concat(".", [c.catalogName, c.schemaName, c.tableName]) if {
+      	c := input.action.resource.column
+      }
+
+      _rule_applies(rule) if {
+      	some group in object.get(rule, "groups", [])
+      	group in input.context.identity.groups
+      }
+
+      _rule_applies(rule) if {
+      	input.context.identity.user in object.get(rule, "users", [])
+      }
+
+      row_filters contains {"expression": rule.expression} if {
+      	rule := data.stardelt.policy.row_filters[_table_name]
+      	_rule_applies(rule)
+      }
+
+      column_masks := {"expression": rule.expression} if {
+      	rule := data.stardelt.policy.column_masks[_column_table_name][input.action.resource.column.columnName]
+      	_rule_applies(rule)
+      }
+    stardelt.policy.rego: |
+      package stardelt.policy
+
+      # The policy plane's rules (stardelt/stardelt#50, #1485 measured the plugin's shapes).
+      # The bridge's entry points in `stardelt.front.rego` read these maps; this document is
+      # empty by default, so the bridge answers `[]` for a row filter and undefined for a
+      # column mask — exactly Trino's "no rule", which is what it does when the two URIs are
+      # absent (helm-values/trino-identity.yaml).
+      #
+      #   row_filters:  "<catalog>.<schema>.<table>" -> {"expression": "<SQL boolean>",
+      #                  "groups": ["<trino group>", …]} or {"…", "users": ["<sub>", …]}
+      #   column_masks: "<catalog>.<schema>.<table>" -> {"<column>": {same shape}}
+      #
+      # A rule applies when one of its `groups` is in identity.groups or its `users` names
+      # identity.user; a table or column with no rule is not filtered and not masked.
+      row_filters := {}
+
+      column_masks := {}
   resources:
     requests: { cpu: "20m", memory: "48Mi" }
     limits: { memory: "256Mi" }
