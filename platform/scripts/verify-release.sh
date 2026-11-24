@@ -12,7 +12,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
 # The command each Makefile target runs. `scripts/tests/test_verify_release.py` reads the Makefile
 # and fails when this table and the recipes drift apart.
 declare -A recipe=(
-  [verify-trino-auth]='TRINO_VERIFY_USER=demo TRINO_VERIFY_USER_PASSWORD=demo bash scripts/verify-trino-auth.sh'
+  [verify-trino-auth]='bash scripts/verify-trino-auth.sh'
   [verify-catalog-permissions]='bash scripts/verify-catalog-permissions.sh'
   [verify-backups-all]='bash scripts/verify-backups-all.sh'
   [verify-streaming]='bash scripts/verify-streaming.sh'
@@ -139,6 +139,13 @@ for t in $targets; do
   extra=()
   if [ "$t" = verify-images ]; then
     extra=(SECRET="${SECRET:-$GHCR_SECRET}")
+  fi
+  # The Makefile's defaults for the person check in verify-trino-auth (`TRINO_VERIFY_USER ?= demo`,
+  # `TRINO_VERIFY_USER_PASSWORD ?= demo`, stardelt/stardelt#1499): the release must not pass with
+  # that check skipped, and a caller's own values still win.
+  if [ "$t" = verify-trino-auth ]; then
+    extra+=(TRINO_VERIFY_USER="${TRINO_VERIFY_USER:-demo}"
+            TRINO_VERIFY_USER_PASSWORD="${TRINO_VERIFY_USER_PASSWORD:-demo}")
   fi
   for attempt in 1 2; do
     if env "${extra[@]}" bash -c "$cmd" > "$logdir/$t.log" 2>&1; then
