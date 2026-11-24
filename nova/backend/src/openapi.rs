@@ -497,6 +497,35 @@ mod tests {
         );
     }
 
+    /// `query_log_api::UsageRow` and `model_usage::UsageRow` were both reflected as
+    /// `UsageRow`, so utoipa kept one and the usage answer was described with the
+    /// model-usage fields (#1505). The query-log row has its own name now, and the
+    /// page points at it.
+    #[test]
+    fn the_usage_answer_has_its_own_row_schema() {
+        let doc = serde_json::to_value(document()).expect("the document serializes");
+        let props = doc["components"]["schemas"]["QueryUsageRow"]["properties"]
+            .as_object()
+            .expect("QueryUsageRow is in the document");
+        for key in [
+            "key",
+            "queries",
+            "failed",
+            "cpuMs",
+            "wallMs",
+            "inputBytes",
+            "writtenBytes",
+            "estimatedCost",
+        ] {
+            assert!(props.contains_key(key), "QueryUsageRow has no {key}");
+        }
+        let items = &doc["components"]["schemas"]["UsagePage"]["properties"]["items"]["items"];
+        assert_eq!(
+            items["$ref"], "#/components/schemas/QueryUsageRow",
+            "UsagePage.items does not point at QueryUsageRow: {items}"
+        );
+    }
+
     /// Routes that are served but not in the document yet. This list only
     /// shrinks: document a route (add its `#[utoipa::path]`) and delete its
     /// line here. Adding a route without either fails the test below.
