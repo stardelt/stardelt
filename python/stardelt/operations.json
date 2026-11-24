@@ -1,6 +1,38 @@
 {
   "contract_version": "0.1.0",
   "operations": {
+    "access_requests_create": {
+      "method": "POST",
+      "path": "/api/access-requests",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
+    "access_requests_list": {
+      "method": "GET",
+      "path": "/api/access-requests",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
+    "access_requests_read": {
+      "method": "GET",
+      "path": "/api/access-requests/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "access_requests_withdraw": {
+      "method": "DELETE",
+      "path": "/api/access-requests/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "ask_answer": {
       "method": "POST",
       "path": "/api/ask",

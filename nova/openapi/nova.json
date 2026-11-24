@@ -16,6 +16,257 @@
     }
   ],
   "paths": {
+    "/api/access-requests": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/access-requests` — the caller's own requests, newest first, at most 50.",
+        "description": "The caller's own access requests: which catalog and group they asked for, the requested verbs and why, and whether the request is still open. Newest first, at most 50. Another person's requests are never listed.",
+        "operationId": "access_requests_list",
+        "responses": {
+          "200": {
+            "description": "The caller's requests, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccessRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/access-requests` — `201` with the stored row.",
+        "description": "Ask the owner group of a catalog for access: the group (the caller must be a member of it), the catalog, one or more of `browse`, `select`, `write`, `create`, and a reason of at most 500 characters. `manage` belongs to the catalog's owner and cannot be requested. The requester is the signed-in caller, never part of the body. An owner group's IdP that leaves the groups out of the token cannot be judged here, so such a request is accepted and the approval decides. The request changes no grant.",
+        "operationId": "access_requests_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAccessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The group, catalog or reason is empty, the reason is over 500 characters, or a verb is unknown, repeated or `manage`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the requested group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/access-requests/{id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/access-requests/{id}` — the caller's own row; somebody else's is a 404.",
+        "description": "One of the caller's own access requests. Another person's request answers 404, exactly like an id that does not exist: the API never confirms that it is there.",
+        "operationId": "access_requests_read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The access request's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such request for this caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/access-requests/{id}` — withdraw one's own open request; `200` with the row.",
+        "description": "Withdraw one of the caller's own open access requests: its state becomes `withdrawn` and it keeps that state. A request that is already withdrawn answers 409, another person's 404. Nothing is deleted, and no grant is touched.",
+        "operationId": "access_requests_withdraw",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The access request's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The row, now `withdrawn`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such request for this caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request was already withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/catalogs": {
       "get": {
         "tags": [
@@ -10920,6 +11171,67 @@
   },
   "components": {
     "schemas": {
+      "AccessRequest": {
+        "type": "object",
+        "description": "A row as the API returns it. `created_at` and `state_changed_at` are RFC 3339 in UTC.",
+        "required": [
+          "id",
+          "requesterSub",
+          "requesterName",
+          "groupName",
+          "catalog",
+          "verbs",
+          "reason",
+          "state",
+          "createdAt",
+          "stateChangedAt"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The catalog the access is asked for."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When it was created, RFC 3339."
+          },
+          "groupName": {
+            "type": "string",
+            "description": "The group whose approval is asked for."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, in one sentence."
+          },
+          "requesterName": {
+            "type": "string",
+            "description": "Their display name, as the token carried it."
+          },
+          "requesterSub": {
+            "type": "string",
+            "description": "The `sub` of the person who asked."
+          },
+          "state": {
+            "type": "string",
+            "description": "`open` or `withdrawn`."
+          },
+          "stateChangedAt": {
+            "type": "string",
+            "description": "When its state last changed, RFC 3339."
+          },
+          "verbs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The requested verbs, sorted: one or more of `browse`, `select`, `write`, `create`."
+          }
+        }
+      },
       "AdminCatalog": {
         "type": "object",
         "description": "One catalog, as an administrator sees it.\n\n`displayName`, `description`, `owner`, `keyPrefix`, `warehouseId` and the two\ngeneration numbers are `null` when the resource does not carry them — never\nan empty string or a guessed value.",
@@ -12668,6 +12980,37 @@
           "store": {
             "type": "boolean",
             "description": "Whether this install has the platform's own secret store. `false` in\n`spec.secrets.mode: external`, where a connection names a path in the\nenterprise's store and the operator syncs it."
+          }
+        }
+      },
+      "CreateAccessRequest": {
+        "type": "object",
+        "description": "`POST /api/access-requests` body. The requester is never part of it.",
+        "required": [
+          "group",
+          "catalog",
+          "verbs",
+          "reason"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The catalog the access is asked for."
+          },
+          "group": {
+            "type": "string",
+            "description": "The group whose approval is asked for; the caller must be a member."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, in one sentence, at most 500 characters."
+          },
+          "verbs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What to ask for: one or more of `browse`, `select`, `write`, `create`."
           }
         }
       },

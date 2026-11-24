@@ -94,6 +94,7 @@
 //! the caller's workspace view (`workspace.rs`); unset, `/api/workspace` answers
 //! `{"state":"unavailable"}` with 200 so the Notebooks page still renders.
 
+mod access_requests;
 mod admin_catalogs;
 mod airflow;
 mod api_json;
@@ -758,6 +759,16 @@ fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/catalog/tables/{ns}/{tbl}/verified-queries/check",
             post(verified_queries::check_all),
+        )
+        // A person asks a catalog's owner group for access (#489 slice 1, D12): the request is
+        // stored, the grant is applied by the approval slice.
+        .route(
+            "/access-requests",
+            get(access_requests::list).post(access_requests::create),
+        )
+        .route(
+            "/access-requests/{id}",
+            get(access_requests::read).delete(access_requests::withdraw),
         )
         .route(
             "/catalog/tables/{ns}/{tbl}/columns/{column}/description",
@@ -1677,7 +1688,7 @@ mod router_tests {
         }
     }
 
-    fn test_app(tag: &str) -> (Router, StaticDir) {
+    pub(crate) fn test_app(tag: &str) -> (Router, StaticDir) {
         let dir = StaticDir::new(tag);
         let app = app(test_state(), api_router(), dir.path());
         (app, dir)
