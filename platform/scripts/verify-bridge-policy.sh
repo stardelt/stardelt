@@ -36,12 +36,11 @@ bad() { echo "✗ $1: $2"; exit 1; }
 # --- the bridge, through a port-forward (the shape catalog-authz-bootstrap.sh uses) --------
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')"
 base="http://localhost:$port"
-log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+tmp="$(mktemp -d)"
 
-kubectl -n "$NAMESPACE" port-forward svc/lakekeeper-opa "$port":8282 >/dev/null 2>"$log" &
+kubectl -n "$NAMESPACE" port-forward svc/lakekeeper-opa "$port":8282 >/dev/null 2>"$tmp/pf.log" &
 pf_pid=$!
-trap 'kill "$pf_pid" 2>/dev/null || true; rm -f "$log"' EXIT
+trap 'kill "$pf_pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 
 health=""
 for _ in $(seq 1 30); do
@@ -49,14 +48,17 @@ for _ in $(seq 1 30); do
   [ -n "$health" ] && break
   sleep 0.5
 done
-[ -n "$health" ] || bad "port-forward" "svc/lakekeeper-opa in $NAMESPACE did not answer /health within 15 s ($(tail -n 1 "$log" 2>/dev/null))"
+# `never came up` is verify-release's transient phrase for a port-forward: the check proved
+# nothing, so it is retried and reported `?`, not `✗` (verify-release.sh).
+[ -n "$health" ] || bad "port-forward" "port-forward to svc/lakekeeper-opa in $NAMESPACE never came up (/health did not answer within 15 s: $(tail -n 1 "$tmp/pf.log" 2>/dev/null))"
 
-ask() { # ask <entry point> <file with the input body> -> the response body, exit 1 on a non-200
+# ask <entry point> <file with the input body> -> the response body on stdout, exit 1 otherwise.
+# Called in the main shell (never in `$()`), so `bad` prints its ✗ line.
+ask() { # ask <entry point> <body file> <row name>
   local code
-  code="$(curl -sS -o "$log.body" -w '%{http_code}' -X POST "$base/v1/data/$1" \
+  code="$(curl -sS -o "$tmp/answer.json" -w '%{http_code}' -X POST "$base/v1/data/$1" \
     -H 'Content-Type: application/json' --data-binary @"$2")" || true
-  [ "$code" = "200" ] || bad "$1" "HTTP $code: $(cut -c1-300 "$log.body")"
-  cat "$log.body"
+  [ "$code" = "200" ] || bad "$3" "HTTP $code: $(cut -c1-300 "$tmp/answer.json")"
 }
 
 # --- row 1: the ConfigMap carries the policy document and the entry points ----------------
@@ -74,31 +76,33 @@ esac
 echo "✓ policy document: stardelt.policy.rego and stardelt.front.rego are in lakekeeper-opa-policies ($files files)"
 
 # --- row 2: GetRowFilters is defined and answers [] --------------------------------------
-cat >"$log.row2" <<'JSON'
+# The ticket's body verbatim; the spike's captured bodies also carry `softwareStack` and
+# `properties`, which the policy does not read.
+cat >"$tmp/row2.json" <<'JSON'
 {"input":{"context":{"identity":{"user":"verify","groups":["wh-verify"]}},"action":{"operation":"GetRowFilters","resource":{"table":{"catalogName":"bronze","schemaName":"shop","tableName":"customers"}}}}}
 JSON
-answer="$(ask stardelt/row_filters "$log.row2")"
-verdict="$(printf '%s' "$answer" | python3 -c '
+ask stardelt/row_filters "$tmp/row2.json" row_filters
+verdict="$(python3 -c '
 import json, sys
-body = json.loads(sys.stdin.read())
+body = json.load(open(sys.argv[1]))
 if "result" not in body:
     print("the bridge did not load the policy document — run make step-lakekeeper")
 elif body["result"] != []:
     print("expected [] (no rule = no filter), got " + json.dumps(body["result"])[:200])
 else:
     print("ok")
-')" || bad row_filters "the answer is not JSON: $(printf '%s' "$answer" | cut -c1-300)"
+' "$tmp/answer.json")" || bad row_filters "the answer is not JSON: $(cut -c1-300 "$tmp/answer.json")"
 [ "$verdict" = "ok" ] || bad row_filters "$verdict"
 echo "✓ row_filters: [] (no rule = no filter)"
 
 # --- row 3: GetColumnMask stays undefined ------------------------------------------------
-cat >"$log.row3" <<'JSON'
+cat >"$tmp/row3.json" <<'JSON'
 {"input":{"context":{"identity":{"user":"verify","groups":["wh-verify"]},"softwareStack":{"trinoVersion":"484"},"properties":{}},"action":{"operation":"GetColumnMask","resource":{"column":{"catalogName":"bronze","schemaName":"shop","tableName":"customers","columnName":"name","columnType":"varchar"}}}}}
 JSON
-answer="$(ask stardelt/column_masks "$log.row3")"
-verdict="$(printf '%s' "$answer" | python3 -c '
+ask stardelt/column_masks "$tmp/row3.json" column_masks
+verdict="$(python3 -c '
 import json, sys
-body = json.loads(sys.stdin.read())
+body = json.load(open(sys.argv[1]))
 if "result" not in body:
     print("ok")
 elif body["result"] == []:
@@ -106,25 +110,25 @@ elif body["result"] == []:
           "\"GENERIC_INTERNAL_ERROR: Failed to deserialize OPA policy response\")")
 else:
     print("expected no result (undefined = no mask), got " + json.dumps(body)[:200])
-')" || bad column_masks "the answer is not JSON: $(printf '%s' "$answer" | cut -c1-300)"
+' "$tmp/answer.json")" || bad column_masks "the answer is not JSON: $(cut -c1-300 "$tmp/answer.json")"
 [ "$verdict" = "ok" ] || bad column_masks "$verdict"
 echo "✓ column_masks: undefined (no rule = no mask)"
 
 # --- row 4: another table is not a blanket filter ----------------------------------------
-cat >"$log.row4" <<'JSON'
+cat >"$tmp/row4.json" <<'JSON'
 {"input":{"context":{"identity":{"user":"verify","groups":["wh-verify"]}},"action":{"operation":"GetRowFilters","resource":{"table":{"catalogName":"gold","schemaName":"other","tableName":"t"}}}}}
 JSON
-answer="$(ask stardelt/row_filters "$log.row4")"
-verdict="$(printf '%s' "$answer" | python3 -c '
+ask stardelt/row_filters "$tmp/row4.json" "another table"
+verdict="$(python3 -c '
 import json, sys
-body = json.loads(sys.stdin.read())
+body = json.load(open(sys.argv[1]))
 if "result" not in body:
     print("the bridge did not load the policy document — run make step-lakekeeper")
 elif body["result"] != []:
     print("expected [] (the empty document is not a blanket filter), got " + json.dumps(body["result"])[:200])
 else:
     print("ok")
-')" || bad "another table" "the answer is not JSON: $(printf '%s' "$answer" | cut -c1-300)"
+' "$tmp/answer.json")" || bad "another table" "the answer is not JSON: $(cut -c1-300 "$tmp/answer.json")"
 [ "$verdict" = "ok" ] || bad "another table" "$verdict"
 echo "✓ another table: [] (the empty document is not a blanket filter)"
 
