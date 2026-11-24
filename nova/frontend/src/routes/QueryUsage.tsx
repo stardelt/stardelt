@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage, type UsagePage } from '../api'
 import { EmptyState } from '../components/EmptyState'
@@ -35,14 +36,17 @@ function cpuText(ms: number): string {
 }
 
 export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; fromMs: number }) {
-  const by = scope === 'mine' ? 'warehouse' : 'principal'
+  // A second dimension of the answer, besides the person: the groups the token carried. It
+  // only means something outside the `mine` scope, where the answer adds up by warehouse.
+  const [dim, setDim] = useState<'principal' | 'group'>('principal')
+  const by = scope === 'mine' ? 'warehouse' : dim
   const usage = useQuery({
-    queryKey: ['query-usage', scope, by, fromMs],
+    queryKey: ['query-usage', scope, by, dim, fromMs],
     queryFn: () => api.queryUsage({ scope, by, from: fromMs }),
     refetchInterval: 60_000,
   })
   const days = useQuery({
-    queryKey: ['query-usage', scope, 'day', fromMs],
+    queryKey: ['query-usage', scope, 'day', dim, fromMs],
     queryFn: () => api.queryUsage({ scope, by: 'day', from: fromMs }),
     refetchInterval: 60_000,
   })
@@ -68,6 +72,13 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
   const perDay = days.data?.items ?? []
   const maxDay = Math.max(...perDay.map(r => r.cpuMs), 1)
   const total = page.total
+  const heading =
+    scope === 'mine'
+      ? 'By warehouse'
+      : dim === 'group'
+        ? 'Which group used the most compute'
+        : 'Who used the most compute'
+  const firstColumn = scope === 'mine' ? 'Warehouse' : dim === 'group' ? 'Group' : 'Person'
 
   return (
     <div className="space-y-5">
@@ -76,14 +87,30 @@ export function QueryUsage({ scope, fromMs }: { scope: 'mine' | 'team' | 'all'; 
         {formatBytes(total.inputBytes)} read · {formatCount(total.failed)} failed
       </p>
 
-      <h2 className="text-sm font-semibold">{scope === 'mine' ? 'By warehouse' : 'Who used the most compute'}</h2>
+      <h2 className="text-sm font-semibold">{heading}</h2>
+
+      {scope !== 'mine' && (
+        <div role="group" aria-label="Add usage up by" className="flex rounded-[10px] border border-border overflow-hidden text-sm w-fit">
+          {(['principal', 'group'] as const).map(option => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={dim === option}
+              onClick={() => setDim(option)}
+              className={`px-3 py-1.5 ${dim === option ? 'bg-accent-solid text-white' : 'bg-bg-elev/60 text-text-dim hover:text-text'}`}
+            >
+              {option === 'group' ? 'Group' : 'Person'}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
-          <caption className="sr-only">{scope === 'mine' ? 'By warehouse' : 'Who used the most compute'}, heaviest first.</caption>
+          <caption className="sr-only">{heading}, heaviest first.</caption>
           <thead className="bg-bg-soft/50">
             <tr>
-              <th className="th px-3 py-2.5">{scope === 'mine' ? 'Warehouse' : 'Person'}</th>
+              <th className="th px-3 py-2.5">{firstColumn}</th>
               <th className="th px-3 py-2.5 text-right">Queries</th>
               <th className="th px-3 py-2.5">CPU time</th>
               <th className="th px-3 py-2.5 text-right">Data read</th>
