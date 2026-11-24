@@ -35,6 +35,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from lib.trino_groups import groups_for
+
 ISSUER = os.environ["ISSUER"].rstrip("/")
 TRINO = os.environ.get("TRINO_URL", "").rstrip("/")
 USER = os.environ["USER"]
@@ -175,12 +177,14 @@ if rows != [[expected]]:
 # (`file.refresh-period`), so retry for up to 60 s before failing.
 groups_file = os.environ.get("GROUPS_FILE", "")
 if groups_file:
-    expected_groups = set()
+    # The file's members are `sub` values whatever claim Trino uses as the engine user, so
+    # the lookup is by the sub in both modes; `expected` above stays the identity assertion.
+    file_key = claims.get("sub") or ""
     with open(groups_file) as f:
-        for line in f:
-            name, _, members = line.strip().partition(":")
-            if expected in members.split(","):
-                expected_groups.add(name)
+        expected_groups = groups_for(f.read().splitlines(), file_key)
+    if not expected_groups:
+        sys.exit("the group file has no line for sub %r — the group path is unproven for %r; "
+                 "write the file with make access-sync" % (file_key, USER))
 
     def groups_statement():
         with opener.open(urllib.request.Request(
@@ -204,8 +208,8 @@ if groups_file:
             break
         if time.time() > deadline:
             sys.exit(
-                "Trino's groups do not match ConfigMap trino-group-file for %r: "
-                "engine=%s file=%s" % (expected, sorted(groups), sorted(expected_groups)))
+                "Trino's groups do not match ConfigMap trino-group-file for %r (sub %r): "
+                "engine=%s file=%s" % (expected, file_key, sorted(groups), sorted(expected_groups)))
         time.sleep(10)
     print("  groups: %d (%s) — the group file's lines for this sub"
           % (len(groups), ", ".join(sorted(groups))))
