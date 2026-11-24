@@ -44,3 +44,25 @@ p95 bends is the number the sizing guide uses.
 
 Results are written to `perf/results/<UTC timestamp>.json` (git-ignored). Tables
 for a release belong in `stardelt-internal`.
+
+## The interactive path: `perf-smoke` and `perf-compare`
+
+`make perf-smoke` measures the path a person actually feels — sign in, submit a
+statement through Nova, poll, cancel — as the visitor `demo`, and writes one JSON
+per run to `~/.cache/stardelt-perf/<UTC timestamp>.json`. It needs no `tpch`
+catalog; the five fixed statements use the demo's `bronze` table and Trino's own
+system views.
+
+`perf/perf-baseline.json` is the committed reference: one recorded run whose
+statement `p50`s a later run is compared against. `make perf-compare` reads the
+newest JSON in that cache directory and prints one line per statement with the
+ratio to the baseline (`--baseline` and `--latest` point it elsewhere).
+Re-record the baseline only after a deliberate platform change that should move
+the numbers, in its own pull request, with the reason in the commit message —
+never to make a slow run look normal. A ratio in the tens while the node's load
+average is high is a host fact, not a platform regression.
+
+The comparison is advisory: a statement above `PERF_MAX_RATIO` (default `3.0`)
+is printed as `SLOW` and the command still exits 0, because the dev node is
+noisy. Set `PERF_STRICT=1` to make a slow statement fail the run; that is the
+form a release gate would take.
