@@ -1570,8 +1570,12 @@ verify-trino-tls: _context ## Prove the in-cluster Trino path is TLS-only and to
 # The path clients take, end to end: anonymous refusal, the service-account Secret,
 # the user's own token (TRINO_VERIFY_USER_PASSWORD=… adds that check), and
 # Superset's own stored connection — the one that went stale in platform#278.
+# The person check runs as the public demo login (demo/demo, the documented public account) so a release cannot pass with it skipped.
+TRINO_VERIFY_USER ?= demo
+TRINO_VERIFY_USER_PASSWORD ?= demo
 verify-trino-auth: _context ## Prove Trino's authentication end to end, including Superset's stored connection
-	@NAMESPACE=$(NAMESPACE) bash scripts/verify-trino-auth.sh
+	@NAMESPACE=$(NAMESPACE) TRINO_VERIFY_USER=$(TRINO_VERIFY_USER) TRINO_VERIFY_USER_PASSWORD=$(TRINO_VERIFY_USER_PASSWORD) \
+	  bash scripts/verify-trino-auth.sh
 
 # platform#416 (decision on #366, option A): `system` is read-only for signed-in people so
 # dbt can list relations; CALL, the runtime tables and tpch/tpcds stay denied.

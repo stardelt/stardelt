@@ -167,3 +167,45 @@ if not expected:
 if rows != [[expected]]:
     sys.exit(f"Trino did not authenticate the token as {expected!r} "
              f"({PRINCIPAL} of {USER!r}): {rows}")
+
+# The engine's groups come from the file group provider, not from the token
+# (platform#125, stardelt/stardelt#1491). A rule keyed on a group (#50) matches
+# nothing when this path is broken, so prove it: the answer equals the group
+# file's lines for this principal. The provider re-reads the file every 30 s
+# (`file.refresh-period`), so retry for up to 60 s before failing.
+groups_file = os.environ.get("GROUPS_FILE", "")
+if groups_file:
+    expected_groups = set()
+    with open(groups_file) as f:
+        for line in f:
+            name, _, members = line.strip().partition(":")
+            if expected in members.split(","):
+                expected_groups.add(name)
+
+    def groups_statement():
+        with opener.open(urllib.request.Request(
+                TRINO + "/v1/statement", data=b"select current_groups() as groups",
+                headers=hdr, method="POST")) as r:
+            b = json.load(r)
+        if not b.get("id"):
+            sys.exit(f"Trino refused the group query: {json.dumps(b)[:200]}")
+        out = []
+        while True:
+            out.extend(b.get("data") or [])
+            if not b.get("nextUri"):
+                return out[0][0] if out else []
+            with opener.open(urllib.request.Request(b["nextUri"])) as r:
+                b = json.load(r)
+
+    deadline = time.time() + 60
+    while True:
+        groups = set(groups_statement())
+        if groups == expected_groups:
+            break
+        if time.time() > deadline:
+            sys.exit(
+                "Trino's groups do not match ConfigMap trino-group-file for %r: "
+                "engine=%s file=%s" % (expected, sorted(groups), sorted(expected_groups)))
+        time.sleep(10)
+    print("  groups: %d (%s) — the group file's lines for this sub"
+          % (len(groups), ", ".join(sorted(groups))))
