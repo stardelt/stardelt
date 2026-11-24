@@ -46,6 +46,7 @@ declare -A recipe=(
   [verify-spark-demo-security]='DEMO_NS=stardelt-demo-spark bash scripts/verify-spark-demo-security.sh'
   [verify-wap]='bash scripts/verify-wap.sh'
   [verify-product-path]='bash scripts/verify-product-path.sh'
+  [verify-usage]='bash scripts/verify-usage.sh'
   [verify-cli]='bash scripts/verify-cli.sh # the shipped CLI as demo'
   [verify-pipeline-validate]='bash scripts/verify-pipeline-validate.sh'
   [verify-spark-pipeline]='bash scripts/verify-spark-pipeline.sh'
@@ -80,12 +81,13 @@ fi
 
 # verify-spark-driver-identity's subject is the demo's permanent SparkCluster (#1157, #493).
 # #1490's entry points are useless if the bridge never loaded them.
+# #1488/#1489: the usage answer is the 0.0.6 exit's "usage and cost per group".
 default_targets="verify-trino-auth verify-bridge-policy verify-catalog-permissions verify-backups-all verify-streaming
 verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-mcp verify-mcp-tools verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query verify-spark-janitor verify-spark-demo-security
-verify-wap verify-product-path verify-cli verify-pipeline-validate verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
+verify-wap verify-product-path verify-usage verify-cli verify-pipeline-validate verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
 verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports verify-s3-sts verify-airflow-actions verify-operator-quiet verify-pod-security-baseline verify-external-secrets verify-storage-capacity"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
