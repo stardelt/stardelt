@@ -11,6 +11,7 @@
 # Environment:
 #   FRESH_DOMAIN     the base domain the run points at Nova (the run upserts its A record);
 #                    required unless DRY_RUN=1
+#   RELEASE_DIR      a release folder (install.yaml, platform-minimal.yaml) to install instead of the checkout (#1625)
 #   E2E_RUN_ID       the run's name in $HOME/.cache/stardelt-e2e/<id> (default: UTC timestamp)
 #   FRESH_NODE_TYPE  the Hetzner server type (default cpx42, 16 GB: the demo profile needs it)
 #   KEEP_ON_FAILURE  1 keeps the server after a failed phase for a look (default 0)
@@ -34,6 +35,9 @@ FRESH_DIR="${FRESH_DIR:-$REPO/platform/dev/hetzner-k3s}"
 NAMESPACE="${NAMESPACE:-stardelt}"
 OPERATOR_RELEASE="stardelt-operator"
 OPERATOR_DEPLOY="stardelt-operator"
+# A release folder to install instead of the checkout: the files `release / Cut` writes, so the
+# gate proves the artifact people install (#1625).
+RELEASE_DIR="${RELEASE_DIR:-}"
 
 DRY_RUN="${DRY_RUN:-0}"
 KEEP_ON_FAILURE="${KEEP_ON_FAILURE:-0}"
@@ -77,6 +81,15 @@ preflight() {
   if [ -z "${FRESH_DOMAIN:-}" ] && [ "$DRY_RUN" != 1 ]; then
     echo "set FRESH_DOMAIN to a domain whose A record the run may create (cloudflare-dns.sh upserts it)" >&2
     missing=1
+  fi
+  if [ -n "$RELEASE_DIR" ]; then
+    local file
+    for file in install.yaml platform-minimal.yaml; do
+      if [ ! -f "$RELEASE_DIR/$file" ]; then
+        echo "RELEASE_DIR=$RELEASE_DIR has no $file (a release folder needs both)" >&2
+        missing=1
+      fi
+    done
   fi
   if [ "$DRY_RUN" != 1 ]; then
     for tool in hetzner-k3s hcloud helm kubectl; do
@@ -187,6 +200,14 @@ wait_for_resources() {
   kubectl -n "$NAMESPACE" wait --for=condition=Ready lakehouse/main --timeout=25m || return 1
 }
 
+# install_from_release applies the release folder's install.yaml (the namespace plus the rendered
+# operator chart) and waits for the Deployment the checkout's helm release would also leave
+# behind (#1625). A function, not `bash -c`, so the paths stay quoted once.
+install_from_release() {
+  kubectl apply --server-side -f "$RELEASE_DIR/install.yaml" &&
+    kubectl -n "$NAMESPACE" rollout status "deploy/${OPERATOR_DEPLOY}" --timeout=300s
+}
+
 phase_up() {
   run_phase "fresh node" "$RUN_DIR/01-fresh-node.log" -- \
     env FRESH_NAME="$FRESH_NAME" FRESH_CONFIG="$FRESH_CONFIG" FRESH_KUBECONFIG="$FRESH_KUBECONFIG" \
@@ -196,11 +217,19 @@ phase_up() {
   # Everything after this point talks to the throwaway cluster, never to the current context.
   export KUBECONFIG="$FRESH_KUBECONFIG"
 
-  run_phase "operator" "$RUN_DIR/02-operator.log" -- \
-    make -C "$PLATFORM_DIR" install-operator || return 1
+  if [ -n "$RELEASE_DIR" ]; then
+    run_phase "operator" "$RUN_DIR/02-operator.log" -- install_from_release || return 1
+  else
+    run_phase "operator" "$RUN_DIR/02-operator.log" -- \
+      make -C "$PLATFORM_DIR" install-operator || return 1
+  fi
 
+  local instance_source="$REPO/operator/examples/platform-minimal.yaml"
+  if [ -n "$RELEASE_DIR" ]; then
+    instance_source="$RELEASE_DIR/platform-minimal.yaml"
+  fi
   sed -e "s/data\.example\.com/${FRESH_DOMAIN}/g" \
-    "$REPO/operator/examples/platform-minimal.yaml" >"$RUN_DIR/platform-instance.yaml"
+    "$instance_source" >"$RUN_DIR/platform-instance.yaml"
   run_phase "platform instance" "$RUN_DIR/03-platform-instance.log" -- \
     kubectl apply -f "$RUN_DIR/platform-instance.yaml" || return 1
   run_phase "platform ready" "$RUN_DIR/03-platform-instance.log" -- \
@@ -264,6 +293,11 @@ report() {
   fi
   out+="commit: ${RUN_COMMIT}"$'\n'
   out+="node type: ${FRESH_NODE_TYPE} @ ${LOCATION}"$'\n'
+  if [ -n "$RELEASE_DIR" ]; then
+    out+="install: release ${RELEASE_DIR}"$'\n'
+  else
+    out+="install: checkout"$'\n'
+  fi
   out+="base domain: ${FRESH_DOMAIN:-<none>}"$'\n'
   out+="wall time: ${SECONDS}s"$'\n'
   out+="logs: ${RUN_DIR}"$'\n'
