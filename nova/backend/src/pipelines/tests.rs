@@ -880,14 +880,12 @@ fn test_state_at(
         catalog_layers: std::sync::Mutex::new(None),
         principal_owners: std::sync::Mutex::new(None),
         http: reqwest::Client::new(),
-        demo: false,
         forward_identity: false,
         redact_query_log_literals: false,
         showback: None,
         mcp: None,
         auth: None,
         jobs: Mutex::new(Vec::new()),
-        demo_state: std::sync::RwLock::new(crate::demo::DemoState::default()),
         kube,
         workloads: crate::cluster::WorkloadCache::default(),
         admin_console_url: None,
@@ -1735,34 +1733,6 @@ async fn runs_notebook_filter_refuses_a_non_member() {
     assert!(
         fake.lock().unwrap().calls.is_empty(),
         "a refused query never reaches the scheduler"
-    );
-}
-
-#[tokio::test]
-async fn runs_in_demo_mode_answers_the_sample() {
-    let sample = crate::demo::runs();
-    assert!(!sample.runs.is_empty(), "the demo sample has runs");
-    let starts: Vec<Option<&str>> = sample
-        .runs
-        .iter()
-        .map(|row| row.run.started_at.as_deref())
-        .collect();
-    let mut newest_first = starts.clone();
-    newest_first.sort_by(|a, b| b.cmp(a));
-    assert_eq!(starts, newest_first, "the demo sample is newest first");
-
-    // Demo mode has no notebook schedule: the filter answers no rows, not an error.
-    let demo = demo_runs(&BTreeMap::from([(
-        "notebook".to_string(),
-        "analytics/smoke.ipynb".to_string(),
-    )]))
-    .expect("a notebook filter is accepted in demo mode");
-    assert!(demo.runs.is_empty(), "{:?}", demo.runs);
-    let unfiltered = demo_runs(&BTreeMap::new()).expect("the plain list succeeds");
-    assert_eq!(
-        unfiltered.runs.len(),
-        sample.runs.len(),
-        "the sample without a notebook filter"
     );
 }
 
@@ -10512,52 +10482,6 @@ async fn audit_has_no_param_values() {
             .contains(CANARY),
         "the value is in the resource, where papermill reads it"
     );
-}
-
-#[tokio::test]
-async fn demo_mode_answers_the_three_pipeline_reads() {
-    use tower::ServiceExt;
-    let app = Router::new()
-        .nest("/api", router())
-        .with_state(crate::router_tests::test_state());
-    for (uri, want) in [
-        ("/api/pipelines", "daily_revenue"),
-        ("/api/pipelines", "ingest_orders"),
-        ("/api/pipelines/principals", "analytics"),
-        ("/api/service-principals", "pipeline-analytics"),
-        ("/api/pipelines/stardelt/daily_revenue", "daily_revenue"),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(uri)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{uri}");
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&body).contains(want),
-            "{uri} answered without {want}: {}",
-            String::from_utf8_lossy(&body)
-        );
-    }
-    // A name the samples do not carry answers the same 404 a real instance gives.
-    let missing = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/pipelines/stardelt/nope")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 /// `spec.notify` is written under the CRD's keys and read back as the document's shape

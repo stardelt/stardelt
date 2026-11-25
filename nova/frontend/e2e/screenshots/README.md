@@ -24,7 +24,7 @@ whole form is visible. The viewport is taller than 800/740 px for the same reaso
 (`finance`, `product`, `sandbox`, `warehouse`), namespaces, table and preview calls.
 `finance` is the chosen catalog, `seed` is open and `nation` selected, so the switcher, the
 catalog's own namespace list and the table header are visible at once. With one catalog —
-demo mode — the switcher renders nothing and the page looks as it did before.
+a single-warehouse install — the switcher renders nothing and the page looks as it did before.
 
 `admin-catalogs-*.png` — the administrator's Catalogs page (stardelt-nova#251) at 1280×800
 and 360×740, dark and light, from the built UI with a stubbed `/api/admin/catalogs` for the
@@ -37,13 +37,13 @@ groups down, catalogs across, the owner prefixed in its cell and an em dash wher
 holds nothing.
 
 `overview-metrics-*.png` — the Overview with catalog metrics (stardelt-nova#250) at
-1280×800 and 360×740, dark and light, from the built demo UI: the Catalogs and Tables
+1280×800 and 360×740, dark and light, from the built UI with the spec's `page.route` fixtures: the Catalogs and Tables
 tiles show the totals, the Catalogs card lists `warehouse` with its schemas, tables, size,
 rows and last change, and the static Iceberg tile is gone. The phone width shows the
 catalog table scrolling inside its card while the page itself does not widen.
 
 `project-footer-*.png` — the project footer (stardelt-nova#268) at 1280×800 and 360×740,
-dark and light, from the built demo UI. At the bottom of the sidebar, under the person
+dark and light, from the built UI with the spec's `page.route` fixtures. At the bottom of the sidebar, under the person
 block, the version that is running (`stardelt v0.1.0`, the frontend package's version,
 baked into the build) and the two links out of the product — Documentation and Source.
 The phone width shows the drawer open, because that is where the footer lives.
@@ -65,7 +65,7 @@ and the page does not scroll sideways.
 
 `sql-panes-*.png` — the SQL editor's two side panes (stardelt-nova#586) at 1440×900 with
 both open, at 1440×900 with both collapsed, and at 390×900 where both start collapsed,
-dark, from the built demo UI. The Tables pane holds the search box and the catalog tree
+dark, from the built UI with the spec's `page.route` fixtures. The Tables pane holds the search box and the catalog tree
 with `warehouse` open on `nyc_taxi`, the History pane the history and the saved queries.
 Collapsed, each pane is a 40 px rail with a rotated label; at 390 px the rails are compact
 bars above and below the editor and the page does not scroll sideways.
@@ -84,15 +84,15 @@ spawn, with the pulsing dot and the elapsed seconds. Opening is a plain link to 
 Nova has no `access:servers` scope.
 
 `deployments-compare-*.png` — the Deployments page with a peer stage (stardelt-nova#667) at
-1440×900 and 390×900, dark and light, from the built UI in demo mode with
-`NOVA_PEER_STAGES=prod=http://127.0.0.1:9`, so the "Compare with prod" control and the peer's
-URL are real. The compare answer is stubbed (`status: "unreachable"`, `detail: "prod did not
+1440×900 and 390×900, dark and light, from the built UI with the spec's `page.route` fixtures
+and `NOVA_PEER_STAGES=prod=http://127.0.0.1:9`, so the "Compare with prod" control and the
+peer's URL are real. The compare answer is stubbed (`status: "unreachable"`, `detail: "prod did not
 answer within 5 seconds"`): in `NOVA_AUTH_MODE=dev` the real `/api/stages/compare` answers 401,
 because it forwards the caller's own token (nova#671). The table itself (`ok`) is not shown —
 that needs two installs.
 
 `shared-account-*.png` — the public-demo banner on the Catalog page (stardelt-nova#725) at
-1440×900 and 390×900, Graphite and Silver, from the built demo UI with the banner's
+1440×900 and 390×900, Graphite and Silver, from the built UI with the spec's `page.route` fixtures with the banner's
 condition forced on for the shot (in `dev` mode `/api/me` answers `shared_account: false`,
 so it does not render otherwise). At 390 px it wraps to four lines above the catalog and
 covers no control.

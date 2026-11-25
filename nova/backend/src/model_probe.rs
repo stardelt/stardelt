@@ -406,13 +406,10 @@ fn interval_from_env(raw: Option<&str>) -> Duration {
 
 /// Start the probe: one round per [`ROUND_EVERY`] for as long as the process runs, each round
 /// probing only the endpoints that are new or older than the interval. Answers whether a task
-/// was started: demo mode and a Nova without a cluster client have none.
+/// was started: a Nova without a cluster client has none.
 pub(crate) fn spawn_loop(state: Arc<AppState>) -> bool {
-    if state.demo || state.kube.is_none() {
-        info!(
-            demo = state.demo,
-            "model probe off — a ModelEndpoint's status stays as the last writer left it"
-        );
+    if state.kube.is_none() {
+        info!("model probe off — a ModelEndpoint's status stays as the last writer left it");
         return false;
     }
     let interval = interval_from_env(std::env::var("NOVA_MODEL_PROBE_SECONDS").ok().as_deref());

@@ -45,8 +45,6 @@
 //!   deleted — a `kubectl` or GitOps pipeline answers 409 instead of being rewritten. The
 //!   statement is **never** audited, only its length and the cron text. A create needs no
 //!   Airflow (the resource is the source of truth); the read routes keep answering 503 without it.
-//!   In demo mode (`NOVA_DEMO=1`) the three read routes answer sample data from `demo.rs`; the
-//!   write routes and the detail routes still answer 503.
 //!
 //! - **Options and parameters** (#223): a schedule carries `${params.<name>}` values (at most 16,
 //!   lower-case names, values up to 256 characters) and the advanced options the loader reads
@@ -4250,8 +4248,7 @@ async fn runs_across_pipelines(
     Ok(filter.answer(rows, groups))
 }
 
-/// The query of `GET /api/runs`, parsed once: the five filters and the cap. Demo mode parses
-/// the same query, so a bad one refuses there too.
+/// The query of `GET /api/runs`, parsed once: the five filters and the cap.
 struct RunsFilter<'a> {
     limit: usize,
     kind: Option<&'a str>,
@@ -6974,30 +6971,6 @@ pub(crate) fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fa
     }
 }
 
-/// Demo mode has no principal and no store, so `SignedIn` refuses every read before the
-/// handler runs (#500). This lets exactly the read routes that have demo samples through.
-pub(crate) enum ReadCaller {
-    Demo,
-    /// Boxed: `SignedIn` is 208 bytes and `clippy::large_enum_variant` is a gate.
-    Signed(Box<SignedIn>),
-}
-
-impl FromRequestParts<Arc<AppState>> for ReadCaller {
-    type Rejection = Fail;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        if state.demo {
-            return Ok(ReadCaller::Demo);
-        }
-        SignedIn::from_request_parts(parts, state)
-            .await
-            .map(|signed| ReadCaller::Signed(Box::new(signed)))
-    }
-}
-
 #[utoipa::path(
     get,
     operation_id = "pipelines_list",
@@ -7011,11 +6984,7 @@ impl FromRequestParts<Arc<AppState>> for ReadCaller {
         (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn list(caller: ReadCaller) -> Response {
-    let signed = match caller {
-        ReadCaller::Demo => return answer(Ok(crate::demo::pipelines())),
-        ReadCaller::Signed(signed) => signed,
-    };
+pub(crate) async fn list(signed: SignedIn) -> Response {
     answer(
         list_pipelines(
             resources(signed.state()).as_ref(),
@@ -7050,15 +7019,9 @@ pub(crate) async fn list(caller: ReadCaller) -> Response {
     )
 )]
 pub(crate) async fn list_runs(
-    caller: ReadCaller,
+    signed: SignedIn,
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Response {
-    let signed = match caller {
-        // Demo mode has no scheduler: the sample is filtered and capped like a real answer, so
-        // the page's filters and its 400s behave the same way.
-        ReadCaller::Demo => return answer(demo_runs(&query)),
-        ReadCaller::Signed(signed) => signed,
-    };
     answer(
         runs_across_pipelines(
             resources(signed.state()).as_ref(),
@@ -7140,22 +7103,6 @@ pub(crate) async fn task_log_for(
         )
         .await,
     )
-}
-
-/// Demo mode's `GET /api/runs`: the sample is filtered and capped like a real answer, so the
-/// page's filters and its 400s behave the same way. There is no notebook schedule in demo mode,
-/// so a `notebook` filter answers no rows — the same empty list the notebook page's usage route
-/// answers there.
-fn demo_runs(query: &BTreeMap<String, String>) -> Result<RunsListResponse, Fail> {
-    let filter = RunsFilter::parse(query)?;
-    let sample = crate::demo::runs();
-    if filter.notebook.is_some() {
-        return Ok(RunsListResponse {
-            runs: Vec::new(),
-            groups: sample.groups,
-        });
-    }
-    Ok(filter.answer(sample.runs, sample.groups))
 }
 
 /// Whether this Pipeline is a Schedule of one published notebook: the owner group, the one-task
@@ -7241,17 +7188,9 @@ fn notebook_usage_rows(
     )
 )]
 pub(crate) async fn notebook_usage(
-    caller: ReadCaller,
+    signed: SignedIn,
     Path((group, name)): Path<(String, String)>,
 ) -> Response {
-    let signed = match caller {
-        ReadCaller::Demo => {
-            return answer(Ok(NotebookUsageResponse {
-                schedules: Vec::new(),
-            }));
-        }
-        ReadCaller::Signed(signed) => *signed,
-    };
     if !signed.identity().groups.iter().any(|g| g == &group) {
         return crate::notebooks::forbidden_group(&group).into_response();
     }
@@ -7290,11 +7229,7 @@ pub(crate) async fn notebook_usage(
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn principals(caller: ReadCaller) -> Response {
-    let signed = match caller {
-        ReadCaller::Demo => return answer(Ok(crate::demo::pipeline_principals())),
-        ReadCaller::Signed(signed) => signed,
-    };
+pub(crate) async fn principals(signed: SignedIn) -> Response {
     answer(principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
 }
 
@@ -7311,11 +7246,7 @@ pub(crate) async fn principals(caller: ReadCaller) -> Response {
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn service_principals(caller: ReadCaller) -> Response {
-    let signed = match caller {
-        ReadCaller::Demo => return answer(Ok(crate::demo::service_principals())),
-        ReadCaller::Signed(signed) => signed,
-    };
+pub(crate) async fn service_principals(signed: SignedIn) -> Response {
     answer(service_principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
 }
 
@@ -7651,18 +7582,9 @@ pub(crate) async fn spec(
     )
 )]
 pub(crate) async fn detail(
-    caller: ReadCaller,
+    signed: SignedIn,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Response {
-    let signed = match caller {
-        ReadCaller::Demo => {
-            return match crate::demo::pipeline_detail(&namespace, &name) {
-                Some(detail) => answer(Ok(detail)),
-                None => answer::<PipelineDetail>(Err(no_such_pipeline())),
-            };
-        }
-        ReadCaller::Signed(signed) => *signed,
-    };
     answer(
         pipeline_detail(
             resources(signed.state()).as_ref(),

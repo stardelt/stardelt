@@ -25,9 +25,8 @@
 //!   large 6/70/70 % — each field overridable by `spec.concurrency`, the same table and merge
 //!   the access-sync job uses. An absent field keeps the class value; a size the table does
 //!   not know falls back to `small`, the CRD's own default.
-//! - **No cluster** (demo mode, a local run, a pod without RBAC): one `small` row, usable and
-//!   in use. The demo lakehouse has exactly one warehouse; the shape stays the same, so the
-//!   UI renders identically with and without a cluster.
+//! - **No cluster** (a local run, a pod without RBAC): one `small` row, usable and in use.
+//!   The shape stays the same, so the UI renders identically with and without a cluster.
 //! - A cluster that refuses or fails answers **502** `the cluster did not answer` (rule U12),
 //!   never a 500 and never an empty list that would read as "no warehouses exist".
 //!
@@ -302,8 +301,7 @@ fn rows(objects: &[Value], identity: &Identity) -> Vec<SqlWarehouse> {
     rows
 }
 
-/// The one-row answer without a cluster (demo mode, a local run): the demo lakehouse has one
-/// warehouse, `small`, and it is the class a query lands in.
+/// The one-row answer without a cluster (a local run): `small` is the class a query lands in.
 fn demo_rows() -> Vec<SqlWarehouse> {
     let (running, queued, memory_share) = class_defaults(DEFAULT_SIZE);
     vec![SqlWarehouse {
@@ -332,7 +330,7 @@ fn actor(principal: Option<Extension<Principal>>, state: &AppState) -> Identity 
     operation_id = "warehouses_list",
     path = "/api/warehouses",
     tag = "public",
-    description = "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. `scale` is the scaler's verdict on the one engine the classes share (`phase`, `workers`, `queriesInFlight`, `lastQueryAt`), read from `status.scale`; `null` until the scaler has written one. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
+    description = "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. `scale` is the scaler's verdict on the one engine the classes share (`phase`, `workers`, `queriesInFlight`, `lastQueryAt`), read from `status.scale`; `null` until the scaler has written one. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per class, largest first, the administrator's row first of all", body = [SqlWarehouse]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -417,7 +415,7 @@ pub struct WarehouseStart {
         (status = 403, description = "None of the caller's groups is granted this class", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such warehouse", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "No cluster connection (demo mode, a local run)", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection (a local run)", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn start(

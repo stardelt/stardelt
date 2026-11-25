@@ -22,7 +22,6 @@ const SAMPLE_JSON = JSON.stringify(
 
 export default function Data() {
   const [tab, setTab] = useState<'load' | 'transfer'>('load')
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
 
   return (
     <div className="max-w-5xl space-y-6">
@@ -31,7 +30,6 @@ export default function Data() {
         <p className="text-text-dim text-sm mt-1">
           Load files into tables, or move data between tables. Each load and transfer appears
           under Recent activity on the Overview.
-          {me.data?.demo && <span className="text-warn"> Demo mode writes to memory.</span>}
         </p>
       </header>
 

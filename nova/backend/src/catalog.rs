@@ -1,4 +1,4 @@
-//! Lakekeeper catalog proxy, with an in-memory demo branch (`NOVA_DEMO=1`).
+//! Lakekeeper catalog proxy.
 //!
 //! Lakekeeper's Iceberg REST routes are prefixed by the warehouse UUID, not
 //! the warehouse name. Nova maps catalog names to warehouse ids from the warehouse
@@ -90,15 +90,14 @@ pub struct CatalogParam {
 
 /// OpenAPI shapes for the catalog routes (first slice of ticket #107).
 ///
-/// Nova proxies these bodies — from Lakekeeper upstream, or from the
-/// in-memory demo shapes in `demo.rs` — so the structs below mirror the
+/// Nova proxies these bodies from Lakekeeper upstream, so the structs below mirror the
 /// proxied Iceberg REST shapes rather than being constructed anywhere.
 /// `#[schema(rename = …)]` keeps the hyphenated Iceberg field names.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct WarehouseInfo {
     /// The configured warehouse name (`NOVA_WAREHOUSE_NAME`).
     pub name: String,
-    /// The Lakekeeper warehouse id, or `"demo"` in demo mode.
+    /// The Lakekeeper warehouse id.
     pub id: String,
 }
 
@@ -373,8 +372,8 @@ pub fn sort_by_layer<T>(
 ///
 /// The list is read with Nova's own service account — the same `get`/`list` on `catalogs`
 /// the administrator page uses. A catalog the list does not cover gets no entry here; the
-/// name convention still applies through [`layer_in`]. Without a cluster client — demo
-/// mode, a local run, `dev` mode outside a cluster — there is nothing to read, so only the
+/// name convention still applies through [`layer_in`]. Without a cluster client — a local
+/// run, `dev` mode outside a cluster — there is nothing to read, so only the
 /// name convention remains. A list that fails leaves the map empty and is retried after the
 /// TTL: a missing label must not fail the catalog list.
 pub async fn catalog_layers(state: &AppState) -> HashMap<String, String> {
@@ -617,14 +616,14 @@ fn upstream_error(status: StatusCode, body: &[u8]) -> Response {
 /// subject: a grant change shows up within half a minute, and browsing the catalog does
 /// not run a statement per click.
 ///
-/// Demo mode — and `dev` mode, which has no caller — has one catalog and no permission
-/// bridge: the configured warehouse, exactly as before. An unreachable engine is the
+/// `dev` mode, which has no caller, has one catalog and no permission bridge: the
+/// configured warehouse, exactly as before. An unreachable engine is the
 /// `Err` string from `execute_from` (502 through [`error_status`]).
 pub async fn allowed_catalogs(
     state: &AppState,
     caller: Option<&Principal>,
 ) -> Result<BTreeSet<String>, String> {
-    let Some(caller) = caller.filter(|_| !state.demo) else {
+    let Some(caller) = caller else {
         return Ok(BTreeSet::from([state.warehouse_name.clone()]));
     };
 
@@ -707,20 +706,16 @@ pub async fn catalog_scope(
 
     // Resolve the id before refusing: a name no catalog knows is 404 and a catalog the
     // person may not browse is 403, whichever group owns it.
-    let id = if state.demo {
-        "demo".to_string()
-    } else {
-        match warehouse_id_for(state, &name).await {
-            Ok(id) => id,
-            Err(WarehouseError::NotFound(_)) => {
-                return Err(sentence(
-                    StatusCode::NOT_FOUND,
-                    &format!("catalog '{name}' not found"),
-                ));
-            }
-            Err(e) => {
-                return Err(sentence(e.status(), &e.to_string()));
-            }
+    let id = match warehouse_id_for(state, &name).await {
+        Ok(id) => id,
+        Err(WarehouseError::NotFound(_)) => {
+            return Err(sentence(
+                StatusCode::NOT_FOUND,
+                &format!("catalog '{name}' not found"),
+            ));
+        }
+        Err(e) => {
+            return Err(sentence(e.status(), &e.to_string()));
         }
     };
     if !allowed.contains(&name) {
@@ -739,9 +734,6 @@ pub async fn catalog_can_write(
     principal: Option<&Principal>,
     catalog_name: &str,
 ) -> bool {
-    if state.demo {
-        return true;
-    }
     let Some(p) = principal else {
         // No principal: the dev/static mode, where there is nothing to check against.
         return true;
@@ -785,9 +777,6 @@ pub async fn first_writable_catalog(
     state: &AppState,
     principal: Option<&Principal>,
 ) -> Option<String> {
-    if state.demo {
-        return Some(state.warehouse_name.clone());
-    }
     let allowed = allowed_catalogs(state, principal).await.ok()?;
     let is_admin = principal.map(|p| p.identity.is_admin).unwrap_or(false);
     for name in &allowed {
@@ -806,7 +795,7 @@ pub async fn first_writable_catalog(
     operation_id = "catalogs_list",
     path = "/api/catalog/catalogs",
     tag = "public",
-    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise; `environment` is `production` when the resource carries `stardelt.io/environment: production`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise; `environment` is `production` when the resource carries `stardelt.io/environment: production`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller.",
     responses(
         (status = 200, description = "The browsable catalogs and the default one", body = CatalogsResponse),
         (status = 502, description = "The query engine or the catalog is not reachable", body = crate::openapi::ErrorResponse),
@@ -850,18 +839,14 @@ pub async fn list_catalogs(
     }
     let mut catalogs = Vec::with_capacity(allowed.len());
     for name in allowed {
-        let id = if s.demo {
-            "demo".to_string()
-        } else {
-            match warehouse_id_for(&s, &name).await {
-                Ok(id) => id,
-                Err(e) => {
-                    return (
-                        e.status(),
-                        Json(serde_json::json!({"error": e.to_string()})),
-                    )
-                        .into_response();
-                }
+        let id = match warehouse_id_for(&s, &name).await {
+            Ok(id) => id,
+            Err(e) => {
+                return (
+                    e.status(),
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response();
             }
         };
         let layer = layer_in(&layers, &name);
@@ -907,7 +892,7 @@ pub async fn list_catalogs(
     get,
     path = "/api/catalog/warehouse",
     tag = "public",
-    description = "The resolved warehouse name and id (`demo` in demo mode).",
+    description = "The resolved warehouse name and id.",
     responses(
         (status = 200, description = "Warehouse name and id", body = WarehouseInfo),
         (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
@@ -916,9 +901,6 @@ pub async fn list_catalogs(
     )
 )]
 pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
-    if s.demo {
-        return Json(serde_json::json!({ "name": s.warehouse_name, "id": "demo" })).into_response();
-    }
     match resolve_warehouse_id(&s).await {
         Ok(id) => Json(serde_json::json!({ "name": s.warehouse_name, "id": id })).into_response(),
         Err(e) => (
@@ -956,10 +938,6 @@ pub async fn list_namespaces(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    if s.demo {
-        let demo = s.demo_state.read().expect("demo state poisoned");
-        return Json(demo.namespaces_json()).into_response();
-    }
     proxy(&s, format!("/catalog/v1/{id}/namespaces")).await
 }
 
@@ -997,15 +975,6 @@ pub async fn create_namespace(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "namespace is required"})),
-        )
-            .into_response();
-    }
-    if s.demo {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "demo mode derives schemas from tables — upload a table into the schema instead"
-            })),
         )
             .into_response();
     }
@@ -1050,10 +1019,6 @@ pub async fn list_tables(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    if s.demo {
-        let demo = s.demo_state.read().expect("demo state poisoned");
-        return Json(demo.tables_json(&ns)).into_response();
-    }
     let Some(ns) = path_segment(&ns) else {
         return bad_segment(&ns);
     };
@@ -1131,17 +1096,6 @@ pub async fn table_metadata(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    if s.demo {
-        let demo = s.demo_state.read().expect("demo state poisoned");
-        return match demo.table_metadata_json(&ns, &tbl) {
-            Some(v) => Json(v).into_response(),
-            None => (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("table {ns}.{tbl} not found")})),
-            )
-                .into_response(),
-        };
-    }
     let (Some(ns), Some(tbl)) = (path_segment(&ns), path_segment(&tbl)) else {
         return bad_segment(&format!("{ns}.{tbl}"));
     };
@@ -1276,9 +1230,6 @@ pub async fn table_history(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    if s.demo {
-        return Json(serde_json::json!({"columns": [], "rows": []})).into_response();
-    }
     if path_segment(&ns).is_none() || path_segment(&tbl).is_none() {
         return bad_segment(&format!("{ns}.{tbl}"));
     }
@@ -1322,13 +1273,6 @@ pub async fn table_rollback(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    if s.demo {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "rollback is not available in demo mode"})),
-        )
-            .into_response();
-    }
     if path_segment(&ns).is_none() || path_segment(&tbl).is_none() {
         return bad_segment(&format!("{ns}.{tbl}"));
     }
@@ -2340,37 +2284,6 @@ mod tests {
         // Expired (an explicit zero TTL, rather than a minute's wait): one list again.
         assert_eq!(catalog_layers_within(&state, Duration::ZERO).await, first);
         assert_eq!(fake.lists.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn demo_mode_names_only() {
-        let mut state = own_state(crate::router_tests::test_state());
-        state.warehouse_name = "gold".into();
-        let state = Arc::new(state);
-
-        // No cluster client: nothing to label, only the name convention.
-        let layers = catalog_layers(&state).await;
-        assert!(layers.is_empty());
-        assert_eq!(layer_in(&layers, "gold").as_deref(), Some("gold"));
-        assert_eq!(layer_in(&layers, "shared"), None);
-
-        let response = list_catalogs(State(Arc::clone(&state)), None).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            json_body(response).await,
-            json!({
-                "catalogs": [{
-                    "name": "gold",
-                    "id": "demo",
-                    "layer": "gold",
-                    "canWrite": true,
-                    "owner": null,
-                    "description": null,
-                    "grants": []
-                }],
-                "default": "gold"
-            })
-        );
     }
 
     #[test]

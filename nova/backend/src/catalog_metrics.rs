@@ -20,7 +20,6 @@
 //! failure of the *visibility* question (an unreachable engine) is a 502, as everywhere
 //! else in the catalog routes.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -409,24 +408,20 @@ fn interval_from(raw: Option<&str>) -> Duration {
     secs.clamp(MIN_REFRESH, MAX_REFRESH)
 }
 
-/// Whether this state gets a background refresher at all: never in demo mode (the numbers
-/// are the seeded tables) and never without a catalog to ask.
+/// Whether this state gets a background refresher at all: never without a catalog to ask.
 pub fn refresher_wanted(state: &AppState) -> bool {
-    !state.demo && !state.lakekeeper_url.trim().is_empty()
+    !state.lakekeeper_url.trim().is_empty()
 }
 
 /// Start the background refresher: after [`REFRESH_FIRST_DELAY`], one round per
 /// [`refresh_interval_from_env`] for as long as the process runs.
 ///
-/// Answers whether a task was started: demo mode and an unconfigured catalog have none, and
+/// Answers whether a task was started: an unconfigured catalog has none, and
 /// a request then starts one scan per unknown catalog itself, at the first sight of it.
 /// Called from `main` after the state exists, once.
 pub fn spawn_refresher(state: Arc<AppState>) -> bool {
     if !refresher_wanted(&state) {
-        info!(
-            demo = state.demo,
-            "catalog metrics refresher off — the endpoint answers from what a request scans"
-        );
+        info!("catalog metrics refresher off — the endpoint answers from what a request scans");
         return false;
     }
     let interval = refresh_interval_from_env();
@@ -455,9 +450,6 @@ async fn refresher_loop(state: Arc<AppState>, first_delay: Duration, interval: D
 /// scans at a time, one entry each. Answers `false` when another round holds the lock —
 /// the loop and an administrator's Refresh never scan the warehouse at the same time.
 async fn run_round(state: &Arc<AppState>) -> bool {
-    if state.demo {
-        return false;
-    }
     // One round at a time. `try_lock` rather than `lock`: a refresh that is already
     // running covers this one, and waiting would only queue another full scan.
     let Ok(_round) = state.metrics_round.try_lock() else {
@@ -670,17 +662,6 @@ impl CatalogMetricsView {
     }
 }
 
-impl From<CatalogStats> for CatalogMetricsView {
-    fn from(stats: CatalogStats) -> Self {
-        Self {
-            stats,
-            error: None,
-            updated_at: None,
-            pending: false,
-        }
-    }
-}
-
 /// The sums over every catalog in the answer. Pending catalogs contribute nothing: their
 /// zeros are not numbers, and a tile must not read "0 tables" while the scan runs.
 #[derive(Debug, Default, Serialize, utoipa::ToSchema)]
@@ -721,32 +702,6 @@ pub struct RefreshAccepted {
     pub accepted: bool,
 }
 
-/// Demo mode has no catalog behind it: the numbers are the seeded in-memory tables. There
-/// are no Parquet files, so the size is the JSON size of the rows — a plausible number
-/// derived from the same data the query runner answers with, rather than a constant. The
-/// last change is the demo lakehouse's own last write (its seed, or the last upload or
-/// transfer), so it does not move with the clock.
-fn demo_numbers(state: &AppState) -> CatalogStats {
-    let demo = state.demo_state.read().expect("demo state poisoned");
-    let mut stats = CatalogStats {
-        name: state.warehouse_name.clone(),
-        ..CatalogStats::default()
-    };
-    let mut namespaces = BTreeSet::new();
-    for table in &demo.tables {
-        namespaces.insert(table.namespace.clone());
-        stats.tables = stats.tables.saturating_add(1);
-        stats.records = stats.records.saturating_add(table.rows.len() as u64);
-        let bytes = serde_json::to_string(&table.rows)
-            .map(|rows| rows.len() as u64)
-            .unwrap_or(0);
-        stats.size_bytes = stats.size_bytes.saturating_add(bytes);
-    }
-    stats.schemas = u32::try_from(namespaces.len()).unwrap_or(u32::MAX);
-    stats.last_commit_ms = demo.last_write_ms;
-    stats
-}
-
 #[utoipa::path(
     get,
     operation_id = "catalog_metrics_get",
@@ -777,35 +732,27 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
     }
 
     let mut catalogs: Vec<CatalogMetricsView> = Vec::with_capacity(allowed.len());
-    if s.demo {
-        // The seeded tables are the numbers: there is nothing to scan and nothing to wait
-        // for, so the row is as fresh as the answer.
-        let mut view = CatalogMetricsView::from(demo_numbers(&s));
-        view.updated_at = Some(i64::try_from(crate::jobs::now_ms()).unwrap_or(i64::MAX));
-        catalogs.push(view);
-    } else {
-        // The request path never scans: whatever the cache holds is the answer, however
-        // old it is (`updatedAt` says how old), and a missing entry is `pending` while one
-        // background scan reads it.
-        let mut missing: Vec<String> = Vec::new();
-        {
-            let cache = s.catalog_metrics.lock().expect("catalog metrics poisoned");
-            for name in &allowed {
-                match cache.get(name) {
-                    Some(entry) => catalogs.push(CatalogMetricsView::read(
-                        entry.stats.clone(),
-                        entry.updated_ms,
-                        entry.error.clone(),
-                    )),
-                    None => missing.push(name.clone()),
-                }
+    // The request path never scans: whatever the cache holds is the answer, however
+    // old it is (`updatedAt` says how old), and a missing entry is `pending` while one
+    // background scan reads it.
+    let mut missing: Vec<String> = Vec::new();
+    {
+        let cache = s.catalog_metrics.lock().expect("catalog metrics poisoned");
+        for name in &allowed {
+            match cache.get(name) {
+                Some(entry) => catalogs.push(CatalogMetricsView::read(
+                    entry.stats.clone(),
+                    entry.updated_ms,
+                    entry.error.clone(),
+                )),
+                None => missing.push(name.clone()),
             }
         }
-        for name in missing {
-            catalogs.push(CatalogMetricsView::pending(name.clone()));
-            // Single-flight: two requests for the same new catalog start one scan.
-            start_background_scan(&s, &name);
-        }
+    }
+    for name in missing {
+        catalogs.push(CatalogMetricsView::pending(name.clone()));
+        // Single-flight: two requests for the same new catalog start one scan.
+        start_background_scan(&s, &name);
     }
 
     // The layer is a property of the catalog, not of the numbers: one cached read for the
@@ -1515,15 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn demo_mode_has_no_refresher() {
-        // Demo mode's numbers are the seeded tables; a background scan of a catalog that
-        // does not exist would only log errors.
-        let demo = crate::router_tests::test_state();
-        assert!(demo.demo, "the test state is the demo one");
-        assert!(!refresher_wanted(&demo));
-        assert!(!spawn_refresher(Arc::clone(&demo)), "nothing was spawned");
-        assert!(demo.catalog_metrics.lock().unwrap().is_empty());
-
+    fn a_refresher_needs_a_configured_catalog() {
         // A real install with a catalog gets one; an empty URL does not.
         let real = crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", "http://x");
         assert!(refresher_wanted(&real));
@@ -2076,53 +2015,6 @@ mod tests {
         assert_eq!(
             body["error"],
             "the numbers were refreshed less than a minute ago"
-        );
-    }
-
-    #[tokio::test]
-    async fn demo_mode_numbers() {
-        let state = crate::router_tests::test_state();
-        *state.demo_state.write().expect("demo state") = crate::demo::DemoState::seed();
-
-        let response = get(State(Arc::clone(&state)), None).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_of(response).await;
-        assert_eq!(
-            body["catalogs"][0]["name"], "warehouse",
-            "demo mode has the one configured catalog"
-        );
-        assert_eq!(body["catalogs"][0]["schemas"], 2);
-        assert_eq!(body["catalogs"][0]["tables"], 3);
-        assert_eq!(
-            body["catalogs"][0]["records"], 20,
-            "the seeded rows: 12 + 5 + 3"
-        );
-        assert!(
-            body["catalogs"][0]["sizeBytes"]
-                .as_u64()
-                .is_some_and(|bytes| bytes > 0),
-            "demo mode derives a size from the seeded rows"
-        );
-        assert_eq!(body["catalogs"][0]["truncated"], false);
-        assert!(
-            body["catalogs"][0]["lastCommitMs"].as_i64().is_some(),
-            "the demo seed is a change"
-        );
-        assert_eq!(body["totals"]["catalogs"], 1);
-        assert_eq!(body["totals"]["schemas"], 2);
-        assert_eq!(body["totals"]["tables"], 3);
-        assert_eq!(body["totals"]["records"], 20);
-        assert_eq!(
-            body["totals"]["sizeBytes"], body["catalogs"][0]["sizeBytes"],
-            "one catalog: the totals are its numbers"
-        );
-        // Demo mode has nothing to scan, so nothing waits: the row is as fresh as the answer.
-        assert_eq!(body["catalogs"][0]["pending"], false);
-        assert!(
-            body["catalogs"][0]["updatedAt"]
-                .as_u64()
-                .is_some_and(|ms| ms > 0),
-            "the demo numbers are read now"
         );
     }
 }

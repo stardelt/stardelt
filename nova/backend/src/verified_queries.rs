@@ -267,9 +267,6 @@ pub async fn list(
     Query(q): Query<CatalogParam>,
     caller: Option<Extension<Principal>>,
 ) -> Response {
-    if s.demo {
-        return crate::catalog_docs::demo_unavailable();
-    }
     let caller = caller.as_ref().map(|c| &c.0);
     let (name, _doc) =
         match crate::catalog_docs::documentation_for(&s, caller, q.catalog.as_deref(), &ns, &tbl)

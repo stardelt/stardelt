@@ -165,20 +165,6 @@ fn view_of(user: &Value, idle_seconds: i64) -> WorkspaceView {
     }
 }
 
-/// A fixed, running workspace for demo mode: the page shows its three states without a hub.
-fn demo_view(idle_seconds: i64) -> WorkspaceView {
-    let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
-    let started = now - chrono::Duration::minutes(42);
-    let active = now - chrono::Duration::minutes(3);
-    let last_activity = active.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    WorkspaceView {
-        state: "running".to_string(),
-        started_at: Some(started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        idle_stop_at: idle_stop_at(&last_activity, idle_seconds),
-        last_activity: Some(last_activity),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The hub calls
 // ---------------------------------------------------------------------------
@@ -280,7 +266,6 @@ pub(crate) async fn get(
 ) -> Response {
     let who = actor(principal, &state);
     let view = match &state.workspace {
-        Some(cfg) if state.demo => demo_view(cfg.idle_seconds),
         Some(cfg) => {
             let path = format!("/users/{}", encode_segment(&who.display_name));
             match hub_call(&state, cfg, reqwest::Method::GET, &path).await {
@@ -330,9 +315,6 @@ pub(crate) async fn start(
     let Some(cfg) = &state.workspace else {
         return not_configured().into_response();
     };
-    if state.demo {
-        return answer(StatusCode::OK, demo_view(cfg.idle_seconds));
-    }
     let path = format!("/users/{}/server", encode_segment(&who.display_name));
     match hub_call(&state, cfg, reqwest::Method::POST, &path).await {
         Some(hub) if hub.status == StatusCode::CREATED || hub.status == StatusCode::ACCEPTED => {
@@ -380,9 +362,6 @@ pub(crate) async fn stop(
     let Some(cfg) = &state.workspace else {
         return not_configured().into_response();
     };
-    if state.demo {
-        return answer(StatusCode::OK, WorkspaceView::state("stopped"));
-    }
     let path = format!("/users/{}/server", encode_segment(&who.display_name));
     match hub_call(&state, cfg, reqwest::Method::DELETE, &path).await {
         Some(hub) if hub.status.is_success() => {
@@ -401,8 +380,6 @@ pub(crate) async fn stop(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use axum::{Router, http::StatusCode, routing::get};
     use serde_json::{Value, json};
 
@@ -686,38 +663,6 @@ mod tests {
         let (status, body) = get_view("http://127.0.0.1:1", 3600, Some(alice())).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["state"], "unavailable");
-    }
-
-    #[tokio::test]
-    async fn demo_mode_answers_a_fixed_running_view() {
-        use tower::ServiceExt;
-
-        let mut state = crate::router_tests::test_state();
-        Arc::get_mut(&mut state).expect("a fresh state").workspace = Some(WorkspaceConfig {
-            api: "http://127.0.0.1:1".to_string(),
-            token: crate::auth::Secret::new("hub-token"),
-            idle_seconds: 3600,
-        });
-        let router = Router::new()
-            .route("/workspace", get(super::get))
-            .with_state(state);
-        let response = router
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/workspace")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["state"], "running");
-        assert!(body["startedAt"].is_string());
-        assert!(body["idleStopAt"].is_string());
     }
 
     #[tokio::test]

@@ -21,7 +21,6 @@ const NOVA_ROUTES: Record<string, Array<{ to: string; label: string }>> = {
 
 export default function AppDetail() {
   const { id = '' } = useParams()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const detail = useQuery({
     queryKey: ['app', id],
     queryFn: () => api.app(id),
@@ -118,7 +117,6 @@ export default function AppDetail() {
           <div className="card p-5 text-sm text-text-dim">
             No extra facts. Nova reads them from the service's own API — a service that is
             unreachable, or one that exposes no API Nova may call, contributes none.
-            {me.data?.demo && <span className="text-text-mute"> Demo mode has no service APIs at all.</span>}
           </div>
         )}
       </section>
@@ -146,7 +144,7 @@ export default function AppDetail() {
           {workloads.length === 0 && (
             <div className="p-5 text-sm text-text-mute">
               Nova sees no workloads for this service in its namespace. Either it is not installed
-              here, or Nova has no cluster access — demo mode runs without one.
+              here, or Nova has no cluster access.
             </div>
           )}
         </div>

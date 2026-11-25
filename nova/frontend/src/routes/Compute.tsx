@@ -95,7 +95,7 @@ export default function Compute() {
               : 'Spark clusters a team starts when it needs them; the shared cluster is always on.'}
           </p>
         </div>
-        {tab === 'spark' && admin && me.data?.demo !== true && (
+        {tab === 'spark' && admin && (
           <button type="button" className="btn-primary" onClick={() => setEditing({ cluster: null })}>
             New cluster
           </button>

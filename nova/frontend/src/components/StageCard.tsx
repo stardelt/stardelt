@@ -57,15 +57,9 @@ export default function StageCard({ me, collapsed }: { me?: Me | null; collapsed
   const body = (
     <>
       {collapsed ? (
-        // The rail shows the dot alone; the `demo` badge shrinks to a dot on it.
+        // The rail shows the dot alone.
         <span className="relative inline-flex shrink-0 h-4 w-4 items-center justify-center">
           <span className={`h-2 w-2 rounded-full ${dotColour}`} />
-          {me?.demo && (
-            <span
-              title="demo"
-              className="hidden md:block absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-warn"
-            />
-          )}
         </span>
       ) : (
         <span className={`h-2 w-2 rounded-full shrink-0 ${dotColour}`} />
@@ -76,16 +70,6 @@ export default function StageCard({ me, collapsed }: { me?: Me | null; collapsed
         </div>
         <div className="text-sm font-medium truncate" title={name}>{name}</div>
       </div>
-      {me?.demo && (
-        <span
-          className={[
-            'badge border-amber-400/40 bg-amber-400/10 text-warn ml-auto',
-            collapsed ? 'md:hidden' : '',
-          ].filter(Boolean).join(' ')}
-        >
-          demo
-        </span>
-      )}
     </>
   )
 

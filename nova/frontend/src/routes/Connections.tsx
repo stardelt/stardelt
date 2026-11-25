@@ -58,8 +58,6 @@ export default function Connections() {
   const queryClient = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const admin = isAdmin(me.data)
-  // Demo mode has no secret store, so every write route answers 503 (#500): offer none.
-  const demo = me.data?.demo === true
   const list = useQuery({ queryKey: ['connections'], queryFn: api.connections })
   // `store: false` is `spec.secrets.mode: external`: the list is built from the Connection
   // resources and a new one names a path in the enterprise's store (#1428).
@@ -113,18 +111,11 @@ export default function Connections() {
               names a path there; the operator syncs the values.
             </p>
           )}
-          {demo && (
-            <p className="text-text-dim text-sm mt-1">
-              Demo mode shows sample connections. Creating, rotating or deleting one needs a secret store.
-            </p>
-          )}
         </div>
-        {!demo && (
-          <button type="button" className="btn-primary" onClick={() => setDialog({ kind: 'new' })}>
-            <Icon name="plus" className="w-4 h-4" />
-            New connection
-          </button>
-        )}
+        <button type="button" className="btn-primary" onClick={() => setDialog({ kind: 'new' })}>
+          <Icon name="plus" className="w-4 h-4" />
+          New connection
+        </button>
       </header>
 
       {notice && <p role="status" className="text-sm text-ok break-words">{notice}</p>}
@@ -148,7 +139,6 @@ export default function Connections() {
             caption="Personal connections"
             rows={personal}
             admin={admin}
-            demo={demo}
             external={external}
             onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
             onDelete={(connection) => setDialog({ kind: 'delete', connection })}
@@ -175,7 +165,6 @@ export default function Connections() {
               caption={`Connections of the group ${group}`}
               rows={groupRows}
               admin={admin}
-              demo={demo}
               external={external}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
@@ -194,7 +183,6 @@ export default function Connections() {
               caption="Managed connections"
               rows={managed}
               admin={admin}
-              demo={demo}
               external={external}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
@@ -291,7 +279,6 @@ function ConnectionTable({
   caption,
   rows,
   admin,
-  demo,
   external,
   onRotate,
   onDelete,
@@ -300,7 +287,6 @@ function ConnectionTable({
   caption: string
   rows: Connection[]
   admin: boolean
-  demo: boolean
   external: boolean
   onRotate: (connection: Connection) => void
   onDelete: (connection: Connection) => void
@@ -344,7 +330,6 @@ function ConnectionTable({
               key={row.name}
               row={row}
               admin={admin}
-              demo={demo}
               external={external}
               onRotate={() => onRotate(row)}
               onDelete={() => onDelete(row)}
@@ -451,10 +436,9 @@ function UseDisclosure({ row }: { row: Connection }) {
   )
 }
 
-function Row({ row, admin, demo, external, onRotate, onDelete, onBreakGlass }: {
+function Row({ row, admin, external, onRotate, onDelete, onBreakGlass }: {
   row: Connection
   admin: boolean
-  demo: boolean
   external: boolean
   onRotate: () => void
   onDelete: () => void
@@ -497,42 +481,38 @@ function Row({ row, admin, demo, external, onRotate, onDelete, onBreakGlass }: {
       </td>
       <td className="td px-3"><Status row={row} /></td>
       <td className="td px-3">
-        {demo ? (
-          <span className="text-xs text-text-mute">Read-only in demo</span>
-        ) : (
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {rotatable && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {rotatable && (
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs"
+              aria-label={`Rotate secret for ${row.name}`}
+              onClick={onRotate}
+            >
+              Rotate secret
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn-ghost py-1 px-2 text-xs text-bad"
+            aria-label={`Delete connection ${row.name}`}
+            onClick={onDelete}
+          >
+            Delete connection
+          </button>
+          {admin && row.scope === 'group' && (
+            <div className="border-l border-border/70 pl-2">
               <button
                 type="button"
                 className="btn-ghost py-1 px-2 text-xs"
-                aria-label={`Rotate secret for ${row.name}`}
-                onClick={onRotate}
+                aria-label={`Read ${row.name} as admin; the read is logged`}
+                onClick={onBreakGlass}
               >
-                Rotate secret
+                Read as admin (logged)
               </button>
-            )}
-            <button
-              type="button"
-              className="btn-ghost py-1 px-2 text-xs text-bad"
-              aria-label={`Delete connection ${row.name}`}
-              onClick={onDelete}
-            >
-              Delete connection
-            </button>
-            {admin && row.scope === 'group' && (
-              <div className="border-l border-border/70 pl-2">
-                <button
-                  type="button"
-                  className="btn-ghost py-1 px-2 text-xs"
-                  aria-label={`Read ${row.name} as admin; the read is logged`}
-                  onClick={onBreakGlass}
-                >
-                  Read as admin (logged)
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
       </td>
     </tr>
   )

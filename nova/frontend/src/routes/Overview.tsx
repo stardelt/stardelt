@@ -204,7 +204,6 @@ export default function Overview() {
           <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
           <p className="text-text-dim text-sm mt-1">
             Your catalogs, how fresh they are, and the last two weeks of queries and runs.
-            {me.data?.demo && <span className="text-warn"> Demo data is in memory.</span>}
           </p>
         </div>
         <div className="flex gap-2">

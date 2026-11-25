@@ -58,7 +58,7 @@ function catalogGroups(catalogs: Catalog[]): CatalogGroup[] | null {
  *
  * The choice lives in the URL (`?catalog=`), so the table list, the table detail, a
  * reload and a pasted link all agree on it, and Back returns to the previous catalog.
- * With one catalog — demo mode, a single-warehouse install — there is nothing to choose
+ * With one catalog — a single-warehouse install — there is nothing to choose
  * and the component renders nothing at all, exactly as the page looked before.
  *
  * Changing the catalog drops `ns`/`tbl`: a table name belongs to the catalog it was

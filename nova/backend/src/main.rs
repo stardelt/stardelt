@@ -1,13 +1,13 @@
 //! stardelt Nova — HTTP backend for the unified UI.
 //!
 //! Endpoints:
-//!   GET  /api/me                            — current user + demo flag
+//!   GET  /api/me                            — current user and auth mode
 //!   GET  /api/health                        — backend liveness + state-store status
 //!   GET  /api/openapi.json                  — the public API description (unauthenticated, no data)
 //!   GET  /api/auth/login                    — start OIDC sign-in (oidc mode; ?return_to=, ?login_hint=)
 //!   GET  /api/auth/callback                 — OIDC redirect target (oidc mode)
 //!   POST /api/auth/logout                   — sign out locally and at the IdP
-//!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
+//!   GET  /api/trino/cluster                 — Trino /v1/info
 //!   GET  /api/catalog/warehouse             — resolved warehouse id+name
 //!   GET  /api/warehouses                    — the SQL compute classes, which the caller uses
 //!   GET  /api/catalog/catalogs              — the catalogs the caller may browse
@@ -72,7 +72,6 @@
 //!   GET  /.well-known/oauth-protected-resource/mcp  — the same, for the `/mcp` path
 //!   POST /mcp                                       — JSON-RPC: initialize, tools/list, tools/call
 //!
-//! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
 //! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
 //! `NOVA_DATABASE_URL` (a PostgreSQL URL) switches on the state store (`db.rs`); unset,
@@ -114,7 +113,6 @@ mod connection_routes;
 mod connections;
 mod data;
 mod db;
-mod demo;
 mod destinations;
 mod embed;
 mod error;
@@ -252,7 +250,6 @@ pub struct AppState {
     /// group a service principal belongs to; the caller's own groups decide visibility.
     pub principal_owners: Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
     pub http: reqwest::Client,
-    pub demo: bool,
     /// The sign-in names `NOVA_SHARED_ACCOUNTS` lists: one account many visitors use (the
     /// public demo). `/api/me` says so and the account's saved queries, settings and
     /// query-log rows are removed nightly (`shared_accounts.rs`).
@@ -276,9 +273,8 @@ pub struct AppState {
     /// `dev` mode; MCP refuses to start without it (see `mcp::McpConfig::from_env`).
     pub auth: Option<Arc<auth::AuthState>>,
     pub jobs: Mutex<Vec<jobs::Job>>,
-    pub demo_state: RwLock<demo::DemoState>,
-    /// Cluster client for the read-only workload view. `None` in demo mode, or when
-    /// Nova runs outside a cluster / lacks RBAC — the UI then simply omits images.
+    /// Cluster client for the read-only workload view. `None` when Nova runs outside a
+    /// cluster or lacks RBAC — the UI then simply omits images.
     pub kube: Option<kube::Client>,
     pub workloads: cluster::WorkloadCache,
     /// The platform's secret store (`secret_store.rs`). `None` when `NOVA_SECRET_STORE_URL`
@@ -343,7 +339,6 @@ pub struct AppState {
 struct Me {
     user: String,
     auth_mode: &'static str,
-    demo: bool,
     /// This sign-in is shared by many people (the public demo); its data is reset nightly.
     shared_account: bool,
     warehouse: String,
@@ -361,7 +356,6 @@ struct Me {
 struct OidcMe<'a> {
     user: &'a str,
     auth_mode: &'static str,
-    demo: bool,
     /// This sign-in is shared by many people (the public demo); its data is reset nightly.
     shared_account: bool,
     warehouse: &'a str,
@@ -398,7 +392,7 @@ struct OidcMe<'a> {
     tag = "public",
     description = "The caller: static user in `dev` mode, verified claims (never tokens) in `oidc` mode. The `oidc` shape is the documented `OidcMe` superset of this one.",
     responses(
-        (status = 200, description = "Current user, auth mode, demo flag and warehouse", body = Me),
+        (status = 200, description = "Current user, auth mode and warehouse", body = Me),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -413,7 +407,6 @@ pub(crate) async fn me(
         None => Json(Me {
             user: s.dev_user.clone(),
             auth_mode: "static-dev",
-            demo: s.demo,
             shared_account: false,
             warehouse: s.warehouse_name.clone(),
             admin_console_url: None,
@@ -430,7 +423,6 @@ pub(crate) async fn me(
             Json(OidcMe {
                 user: &id.display_name,
                 auth_mode: "oidc",
-                demo: s.demo,
                 shared_account: shared_accounts::is_shared(&s.shared_accounts, &id.display_name),
                 warehouse: &s.warehouse_name,
                 sub: &id.sub,
@@ -487,7 +479,7 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Health> {
     operation_id = "trino_cluster",
     path = "/api/trino/cluster",
     tag = "internal",
-    description = "The query engine coordinator's own status page (`/v1/info`), passed through as the engine answers it: an object with `nodeVersion.version`, `environment`, `coordinator`, `starting` and `uptime`. The fields are the engine's and may change with its version; Nova adds nothing. In demo mode the answer is the fixed `{\"nodeVersion\": {\"version\": \"demo\"}, \"state\": \"ACTIVE\", \"demo\": true}`. The engine's own status code is passed through; when the engine cannot be reached the answer is 502 with a sentence. Administrator-only: anybody else gets 403.",
+    description = "The query engine coordinator's own status page (`/v1/info`), passed through as the engine answers it: an object with `nodeVersion.version`, `environment`, `coordinator`, `starting` and `uptime`. The fields are the engine's and may change with its version; Nova adds nothing. The engine's own status code is passed through; when the engine cannot be reached the answer is 502 with a sentence. Administrator-only: anybody else gets 403.",
     responses(
         (status = 200, description = "The coordinator's status object, as the engine answers it", body = Object),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -496,14 +488,6 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Health> {
     )
 )]
 async fn trino_cluster(State(s): State<Arc<AppState>>) -> Response {
-    if s.demo {
-        return Json(serde_json::json!({
-            "nodeVersion": { "version": "demo" },
-            "state": "ACTIVE",
-            "demo": true
-        }))
-        .into_response();
-    }
     // Trino 480 dropped /v1/cluster + /v1/node; coordinator status lives at /v1/info.
     proxy_get(&s, format!("{}/v1/info", s.trino_url)).await
 }
@@ -1048,19 +1032,10 @@ async fn main() -> anyhow::Result<()> {
     // before `auth_mode` is consumed below.
     let auth_dev = matches!(auth_mode, auth::AuthMode::Dev);
 
-    let demo_mode = env_flag("NOVA_DEMO");
-    let demo_state = if demo_mode {
-        demo::DemoState::seed()
-    } else {
-        demo::DemoState::default()
-    };
-
     // Read-only cluster access for the workload view. Absence is not an error: Nova
-    // runs in demo mode and on laptops, and a cluster without the RBAC below simply
-    // shows apps without images.
-    let kube = if demo_mode {
-        None
-    } else {
+    // runs on laptops too, and a cluster without the RBAC below simply shows apps
+    // without images.
+    let kube = {
         match kube::Config::infer().await {
             Ok(mut config) => {
                 info!(
@@ -1377,7 +1352,6 @@ async fn main() -> anyhow::Result<()> {
         catalog_layers: Mutex::new(None),
         principal_owners: Mutex::new(None),
         http,
-        demo: demo_mode,
         shared_accounts: shared_accounts::from_env(),
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         redact_query_log_literals: env_flag("NOVA_QUERY_LOG_REDACT_LITERALS"),
@@ -1385,7 +1359,6 @@ async fn main() -> anyhow::Result<()> {
         mcp,
         auth: auth.clone(),
         jobs: Mutex::new(Vec::new()),
-        demo_state: RwLock::new(demo_state),
         kube,
         workloads: cluster::WorkloadCache::default(),
         admin_console_url: admin_console,
@@ -1406,7 +1379,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The Overview's numbers are read in the background, never on a request: every five
     // minutes, with Nova's own service token, one round at a time (stardelt-nova#263).
-    // Not in demo mode (the seeded tables are the numbers) and not without a catalog.
+    // Not without a catalog.
     catalog_metrics::spawn_refresher(Arc::clone(&state));
     // The ModelEndpoint probe (stardelt-operator#609 slice c2): one round after a minute, then
     // every NOVA_MODEL_PROBE_SECONDS (a day by default); a new endpoint is probed at the first round.
@@ -1473,7 +1446,6 @@ async fn main() -> anyhow::Result<()> {
         lakekeeper = %state.lakekeeper_url,
         warehouse = %state.warehouse_name,
         static_dir = %static_dir,
-        demo = state.demo,
         auth = if auth.is_some() { "oidc" } else { "dev" },
         store = state.store.is_some(),
         catalog_token = state.catalog_token.is_some(),
@@ -1511,27 +1483,14 @@ mod router_tests {
     }
 
     pub(crate) fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
-        build_test_state(
-            db,
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:1",
-            true,
-            None,
-            None,
-        )
+        build_test_state(db, "http://127.0.0.1:1", "http://127.0.0.1:1", None, None)
     }
 
-    /// An `AppState` whose JupyterHub workspace points at `api` (`workspace.rs` tests): not
-    /// demo, so the handlers really call the hub.
+    /// An `AppState` whose JupyterHub workspace points at `api` (`workspace.rs` tests): the
+    /// handlers really call the hub.
     pub(crate) fn test_state_with_workspace(api: &str, idle_seconds: i64) -> Arc<AppState> {
-        let mut state = build_test_state(
-            None,
-            "http://127.0.0.1:1",
-            "http://127.0.0.1:1",
-            false,
-            None,
-            None,
-        );
+        let mut state =
+            build_test_state(None, "http://127.0.0.1:1", "http://127.0.0.1:1", None, None);
         Arc::get_mut(&mut state).expect("a fresh state").workspace =
             Some(workspace::WorkspaceConfig {
                 api: api.to_string(),
@@ -1542,21 +1501,20 @@ mod router_tests {
     }
 
     /// An `AppState` with a cluster client (`admin_catalogs.rs`): the `Catalog` rows come
-    /// from the API server the client points at, not from the demo branch.
+    /// from the API server the client points at.
     pub(crate) fn test_state_with_kube(kube: kube::Client) -> Arc<AppState> {
         build_test_state(
             None,
             "http://127.0.0.1:1",
             "http://127.0.0.1:1",
-            false,
             None,
             Some(kube),
         )
     }
 
-    /// An `AppState` for the catalog-token tests (`catalog_token.rs`): not demo, so the
-    /// handlers really call Lakekeeper, with the fakes' URLs and the service-token client
-    /// under test (or `None` for today's unauthenticated behaviour).
+    /// An `AppState` for the catalog-token tests (`catalog_token.rs`): the handlers really
+    /// call Lakekeeper, with the fakes' URLs and the service-token client under test (or
+    /// `None` for today's unauthenticated behaviour).
     pub(crate) fn catalog_test_state(
         lakekeeper_url: &str,
         catalog_token: Option<catalog_token::CatalogToken>,
@@ -1565,32 +1523,24 @@ mod router_tests {
             None,
             "http://127.0.0.1:1",
             lakekeeper_url,
-            false,
             catalog_token,
             None,
         )
     }
 
-    /// An `AppState` for the catalog tests (`catalog.rs`): not demo, both upstreams are
-    /// fakes, so `SHOW CATALOGS` and the warehouse list are answered by the test.
+    /// An `AppState` for the catalog tests (`catalog.rs`): both upstreams are fakes, so
+    /// `SHOW CATALOGS` and the warehouse list are answered by the test.
     pub(crate) fn catalog_scope_test_state(trino_url: &str, lakekeeper_url: &str) -> Arc<AppState> {
-        build_test_state(None, trino_url, lakekeeper_url, false, None, None)
+        build_test_state(None, trino_url, lakekeeper_url, None, None)
     }
 
-    /// A live (not demo) state whose catalog (Lakekeeper) is the server at `lakekeeper_url`.
+    /// A state whose catalog (Lakekeeper) is the server at `lakekeeper_url`.
     pub(crate) fn test_state_with_lakekeeper(lakekeeper_url: &str) -> Arc<AppState> {
-        build_test_state(
-            None,
-            "http://127.0.0.1:1",
-            lakekeeper_url,
-            false,
-            None,
-            None,
-        )
+        build_test_state(None, "http://127.0.0.1:1", lakekeeper_url, None, None)
     }
-    /// A live (not demo) state whose engine is the server at `trino_url`.
+    /// A state whose engine is the server at `trino_url`.
     pub(crate) fn test_state_with_trino(trino_url: &str) -> Arc<AppState> {
-        build_test_state(None, trino_url, "http://127.0.0.1:1", false, None, None)
+        build_test_state(None, trino_url, "http://127.0.0.1:1", None, None)
     }
     pub(crate) fn test_state_with_stage(
         stage_name: Option<String>,
@@ -1600,7 +1550,6 @@ mod router_tests {
             None,
             "http://127.0.0.1:1",
             "http://127.0.0.1:1",
-            false,
             None,
             None,
             stage_name,
@@ -1620,7 +1569,6 @@ mod router_tests {
             None,
             trino_url,
             "http://127.0.0.1:1",
-            false,
             None,
             None,
             None,
@@ -1634,7 +1582,6 @@ mod router_tests {
         db: Option<sqlx::PgPool>,
         trino_url: &str,
         lakekeeper_url: &str,
-        demo_mode: bool,
         catalog_token: Option<catalog_token::CatalogToken>,
         kube: Option<kube::Client>,
     ) -> Arc<AppState> {
@@ -1642,7 +1589,6 @@ mod router_tests {
             db,
             trino_url,
             lakekeeper_url,
-            demo_mode,
             catalog_token,
             kube,
             None,
@@ -1657,7 +1603,6 @@ mod router_tests {
             None,
             "http://127.0.0.1:1",
             "http://127.0.0.1:1",
-            false,
             None,
             None,
             None,
@@ -1671,7 +1616,6 @@ mod router_tests {
         db: Option<sqlx::PgPool>,
         trino_url: &str,
         lakekeeper_url: &str,
-        demo_mode: bool,
         catalog_token: Option<catalog_token::CatalogToken>,
         kube: Option<kube::Client>,
         stage_name: Option<String>,
@@ -1705,14 +1649,12 @@ mod router_tests {
             catalog_layers: Mutex::new(None),
             principal_owners: Mutex::new(None),
             http: reqwest::Client::new(),
-            demo: demo_mode,
             forward_identity: false,
             redact_query_log_literals: false,
             showback: None,
             mcp: None,
             auth: None,
             jobs: Mutex::new(Vec::new()),
-            demo_state: RwLock::new(demo::DemoState::default()),
             kube,
             workloads: cluster::WorkloadCache::default(),
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
@@ -1854,49 +1796,6 @@ mod router_tests {
                 "{uri} is not registered in api_router"
             );
         }
-    }
-
-    /// `GET /api/catalog/catalogs` is wired next to `/catalog/warehouse` and answers the
-    /// shape the UI reads: the demo catalog, its id and the default, never cached.
-    #[tokio::test]
-    async fn the_catalog_list_route_answers_the_demo_catalog() {
-        let (app, _dir) = test_app("catalog-list");
-        let response = get(app, "/api/catalog/catalogs").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(header(&response, "cache-control"), Some("no-store"));
-        let bytes = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .expect("body");
-        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(body["default"], "warehouse");
-        assert_eq!(
-            body["catalogs"],
-            serde_json::json!([{
-                "name": "warehouse",
-                "id": "demo",
-                "canWrite": true,
-                "owner": null,
-                "description": null,
-                "grants": []
-            }])
-        );
-    }
-
-    /// Demo mode has one catalog: a name it does not have is refused before any upstream
-    /// is called, and an engine catalog name is refused as invalid.
-    #[tokio::test]
-    async fn a_catalog_the_caller_may_not_browse_is_refused_before_the_catalog() {
-        let (app, _dir) = test_app("catalog-scope");
-        let response = get(app.clone(), "/api/catalog/namespaces?catalog=finance").await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let response = get(app.clone(), "/api/catalog/namespaces?catalog=System").await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let response = get(app, "/api/catalog/namespaces").await;
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "the default catalog still answers in demo mode"
-        );
     }
 
     /// `GET /api/openapi.json` is served outside sign-in and carries the
@@ -3094,12 +2993,10 @@ mod router_tests {
         seed_read(&pool, BOB_SUB, ("bronze.shop", "orders"), 7, 1).await;
 
         let dir = StaticDir::new("read-tables");
-        // Not demo: the demo branch answers canned tables and never reads the store.
         let state = build_test_state(
             Some(pool.clone()),
             "http://127.0.0.1:1",
             "http://127.0.0.1:1",
-            false,
             None,
             None,
         );

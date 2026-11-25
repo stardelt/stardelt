@@ -521,38 +521,6 @@ pub async fn run_query(
         .map(|c| (c.0.identity.display_name.clone(), c.0.identity.sub.clone()))
         .unwrap_or_else(|| (s.dev_user.clone(), s.dev_user.clone()));
 
-    if s.demo {
-        let demo = s.demo_state.read().expect("demo state poisoned");
-        return match demo.run_query(&sql) {
-            Ok(r) => {
-                jobs::record(
-                    &s.jobs,
-                    "query",
-                    title,
-                    "succeeded",
-                    r.query_id.clone(),
-                    Some(r.row_count),
-                    &user,
-                    &owner,
-                );
-                Json(r).into_response()
-            }
-            Err(e) => {
-                jobs::record(
-                    &s.jobs,
-                    "query",
-                    title,
-                    "failed",
-                    Some(e.clone()),
-                    None,
-                    &user,
-                    &owner,
-                );
-                (error_status(&e), Json(serde_json::json!({ "error": e }))).into_response()
-            }
-        };
-    }
-
     match execute_from(&s, sql, caller.as_ref().map(|c| &c.0), "nova-sql-editor").await {
         Ok(r) => {
             jobs::record(
@@ -779,14 +747,12 @@ mod tests {
             catalog_layers: std::sync::Mutex::new(None),
             principal_owners: std::sync::Mutex::new(None),
             http: reqwest::Client::new(),
-            demo: false,
             forward_identity: forward,
             redact_query_log_literals: false,
             showback: None,
             mcp: None,
             auth: None,
             jobs: std::sync::Mutex::new(Vec::new()),
-            demo_state: std::sync::RwLock::new(crate::demo::DemoState::default()),
             kube: None,
             workloads: crate::cluster::WorkloadCache::default(),
             admin_console_url: None,

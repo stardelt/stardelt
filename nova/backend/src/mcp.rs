@@ -1977,22 +1977,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn table_documentation_of_a_missing_table() {
-        let (app, _dir) = test_app("mcp-table-docs-missing", true);
-        let result = call(
-            app,
-            "table_documentation",
-            json!({ "namespace": "nope", "table": "nope" }),
-        )
-        .await;
-        assert_eq!(result["isError"], true, "{result}");
-        assert!(
-            text_of(&result).contains("no such table nope.nope"),
-            "{result}"
-        );
-    }
-
-    #[tokio::test]
     async fn table_documentation_drops_the_page_hints() {
         let doc = json!({
             "description": "Trips, one row per completed ride.",

@@ -2,8 +2,8 @@ import { test, expect, type Route, type Page } from '@playwright/test'
 
 // The Overview's Me / My groups switch (stardelt-nova#510 slice 3, #771): "My groups" is the
 // first view and asks the query log for `scope=team`; "Mine" asks for `scope=mine` and hides
-// the pipeline runs, which belong to a group rather than to a person. Runs in the `demo`
-// project (playwright.config.ts), so the run rows come from the demo seed.
+// the pipeline runs, which belong to a group rather than to a person. The pipeline runs are
+// stubbed with `page.route`, like the query log below.
 
 const AT = (iso: string) => Date.parse(iso)
 
@@ -27,6 +27,28 @@ const QUERY_ITEMS = [
 const json = (route: Route, body: unknown) =>
   route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
 
+/** One run row of `GET /api/runs`: a pipeline run belongs to its group, not to a person. */
+const RUNS = {
+  runs: [
+    {
+      namespace: 'default',
+      name: 'ingest_orders',
+      ownerGroup: 'analysts',
+      kind: 'pipeline',
+      runId: 'r-1',
+      state: 'success',
+      type: 'scheduled',
+      logicalDate: '2026-11-08T09:00:00Z',
+      startedAt: '2026-11-08T09:00:00Z',
+      endedAt: '2026-11-08T09:02:00Z',
+      durationSeconds: 120,
+      triggeredBy: 'scheduler',
+      note: null,
+    },
+  ],
+  groups: ['analysts'],
+}
+
 /** The card's timeline asks `limit=20`; the pulse card asks `limit=200` and mounts last, so
  *  only the timeline's scope is recorded here. */
 async function open(page: Page) {
@@ -38,6 +60,7 @@ async function open(page: Page) {
     }
     return json(route, { items: QUERY_ITEMS, nextCursor: null })
   })
+  await page.route('**/api/runs**', (route) => json(route, RUNS))
   await page.goto('/')
   const card = page.locator('div.card', { has: page.getByRole('heading', { name: 'Recent activity' }) })
   // The card is below the fold and reads its two lists only when it comes near (nova#859).

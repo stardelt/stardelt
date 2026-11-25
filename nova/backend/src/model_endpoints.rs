@@ -6,7 +6,7 @@
 //! it usable — not the internal hostname or the name of the Connection holding the key. The
 //! key itself never reaches Nova through this route (the kubelet projects it into the pod).
 //!
-//! Without a cluster (demo mode, a local run) the answer is an empty list: no endpoint means
+//! Without a cluster (a local run) the answer is an empty list: no endpoint means
 //! no AI feature, which is the design's switch. A cluster that refuses is a 502.
 
 use std::sync::Arc;
@@ -129,7 +129,7 @@ fn rows(objects: &[Value]) -> Vec<ModelEndpointRow> {
     operation_id = "model_endpoints_list",
     path = "/api/model-endpoints",
     tag = "public",
-    description = "Every `ModelEndpoint` of the platform namespace, name order: `name`, `model`, `location` (`on-premise` | `cloud`, default `on-premise`), `purposes` (default `[\"ask\",\"agents\"]`), `sendRows` (may query results be sent to this model; off by default), the quota of `spec.quota` — `perGroupMonthlyTokens` and `perPersonDailyTokens`, each `null` for no limit — and the probe's last answer — `reachable`, `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`, `message`, each `null` until the probe has run. The endpoint's `url` and its `keyRef` are absent on purpose: the shape says that a model exists, what it is, where prompts go and whether it works, never the internal hostname or the name of the Connection holding the key. Without a cluster connection (demo mode, a local run) the answer is an empty list: no endpoint means no AI feature. A cluster that refuses or fails is a 502, never an empty list that would read as \"no model\". Answers `Cache-Control: no-store`.",
+    description = "Every `ModelEndpoint` of the platform namespace, name order: `name`, `model`, `location` (`on-premise` | `cloud`, default `on-premise`), `purposes` (default `[\"ask\",\"agents\"]`), `sendRows` (may query results be sent to this model; off by default), the quota of `spec.quota` — `perGroupMonthlyTokens` and `perPersonDailyTokens`, each `null` for no limit — and the probe's last answer — `reachable`, `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`, `message`, each `null` until the probe has run. The endpoint's `url` and its `keyRef` are absent on purpose: the shape says that a model exists, what it is, where prompts go and whether it works, never the internal hostname or the name of the Connection holding the key. Without a cluster connection (a local run) the answer is an empty list: no endpoint means no AI feature. A cluster that refuses or fails is a 502, never an empty list that would read as \"no model\". Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per endpoint, name order; empty when none is connected", body = [ModelEndpointRow]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),

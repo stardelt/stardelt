@@ -463,7 +463,6 @@ async fn advance(
         (status = 400, description = "The statement is empty", body = crate::openapi::ErrorResponse),
         (status = 429, description = "The caller already holds ten statements; read or cancel one", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "Not available in demo mode", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -472,12 +471,6 @@ async fn submit(
     caller: Option<axum::Extension<crate::auth::Principal>>,
     ApiJson(req): ApiJson<SubmitRequest>,
 ) -> Response {
-    if s.demo {
-        return fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "statements are not available in demo mode",
-        );
-    }
     if req.sql.trim().is_empty() {
         return fail(StatusCode::BAD_REQUEST, "the statement is empty");
     }
@@ -1203,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_statement_is_a_400_and_demo_mode_a_503() {
+    async fn an_empty_statement_is_a_400() {
         let live = app(
             crate::router_tests::test_state_with_trino("http://127.0.0.1:1"),
             "alice",
@@ -1216,15 +1209,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        let demo = app(crate::router_tests::test_state(), "alice");
-        let (status, _) = call(
-            &demo,
-            "POST",
-            "/api/statements",
-            Some(json!({ "sql": "select 1" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
