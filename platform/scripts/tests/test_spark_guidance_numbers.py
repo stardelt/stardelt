@@ -9,6 +9,28 @@ PLATFORM = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST = PLATFORM / "manifests" / "spark.yaml"
 README = PLATFORM.parent / "python" / "stardelt" / "README.md"
 GUIDE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "spark.md"
+HELPER = PLATFORM.parent / "python" / "stardelt" / "__init__.py"
+
+
+def spark_tips():
+    """`SPARK_TIPS` from the helper, parsed — the seven strings `spark_tips()` prints."""
+    import ast
+    tree = ast.parse(HELPER.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SPARK_TIPS":
+            return [ast.literal_eval(element) for element in node.value.elts]
+    raise AssertionError("python/stardelt/__init__.py no longer defines SPARK_TIPS")
+
+
+def readme_table_rows():
+    """The data rows of the README's "Keeping the shared driver healthy" table."""
+    text = README.read_text()
+    block = text.split("## Keeping the shared driver healthy", 1)[1].split("\n## ", 1)[0]
+    rows = [line for line in block.splitlines() if line.startswith("| ")]
+    if not rows:
+        raise AssertionError("the README no longer carries the 'Keeping the shared driver healthy' table")
+    data = [row for row in rows[1:] if not set(row) <= set("|-: ")]
+    return data
 
 
 def manifest_numbers():
@@ -73,6 +95,15 @@ class SparkGuidanceNumbers(unittest.TestCase):
             match, "the guide no longer carries the sentence 'collect() and toPandas() stop at 512 MB'"
         )
         self.assertEqual(int(match.group(1)), n["max_result_mib"])
+
+    def test_the_helper_tips_quote_the_manifest(self):
+        tips = spark_tips()
+        text = "\n".join(tips)
+        n = manifest_numbers()
+        self.assertIn(f"{n['driver_heap_gib']} GiB driver heap", text)
+        self.assertIn(f"above {n['max_result_mib']} MiB", text)
+        self.assertIn(f"{n['executor_gib']} GiB each", text)
+        self.assertEqual(len(tips), len(readme_table_rows()))
 
 
 if __name__ == "__main__":
