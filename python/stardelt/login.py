@@ -5,7 +5,9 @@ PKCE even for this grant (found against the live realm: "Missing parameter: code
 does not ask for it ignores the extra fields. The person gets an address and a short code, approves it in a browser, and the tokens are kept in
 ``$XDG_CONFIG_HOME/stardelt/credentials.json`` (``~/.config/...`` without it; the directory is mode 0700, the
 file 0600). ``STARDELT_TOKEN`` still wins when it is set, for CI. The access token is renewed with the refresh
-token when less than a minute is left. A token is never printed.
+token when less than a minute is left. The device sign-in asks for ``offline_access``, so the sign-in
+outlives the provider's browser session; ``stardelt logout`` revokes the refresh token when the
+provider publishes a revocation endpoint. A token is never printed.
 """
 
 import base64
@@ -58,10 +60,41 @@ def save(environ, creds):
     return path
 
 
-def forget(environ):
-    """Delete the stored sign-in. ``True`` when there was one."""
+def revoke(session, creds):
+    """Best effort: ask the provider to invalidate the stored refresh token (RFC 7009).
+
+    A provider without a ``revocation_endpoint`` is left alone, and every failure is ignored: the
+    sign-in is gone locally in any case. ``except Exception`` is deliberate — a broken discovery
+    document, a session that raises, a non-JSON answer must never keep the file behind.
+    """
+    refresh = (creds or {}).get("refresh_token")
+    issuer = (creds or {}).get("issuer")
+    if not refresh or not issuer or session is None:
+        return False
+    try:
+        endpoint = discover(session, issuer).get("revocation_endpoint")
+        if not endpoint:
+            return False
+        session.request(
+            "POST",
+            endpoint,
+            data={"token": refresh, "token_type_hint": "refresh_token", "client_id": creds.get("client_id")},
+            timeout=TIMEOUT,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def forget(environ, session=None):
+    """Delete the stored sign-in, revoking its refresh token first when a session is given.
+
+    ``True`` when there was one.
+    """
     path = credentials_path(environ)
     try:
+        stored = load(environ)
+        revoke(session, stored)
         path.unlink()
     except (OSError, AttributeError):
         return False
@@ -136,15 +169,29 @@ def pkce():
     return verifier, challenge
 
 
+def _device_start(session, endpoint, client_id, challenge, scope):
+    return _post(
+        session,
+        endpoint,
+        {"client_id": client_id, "scope": scope, "code_challenge": challenge, "code_challenge_method": "S256"},
+    )
+
+
 def device_login(session, issuer, client_id, say, sleep=time.sleep, clock=time.time):
-    """Run the device flow and return the credentials dict. ``say`` receives the lines the person must read."""
+    """Run the device flow and return the credentials dict. ``say`` receives the lines the person must read.
+
+    The sign-in asks for ``offline_access`` (it is not asked again when the provider does not offer
+    it): the refresh token then outlives the provider's SSO session, so a person signs in once and
+    scripts keep working until the sign-in is revoked.
+    """
     meta = discover(session, issuer)
     verifier, challenge = pkce()
-    status, start = _post(
-        session,
-        meta["device_authorization_endpoint"],
-        {"client_id": client_id, "scope": "openid", "code_challenge": challenge, "code_challenge_method": "S256"},
+    status, start = _device_start(
+        session, meta["device_authorization_endpoint"], client_id, challenge, "openid offline_access"
     )
+    if status == 400 and start.get("error") == "invalid_scope":
+        say("this identity provider gives no offline sign-in; the sign-in lasts as long as its session")
+        status, start = _device_start(session, meta["device_authorization_endpoint"], client_id, challenge, "openid")
     if status != 200 or "device_code" not in start:
         raise LoginError(f"the identity provider refused the sign-in request (HTTP {status})")
     where = start.get("verification_uri_complete") or start.get("verification_uri", "")

@@ -177,6 +177,22 @@ else
   echo "› client $DEV_CLIENT: settings match"
 fi
 
+# 5a. The optional `offline_access` scope: without it the CLI's refresh token dies with the browser
+#    SSO session (#1641). Keycloak creates the built-in scope in every realm.
+if "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/clients/$client_uuid/optional-client-scopes" \
+  | python3 -c 'import sys,json; sys.exit(0 if any(s.get("name") == "offline_access" for s in json.load(sys.stdin)) else 1)'; then
+  :
+else
+  offline_scope_id="$("${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/client-scopes" \
+    | python3 -c 'import sys,json
+print(next((s["id"] for s in json.load(sys.stdin) if s.get("name") == "offline_access"), ""))')"
+  [ -n "$offline_scope_id" ] || fail "realm $REALM has no offline_access client scope"
+  "${CURL[@]}" -o /dev/null "${HEAD[@]}" "${AUTH[@]}" -X PUT \
+    "$API/clients/$client_uuid/optional-client-scopes/$offline_scope_id" \
+    || fail "Keycloak refused to make offline_access an optional scope of $DEV_CLIENT"
+fi
+echo "› client $DEV_CLIENT: offline_access optional"
+
 # 5b. Mappers, by name; a missing one is added.
 "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/clients/$client_uuid" > "$tmp/current.json"
 python3 - "$tmp/current.json" "$tmp/desired.json" "$tmp" <<'PY' > "$tmp/missing.txt"

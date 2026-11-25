@@ -54,6 +54,23 @@ def test_the_device_flow_shows_the_code_polls_and_returns_the_tokens():
         "client_id": "stardelt-dev",
         "code_verifier": kwargs["data"]["code_verifier"],
     }
+    # The sign-in outlives the browser session: the device request asks for an offline token.
+    assert session.calls[1][2]["data"]["scope"] == "openid offline_access"
+
+
+def test_a_provider_that_refuses_offline_access_falls_back_to_openid():
+    session = FakeSession(
+        FakeResponse(200, META),
+        FakeResponse(400, {"error": "invalid_scope"}),
+        FakeResponse(200, START),
+        GRANTED,
+    )
+    said = []
+    creds = login.device_login(session, ISSUER, "stardelt-dev", said.append, sleep=lambda s: None, clock=lambda: 1000)
+    starts = [call[2]["data"] for call in session.calls if "scope" in call[2].get("data", {})]
+    assert [start["scope"] for start in starts] == ["openid offline_access", "openid"]
+    assert any("no offline sign-in" in line for line in said)
+    assert creds["access_token"] == CANARY and creds["refresh_token"] == "rt-1"
 
 
 def challenge_of(verifier):
@@ -183,6 +200,30 @@ def test_logout_forgets_and_a_later_command_needs_authentication(tmp_path):
     assert run(["logout"], FakeSession(), environ)[:1] == (0,)
     code, _, err = run(["whoami"], FakeSession(), environ)
     assert code == 3 and "stardelt login" in err
+
+
+def test_logout_revokes_the_refresh_token_when_the_provider_can(tmp_path):
+    environ = {"HOME": str(tmp_path)}
+    stored(tmp_path)
+    session = FakeSession(
+        FakeResponse(200, dict(META, revocation_endpoint=ISSUER + "/protocol/openid-connect/revoke")),
+        FakeResponse(200, {}),
+    )
+    assert run(["logout"], session, environ)[0] == 0
+    assert session.calls[0][:2] == ("GET", ISSUER + "/.well-known/openid-configuration")
+    method, url, kwargs = session.calls[1]
+    assert (method, url) == ("POST", ISSUER + "/protocol/openid-connect/revoke")
+    assert kwargs["data"] == {"token": "rt-old", "token_type_hint": "refresh_token", "client_id": "stardelt-dev"}
+    assert login.load(environ) is None
+
+
+def test_logout_forgets_even_when_the_provider_refuses_or_names_no_revocation_endpoint(tmp_path):
+    for index, answer in enumerate((FakeResponse(200, META), FakeResponse(500, {}))):
+        home = tmp_path / f"home-{index}"
+        stored(home)
+        session = FakeSession(answer)
+        assert run(["logout"], session, {"HOME": str(home)})[0] == 0
+        assert login.load({"HOME": str(home)}) is None
 
 
 def test_login_without_an_issuer_is_a_usage_error(tmp_path):
