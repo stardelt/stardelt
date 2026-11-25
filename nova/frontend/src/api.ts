@@ -3,76 +3,21 @@
 // Auth is a same-origin HttpOnly session cookie (oidc mode) — no tokens in JS.
 
 import { redirectToLogin } from './auth'
+import type { components } from './api-schema'
 
-export type Me = {
-  /** Display name (`preferred_username` / `email` / `upn` / `name` in oidc mode). */
-  user: string
-  /** `static-dev` (no login) or `oidc`. */
-  auth_mode: 'static-dev' | 'oidc' | string
-  /** This sign-in is shared by many people (the public demo); reset nightly. */
-  shared_account?: boolean
-  warehouse: string
-  stage_name?: string | null
-  stage_kind?: 'dev' | 'test' | 'prod'
-  /** The peer stages this Nova compares against (`NOVA_PEER_STAGES`); empty when none. */
-  peers?: { name: string; url: string }[]
-  // The fields below are present in oidc mode only — claims, never tokens.
-  sub?: string
-  email?: string | null
-  name?: string | null
-  groups?: string[]
-  roles?: string[]
-  groups_overage?: boolean
-  is_admin?: boolean
-  via?: 'session' | 'bearer'
-  /**
-   * The configured value behind the administrator decision (#213): the matched admin
-   * group, or the held role. `admin_by` says which one; both are absent when the
-   * installation configures neither.
-   */
-  admin_group?: string | null
-  admin_by?: 'group' | 'role' | string | null
-  /**
-   * Unix seconds at which the browser session can no longer be renewed (#213). Absent
-   * for a bearer call, which has no browser session; never the access token's `exp`.
-   */
-  session_expires_at?: number | null
-  /** False until Nova forwards the user's token to Trino/Lakekeeper (phase 2). */
-  identity_forwarding?: boolean
-  /**
-   * The Keycloak admin console for the realm, built by the backend from the
-   * configured issuer. `null`/absent in dev mode and for non-Keycloak issuers, so the
-   * UI shows no Users link where there is no console to open.
-   */
-  admin_console_url?: string | null
-}
+type Schema<K extends keyof components['schemas']> = components['schemas'][K]
 
-/** A named SQL snippet owned by the caller (GET /api/saved-queries). */
-export type SavedQuery = {
-  id: number
-  title: string
-  sql: string
-  warehouse: string
-  created_at: number
-  updated_at: number
-  /** The caller's `sub` (or `static-dev` user in dev mode). */
-  owner_sub: string
-  /** Groups the query is shared with; empty when it is not shared. */
-  shared_with: string[]
-}
+/**
+ * `/api/me` — the `oidc` claim set (never tokens). `dev` mode answers the smaller `Me` schema,
+ * without the claims below; readers keep their `?.` and `??`, and the narrower union comes with
+ * the ticket that migrates the remaining hand-written types.
+ */
+export type Me = Schema<'OidcMe'>
 
-/** A named email or webhook endpoint owned by one group (`GET /api/destinations`, nova#273). */
-export type Destination = {
-  id: number
-  owner_group: string
-  name: string
-  kind: 'email' | 'webhook'
-  config: { url?: string; recipients?: string[] }
-  created_at: number
-  updated_at: number
-}
+export type SavedQuery = Schema<'SavedQuery'>
 
-/** What one test delivery did (`POST /api/destinations/{id}/test`). */
+export type Destination = Schema<'Destination'>
+
 export type DestinationTest = { ok: boolean; status?: number | null; detail: string }
 
 export type Warehouse = { name: string; id: string }
@@ -89,27 +34,7 @@ export type Warehouse = { name: string; id: string }
  * `canUse` is non-authoritative: one of the caller's groups is granted the class. `yours`
  * is the class a query will land in — the largest usable one, or the default class.
  */
-export type SqlWarehouse = {
-  name: string
-  /** `spec.displayName`; `null` when the object carries none — show `name` then. */
-  displayName: string | null
-  size: string | null
-  running: number
-  queued: number
-  memoryShare: string
-  /** The class a query lands in when no selector matches. */
-  default: boolean
-  /** One of the caller's groups is granted this class (the engine decides, not Nova). */
-  canUse: boolean
-  /** The class this caller lands in: the largest usable one, or the default class. */
-  yours: boolean
-  /**
-   * The scaler's verdict on the shared engine; `null` until it has written one. `phase` is
-   * the scaler's word (`Stopped`, `Starting`, `Running`) — every class carries the same one,
-   * because there is one engine (#1059).
-   */
-  scale: { phase: string; workers: number; queriesInFlight: number; lastQueryAt?: string | null } | null
-}
+export type SqlWarehouse = Schema<'SqlWarehouse'>
 
 /**
  * One catalog the caller may browse (`GET /api/catalog/catalogs`): the name the SQL
