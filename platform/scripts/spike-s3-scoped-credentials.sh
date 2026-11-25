@@ -40,7 +40,7 @@
 # unreachable; Q8 needs the vendored chart (`make chart-deps`) and helm.
 set -euo pipefail
 
-IMAGE="chrislusf/seaweedfs:4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+IMAGE="chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9"
 NAME="s3-scope-spike"
 GW="spike-s3-gw"
 PORT="18333"

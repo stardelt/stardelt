@@ -200,7 +200,7 @@ pub fn chart_version(chart: &str) -> Option<&'static str> {
     match chart {
         "cnpg/cloudnative-pg" => Some("0.29.1"),
         "cnpg/plugin-barman-cloud" => Some("0.9.0"),
-        "seaweedfs/seaweedfs" => Some("4.25.1"),
+        "seaweedfs/seaweedfs" => Some("4.55.0"),
         "lakekeeper/lakekeeper" => Some("0.14.0"),
         "trino/trino" => Some("1.45.0"),
         "jupyterhub/jupyterhub" => Some("4.4.5"),

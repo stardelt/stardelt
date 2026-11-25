@@ -154,7 +154,7 @@ jobs:
       - name: helm template — seaweedfs
         run: |
           bash scripts/retry.sh helm template seaweedfs seaweedfs/seaweedfs \
-            --version 4.25.1 \
+            --version 4.55.0 \
             --namespace stardelt \
             -f helm-values/seaweedfs.yaml > /dev/null
 

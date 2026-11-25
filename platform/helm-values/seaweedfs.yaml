@@ -1,11 +1,11 @@
 # SeaweedFS — S3-compatible storage for the MVP.
-# Chart: seaweedfs/seaweedfs 4.25.1, appVersion 4.25.
+# Chart: seaweedfs/seaweedfs 4.55.0, appVersion 4.55.
 #
 # S3-compatible object store for the lakehouse. Backs Iceberg tables via
 # Trino + Lakekeeper.
 
 image:
-  tag: "4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+  tag: "4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9"
 
 master:
   replicas: 1

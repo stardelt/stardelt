@@ -398,7 +398,7 @@ mod tests {
             name: "seaweedfs".into(),
             chart: "seaweedfs/seaweedfs".into(),
             repo: Some("https://seaweedfs.github.io/seaweedfs/helm".into()),
-            version: Some("4.25.1".into()),
+            version: Some("4.55.0".into()),
             namespace: "stardelt".into(),
             dry_run,
             set,
@@ -423,7 +423,7 @@ mod tests {
         assert!(!args.contains(&"seaweedfs/seaweedfs".to_string()));
         assert!(args.contains(&"--repo".to_string()));
         assert!(args.contains(&"https://seaweedfs.github.io/seaweedfs/helm".to_string()));
-        assert!(args.contains(&"4.25.1".to_string()));
+        assert!(args.contains(&"4.55.0".to_string()));
         assert!(args.contains(&"stardelt".to_string()));
         assert!(args.contains(&"--wait".to_string()));
         assert!(!args.contains(&"--dry-run".to_string()));

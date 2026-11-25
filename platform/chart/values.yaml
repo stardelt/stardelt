@@ -275,7 +275,7 @@ s3Credentials:
   region: us-east-1
 
 seaweedfs:
-  # S3-compatible storage for the lakehouse (chart: seaweedfs 4.25.1).
+  # S3-compatible storage for the lakehouse (chart: seaweedfs 4.55.0).
   enabled: true
   # Keep the service names (`seaweedfs-s3`, ...) that the values below and the
   # playground ingresses expect.

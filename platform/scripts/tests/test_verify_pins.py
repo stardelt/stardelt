@@ -74,8 +74,8 @@ TRINO_PINNED = (
     "@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f"
 )
 SEAWEEDFS_PINNED = (
-    "chrislusf/seaweedfs:4.25"
-    "@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+    "chrislusf/seaweedfs:4.55"
+    "@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9"
 )
 OPENFGA_PINNED = (
     "openfga/openfga:v1.22.1"
