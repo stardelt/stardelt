@@ -250,6 +250,20 @@ trap 'rm -f "$body_file"' EXIT
 git config user.name "github-actions[bot]" 2>/dev/null || true
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com" 2>/dev/null || true
 
+# The roll must describe a tree that contains origin/main: a branch created from the run's
+# checkout pins images built from a commit main has moved past (#1644, where the operator pin
+# predated #1629 and `verify-pins` still said PASS). A rebase is not the fix — the branch's
+# images were built from its own commit — so this refuses and lets the push to main, which made
+# it stale, start the next run from the new head.
+require_current_main() {
+  git fetch --quiet origin main
+  if ! git merge-base --is-ancestor origin/main HEAD; then
+    echo "pin-rollup: origin/main has moved past this run's checkout ($(git rev-parse --short HEAD)); refusing to pin images older than main. Re-run the rollup from main: gh workflow run platform-pin-rollup.yml --ref main (or wait for the next push to main)." >&2
+    exit 1
+  fi
+}
+
+require_current_main
 branch="chore/pin-rollup"
 git switch -C "$branch"
 git add "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" "$AIRFLOW_FILE" "$AIRFLOW_GROUP_FILE" "$SUPERSET_FILE" "$SUPERSET_GROUP_FILE" \
@@ -319,6 +333,7 @@ if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then
   done
   [ "$replaced" = yes ] || changes+=("$operator_line")
   git commit --amend -m "$(rollup_message)"
+  require_current_main
   git push --force-with-lease origin "$branch"
   {
     echo ""
