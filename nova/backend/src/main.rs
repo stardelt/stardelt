@@ -117,6 +117,7 @@ mod db;
 mod demo;
 mod destinations;
 mod embed;
+mod error;
 mod jobs;
 mod lineage_api;
 mod lineage_event;

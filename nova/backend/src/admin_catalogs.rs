@@ -44,7 +44,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::api_json::ApiJson;
 use crate::auth::{Identity, Principal};
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 
 /// One catalog, as an administrator sees it.
 ///

@@ -144,7 +144,7 @@ fn no_store(mut response: Response) -> Response {
 
 /// One refusal in the API's envelope.
 fn fail(status: StatusCode, message: impl Into<String>) -> Response {
-    no_store((status, Json(json!({ "error": message.into() }))).into_response())
+    no_store(crate::error::Fail::new(status, message).into_response())
 }
 
 /// The `200` answer.

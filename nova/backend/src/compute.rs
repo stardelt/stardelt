@@ -28,7 +28,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::api_json::ApiJson;
 use crate::auth::{Identity, Principal};
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 use crate::pipelines::{ResourceError, answer, no_cluster, resource_fail};
 
 /// The Deployment label that marks a Spark server the manifests install: `shared` for the

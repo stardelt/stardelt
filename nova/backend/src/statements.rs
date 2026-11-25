@@ -284,7 +284,7 @@ fn view(id: &str, s: &Statement) -> StatementView {
 }
 
 fn fail(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": message.into() }))).into_response()
+    crate::error::Fail::new(status, message).into_response()
 }
 
 fn no_such_statement() -> Response {

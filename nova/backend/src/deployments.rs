@@ -42,7 +42,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::api_json::ApiJson;
 use crate::auth::{Identity, Principal, deploy_stage};
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 use crate::saved_queries::{error, store_failed, unavailable};
 
 /// Most characters a bundle, an owner group or a target may carry (the table's CHECK
