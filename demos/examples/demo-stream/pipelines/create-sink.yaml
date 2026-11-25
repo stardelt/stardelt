@@ -1,5 +1,6 @@
 name: demo-stream-setup
 description: "Creates the stream's sink table in the demo's gold layer. Runs once; the stream needs the table to exist."
+viewers: [visitors]
 tasks:
   - {name: schema, sqlFile: sql/schema.sql}
   - {name: sink, sqlFile: sql/sink.sql, dependsOn: [schema]}

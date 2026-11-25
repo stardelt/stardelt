@@ -264,6 +264,63 @@ class CheckTest(unittest.TestCase):
             "pipeline shop-ontap is on demand; a visitor cannot see a next run", problems
         )
 
+    def test_check_accepts_the_on_demand_stream_setup(self):
+        """When: `demo-stream-setup` is on demand by design (it creates a table once). Then: no
+        on-demand problem, so the inventory check converges after the demo-stream step (#1635)."""
+        problems = demo_inventory.check(
+            [
+                pipeline(
+                    "demo-stream-setup",
+                    schedule=None,
+                    viewers=["visitors"],
+                    labels={"stardelt.io/bundle": "demo-stream"},
+                )
+            ],
+            [],
+            [],
+            {},
+        )
+        self.assertEqual(
+            [p for p in problems if "on demand" in p],
+            [],
+        )
+
+    def test_check_still_names_another_on_demand_pipeline(self):
+        """When: another demo pipeline is on demand. Then: check still names it — only the
+        exemption's own name is skipped (#1635)."""
+        problems = demo_inventory.check(
+            [pipeline("demo-stream-backfill", schedule=None, viewers=["visitors"])],
+            [],
+            [],
+            {},
+        )
+        self.assertIn(
+            "pipeline demo-stream-backfill is on demand; a visitor cannot see a next run",
+            problems,
+        )
+
+    def test_check_names_the_stream_bundle_for_a_viewerless_pipeline(self):
+        """When: a pipeline labelled `stardelt.io/bundle: demo-stream` lacks viewers. Then: the
+        hint names that bundle's command, not the shop's (#1635)."""
+        problems = demo_inventory.check(
+            [
+                pipeline(
+                    "demo-stream-setup",
+                    schedule={"cron": "0 2 * * *"},
+                    viewers=["analysts"],
+                    labels={"stardelt.io/bundle": "demo-stream"},
+                )
+            ],
+            [],
+            [],
+            {},
+        )
+        self.assertIn(
+            "pipeline demo-stream-setup does not name visitors in its viewers"
+            " — run make demo-stream YES=1",
+            problems,
+        )
+
     def test_check_names_a_demo_pipeline_without_a_description(self):
         problems = demo_inventory.check(
             [
