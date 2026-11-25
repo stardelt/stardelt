@@ -69,7 +69,11 @@ def _parser():
     setup = commands.add_parser("setup", help="install local integration files (the VS Code kernel)")
     setup_commands = setup.add_subparsers(dest="setup_command", required=True)
     editor = setup_commands.add_parser("vscode", help="write the stardelt kernelspec for VS Code")
-    editor.add_argument("--host", help="Nova's address (default: STARDELT_NOVA_URL or the stored sign-in)")
+    editor.add_argument(
+        "--host",
+        default=argparse.SUPPRESS,
+        help="Nova's address (default: STARDELT_NOVA_URL or the stored sign-in)",
+    )
     editor.add_argument("--spark-host", help="the Spark Connect host (default spark.<Nova's domain>)")
     sql = commands.add_parser("sql", help="run one statement as you")
     sql.add_argument("statement", nargs="?", help="the SQL text; or use -f")
@@ -384,8 +388,9 @@ def _hoist_host(arguments):
     Moves the first `--host URL` / `--host=URL` that comes after the command to the front,
     unless it follows a `--` separator. A `--host` already in front is left alone.
 
-    `setup vscode` is exempt: it parses its own `--host` (whose default `None` would overwrite a
-    hoisted global one), so `stardelt setup vscode --host URL` keeps that flag in place."""
+    `setup vscode` is exempt so its own `--host` stays after the command (`stardelt setup vscode
+    --host URL`): the subparser's option only sets the value when typed (`default=argparse.SUPPRESS`,
+    #1646), so it no longer overwrites a global one."""
     if not arguments or arguments[0].startswith("--host"):
         return arguments
     if arguments[0] == "setup":
