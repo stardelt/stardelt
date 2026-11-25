@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/stardelt-operator"]
+members = ["crates/stardelt-operator", "crates/stardelt-crds"]
 
 [workspace.package]
 version = "0.0.4"
@@ -9,6 +9,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+stardelt-crds = { path = "crates/stardelt-crds" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
