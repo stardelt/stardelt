@@ -101,6 +101,7 @@ POST	/api/catalog/namespaces	catalog	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/rollback	catalog	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/verified-queries	verified_queries	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/verified-queries/check	verified_queries	main	signed-in
+POST	/api/compute/ensure	compute	main	signed-in
 POST	/api/compute/{name}/start	compute	main	signed-in
 POST	/api/compute/{name}/stop	compute	main	signed-in
 POST	/api/connections	connection_routes	main	signed-in

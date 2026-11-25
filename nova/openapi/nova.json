@@ -3170,6 +3170,98 @@
         }
       }
     },
+    "/api/compute/ensure": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/compute/ensure`: the caller's group cluster, reused or created (#493 point 3).",
+        "description": "The caller's group cluster: the one already owned by `group`, or a new `SparkCluster` named `group` with `size: small`, `runtime: spark-4.1-py3.13`, `idleStopMinutes: 60` and `state: Running`. Only a member of `group` may call it (administrators are not exempt). An existing cluster is answered as it is, `Stopped` included; a group whose name is not a valid cluster name (1 to 40 lower-case letters, digits and dashes, starting with a letter) answers `400` and keeps its administrator-made cluster. Two callers at once create one cluster: the loser reads the winner's. Answers the `ComputeCluster` view of the cluster. `Cache-Control: no-store`.",
+        "operationId": "compute_ensure",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeEnsureBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The group's cluster, existing or created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeCluster"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The group name cannot be a cluster name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The cluster changed while it was created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/compute/{name}/start": {
       "post": {
         "tags": [
@@ -12905,6 +12997,20 @@
             "description": "Whether this is the Spark the caller's own notebook uses."
           }
         }
+      },
+      "ComputeEnsureBody": {
+        "type": "object",
+        "description": "The body of `POST /api/compute/ensure`: the owner group whose cluster to reuse or create.",
+        "required": [
+          "group"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The owner group; the caller must be a member of it."
+          }
+        },
+        "additionalProperties": false
       },
       "ComputeEnvVar": {
         "type": "object",
