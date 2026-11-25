@@ -68,3 +68,30 @@ test('a caller outside the owner group is told why', async ({ page }) => {
   ).toBeVisible()
   await expect(page.getByRole('button', { name: 'Roll back', exact: true })).toHaveCount(0)
 })
+
+test('a stage link narrows the Deployments page to one bundle and stage', async ({ page }) => {
+  const stage = (name: string, bundle: string, target: string) => ({
+    name, namespace: 'stardelt', ownerGroup: 'analytics', canRun: true, canEdit: true,
+    state: 'idle', loaded: true, lastRun: null, tasks: [],
+    deployment: { bundle, target, revision: 'abc1234' },
+  })
+  await page.route('**/api/**', (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/me') return json(route, ME)
+    if (path === '/api/pipelines') {
+      return json(route, { pipelines: [stage('gold', 'shop', 'prod'), stage('dev-load', 'other', 'dev')] })
+    }
+    if (path === '/api/deployments') return json(route, [])
+    return json(route, {})
+  })
+
+  await page.goto('/deployments?bundle=shop&target=prod')
+  await expect(page.getByRole('heading', { name: 'shop · prod' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'other · dev' })).toHaveCount(0)
+  await expect(page.getByText('Showing shop · prod.')).toBeVisible()
+  const every = page.getByRole('link', { name: 'Show every stage' })
+  await expect(every).toHaveAttribute('href', '/deployments')
+  await every.click()
+  await expect(page).toHaveURL(/\/deployments$/)
+  await expect(page.getByRole('heading', { name: 'other · dev' })).toBeVisible()
+})

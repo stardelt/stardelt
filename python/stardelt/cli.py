@@ -722,6 +722,9 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             return OK
         if args.command == "run":
             run, tasks = runs.start(nova, args.namespace, args.name, args.wait, args.timeout or None, args.interval)
+            if run.get("bundle"):
+                revision = run.get("revision") or "no commit"
+                stderr.write(f"stardelt: deployed from {run['bundle']} {run.get('target', '')} at {revision}\n")
             stdout.write(json.dumps(dict(run, tasks=tasks) if args.wait else run, indent=2, ensure_ascii=False) + "\n")
             if args.wait and run["state"] != "success":
                 failed = [t["taskId"] for t in tasks if t["state"] == "failed"]
