@@ -25,7 +25,8 @@ auth:
     createClusterRoleBinding: true
 # The catalog's permissions live in OpenFGA (twin of platform/helm-values/lakekeeper.yaml's
 # `authz`, #1617). The chart's migration Job writes the authorization model during the
-# release, so the `openfga` release must be up first (controller.rs `release_ready`).
+# release, so the operator applies a new catalog only once the `openfga` release's workloads
+# are ready (controller.rs, `permission_store_up`).
 authz:
   backend: openfga
   openfga:

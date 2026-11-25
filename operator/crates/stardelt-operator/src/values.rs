@@ -1335,6 +1335,11 @@ mod tests {
             serde_json::json!(false),
             "the operator deploys the OpenFGA release; the chart must not deploy a second one"
         );
+        assert_ne!(
+            l.get("OPABridge").and_then(|b| b.get("enabled")),
+            Some(&serde_json::json!(true)),
+            "the OPA bridge stays off: its sidecar ships no `restricted` securityContext (#1361)"
+        );
         substitute_namespace(&mut l, "data");
         let endpoint = l["authz"]["openfga"]["endpoint"]
             .as_str()
