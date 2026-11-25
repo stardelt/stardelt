@@ -92,6 +92,13 @@ exit 1
 """
 
 
+# A kubectl that records what the install asked it to do and succeeds (#1625).
+FAKE_KUBECTL_RECORDING = """#!/usr/bin/env bash
+echo "${*}" >> "$HOME/kubectl.calls"
+exit 0
+"""
+
+
 class E2EFreshNode(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -175,6 +182,36 @@ class E2EFreshNode(unittest.TestCase):
         pod_log = run_dir / "pod-logs" / "bootstrap-trino.log"
         self.assertTrue(pod_log.exists(), done.stdout + done.stderr)
         self.assertIn("POD LOGS bootstrap-trino", pod_log.read_text(), done.stdout)
+
+    def test_release_dir_installs_the_release_files(self):
+        release = self.tmp / "release"
+        release.mkdir()
+        (release / "install.yaml").write_text("kind: Namespace\nmetadata:\n  name: stardelt\n")
+        (release / "platform-minimal.yaml").write_text(
+            "# from the release folder\nbaseDomain: data.example.com\n"
+        )
+        self._write(self.bindir / "kubectl", FAKE_KUBECTL_RECORDING)
+        done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", RELEASE_DIR=str(release))
+        calls = (self.home / "kubectl.calls").read_text()
+        self.assertIn(f"apply --server-side -f {release}/install.yaml", calls, done.stdout + done.stderr)
+        self.assertIn(
+            "rollout status deploy/stardelt-operator --timeout=300s", calls, done.stdout + done.stderr
+        )
+        instance = (self.home / ".cache" / "stardelt-e2e" / "testid" / "platform-instance.yaml")
+        self.assertTrue(instance.exists(), done.stdout + done.stderr)
+        self.assertIn("# from the release folder", instance.read_text(), done.stdout)
+        self.assertIn("baseDomain: example.test", instance.read_text(), done.stdout)
+        self.assertIn(f"install: release {release}", done.stdout)
+
+    def test_release_dir_without_both_files_refuses_before_creating_a_server(self):
+        release = self.tmp / "release-empty"
+        release.mkdir()
+        done = self.run_script("up", YES="1", DRY_RUN="1", RELEASE_DIR=str(release))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn(f"RELEASE_DIR={release} has no install.yaml", done.stderr)
+        self.assertIn("has no platform-minimal.yaml", done.stderr)
+        self.assertFalse((self.home / "hetzner-k3s.called").exists(), "a server was created")
+        self.assertFalse((self.home / ".cache").exists(), "the run directory was created")
 
     def test_down_deletes_every_run_this_checkout_started(self):
         (self.fresh_dir / ".fresh-stardelt-fresh-a.yaml").write_text("cluster_name: stardelt-fresh-a\n")

@@ -465,9 +465,9 @@ verify-fresh-node-product: _context ## The readiness checks plus Airflow, Supers
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-fresh-node.sh product
 
 .PHONY: e2e-fresh-node e2e-cleanup
-e2e-fresh-node: _context ## One throwaway Hetzner server: fresh node, operator install, verify, deleted again (needs YES=1, FRESH_DOMAIN=<domain>)
+e2e-fresh-node: _context ## One throwaway Hetzner server: fresh node, operator install, verify, deleted again (needs YES=1, FRESH_DOMAIN=<domain>; RELEASE_DIR=<release folder> installs its install.yaml + platform-minimal.yaml instead of the checkout)
 	@if [ '$(YES)' != 1 ] && [ '$(DRY_RUN)' != 1 ]; then echo "would create one throwaway Hetzner server (cpx42), verify it and delete it — re-run with YES=1 FRESH_DOMAIN=<domain>"; exit 1; fi
-	@YES=1 FRESH_DOMAIN='$(FRESH_DOMAIN)' DRY_RUN='$(DRY_RUN)' FRESH_NODE_TYPE='$(FRESH_NODE_TYPE)' bash scripts/e2e-fresh-node.sh up
+	@YES=1 FRESH_DOMAIN='$(FRESH_DOMAIN)' DRY_RUN='$(DRY_RUN)' FRESH_NODE_TYPE='$(FRESH_NODE_TYPE)' RELEASE_DIR='$(RELEASE_DIR)' bash scripts/e2e-fresh-node.sh up
 
 e2e-cleanup: ## Delete every stardelt-fresh-* server this checkout started (safe to re-run)
 	@bash scripts/e2e-fresh-node.sh down
