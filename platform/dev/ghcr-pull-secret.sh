@@ -39,11 +39,20 @@ else
 fi
 echo "› kube-context: $ctx"
 
+# Server-side apply: a client-side apply copies the whole object, `.dockerconfigjson` included,
+# into kubectl.kubernetes.io/last-applied-configuration, where anyone who may read the Secret's
+# metadata (but not its data) reads the token (#1663).
 "${kube[@]}" create secret docker-registry ghcr-creds \
   --namespace "$NS" \
   --docker-server=ghcr.io \
   --docker-username="$user" \
   --docker-password="$token" \
-  --dry-run=client -o yaml | "${kube[@]}" apply -f -
+  --dry-run=client -o yaml \
+  | "${kube[@]}" apply --server-side --field-manager=stardelt-scripts -f -
+
+# A Secret an older run created with a client-side apply still carries the token in that
+# annotation: heal it on every run (#1663, the shape public-demo.sh uses since #1655).
+"${kube[@]}" -n "$NS" annotate secret ghcr-creds \
+  kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true
 
 echo "✓ ghcr-creds present in namespace $NS (user $user, context $ctx)"
