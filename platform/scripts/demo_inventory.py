@@ -56,8 +56,18 @@ LEGACY = (
     "shop-07-stg-cust", "shop-08-stg-prod", "shop-09-stg-lines", "shop-10-revenue", "shop-11-ltv", "shop-12-mix",
 )
 
+# A demo pipeline that is on demand by design: it creates a table once, so it has no next run
+# for a visitor to see (#1635). The value is the reason, for a reader.
+ON_DEMAND = {"demo-stream-setup": "creates the stream's sink table once"}
+
 # The command that converges one kind of demo object.
 FIX = {"pipeline": "demo-shop", "stream": "demo-stream", "cluster": "demo-cluster"}
+
+# A pipeline belongs to a bundle as well as a kind; the label says which one, and its own
+# bundle's command is the one that converges it (#1635).
+BUNDLE_FIX = {"shop": "demo-shop", "demo-stream": "demo-stream", "public-db": "demo-public-db"}
+
+BUNDLE_LABEL = "stardelt.io/bundle"
 
 # A page a visitor opens first; #79 says none of them may be empty. The value is the command
 # that fills it (`FIX` names the object's own command; this names the page's).
@@ -313,6 +323,14 @@ def _owner(obj, kind):
     return _spec(obj).get("ownerGroup")
 
 
+def _fix(kind, obj):
+    """The `make` target that converges the object: its bundle's, else its kind's command."""
+    if kind != "pipeline":
+        return FIX[kind]
+    bundle = (obj.get("metadata", {}).get("labels") or {}).get(BUNDLE_LABEL)
+    return BUNDLE_FIX.get(bundle, FIX[kind])
+
+
 def _demo_objects(pipelines, streams, clusters):
     """Every object the demo group owns, in kind order."""
     return [
@@ -351,16 +369,18 @@ def check(pipelines, streams, clusters, runs, connections=None, now=None) -> lis
         if GROUP not in (_spec(obj).get("viewers") or []):
             problems.append(
                 f"{kind} {_name(obj)} does not name {GROUP} in its viewers"
-                f" — run make {FIX[kind]} YES=1"
+                f" — run make {_fix(kind, obj)} YES=1"
             )
     for kind, obj in demo:
         if kind == "pipeline" and not (_spec(obj).get("description") or "").strip():
             problems.append(
                 f"pipeline {_name(obj)} has no one-line description"
-                f" — run make {FIX[kind]} YES=1"
+                f" — run make {_fix(kind, obj)} YES=1"
             )
     for kind, obj in demo:
         if kind == "pipeline" and not _spec(obj).get("schedule"):
+            if _name(obj) in ON_DEMAND:
+                continue
             problems.append(
                 f"pipeline {_name(obj)} is on demand; a visitor cannot see a next run"
             )
