@@ -259,4 +259,56 @@ Exit 0 means every level's count matched its rows; exit 1 names the level and th
 left empty for `demo-reset` (03:00 UTC, which clears `playground.scratch`).
 
 `python3 perf/ingest.py --self-test` proves the batching, the time arithmetic, the
-free-after-each-statement and the count check against a stub HTTP server: no cluster, no token.
+free-after-each-statement and the count check against a stub HTTP server: no cluster, no token.)
+
+## The release table: `perf-report`
+
+`make perf-report` reads the newest run of each workload from
+`${PERF_OUT_DIR:-$HOME/.cache/stardelt-perf}` and prints one block per workload, so a
+release's numbers are one command instead of five files opened by hand.
+
+| writer | file | block |
+|---|---|---|
+| `scripts/perf-smoke.sh` | `<UTC>.json` | `## smoke` |
+| `perf/pipelines.py` | `pipelines-<UTC>.json` | `## pipelines` |
+| `perf/ingest.py` | `ingest-<UTC>.json` | `## ingest` |
+| `perf/spark.sh` | `spark-<UTC>.json` | `## spark` |
+| `perf/highwater.py` | `highwater-<UTC>.json` | `## highwater` |
+
+"Newest" is the timestamp in the file name; a tie goes to the later mtime, then the name. A
+`pipelines-*.json` from before #1533 (one `pipeline` string instead of a list) is read too. Only
+`PERF_OUT_DIR` is read: `perf/baseline.py` writes to `perf/results/` and needs an administrator
+token, so it is not part of this table.
+
+```text
+$ make perf-report
+## smoke  2026-11-24T21:11:57Z  person=demo  repeats=3
+scan         runs=3  p50=460ms  p95=810ms  rows=1  SUCCEEDED
+…
+## ingest  2026-11-25T00:15:59Z  table=playground.scratch.perf_ingest
+rows=10000  batches=1  count=10000  seconds=0.4s  rowsPerSecond=22321  p50=430ms
+…
+## pipelines  2026-11-24T23:41:06Z  person=demo
+level 1  runs=1  ok=1  p50=15.0s  p95=15.0s  max=15.0s  shop-1-bronze
+…
+## highwater  2026-11-24T23:22:17Z  namespace=stardelt  samples=30
+trino-coordinator-55c95f5bdd-l67rd  69m  1892Mi (!)
+…
+```
+
+A budget line keeps its writer's own unit — milliseconds for `perf-smoke` and the Spark
+operations, seconds with one decimal for `perf-pipelines`, MiB and millicores for
+`perf-highwater` — and a number that is `None` (a level where nobody succeeded) prints `-`.
+`highwater` prints at most five pods, sorted by peak memory, and marks a row with a restart or an
+`OOMKilled` with ` (!)`.
+
+| flag | meaning |
+|---|---|
+| `--dir PATH` | where the runs are (default `$PERF_OUT_DIR` or `~/.cache/stardelt-perf`) |
+| `--json PATH` | write the combined document as indented JSON, last line `perf-report: JSON at <PATH>` |
+| `--self-test` | prove the readers against five fixtures in a temp dir; no cluster, no token |
+
+A source with no run prints `## <name>: no run in <dir>` and is not an error on its own — the
+table is as complete as the cache is. When no source has a run at all the command exits 1 with
+`perf-report: FAIL no perf run in <dir> — run make perf-smoke (or another workload) first`.
+The combined JSON from `--json` is what a release copies into `stardelt-internal`.
