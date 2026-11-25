@@ -1477,6 +1477,7 @@ async fn main() -> anyhow::Result<()> {
         query_log_store::spawn_retention(pool.clone());
         mcp_audit::spawn_retention(pool.clone());
         model_calls::spawn_retention(pool.clone());
+        lineage_store::spawn_retention(pool.clone());
         shared_accounts::spawn_nightly(pool, state.shared_accounts.clone());
     }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
