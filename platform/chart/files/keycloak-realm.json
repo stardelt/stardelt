@@ -534,6 +534,9 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": false,
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "redirectUris": [
         "http://127.0.0.1/*",
         "http://localhost/*"
