@@ -662,19 +662,7 @@ fn so_far(created: &[String]) -> String {
 /// principal is always there (`require_admin` ran); in `dev` mode the one operator is the
 /// actor, with `sub` the configured dev user so the limiter has a stable key.
 fn actor(principal: Option<axum::Extension<Principal>>, state: &AppState) -> Identity {
-    match principal {
-        Some(axum::Extension(principal)) => principal.identity,
-        None => Identity {
-            sub: state.dev_user.clone(),
-            display_name: state.dev_user.clone(),
-            email: None,
-            name: None,
-            groups: Vec::new(),
-            roles: Vec::new(),
-            groups_overage: false,
-            is_admin: true,
-        },
-    }
+    crate::auth::caller_identity(&state.dev_user, principal.as_ref().map(|e| &e.0))
 }
 
 /// The body rules the `Catalog` CRD (and its CEL rule) enforces, repeated as 400 sentences

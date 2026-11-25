@@ -1404,19 +1404,7 @@ fn comment_on_column_sql(
 /// The caller's identity: the principal in `oidc` mode, the static user as an administrator
 /// in `dev` mode (the same convention as `apps.rs` and the break-glass log).
 pub fn caller_identity(state: &AppState, caller: Option<&Principal>) -> Identity {
-    match caller {
-        Some(principal) => principal.identity.clone(),
-        None => Identity {
-            sub: state.dev_user.clone(),
-            display_name: state.dev_user.clone(),
-            email: None,
-            name: None,
-            groups: Vec::new(),
-            roles: Vec::new(),
-            groups_overage: false,
-            is_admin: true,
-        },
-    }
+    crate::auth::caller_identity(&state.dev_user, caller)
 }
 
 pub(crate) fn demo_unavailable() -> Response {
