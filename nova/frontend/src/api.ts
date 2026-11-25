@@ -7,7 +7,11 @@ import type { components } from './api-schema'
 
 type Schema<K extends keyof components['schemas']> = components['schemas'][K]
 
-/** `/api/me`: the dev-mode fields of `Me`, and in oidc mode the claim set of `OidcMe` (never tokens). */
+/**
+ * `/api/me` — the `oidc` claim set (never tokens). `dev` mode answers the smaller `Me` schema,
+ * without the claims below; readers keep their `?.` and `??`, and the narrower union comes with
+ * the ticket that migrates the remaining hand-written types.
+ */
 export type Me = Schema<'OidcMe'>
 
 export type SavedQuery = Schema<'SavedQuery'>
