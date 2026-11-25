@@ -125,6 +125,17 @@ class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
                 self.assertIn('GH_TOKEN="$GITHUB_TOKEN"', line,
                               f"a gh call in the rebuild block does not force GITHUB_TOKEN: {line}")
 
+    def test_a_branch_from_an_old_checkout_is_refused_before_any_push(self):
+        """#1644: a run whose checkout main has moved past must not pin images older than main."""
+        text = ROLLUP.read_text()
+        guard = text.index("git merge-base --is-ancestor origin/main HEAD")
+        self.assertLess(guard, text.index('git push --force-with-lease origin "$branch"'),
+                        "the guard runs before the branch is pushed")
+        block = dispatch_block(text)
+        self.assertLess(block.index("require_current_main"),
+                        block.rindex('git push --force-with-lease origin "$branch"'),
+                        "the guard is called again before the post-rebuild push")
+
     def test_a_previous_run_on_the_branch_is_not_taken_for_the_new_one(self):
         block = dispatch_block(ROLLUP.read_text())
         previous = block.index("previous_run=")
