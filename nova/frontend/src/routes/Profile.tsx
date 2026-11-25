@@ -1,7 +1,6 @@
+import { useMe } from '../hooks'
 import { useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import NotebookConnections, { useNotebookConnectionsAvailable } from '../components/NotebookConnections'
 import { useYourWarehouse, warehouseHint, warehouseText } from '../components/WarehouseNote'
@@ -91,7 +90,7 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 }
 
 export default function Profile() {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const data = me.data
   const admin = isAdmin(data)
   const dev = data?.auth_mode === 'static-dev'

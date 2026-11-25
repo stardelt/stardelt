@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { safeHttpUrl } from '../format'
@@ -10,7 +11,7 @@ const FALLBACK = (import.meta.env.VITE_JUPYTERHUB_URL as string | undefined) ?? 
 /** The hub's address and the person, or nothing while it is not usable. */
 function useHub() {
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const jupyter = apps.data?.find(a => a.id === 'jupyterhub')
   const up = jupyter?.status === 'up'
   // Only http(s) URLs may reach `href`; anything else falls back, then to nothing.

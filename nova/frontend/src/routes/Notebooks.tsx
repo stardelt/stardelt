@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
@@ -33,7 +34,7 @@ const HUBS: Array<{ label: string; path: string }> = [
  */
 export default function Notebooks() {
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const admin = isAdmin(me.data)
   const jupyter = apps.data?.find(a => a.id === 'jupyterhub')
   const up = jupyter?.status === 'up'

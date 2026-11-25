@@ -1,10 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMe } from '../hooks'
 import { useId, useState } from 'react'
-import { api } from '../api'
 
 /** On a prod stage, a destructive dialog asks for the object's name (internal#106 decision 9). */
 export function useConfirmName(name: string) {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const needed = me.data?.stage_kind === 'prod'
   const [typed, setTyped] = useState('')
   return { needed, ok: !needed || typed.trim() === name, typed, setTyped }

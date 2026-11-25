@@ -1,6 +1,5 @@
+import { useMe } from '../hooks'
 import type { ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
 import { isAdmin } from '../roles'
 
 /**
@@ -12,7 +11,7 @@ import { isAdmin } from '../roles'
  * is the real answer — there is nothing to click in Nova.
  */
 export default function RequireAdmin({ children }: { children: ReactNode }) {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
 
   if (me.isLoading) return <div className="text-text-mute text-sm">loading…</div>
 

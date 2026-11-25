@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, errorMessage, type Destination } from '../api'
@@ -21,7 +22,7 @@ const byName = (a: Destination, b: Destination) => a.name.localeCompare(b.name)
  */
 export default function Destinations() {
   const queryClient = useQueryClient()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const list = useQuery({
     queryKey: ['destinations'],
     queryFn: api.destinations,

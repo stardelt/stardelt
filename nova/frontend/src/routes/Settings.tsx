@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
@@ -13,7 +14,7 @@ import { isAdmin } from '../roles'
  * CRDs and values, and Nova is a viewport onto it (master spec §4).
  */
 export default function Settings() {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const workloads = useQuery({ queryKey: ['workloads'], queryFn: api.workloads, refetchInterval: 30_000 })
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 30_000 })
 

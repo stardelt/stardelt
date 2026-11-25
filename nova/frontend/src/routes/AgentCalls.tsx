@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useDebounced } from '../hooks'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, type McpCall } from '../api'
 import ErrorBox from '../components/ErrorBox'
@@ -13,15 +14,6 @@ import { formatDurationMs, formatTime, relativeTime } from '../format'
 /** How many rows the page asks for; the API accepts 1 to 500. */
 const LIMITS = [50, 100, 200, 500] as const
 
-/** A filter typed into a box, applied once the person stops typing. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), ms)
-    return () => clearTimeout(timer)
-  }, [value, ms])
-  return debounced
-}
 
 export default function AgentCalls() {
   const [person, setPerson] = useState('')
