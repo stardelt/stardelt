@@ -12,7 +12,8 @@
 #
 # Environment: FRESH_NAME, FRESH_CONFIG, FRESH_VOLUMES, FRESH_KUBECONFIG, FRESH_NODE_TYPE,
 # FRESH_WAIT_SECONDS, FRESH_INGRESS, FRESH_DOMAIN, LOCATION, KEEP_ON_FAILURE, NO_WAIT,
-# DRY_RUN (passed through to provision.sh).
+# DRY_RUN (passed through to provision.sh), HETZNER_ENV (default
+# ~/.config/stardelt/hetzner.env: the file the teardown's HCLOUD_TOKEN comes from).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Only a throwaway cluster may reach provision.sh/destroy.sh from here.
@@ -40,6 +41,13 @@ KEEP_ON_FAILURE="${KEEP_ON_FAILURE:-0}"
 NO_WAIT="${NO_WAIT:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 IN_CLEANUP=0
+
+# The teardown below calls `hcloud`, which reads its token from HCLOUD_TOKEN only. The
+# maintainer keeps it in this file (provision.sh loads it the same way); without it every
+# delete failed silently and the volumes of a fresh-node run stayed billed (#1632).
+HETZNER_ENV="${HETZNER_ENV:-$HOME/.config/stardelt/hetzner.env}"
+# shellcheck source=/dev/null
+[ -f "$HETZNER_ENV" ] && { set -a; . "$HETZNER_ENV"; set +a; }
 
 usage() {
   echo "usage: fresh-node.sh up|down" >&2
@@ -104,15 +112,24 @@ delete_volumes() {
     return 0
   fi
   if [ -s "$FRESH_VOLUMES" ]; then
+    # One sentence instead of a 15-minute retry loop that cannot succeed: hcloud reads the
+    # token from the environment only (#1632).
+    [ -n "${HCLOUD_TOKEN:-}" ] || {
+      echo "warning: no HCLOUD_TOKEN (set it or put it in $HETZNER_ENV) — volumes not deleted:$(tr '\n' ' ' <"$FRESH_VOLUMES")" >&2
+      return 0
+    }
     echo "› deleting $(grep -c . "$FRESH_VOLUMES") Hetzner volume(s) of this run"
     while read -r id; do
       [ -n "$id" ] || continue
-      local ok=0
+      local ok=0 err=""
       for _ in $(seq 1 "$FRESH_VOLUME_TRIES"); do
-        if hcloud volume delete "$id" >/dev/null 2>&1; then ok=1; break; fi
+        if err="$(hcloud volume delete "$id" 2>&1 >/dev/null)"; then ok=1; break; fi
         sleep "$FRESH_VOLUME_SLEEP"
       done
-      if [ "$ok" != 1 ]; then left="${left} ${id}"; fi
+      if [ "$ok" != 1 ]; then
+        echo "  volume ${id}: ${err:-no error text}" >&2
+        left="${left} ${id}"
+      fi
     done <"$FRESH_VOLUMES"
   fi
   local pg
