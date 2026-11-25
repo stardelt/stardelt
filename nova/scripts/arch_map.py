@@ -45,7 +45,7 @@ AREAS: dict[str, list[str]] = {
         "main", "auth", "session_store", "seal", "api_json", "error", "rfc3339", "openapi",
         "metrics", "audit",
         "db", "people", "user_settings", "shared_accounts", "demo", "embed", "token_exchange",
-        "catalog_token",
+        "catalog_token", "version",
     ],
     "Catalog": [
         "catalog", "catalog_docs", "catalog_doc_store", "catalog_metrics", "catalog_search",

@@ -2176,6 +2176,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The version and commit of the running Nova process: `version` is `NOVA_VERSION` when the deployment sets it and the crate version otherwise, `commit` is `NOVA_COMMIT` or `unknown`. Nothing is fetched and nothing leaves the instance. */
+        get: operations["nova_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/warehouses": {
         parameters: {
             query?: never;
@@ -5089,6 +5106,13 @@ export interface components {
             verifiedAt: string;
             /** @description The `sub` of the person who verified it. */
             verifiedBy: string;
+        };
+        /** @description The version and the commit of the running process. */
+        Version: {
+            /** @description `NOVA_COMMIT` when the deployment sets it, else `unknown`. */
+            commit: string;
+            /** @description `NOVA_VERSION` when the deployment sets it, else the crate version. */
+            version: string;
         };
         /**
          * @description OpenAPI shapes for the catalog routes (first slice of ticket #107).
@@ -13790,6 +13814,35 @@ export interface operations {
             };
             /** @description The state store is not configured */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    nova_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The running version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Version"];
+                };
+            };
+            /** @description No token to sign in with */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
