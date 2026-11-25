@@ -15,7 +15,7 @@
 #                  `azp` is `$MCP_CLIENT`, `$HOST/mcp` is among its audiences, and the only
 #                  other audience is `nova` (the exchange actor #1442/#1455 needs)
 #   tools/list     POST $HOST/mcp {"jsonrpc":"2.0","id":1,"method":"tools/list"} → 200 and the
-#                  names carry `platform_status`, `sql_read` and `pipeline_start`
+#                  names carry `platform_status`, `sql_read`, `pipeline_start` and `table_health`
 #   platform_status tools/call `platform_status` → 200, `status` is `ok`, `db` is `up|disabled`
 #   write-scope    tools/call `pipeline_start` → 403 `insufficient_scope` asking for
 #                  `stardelt:write`, and no run is started: the `stardelt-mcp` token a device
@@ -25,6 +25,7 @@
 #   sql_explain    tools/call `sql_explain` → at least one plan row, column `Query Plan`
 #   catalog_search tools/call `catalog_search` {"query":"customers","catalog":"bronze"} →
 #                  `bronze.shop.customers` among the matches
+#   table_health   tools/call `table_health` on bronze.shop.customers → one of grey, green, amber, red
 #   query-log      the agent's statement is attributed to the person, source `stardelt-mcp`
 #
 # These call the engine through the token exchange #1442/#1455 added: the MCP token is never
@@ -191,6 +192,7 @@ if [ "$TOKEN_OK" != 1 ]; then
   bad sql_read "not run: sign-in minted no token"
   bad sql_explain "not run: sign-in minted no token"
   bad catalog_search "not run: sign-in minted no token"
+  bad table_health "not run: sign-in minted no token"
   bad query-log "not run: sign-in minted no token"
 else
 
@@ -214,10 +216,10 @@ if missing:
     print("%d tools, missing %s" % (len(names), ", ".join(missing)))
     sys.exit(1)
 print("%d tools (%s present)" % (len(names), ", ".join(sys.argv[1:])))
-' platform_status sql_read pipeline_start < "$tmp/body")"; then
+' platform_status sql_read pipeline_start table_health < "$tmp/body")"; then
       ok tools/list "POST /mcp → $status, $detail"
     else
-      bad tools/list "POST /mcp → $status, $detail (want platform_status, sql_read, pipeline_start)"
+      bad tools/list "POST /mcp → $status, $detail (want platform_status, sql_read, pipeline_start, table_health)"
     fi
   else
     bad tools/list "POST /mcp → $(describe "$status")$(error_of) (want 200 with result.tools)"
@@ -397,11 +399,45 @@ print("customers bronze → bronze.shop.customers")
     bad catalog_search "tools/call → $(describe "$status")$(error_of) (want 200 with a JSON-RPC result)"
   fi
 
+  # ---- table_health: a table's freshness promise is readable through the tool -----------------
+
+  status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"table_health","arguments":{"namespace":"shop","table":"customers","catalog":"bronze"}}}')"
+  if [ "$status" = "200" ]; then
+    if detail="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    print("body is not JSON")
+    sys.exit(1)
+result = doc.get("result") if isinstance(doc, dict) else None
+if not isinstance(result, dict):
+    print("no result in the answer")
+    sys.exit(1)
+if result.get("isError") is True:
+    content = result.get("content") or [{}]
+    print("tool error: %s" % ((content[0] or {}).get("text") or "the tool failed"))
+    sys.exit(1)
+body = result.get("structuredContent") or {}
+status = body.get("status")
+if status not in ("grey", "green", "amber", "red"):
+    print("status=%s" % (status,))
+    sys.exit(1)
+print("bronze.shop.customers → status=%s detail=%s" % (status, body.get("detail")))
+' < "$tmp/body")"; then
+      ok table_health "tools/call → $detail"
+    else
+      bad table_health "tools/call → $detail (want status=grey|green|amber|red)"
+    fi
+  else
+    bad table_health "tools/call → $(describe "$status")$(error_of) (want 200 with a JSON-RPC result)"
+  fi
+
   # ---- query-log: the agent's statement is attributed to the person and the MCP client ---------
 
   found=""
   for i in 1 2 3 4 5; do
-    status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"query_log_list","arguments":{"limit":5}}}')"
+    status="$(fetch POST "$HOST/mcp" '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"query_log_list","arguments":{"limit":5}}}')"
     if [ "$status" = "200" ] && detail="$(python3 -c '
 import json, sys
 try:
@@ -442,9 +478,9 @@ fi
 
 # ---- verdict ---------------------------------------------------------------
 
-if [ "$PASSED" -eq 8 ] && [ "$FAILED" -eq 0 ]; then
-  echo "verify-mcp-tools: PASS (8 of 8)"
+if [ "$PASSED" -eq 9 ] && [ "$FAILED" -eq 0 ]; then
+  echo "verify-mcp-tools: PASS (9 of 9)"
   exit 0
 fi
-echo "verify-mcp-tools: FAIL ($PASSED of 8)"
+echo "verify-mcp-tools: FAIL ($PASSED of 9)"
 exit 1
