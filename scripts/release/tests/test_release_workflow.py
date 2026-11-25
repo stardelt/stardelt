@@ -56,6 +56,18 @@ class ReleaseArchitectureMapTest(unittest.TestCase):
         self.assertIn("scripts/arch_map.py", self.cut)
         self.assertIn('--out "../releases/v$version/architecture"', self.cut)
 
+    def test_the_cut_copies_the_hand_written_request_flow_beside_the_map(self) -> None:
+        # The page written into the release dir renders the sequence diagram only when
+        # request-flow.mmd sits next to it; `--out` writes no copy (#1619).
+        self.assertIn(
+            'cp nova/docs/architecture/request-flow.mmd "releases/v$version/architecture/"',
+            self.cut,
+        )
+
+    def test_every_step_names_the_same_release_subdirectory(self) -> None:
+        self.assertIn('releases/v$VERSION/architecture"', self.cut_workflow)
+        self.assertIn("releases/$V/architecture/nova-architecture.html", self.publish)
+
     def test_the_cut_workflow_renders_both_diagrams_to_svg(self) -> None:
         self.assertIn("for f in components request-flow", self.cut_workflow)
         self.assertIn('-o "$d/$f.svg"', self.cut_workflow)
