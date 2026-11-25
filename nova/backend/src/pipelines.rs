@@ -5201,12 +5201,24 @@ fn concurrency_of(spec: &Value) -> &str {
         .unwrap_or("Forbid")
 }
 
-/// Serialises "read the active runs, then trigger": without it two requests that arrive
-/// together both see no active run and both start on a `Forbid` pipeline (measured
-/// 2026-11-24, stardelt/stardelt#1537). A trigger is one Airflow round trip (~50 ms), and
-/// starts are rare, so one process-wide gate is enough; it deliberately does not hold across
-/// the run itself.
-static RUN_START_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serialises "read the active runs, then trigger" for one pipeline: without it two requests
+/// that arrive together both see no active run and both start on a `Forbid` pipeline (measured
+/// 2026-11-24, stardelt/stardelt#1537). One gate per pipeline, so a slow scheduler answer for
+/// one pipeline never holds up a start of another; it does not hold across the run itself.
+static RUN_START_GATES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The start gate of `Pipeline <namespace>/<name>`, created on first use.
+fn run_start_gate(namespace: &str, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+    Arc::clone(
+        RUN_START_GATES
+            .lock()
+            .expect("run start gates poisoned")
+            .entry(format!("{namespace}/{name}"))
+            .or_default(),
+    )
+}
 
 /// `POST …/runs`: start a run now. Refusals happen before Airflow is asked to trigger:
 /// not loaded (409), paused (409), rate limit (429), an active run under `Forbid`/`Replace`
@@ -5240,7 +5252,8 @@ async fn run_now_inner(
     name: &str,
     start: &RunStart,
 ) -> Result<RunView, ActionError> {
-    let _start = RUN_START_GATE.lock().await;
+    let gate = run_start_gate(namespace, name);
+    let _start = gate.lock().await;
     let resources = resources
         .ok_or_else(no_cluster)
         .map_err(ActionError::error)?;
@@ -12074,6 +12087,34 @@ mod tests {
             1,
             "only one start reached Airflow"
         );
+    }
+
+    /// One pipeline's start gate never holds up another pipeline's start.
+    #[tokio::test]
+    async fn run_now_does_not_wait_for_another_pipelines_gate() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+        let other = run_start_gate(&namespace, "another-pipeline");
+        let _held = other.lock().await;
+
+        let started = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &member,
+                &namespace,
+                "smoke",
+                &RunStart::default(),
+            ),
+        )
+        .await
+        .expect("a held gate of another pipeline must not block this start");
+        assert!(started.is_ok(), "{started:?}");
     }
 
     #[tokio::test]
