@@ -108,8 +108,10 @@ class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
         block = dispatch_block(text)
         # The post-amend push is the last one; `index` would find the pre-dispatch push.
         post_amend = text.rindex('git push --force-with-lease origin "$branch"')
-        self.assertLess(text.rindex("git commit --amend --no-edit"), post_amend,
+        self.assertLess(text.rindex('git commit --amend -m "$(rollup_message)"'), post_amend,
                         "the rebuilt digest is committed, then the branch is re-pushed")
+        self.assertIn("rollup_message", block,
+                      "the amend regenerates the message; --no-edit named the replaced digest (#1644)")
         self.assertLess(block.rindex('git push --force-with-lease origin "$branch"'),
                         text.index("fi\n\n# Reuse the open PR only."), "the re-push closes the block")
         self.assertLess(text.index('git push --force-with-lease origin "$branch"'),
