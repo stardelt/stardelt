@@ -182,6 +182,9 @@ use url::Url;
 
 pub struct AppState {
     pub dev_user: String,
+    /// `NOVA_DEFAULT_THEME`: the instance's theme, one of the four theme ids. It only shapes
+    /// the served `index.html` (`<html data-theme>`); a person's stored choice still wins.
+    pub default_theme: &'static str,
     pub trino_url: String,
     pub lakekeeper_url: String,
     /// Nova's own catalog sign-in (`catalog_token.rs`, stardelt-nova#222). `None` unless
@@ -571,21 +574,58 @@ async fn security_headers(req: axum::extract::Request, next: axum::middleware::N
     res
 }
 
+/// The served SPA shell with the instance's theme on `<html data-theme="…">`. A shell without
+/// the tag gets one; anything without an `<html` tag is returned unchanged.
+fn themed_index(html: &str, theme: &str) -> String {
+    if let Some(start) = html.find("data-theme=\"") {
+        let value = start + "data-theme=\"".len();
+        if let Some(len) = html[value..].find('"') {
+            return format!("{}{}{}", &html[..value], theme, &html[value + len..]);
+        }
+        return html.to_string();
+    }
+    html.replacen("<html", &format!("<html data-theme=\"{theme}\""), 1)
+}
+
 /// The whole app: the JSON API under `/api`, the SPA everywhere else, and the response
 /// headers both share. `main` supplies the real state and static directory; the tests in
 /// `router_tests` build the same shape, so a routing or header regression fails in CI
-/// instead of at the ingress.
-fn app(state: Arc<AppState>, api: Router<Arc<AppState>>, static_dir: &str) -> Router {
+/// instead of at the ingress. `theme` is the instance default written into the served shell.
+fn app(state: Arc<AppState>, api: Router<Arc<AppState>>, static_dir: &str, theme: &str) -> Router {
+    // The shell is read per request so a replaced `index.html` (a new image) is served at once,
+    // and the instance theme is written into it: no flash of the wrong palette on first paint.
+    let index = {
+        let dir = static_dir.to_string();
+        let theme = theme.to_string();
+        move || {
+            let dir = dir.clone();
+            let theme = theme.clone();
+            async move {
+                match std::fs::read_to_string(format!("{dir}/index.html")) {
+                    Ok(html) => (
+                        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        themed_index(&html, &theme),
+                    )
+                        .into_response(),
+                    Err(_) => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        }
+    };
     Router::new()
         // The MCP endpoint is outside `/api` (`mcp.rs`), merged before the fallback so
         // the SPA never answers `/mcp`: with the switch off, every MCP route is its 404.
         .merge(mcp::router())
         // The fallback sits on the nested router; see `api_not_found`.
         .nest("/api", api.fallback(api_not_found))
+        .route("/", get(index.clone()))
+        .route("/index.html", get(index.clone()))
         .fallback_service(
-            ServeDir::new(static_dir).fallback(tower_http::services::ServeFile::new(format!(
-                "{static_dir}/index.html"
-            ))),
+            // `fallback`, not `not_found_service`: a deep link must still answer 200 with the SPA
+            // (`spa_routes_still_serve_index_html`), exactly as `ServeFile` did before the theme.
+            ServeDir::new(static_dir)
+                .append_index_html_on_directories(false)
+                .fallback(get(index)),
         )
         .layer(axum::middleware::from_fn(security_headers))
         // Spans carry the path only: query strings (e.g. the OIDC callback's `code`)
@@ -596,6 +636,27 @@ fn app(state: Arc<AppState>, api: Router<Arc<AppState>>, static_dir: &str) -> Ro
             },
         ))
         .with_state(state)
+}
+
+/// `NOVA_DEFAULT_THEME`: one of the four theme ids, `graphite` when unset.
+fn default_theme_from_env() -> Result<&'static str, String> {
+    match std::env::var("NOVA_DEFAULT_THEME") {
+        Err(_) => Ok("graphite"),
+        Ok(value) => parse_theme(value.trim()),
+    }
+}
+
+/// The four theme ids of the theme library (`design/themes.md`); anything else is refused.
+fn parse_theme(value: &str) -> Result<&'static str, String> {
+    match value {
+        "" | "graphite" => Ok("graphite"),
+        "dark" => Ok("dark"),
+        "light" => Ok("light"),
+        "silver" => Ok("silver"),
+        other => Err(format!(
+            "NOVA_DEFAULT_THEME must be dark, light, graphite or silver, got {other}"
+        )),
+    }
 }
 
 fn env_flag(name: &str) -> bool {
@@ -1268,6 +1329,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
+        default_theme: default_theme_from_env().map_err(anyhow::Error::msg)?,
         trino_url: std::env::var("NOVA_TRINO_URL")
             .unwrap_or_else(|_| "http://trino.stardelt.svc.cluster.local:8080".into()),
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
@@ -1335,6 +1397,7 @@ async fn main() -> anyhow::Result<()> {
     model_probe::spawn_loop(Arc::clone(&state));
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
+    let default_theme = default_theme_from_env().map_err(anyhow::Error::msg)?;
 
     let protected = api_router();
     // Everything except /health, /openapi.json and /auth/* requires a principal
@@ -1385,7 +1448,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Every public response is counted for /metrics (stardelt-operator#607).
-    let app = app(state.clone(), api, &static_dir)
+    let app = app(state.clone(), api, &static_dir, default_theme)
         .layer(axum::middleware::from_fn(metrics::count_requests));
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
@@ -1527,6 +1590,7 @@ mod router_tests {
             stage_name,
             stage_kind,
             None,
+            "graphite",
         )
     }
     /// An `AppState` for the engine-token tests (`token_exchange.rs`, `mcp.rs`): the MCP
@@ -1546,6 +1610,7 @@ mod router_tests {
             None,
             "dev",
             Some(exchange),
+            "graphite",
         )
     }
 
@@ -1567,6 +1632,22 @@ mod router_tests {
             None,
             "dev",
             None,
+            "graphite",
+        )
+    }
+    /// An `AppState` whose instance default theme is `theme` (`the_served_shell_carries_the_instance_theme`).
+    pub(crate) fn test_state_with_theme(theme: &'static str) -> Arc<AppState> {
+        build_test_state_full(
+            None,
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            false,
+            None,
+            None,
+            None,
+            "dev",
+            None,
+            theme,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -1580,9 +1661,11 @@ mod router_tests {
         stage_name: Option<String>,
         stage_kind: &'static str,
         exchange: Option<token_exchange::TokenExchange>,
+        default_theme: &'static str,
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
+            default_theme,
             trino_url: trino_url.into(),
             lakekeeper_url: lakekeeper_url.into(),
             shared_accounts: vec![],
@@ -1690,7 +1773,8 @@ mod router_tests {
 
     pub(crate) fn test_app(tag: &str) -> (Router, StaticDir) {
         let dir = StaticDir::new(tag);
-        let app = app(test_state(), api_router(), dir.path());
+        let state = test_state();
+        let app = app(state.clone(), api_router(), dir.path(), state.default_theme);
         (app, dir)
     }
 
@@ -1809,7 +1893,8 @@ mod router_tests {
             .merge(public_router())
             .merge(api_router())
             .merge(admin_router());
-        let app = app(test_state(), api, dir.path());
+        let state = test_state();
+        let app = app(state.clone(), api, dir.path(), state.default_theme);
         let response = get(app, "/api/openapi.json").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1838,7 +1923,8 @@ mod router_tests {
         let dir = StaticDir::new("health");
         // `/health` lives in `public_router()`, not in `api_router()`.
         let api = Router::new().merge(public_router()).merge(api_router());
-        let app = app(test_state(), api, dir.path());
+        let state = test_state();
+        let app = app(state.clone(), api, dir.path(), state.default_theme);
         let response = get(app, "/api/health").await;
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
@@ -1994,7 +2080,8 @@ mod router_tests {
         if let Some(sub) = who {
             api = api.layer(Extension(signed_in(sub)));
         }
-        app(test_state_with_db(Some(pool)), api, dir.path())
+        let state = test_state_with_db(Some(pool));
+        app(state.clone(), api, dir.path(), state.default_theme)
     }
 
     /// A signed-in caller in a set of groups, as `require_auth` would have put it.
@@ -2012,7 +2099,8 @@ mod router_tests {
         dir: &StaticDir,
     ) -> Router {
         let api = api_router().layer(Extension(signed_in_with_groups(who, groups)));
-        app(test_state_with_db(Some(pool)), api, dir.path())
+        let state = test_state_with_db(Some(pool));
+        app(state.clone(), api, dir.path(), state.default_theme)
     }
 
     /// Alice saves a query and shares it with `analytics`. Its members see it with
@@ -2361,6 +2449,64 @@ mod router_tests {
         }
     }
 
+    /// The instance theme lands on the existing attribute, and a shell that marks no theme gets one.
+    #[test]
+    fn themed_index_replaces_the_attribute() {
+        let themed = themed_index("<html lang=\"en\" data-theme=\"graphite\">", "light");
+        assert!(themed.contains("data-theme=\"light\""), "{themed}");
+        assert!(!themed.contains("data-theme=\"graphite\""), "{themed}");
+    }
+
+    /// A shell with no `<html` tag is a build Nova does not understand: served unchanged.
+    #[test]
+    fn themed_index_keeps_a_shell_without_html() {
+        let shell = "<!doctype html><title>nova</title>";
+        assert_eq!(themed_index(shell, "light"), shell);
+    }
+
+    /// Only the four theme ids are accepted; unset and empty mean today's `graphite`.
+    #[test]
+    fn the_default_theme_env_is_validated() {
+        assert_eq!(parse_theme(""), Ok("graphite"));
+        assert_eq!(parse_theme("graphite"), Ok("graphite"));
+        assert_eq!(parse_theme("dark"), Ok("dark"));
+        assert_eq!(parse_theme("light"), Ok("light"));
+        assert_eq!(parse_theme("silver"), Ok("silver"));
+        assert_eq!(
+            parse_theme("neon"),
+            Err("NOVA_DEFAULT_THEME must be dark, light, graphite or silver, got neon".into())
+        );
+    }
+
+    /// The served shell carries the instance default on `/` and on a deep link, so the first
+    /// paint already has the right palette (design/themes.md T2).
+    #[tokio::test]
+    async fn the_served_shell_carries_the_instance_theme() {
+        for uri in ["/", "/catalog"] {
+            let dir = StaticDir::new("theme");
+            std::fs::write(
+                dir.0.join("index.html"),
+                "<!doctype html><html data-theme=\"graphite\"><body>nova</body></html>",
+            )
+            .expect("index.html");
+            let state = test_state_with_theme("light");
+            let app = app(state.clone(), api_router(), dir.path(), state.default_theme);
+            let response = get(app, uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                header(&response, "content-type"),
+                Some("text/html; charset=utf-8"),
+                "{uri}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(body.contains("data-theme=\"light\""), "{uri}: {body}");
+            assert!(!body.contains("data-theme=\"graphite\""), "{uri}: {body}");
+        }
+    }
+
     #[tokio::test]
     async fn security_headers_are_set_on_api_responses() {
         let (app, _dir) = test_app("headers-api");
@@ -2414,7 +2560,8 @@ mod router_tests {
         if let Some(p) = who {
             api = api.layer(Extension(p));
         }
-        app(test_state_with_db(Some(pool)), api, dir.path())
+        let state = test_state_with_db(Some(pool));
+        app(state.clone(), api, dir.path(), state.default_theme)
     }
 
     /// Two queries of alice (a select on warehouse `default`, a create-table-as on `analytics`)
@@ -2949,7 +3096,7 @@ mod router_tests {
         );
         let mut api = api_router();
         api = api.layer(Extension(signed_in_as(ALICE_SUB, "alice")));
-        let app = app(state, api, dir.path());
+        let app = app(state.clone(), api, dir.path(), state.default_theme);
 
         let (status, body) = call(&app, "GET", "/api/lineage/read-tables", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -2987,7 +3134,8 @@ mod router_tests {
     #[tokio::test]
     async fn the_query_log_answers_503_without_a_state_store() {
         let dir = StaticDir::new("query-log-503");
-        let app = app(test_state(), api_router(), dir.path());
+        let state = test_state();
+        let app = app(state.clone(), api_router(), dir.path(), state.default_theme);
         assert_eq!(
             call(&app, "GET", "/api/query-log", None).await.0,
             StatusCode::SERVICE_UNAVAILABLE

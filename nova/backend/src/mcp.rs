@@ -1532,7 +1532,12 @@ mod tests {
             });
         }
         let dir = crate::router_tests::StaticDir::new(tag);
-        let app = crate::app(state, crate::api_router(), dir.path());
+        let app = crate::app(
+            state.clone(),
+            crate::api_router(),
+            dir.path(),
+            state.default_theme,
+        );
         (app, dir)
     }
 
@@ -1555,7 +1560,12 @@ mod tests {
             writes: Arc::new(Mutex::new(HashMap::new())),
         });
         let dir = crate::router_tests::StaticDir::new(tag);
-        let app = crate::app(state, crate::api_router(), dir.path());
+        let app = crate::app(
+            state.clone(),
+            crate::api_router(),
+            dir.path(),
+            state.default_theme,
+        );
         (app, dir)
     }
 
@@ -1579,7 +1589,12 @@ mod tests {
             writes: Arc::new(Mutex::new(HashMap::new())),
         });
         let dir = crate::router_tests::StaticDir::new(tag);
-        let app = crate::app(state, crate::api_router(), dir.path());
+        let app = crate::app(
+            state.clone(),
+            crate::api_router(),
+            dir.path(),
+            state.default_theme,
+        );
         (app, dir)
     }
 
@@ -1602,7 +1617,12 @@ mod tests {
             writes: Arc::new(Mutex::new(HashMap::new())),
         });
         let dir = crate::router_tests::StaticDir::new(tag);
-        let app = crate::app(state, crate::api_router(), dir.path());
+        let app = crate::app(
+            state.clone(),
+            crate::api_router(),
+            dir.path(),
+            state.default_theme,
+        );
         (app, dir)
     }
 

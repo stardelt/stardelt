@@ -327,6 +327,7 @@ mod tests {
     #[test]
     fn notebooks_pillar_adds_jupyterhub_to_the_platform_plan() {
         let without = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -362,6 +363,7 @@ mod tests {
     #[test]
     fn secrets_none_plans_no_external_secrets() {
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -381,6 +383,7 @@ mod tests {
     #[test]
     fn external_secrets_comes_before_the_pillars() {
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -457,6 +460,7 @@ mod tests {
     #[test]
     fn platform_mode_plans_the_store_after_external_secrets() {
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -483,6 +487,7 @@ mod tests {
     #[test]
     fn external_mode_plans_no_store() {
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -518,6 +523,7 @@ mod tests {
     #[test]
     fn pipelines_pillar_adds_airflow_to_the_platform_plan() {
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -567,6 +573,7 @@ mod tests {
     #[test]
     fn dashboards_pillar_adds_superset_to_the_platform_plan() {
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars::default(),
             dry_run: true,
@@ -607,6 +614,7 @@ mod tests {
     #[test]
     fn streaming_pillar_plans_the_kafka_operator() {
         let with = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars {
                 streaming: true,
@@ -660,6 +668,7 @@ mod tests {
     #[test]
     fn platform_plan_owns_the_cluster_scoped_cnpg_operator() {
         let pi = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Default::default(),
             dry_run: true,
@@ -699,6 +708,7 @@ mod tests {
     #[test]
     fn every_default_chart_has_a_pinned_version() {
         let platform = plan_platform(&PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars {
                 notebooks: true,
@@ -730,6 +740,7 @@ mod tests {
     #[test]
     fn every_planned_chart_has_a_repo() {
         let platform = plan_platform(&PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Default::default(),
             pillars: Pillars {
                 notebooks: true,

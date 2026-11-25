@@ -2888,6 +2888,7 @@ mod tests {
     fn test_state_db(store: Option<StoreClient>, db: Option<sqlx::PgPool>) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
+            default_theme: "graphite",
             trino_url: "http://127.0.0.1:1".into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
             shared_accounts: vec![],

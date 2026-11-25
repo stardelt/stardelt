@@ -172,6 +172,8 @@ spec:
             # falls back to its built-in http://…:8080 default, which is what a
             # dev install without identity runs. Re-applying this manifest cannot
             # silently point Nova at a listener that is not there.
+            - name: NOVA_DEFAULT_THEME
+              value: "graphite"
             - name: NOVA_TRINO_URL
               valueFrom:
                 configMapKeyRef: { name: stardelt-identity, key: trinoUrl, optional: true }

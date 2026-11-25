@@ -300,7 +300,13 @@ fn identity_env(name: &str, key: &str) -> EnvVar {
 /// the Trino CA, the events token) is optional, so Nova starts without it and runs in
 /// development mode; only the state store and the object-store keys are required. The settings
 /// for the catalog client, the secret store and Airflow arrive with those components.
-fn env(namespace: &str, base_domain: Option<&str>, airflow: bool, mcp: &McpSpec) -> Vec<EnvVar> {
+fn env(
+    namespace: &str,
+    base_domain: Option<&str>,
+    airflow: bool,
+    mcp: &McpSpec,
+    default_theme: crate::crd::Theme,
+) -> Vec<EnvVar> {
     let mut env = vec![
         identity_env("NOVA_TRINO_URL", "trinoUrl"),
         secret_env("NOVA_TRINO_CA_PEM", "trino-ca", "tls.crt", true),
@@ -310,6 +316,7 @@ fn env(namespace: &str, base_domain: Option<&str>, airflow: bool, mcp: &McpSpec)
         ),
         value_env("NOVA_WAREHOUSE_NAME", WAREHOUSE),
         value_env("NOVA_DEV_USER", "stardelt-dev"),
+        value_env("NOVA_DEFAULT_THEME", default_theme.as_str()),
         identity_env("NOVA_AUTH_MODE", "authMode"),
         identity_env("NOVA_PUBLIC_URL", "publicUrl"),
         identity_env("NOVA_OIDC_ISSUER", "issuerUrl"),
@@ -445,6 +452,7 @@ fn container(
     airflow: bool,
     mcp: &McpSpec,
     models: &[ModelKey],
+    default_theme: crate::crd::Theme,
 ) -> Container {
     let port = |name: &str, container_port: i32| ContainerPort {
         name: Some(name.into()),
@@ -458,7 +466,7 @@ fn container(
         // the registry is unreachable.
         image_pull_policy: Some("IfNotPresent".into()),
         ports: Some(vec![port("http", 8080), port("internal", 8081)]),
-        env: Some(env(namespace, base_domain, airflow, mcp)),
+        env: Some(env(namespace, base_domain, airflow, mcp, default_theme)),
         volume_mounts: if models.is_empty() {
             None
         } else {
@@ -517,7 +525,8 @@ const MODEL_KEYS_VOLUME: &str = "model-keys";
 /// `base_domain` is the domain the applications are served under, used for the links Nova shows
 /// to the other applications (none when it is `None`). `airflow` adds the three variables that
 /// point Nova at the Airflow of the `pipelines` pillar; `mcp` adds the two of the hosted MCP
-/// endpoint when it is enabled; `models` are the model endpoint keys projected into the pod.
+/// endpoint when it is enabled; `models` are the model endpoint keys projected into the pod;
+/// `default_theme` is the instance theme Nova serves for people who have not chosen one.
 pub fn deployment(
     namespace: &str,
     image: &str,
@@ -525,6 +534,7 @@ pub fn deployment(
     airflow: bool,
     mcp: &McpSpec,
     models: &[ModelKey],
+    default_theme: crate::crd::Theme,
 ) -> Deployment {
     let mut labels = name_selector();
     labels.extend(part_of());
@@ -575,6 +585,7 @@ pub fn deployment(
                         airflow,
                         mcp,
                         models,
+                        default_theme,
                     )],
                     ..PodSpec::default()
                 }),
@@ -805,7 +816,7 @@ mod tests {
 
     #[test]
     fn the_deployment_runs_the_given_image_as_the_nova_service_account() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[]);
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[], Default::default());
         assert_eq!(deployment.metadata.name.as_deref(), Some("nova"));
         assert_eq!(deployment.metadata.namespace.as_deref(), Some("stardelt"));
         let spec = deployment.spec.clone();
@@ -832,7 +843,7 @@ mod tests {
 
     #[test]
     fn the_pod_is_locked_down() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[]);
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[], Default::default());
         let pod = deployment.spec.clone().template.spec.expect("pod");
         let pod_security = pod.security_context.expect("pod security");
         assert_eq!(pod_security.run_as_non_root, Some(true));
@@ -855,7 +866,7 @@ mod tests {
 
     #[test]
     fn no_model_endpoint_means_no_volume() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[]);
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[], Default::default());
         let pod = deployment.spec.clone().template.spec.expect("pod");
         assert!(pod.volumes.is_none());
         assert!(pod.containers[0].volume_mounts.is_none());
@@ -868,7 +879,7 @@ mod tests {
             connection: "llm-key".into(),
             key: "api-key".into(),
         }];
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &models);
+        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &models, Default::default());
         let pod = deployment.spec.clone().template.spec.expect("pod");
         let volumes = pod.volumes.expect("volumes");
         assert_eq!(volumes[0].name, "model-keys");
@@ -897,6 +908,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         let ports: Vec<_> = container
             .ports
@@ -926,6 +938,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         let names: Vec<&str> = env.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
@@ -936,6 +949,7 @@ mod tests {
                 "NOVA_LAKEKEEPER_URL",
                 "NOVA_WAREHOUSE_NAME",
                 "NOVA_DEV_USER",
+                "NOVA_DEFAULT_THEME",
                 "NOVA_AUTH_MODE",
                 "NOVA_PUBLIC_URL",
                 "NOVA_OIDC_ISSUER",
@@ -972,6 +986,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         let mut required = Vec::new();
         for var in &env {
@@ -1006,6 +1021,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         let secret = |name: &str| {
             let selector = named(&env, name)
@@ -1069,6 +1085,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         let value = |name: &str| named(&env, name).value.expect(name);
         assert_eq!(
@@ -1094,6 +1111,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         assert!(without.iter().all(|e| e.name != "NOVA_BASE_DOMAIN"));
         let with = env_of(&deployment(
@@ -1103,6 +1121,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         assert_eq!(
             named(&with, "NOVA_BASE_DOMAIN").value.as_deref(),
@@ -1120,6 +1139,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         assert!(!off.iter().any(|e| e.name.starts_with("NOVA_MCP_")));
 
@@ -1134,6 +1154,7 @@ mod tests {
                 ..McpSpec::default()
             },
             &[],
+            Default::default(),
         ));
         assert_eq!(named(&on, "NOVA_MCP_ENABLED").value.as_deref(), Some("1"));
         assert_eq!(
@@ -1152,6 +1173,7 @@ mod tests {
                 ..McpSpec::default()
             },
             &[],
+            Default::default(),
         ));
         assert_eq!(
             named(&custom, "NOVA_MCP_AUDIENCE").value.as_deref(),
@@ -1173,6 +1195,7 @@ mod tests {
                 ..McpSpec::default()
             },
             &[],
+            Default::default(),
         ));
         assert_eq!(
             named(&tuned, "NOVA_MCP_MAX_ROWS").value.as_deref(),
@@ -1218,6 +1241,7 @@ mod tests {
                 ..McpSpec::default()
             },
             &[],
+            Default::default(),
         ));
         assert_eq!(
             named(&limited, "NOVA_MCP_ALLOWED_CLIENTS").value.as_deref(),
@@ -1235,6 +1259,7 @@ mod tests {
                 ..McpSpec::default()
             },
             &[],
+            Default::default(),
         ));
         assert_eq!(
             named(&grouped, "NOVA_MCP_ALLOWED_GROUPS").value.as_deref(),
@@ -1252,6 +1277,7 @@ mod tests {
             false,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         assert!(without.iter().all(|e| !e.name.starts_with("NOVA_AIRFLOW")));
         let env = env_of(&deployment(
@@ -1261,6 +1287,7 @@ mod tests {
             true,
             &McpSpec::default(),
             &[],
+            Default::default(),
         ));
         let added: Vec<&str> = env
             .iter()

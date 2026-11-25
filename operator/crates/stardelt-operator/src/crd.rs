@@ -25,6 +25,28 @@ fn default_profile() -> Profile {
     Profile::Demo
 }
 
+/// The instance's default theme, used when a person has not chosen one (design/themes.md T2).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Dark,
+    Light,
+    #[default]
+    Graphite,
+    Silver,
+}
+
+impl Theme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+            Theme::Graphite => "graphite",
+            Theme::Silver => "silver",
+        }
+    }
+}
+
 /// Which pillars a platform instance enables.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct Pillars {
@@ -726,6 +748,10 @@ pub struct PlatformInstanceSpec {
     /// row cap and timeout of `sql_read`, and the client ids allowed to call it. Off by default.
     #[serde(default)]
     pub mcp: McpSpec,
+    /// Default theme for Nova's interface (the four ids of the theme library); a person's own
+    /// choice in Preferences wins. One of `dark`, `light`, `graphite` or `silver`.
+    #[serde(default, rename = "defaultTheme")]
+    pub default_theme: Theme,
 }
 
 /// The customer's Prometheus (operator#607, decision of 2026-11-12T20:27Z).
@@ -4362,6 +4388,38 @@ mod tests {
         assert!(pi.spec.pillars.lakehouse);
         assert!(!pi.spec.pillars.batch);
         assert!(pi.spec.dry_run, "a new PlatformInstance must plan only");
+    }
+
+    /// The instance theme (design/themes.md T2): graphite when the field is absent, the four ids
+    /// of the theme library otherwise, and nothing else.
+    #[test]
+    fn platform_instance_default_theme_is_graphite_and_reads_the_four_ids() {
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": {}
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(pi.spec.default_theme, Theme::Graphite);
+
+        let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": { "defaultTheme": "light" }
+        }))
+        .expect("deserialize PlatformInstance");
+        assert_eq!(pi.spec.default_theme, Theme::Light);
+        assert_eq!(pi.spec.default_theme.as_str(), "light");
+
+        let refused = serde_json::from_value::<PlatformInstance>(serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster" },
+            "spec": { "defaultTheme": "neon" }
+        }));
+        assert!(refused.is_err(), "an unknown theme must be refused");
     }
 
     #[test]

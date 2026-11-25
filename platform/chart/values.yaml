@@ -691,6 +691,9 @@ nova:
   lakekeeperURL: "http://lakekeeper.{{ .Release.Namespace }}.svc.cluster.local:8181"
   warehouseName: warehouse
   devUser: stardelt-dev
+  # Default theme for people who have not chosen one in Preferences: dark, light, graphite or
+  # silver (design/themes.md). The operator's CRD carries the same as spec.defaultTheme.
+  defaultTheme: graphite
   # Sign-ins shared by many people (a public demo), comma separated; empty = none.
   sharedAccounts: ""
   # The hosted MCP endpoint (stardelt-nova#112; design agent-access §4). Off by default.

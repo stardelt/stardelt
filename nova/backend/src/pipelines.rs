@@ -9111,6 +9111,7 @@ mod tests {
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
+            default_theme: "graphite",
             trino_url: trino_url.into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
             shared_accounts: vec![],

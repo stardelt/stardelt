@@ -54,9 +54,18 @@ export function hasThemeChoice(): boolean {
   return storedTheme() !== null
 }
 
+/**
+ * The instance default the server wrote into the served shell (`NOVA_DEFAULT_THEME`,
+ * design/themes.md T2). `null` when the shell carries none.
+ */
+function instanceTheme(): Theme | null {
+  const value = document.documentElement.dataset.theme
+  return isTheme(value) ? value : null
+}
+
 export function getTheme(): Theme {
   if (currentTheme) return currentTheme
-  currentTheme = storedTheme() ?? 'graphite'
+  currentTheme = storedTheme() ?? instanceTheme() ?? 'graphite'
   return currentTheme
 }
 
