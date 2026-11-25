@@ -80,7 +80,11 @@ export default function Compute() {
     mutationFn: (name: string) => api.stopCompute(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['compute'] }),
   })
-  const pending = start.isPending || stop.isPending
+  const ensure = useMutation({
+    mutationFn: (group: string) => api.ensureCompute(group),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['compute'] }),
+  })
+  const pending = start.isPending || stop.isPending || ensure.isPending
   const sorted = clusters.data
     ? [...clusters.data.clusters].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
     : []
@@ -131,8 +135,29 @@ export default function Compute() {
 
       {tab === 'spark' && clusters.data && clusters.data.clusters.length === 0 && (
         <EmptyState icon="spark" title="No compute clusters">
-          A cluster is created as a <span className="font-mono">SparkCluster</span> resource; ask an administrator to
-          create one.
+          {me.data && me.data.groups.length > 0 ? (
+            <div className="flex flex-col items-center gap-3">
+              <p>
+                Your group has no Spark cluster yet. One is created the first time it is needed, and stops itself
+                after an hour without a job.
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {me.data.groups.map((group) => (
+                  <button
+                    key={group}
+                    type="button"
+                    className="btn-primary"
+                    disabled={pending}
+                    onClick={() => ensure.mutate(group)}
+                  >
+                    {ensure.isPending ? 'Creating…' : `Create the ${group} cluster`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <>Ask an administrator to create a cluster.</>
+          )}
         </EmptyState>
       )}
 
@@ -141,6 +166,11 @@ export default function Compute() {
           {(start.isError || stop.isError) && (
             <p role="alert" className="text-sm text-bad">
               {errorMessage((start.error ?? stop.error) as unknown)}
+            </p>
+          )}
+          {ensure.isError && (
+            <p role="alert" className="text-sm text-bad">
+              {errorMessage(ensure.error as unknown)}
             </p>
           )}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">

@@ -1830,6 +1830,7 @@ export const api = {
   compute:        ()                            => jget<{ clusters: ComputeCluster[] }>('/api/compute'),
   startCompute:   (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/start`, {}),
   stopCompute:    (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/stop`, {}),
+  ensureCompute:  (group: string)               => jpost<ComputeCluster>('/api/compute/ensure', { group }),
   saveCompute:    (name: string, body: ComputeSpecBody) => jput<ComputeCluster>(`/api/admin/compute/${seg(name)}`, body),
   deleteCompute:  (name: string)                => jdel(`/api/admin/compute/${seg(name)}`),
   /** The caller's own JupyterHub workspace (stardelt-nova#653). */
