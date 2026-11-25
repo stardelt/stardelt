@@ -804,6 +804,12 @@ fn api_router() -> Router<Arc<AppState>> {
             "/catalog/tables/{ns}/{tbl}/documentation",
             get(catalog_docs::read).put(catalog_docs::update),
         )
+        // Whether the data is as fresh as its owner promised (#402 slice 1): the promise is
+        // the Iceberg property `stardelt.freshness`, evaluated at the read.
+        .route(
+            "/catalog/tables/{ns}/{tbl}/health",
+            get(catalog_docs::health).put(catalog_docs::update_health),
+        )
         // A question and its trusted SQL, kept per table by its owners (#911 slice 2a).
         .route(
             "/catalog/tables/{ns}/{tbl}/verified-queries",

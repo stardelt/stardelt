@@ -2325,6 +2325,224 @@
         }
       }
     },
+    "/api/catalog/tables/{ns}/{tbl}/health": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. Demo mode answers grey with `canEdit: false`.",
+        "operationId": "table_freshness_get",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table's freshness at the moment of the read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableFreshness"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is not a single path segment, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "public"
+        ],
+        "description": "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property. Demo mode answers 503.",
+        "operationId": "table_freshness_update",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FreshnessUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The table's freshness after the change, freshly loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableFreshness"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is invalid, the catalog name is invalid, or the table has no owner and this request does not claim it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog, or only the owner group and administrators may edit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable, did not answer, or stayed busy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Demo mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/tables/{ns}/{tbl}/history": {
       "get": {
         "tags": [
@@ -13687,6 +13905,65 @@
           }
         }
       },
+      "Freshness": {
+        "type": "object",
+        "description": "The freshness promise stored as JSON text in [`FRESHNESS_PROPERTY`].",
+        "required": [
+          "by",
+          "timezone",
+          "setAt"
+        ],
+        "properties": {
+          "by": {
+            "type": "string",
+            "description": "The deadline: a 24-hour clock time, `HH:MM`."
+          },
+          "graceMinutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How long after the deadline the table is still `amber`.",
+            "minimum": 0
+          },
+          "setAt": {
+            "type": "string",
+            "description": "When Nova wrote the promise (RFC 3339); the baseline of a table with no snapshot."
+          },
+          "timezone": {
+            "type": "string",
+            "description": "The IANA zone the deadline is a wall-clock time in."
+          }
+        }
+      },
+      "FreshnessUpdate": {
+        "type": "object",
+        "description": "`PUT /api/catalog/tables/{ns}/{tbl}/health` body.\n\n`by: null` removes the promise; an absent key changes nothing.",
+        "properties": {
+          "by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The deadline (`null` removes the promise)."
+          },
+          "graceMinutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long after the deadline the table is still `amber` (0 to 1440, default 60).",
+            "minimum": 0
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The IANA zone of the deadline; required with a deadline."
+          }
+        },
+        "additionalProperties": false
+      },
       "Health": {
         "type": "object",
         "description": "What the readiness probe answers.",
@@ -17867,6 +18144,61 @@
               "type": "string"
             },
             "description": "The `stardelt.tags` property, split on commas, trimmed and sorted."
+          }
+        }
+      },
+      "TableFreshness": {
+        "type": "object",
+        "description": "One table's freshness: the promise, the newest commit and the status both imply.",
+        "required": [
+          "status",
+          "detail",
+          "canEdit"
+        ],
+        "properties": {
+          "canEdit": {
+            "type": "boolean",
+            "description": "Whether the interim rule lets this caller set the promise."
+          },
+          "detail": {
+            "type": "string",
+            "description": "One sentence a person or an assistant can repeat."
+          },
+          "dueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The most recent deadline at or before now, RFC 3339, or `null`."
+          },
+          "lastWrite": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest commit, RFC 3339, or `null` for a table with no snapshot."
+          },
+          "nextDueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first deadline strictly after now, RFC 3339, or `null`."
+          },
+          "promise": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Freshness",
+                "description": "The stored promise, or `null` when the table carries none (or one that does not parse)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`grey`, `green`, `amber` or `red`."
           }
         }
       },
