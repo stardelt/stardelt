@@ -161,7 +161,7 @@ singleuser:
     # test `notebook_task_image_matches_the_single_user_image` fails when values/airflow.yaml
     # disagrees.
     name: ghcr.io/stardelt/jupyter-singleuser
-    tag: "dev@sha256:324282d64a832592e24ab9c16ecbb193dfa5883ffc260009854c0ddc0cbb8866"
+    tag: "dev@sha256:fc3f27f61ec1289744349d037cf38f03dda11dedcd34f4b0b5566842c42ebbcc"
     pullSecrets:
       - name: ghcr-creds
   memory:
