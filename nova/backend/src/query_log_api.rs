@@ -138,12 +138,15 @@ impl Caller {
                 groups: p.identity.groups.clone(),
                 is_admin: p.identity.is_admin,
             },
-            None => Self {
-                username: dev_user.to_string(),
-                sub: dev_user.to_string(),
-                groups: vec![],
-                is_admin: true,
-            },
+            None => {
+                let dev = crate::auth::Identity::dev_admin(dev_user);
+                Self {
+                    username: dev.display_name,
+                    sub: dev.sub,
+                    groups: dev.groups,
+                    is_admin: dev.is_admin,
+                }
+            }
         }
     }
 

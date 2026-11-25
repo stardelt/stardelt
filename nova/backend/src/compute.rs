@@ -610,21 +610,8 @@ fn compute_api(state: &AppState) -> Result<Api<kube::api::DynamicObject>, Fail> 
 /// Who the caller is. `dev` mode has no IdP: the single user is the operator, an
 /// administrator with no groups — exactly like `warehouses::actor`.
 fn actor(principal: Option<Extension<Principal>>, state: &AppState) -> Identity {
-    match principal {
-        Some(Extension(principal)) => principal.identity,
-        None => Identity {
-            sub: state.dev_user.clone(),
-            display_name: state.dev_user.clone(),
-            email: None,
-            name: None,
-            groups: Vec::new(),
-            roles: Vec::new(),
-            groups_overage: false,
-            is_admin: true,
-        },
-    }
+    crate::auth::caller_identity(&state.dev_user, principal.as_ref().map(|e| &e.0))
 }
-
 fn not_found() -> Fail {
     // Indistinguishable from a cluster that does not exist (and from one the caller may not
     // use).

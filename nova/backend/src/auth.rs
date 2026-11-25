@@ -416,6 +416,36 @@ pub struct Identity {
     pub is_admin: bool,
 }
 
+impl Identity {
+    /// The one person of `dev` mode, where nobody signs in: `NOVA_DEV_USER`, an administrator
+    /// with no groups. The only place outside the tests that builds an `Identity` by hand.
+    pub fn dev_admin(user: &str) -> Self {
+        Identity {
+            sub: user.to_string(),
+            display_name: user.to_string(),
+            email: None,
+            name: None,
+            groups: Vec::new(),
+            roles: Vec::new(),
+            groups_overage: false,
+            is_admin: true,
+        }
+    }
+
+    /// Whether this person is a member of `group` (exact name, as the token carries it).
+    pub fn in_group(&self, group: &str) -> bool {
+        self.groups.iter().any(|g| g == group)
+    }
+}
+
+/// The caller of a route: the signed-in principal's identity in `oidc` mode, the dev-mode
+/// administrator ([`Identity::dev_admin`]) when nobody signs in.
+pub fn caller_identity(dev_user: &str, principal: Option<&Principal>) -> Identity {
+    principal
+        .map(|p| p.identity.clone())
+        .unwrap_or_else(|| Identity::dev_admin(dev_user))
+}
+
 /// What a resource server needs beyond the identity: the token's granted scopes and the
 /// client it was issued to (`azp`, OIDC Core 2 §2). `None` when the IdP sets no `azp`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

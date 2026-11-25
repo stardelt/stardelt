@@ -403,7 +403,7 @@ pub fn visible(identity: &Identity, spec: &Value) -> bool {
     if identity.is_admin {
         return true;
     }
-    let mine = |group: &str| identity.groups.iter().any(|g| g == group);
+    let mine = |group: &str| identity.in_group(group);
     if spec
         .get("ownerGroup")
         .and_then(Value::as_str)
@@ -428,7 +428,7 @@ pub fn may_act(identity: &Identity, spec: &Value) -> bool {
     }
     spec.get("ownerGroup")
         .and_then(Value::as_str)
-        .is_some_and(|group| identity.groups.iter().any(|g| g == group))
+        .is_some_and(|group| identity.in_group(group))
 }
 
 /// How long a resource may exist without a DAG before the view calls it `not-loaded`. The loader
