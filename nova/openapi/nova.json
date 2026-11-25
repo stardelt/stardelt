@@ -10990,6 +10990,37 @@
         }
       }
     },
+    "/api/version": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The version and commit of the running Nova process: `version` is `NOVA_VERSION` when the deployment sets it and the crate version otherwise, `commit` is `NOVA_COMMIT` or `unknown`. Nothing is fetched and nothing leaves the instance.",
+        "operationId": "nova_version",
+        "responses": {
+          "200": {
+            "description": "The running version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Version"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -18867,6 +18898,24 @@
           "verifiedBy": {
             "type": "string",
             "description": "The `sub` of the person who verified it."
+          }
+        }
+      },
+      "Version": {
+        "type": "object",
+        "description": "The version and the commit of the running process.",
+        "required": [
+          "version",
+          "commit"
+        ],
+        "properties": {
+          "commit": {
+            "type": "string",
+            "description": "`NOVA_COMMIT` when the deployment sets it, else `unknown`."
+          },
+          "version": {
+            "type": "string",
+            "description": "`NOVA_VERSION` when the deployment sets it, else the crate version."
           }
         }
       },

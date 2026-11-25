@@ -55,6 +55,7 @@ pub struct ErrorResponse {
     ),
     paths(
         crate::me,
+        crate::version::version,
         crate::health,
         crate::openapi::serve,
         crate::auth::config,
@@ -201,6 +202,7 @@ pub struct ErrorResponse {
         crate::Me,
         crate::OidcMe,
         crate::Health,
+        crate::version::Version,
         crate::statements::SubmitRequest,
         crate::statements::StatementList,
         crate::statements::StatementListItem,

@@ -161,6 +161,7 @@ mod superset_archive;
 mod trino;
 mod user_settings;
 mod verified_queries;
+mod version;
 mod warehouses;
 mod workspace;
 
@@ -756,6 +757,8 @@ fn public_router() -> Router<Arc<AppState>> {
 fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me", get(me))
+        // What this process is (#55 slice 1): the footer and the update card compare it.
+        .route("/version", get(version::version))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
         .route("/catalog/catalogs", get(catalog::list_catalogs))
         // The SQL compute classes and the one this caller lands in (stardelt-nova#236): read
@@ -1831,6 +1834,22 @@ mod router_tests {
             value["paths"].get("/api/me").is_some(),
             "the document describes /api/me"
         );
+    }
+
+    /// `GET /api/version` answers what the running process is (#55 slice 1, #1701).
+    #[tokio::test]
+    async fn version_answers_the_crate_version() {
+        let dir = StaticDir::new("version");
+        let api = Router::new().merge(public_router()).merge(api_router());
+        let state = test_state();
+        let app = app(state.clone(), api, dir.path(), state.default_theme);
+        let response = get(app, "/api/version").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
     }
 
     /// Without `NOVA_DATABASE_URL` the probe still answers 200 and says why.

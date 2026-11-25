@@ -496,6 +496,13 @@
       "query_params": [],
       "body": false
     },
+    "nova_version": {
+      "method": "GET",
+      "path": "/api/version",
+      "path_params": [],
+      "query_params": [],
+      "body": false
+    },
     "openapi_document": {
       "method": "GET",
       "path": "/api/openapi.json",
