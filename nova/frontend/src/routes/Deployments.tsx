@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, errorMessage, type PipelineView, type StageRow } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { SkeletonTable } from '../components/Skeleton'
@@ -31,6 +31,11 @@ export function stages(pipelines: PipelineView[]): Stage[] {
   return [...found.values()]
     .map((stage) => ({ ...stage, rows: [...stage.rows].sort((a, b) => a.name.localeCompare(b.name)) }))
     .sort((a, b) => a.bundle.localeCompare(b.bundle) || a.target.localeCompare(b.target))
+}
+
+/** The Deployments page, narrowed to one stage: the link a run and a row carry (#105). */
+export function stageHref(bundle: string, target: string): string {
+  return `/deployments?${new URLSearchParams({ bundle, target }).toString()}`
 }
 
 /** Pipelines a rebuild from Git would not bring back: no bundle stamp, or changed since deploy. */
@@ -260,7 +265,12 @@ export default function Deployments() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const peers = me.data?.peers ?? []
   const [peer, setPeer] = useState<string | null>(null)
-  const groups = stages(list.data?.pipelines ?? [])
+  const [params] = useSearchParams()
+  const bundle = params.get('bundle')
+  const target = params.get('target')
+  const all = stages(list.data?.pipelines ?? [])
+  const filterActive = Boolean(bundle && target)
+  const groups = filterActive ? all.filter((s) => s.bundle === bundle && s.target === target) : all
   const outside = notInGit(list.data?.pipelines ?? [])
   const failed = list.isError && !list.data
 
@@ -302,11 +312,24 @@ export default function Deployments() {
           <ErrorBox error={list.error} onRetry={() => void list.refetch()} />
         </div>
       )}
-      {list.data && groups.length === 0 && (
+      {list.data && !filterActive && all.length === 0 && (
         <div className="card px-5 py-5 text-sm text-text-mute">
           Nothing was deployed from a bundle yet. Pipelines made here or with{' '}
           <span className="font-mono text-xs">stardelt apply</span> are on the{' '}
           <Link to="/pipelines" className="underline">Pipelines</Link> page.
+        </div>
+      )}
+
+      {filterActive && (
+        <p className="text-sm text-text-dim">
+          Showing {bundle} · {target}.{' '}
+          <Link to="/deployments" className="underline">Show every stage</Link>
+        </p>
+      )}
+
+      {list.data && filterActive && groups.length === 0 && (
+        <div className="card px-5 py-5 text-sm text-text-mute">
+          No stage {bundle} · {target} is deployed. It may have been rolled back.
         </div>
       )}
 

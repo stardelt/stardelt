@@ -4,6 +4,7 @@ import { api, type RunsListRow } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { RunStateBadge, formatWhen, runDuration, runStateWord } from './Pipelines'
+import { stageHref } from './Deployments'
 
 /**
  * Runs: every run of the caller's notebooks and pipelines in one table, filterable by
@@ -174,8 +175,9 @@ export default function Runs() {
                       {row.ownerGroup ?? 'administrators'}
                     </span>
                     {row.bundle && (
-                      <span
-                        className="block text-xs text-text-mute"
+                      <Link
+                        to={stageHref(row.bundle, row.target ?? '')}
+                        className="block text-xs text-text-mute underline"
                         title={
                           row.revision
                             ? `deployed from ${row.bundle} at ${row.revision}`
@@ -183,7 +185,7 @@ export default function Runs() {
                         }
                       >
                         {row.bundle}@{row.revision ? row.revision.slice(0, 7) : 'no commit'}
-                      </span>
+                      </Link>
                     )}
                   </td>
                   <td className="td px-3">{kindWord(row.kind)}</td>

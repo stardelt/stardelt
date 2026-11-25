@@ -4,7 +4,8 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError, api, type PipelineTaskSpec, type RunCheckView, type RunView, type TaskView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import RunTaskTable from '../components/RunTaskTable'
-import { formatTime } from '../format'
+import { formatTime, shortRevision } from '../format'
+import { stageHref } from './Deployments'
 import {
   RunStateBadge,
   formatWhen,
@@ -148,6 +149,15 @@ export default function RunDetail() {
           <span aria-hidden className="text-text-mute">·</span>
           <span>{runDuration(run.durationSeconds)}</span>
         </p>
+        {run.bundle && (
+          <p className="text-sm text-text-dim break-words">
+            Deployed from{' '}
+            <Link to={stageHref(run.bundle, run.target ?? '')} className="underline">
+              {run.bundle} · {run.target}
+            </Link>
+            {run.revision && <span className="font-mono text-xs"> @ {shortRevision(run.revision)}</span>}
+          </p>
+        )}
       </header>
 
       <section className="card space-y-3 p-4" aria-labelledby="run-timeline-heading">

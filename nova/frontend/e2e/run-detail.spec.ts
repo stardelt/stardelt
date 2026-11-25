@@ -60,7 +60,7 @@ const RUN_DETAIL = {
   ],
 }
 
-async function open(page: Page, width = 1440) {
+async function open(page: Page, width = 1440, run: Record<string, unknown> = RUN) {
   const runPath = `/api/pipelines/${NS}/${NAME}/runs/${RUN_ID}`
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
@@ -68,7 +68,7 @@ async function open(page: Page, width = 1440) {
     const path = decodeURIComponent(url.pathname)
     if (url.pathname === '/api/me') return json(route, ME)
     if (url.pathname === `/api/pipelines/${NS}/${NAME}`) return json(route, PIPELINE)
-    if (path === runPath) return json(route, RUN_DETAIL)
+    if (path === runPath) return json(route, { ...RUN_DETAIL, run })
     if (path === `${runPath}/queries`) return json(route, { queries: [] })
     return json(route, [])
   })
@@ -85,6 +85,16 @@ async function open(page: Page, width = 1440) {
   return page
 }
 
+test('the run names the deploy it came from', async ({ page }) => {
+  await open(page, 1440, { ...RUN, bundle: 'shop-etl', target: 'dev', revision: '9f3c2a1' })
+
+  const deploy = page.getByText('Deployed from')
+  await expect(deploy).toBeVisible()
+  await expect(page.getByText('shop-etl · dev @ 9f3c2a1')).toBeVisible()
+  const link = page.getByRole('link', { name: /shop-etl · dev/ })
+  await expect(link).toHaveAttribute('href', '/deployments?bundle=shop-etl&target=dev')
+})
+
 test('one run is a page: header, timeline, graph and the task table', async ({ page }) => {
   await open(page)
 
@@ -96,6 +106,8 @@ test('one run is a page: header, timeline, graph and the task table', async ({ p
   await expect(header.getByRole('heading', { name: /Run 2026-11-14/ })).toBeVisible()
   await expect(header.getByText('Failed', { exact: true })).toBeVisible()
   await expect(header.getByText('5 m 00 s', { exact: true })).toBeVisible()
+  // A hand-made run carries no deploy stamp, so the header says nothing about one.
+  await expect(page.getByText('Deployed from')).toHaveCount(0)
 
   // The timeline: one bar per task, each at its own offset, the failed one with a width.
   const bars = page.getByTestId('run-timeline-bar')

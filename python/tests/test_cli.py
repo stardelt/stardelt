@@ -83,9 +83,23 @@ QUEUED = FakeResponse(201, {"runId": "manual__1", "state": "queued", "type": "ma
 
 
 def test_run_starts_a_pipeline_and_prints_the_queued_run():
-    code, out, _, session = run(["run", "etl", "daily"], QUEUED)
-    assert (code, json.loads(out)["state"]) == (0, "queued")
+    code, out, err, session = run(["run", "etl", "daily"], QUEUED)
+    assert (code, json.loads(out)["state"], err) == (0, "queued", "")
     assert [(m, u.rsplit("/api", 1)[1]) for m, u, _ in session.calls] == [("POST", "/pipelines/etl/daily/runs")]
+
+
+def test_run_says_which_deploy_it_came_from_on_stderr():
+    answer = FakeResponse(
+        201,
+        {"runId": "manual__1", "state": "queued", "type": "manual",
+         "bundle": "shop-etl", "target": "dev", "revision": "9f3c2a1"},
+    )
+    code, out, err, _ = run(["run", "etl", "daily"], answer)
+    assert (code, err) == (0, "stardelt: deployed from shop-etl dev at 9f3c2a1\n")
+    assert json.loads(out) == {
+        "runId": "manual__1", "state": "queued", "type": "manual",
+        "bundle": "shop-etl", "target": "dev", "revision": "9f3c2a1",
+    }
 
 
 def test_run_wait_exits_0_when_the_run_succeeded_and_prints_its_tasks():
