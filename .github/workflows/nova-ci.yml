@@ -51,6 +51,12 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('nova/**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # The workflow's `defaults.run.working-directory` is `nova`, so this one step runs from the
+      # repository root to keep the command relative to it.
+      - name: Architecture map is current
+        working-directory: .
+        run: cd nova && python3 scripts/arch_map.py --doc ARCHITECTURE.md --check
+
       - name: fmt check
         run: cargo fmt --all -- --check
 

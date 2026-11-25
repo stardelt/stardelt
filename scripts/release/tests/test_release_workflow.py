@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+PUBLISH = ROOT / ".github" / "workflows" / "release-publish.yml"
 CUT = ROOT / "scripts" / "release" / "cut.sh"
 NAME = "      - name: Check the commit and generate releases/"
 
@@ -41,6 +42,37 @@ class ReleaseWorkflowGateTest(unittest.TestCase):
 
     def test_the_workflow_header_names_the_order(self) -> None:
         self.assertIn("installs that install.yaml before the real cut", self.text)
+
+
+class ReleaseArchitectureMapTest(unittest.TestCase):
+    """Every release carries Nova's architecture map of its own commit (#1619)."""
+
+    def setUp(self) -> None:
+        self.cut = CUT.read_text(encoding="utf-8")
+        self.cut_workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.publish = PUBLISH.read_text(encoding="utf-8")
+
+    def test_the_cut_writes_the_map_into_the_release_directory(self) -> None:
+        self.assertIn("scripts/arch_map.py", self.cut)
+        self.assertIn('--out "../releases/v$version/architecture"', self.cut)
+
+    def test_the_cut_workflow_renders_both_diagrams_to_svg(self) -> None:
+        self.assertIn("for f in components request-flow", self.cut_workflow)
+        self.assertIn('-o "$d/$f.svg"', self.cut_workflow)
+        # request-flow.mmd is hand-written and `--out` writes no copy of it (#1619).
+        self.assertIn("nova/docs/architecture/$f.mmd", self.cut_workflow)
+
+    def test_the_mermaid_cli_is_pinned_to_an_exact_version(self) -> None:
+        self.assertRegex(
+            self.cut_workflow, r"@mermaid-js/mermaid-cli@\d+\.\d+\.\d+",
+            "an unpinned `@latest` would change the SVGs of a released commit",
+        )
+        self.assertNotIn("mermaid-cli@latest", self.cut_workflow)
+
+    def test_the_release_publishes_the_architecture_page_and_the_svgs(self) -> None:
+        self.assertIn('releases/$V/architecture/nova-architecture.html', self.publish)
+        self.assertIn('releases/$V/architecture/components.svg', self.publish)
+        self.assertIn('releases/$V/architecture/request-flow.svg', self.publish)
 
 
 if __name__ == "__main__":

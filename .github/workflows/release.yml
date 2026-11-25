@@ -70,6 +70,18 @@ jobs:
           NO_FRESH_NODE_CHECK: "1"
         run: bash scripts/release/cut.sh "$VERSION" "${{ steps.m.outputs.sha }}"
 
+      - name: Render the Nova map to SVG
+        run: |
+          set -euo pipefail
+          d="releases/v$VERSION/architecture"
+          [ -d "$d" ] || { echo "✗ $d is missing (cut.sh writes it, #1619)"; exit 1; }
+          printf '{"args":["--no-sandbox"]}' > "$RUNNER_TEMP/puppeteer.json"
+          for f in components request-flow; do
+            src="$d/$f.mmd"; [ -f "$src" ] || src="nova/docs/architecture/$f.mmd"
+            npx -y @mermaid-js/mermaid-cli@11.17.1 -p "$RUNNER_TEMP/puppeteer.json" -i "$src" -o "$d/$f.svg"
+          done
+          ls -l "$d"
+
       - name: Upload the files (dry run)
         if: inputs.dry_run
         uses: actions/upload-artifact@v7

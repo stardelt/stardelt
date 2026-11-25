@@ -100,4 +100,6 @@ jobs:
           python3 scripts/release/release_notes.py "${V#v}" <(git show "$COMMIT:CHANGELOG.md" 2>/dev/null || true) > "$RUNNER_TEMP/notes.md"
           gh release create "$V" --verify-tag --title "stardelt $V" --notes-file "$RUNNER_TEMP/notes.md" \
             "releases/$V/install.yaml" "releases/$V/versions.yaml" "releases/$V/platform-minimal.yaml" \
+            "releases/$V/architecture/nova-architecture.html" \
+            "releases/$V/architecture/components.svg" "releases/$V/architecture/request-flow.svg" \
             "$RUNNER_TEMP"/dist/*
