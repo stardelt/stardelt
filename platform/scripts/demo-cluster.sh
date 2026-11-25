@@ -37,6 +37,8 @@ spec:
   runtime: spark-4.1-py3.13
   size: small
   maxExecutors: 2
+  sparkConf:
+    spark.kubernetes.executor.request.cores: "250m"
   idleStopMinutes: 1440
   state: Running
 YAML
@@ -85,6 +87,7 @@ phase="$(jq -r '.status.phase // ""' <<<"$document")"
 sa="$(jq -r '.status.driverServiceAccount // ""' <<<"$document")"
 identity="$(jq -r '.status.workloadIdentity // ""' <<<"$document")"
 endpoint="$(jq -r '.status.endpoint // ""' <<<"$document")"
+executor_request="$(jq -r '.spec.sparkConf["spark.kubernetes.executor.request.cores"] // ""' <<<"$document")"
 uid="$(kubectl -n "$NS" get serviceaccount "$SA" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 expected_endpoint="sc://spc-$NAME-server.$NS.svc.cluster.local:15002"
 
@@ -96,6 +99,7 @@ case "$identity" in
   *) problems+=("the workload identity is ${identity:-?}, not kubernetes~<uid>") ;;
 esac
 [ "$endpoint" = "$expected_endpoint" ] || problems+=("the endpoint is ${endpoint:-?}, not $expected_endpoint")
+[ "$executor_request" = 250m ] || problems+=("the executor's CPU request is ${executor_request:-unset}, not 250m")
 if [ -z "$uid" ]; then
   problems+=("the ServiceAccount $SA does not exist")
 elif [ "${identity#kubernetes~}" != "$uid" ]; then
@@ -106,4 +110,4 @@ if [ "${#problems[@]}" -ne 0 ]; then
   printf '✗ %s\n' "$(IFS='; '; echo "${problems[*]}")"
   exit 1
 fi
-echo "✓ SparkCluster $NAME is Running ($SA, $identity)"
+echo "✓ SparkCluster $NAME is Running ($SA, $identity; executor request 250m)"
