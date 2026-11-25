@@ -2,7 +2,7 @@ bundle:
   name: public-db
   ownerGroup: demo
 include: [pipelines/*.yaml]
-files: [notebooks/load_rnacentral.ipynb]
+files: [notebooks/load_rnacentral.ipynb, sql/schema.sql]
 requires:
   connections: [rnacentral]
 targets:
