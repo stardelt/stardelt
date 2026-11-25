@@ -816,7 +816,15 @@ mod tests {
 
     #[test]
     fn the_deployment_runs_the_given_image_as_the_nova_service_account() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[], Default::default());
+        let deployment = deployment(
+            "stardelt",
+            IMAGE,
+            None,
+            false,
+            &McpSpec::default(),
+            &[],
+            Default::default(),
+        );
         assert_eq!(deployment.metadata.name.as_deref(), Some("nova"));
         assert_eq!(deployment.metadata.namespace.as_deref(), Some("stardelt"));
         let spec = deployment.spec.clone();
@@ -843,7 +851,15 @@ mod tests {
 
     #[test]
     fn the_pod_is_locked_down() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[], Default::default());
+        let deployment = deployment(
+            "stardelt",
+            IMAGE,
+            None,
+            false,
+            &McpSpec::default(),
+            &[],
+            Default::default(),
+        );
         let pod = deployment.spec.clone().template.spec.expect("pod");
         let pod_security = pod.security_context.expect("pod security");
         assert_eq!(pod_security.run_as_non_root, Some(true));
@@ -866,7 +882,15 @@ mod tests {
 
     #[test]
     fn no_model_endpoint_means_no_volume() {
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &[], Default::default());
+        let deployment = deployment(
+            "stardelt",
+            IMAGE,
+            None,
+            false,
+            &McpSpec::default(),
+            &[],
+            Default::default(),
+        );
         let pod = deployment.spec.clone().template.spec.expect("pod");
         assert!(pod.volumes.is_none());
         assert!(pod.containers[0].volume_mounts.is_none());
@@ -879,7 +903,15 @@ mod tests {
             connection: "llm-key".into(),
             key: "api-key".into(),
         }];
-        let deployment = deployment("stardelt", IMAGE, None, false, &McpSpec::default(), &models, Default::default());
+        let deployment = deployment(
+            "stardelt",
+            IMAGE,
+            None,
+            false,
+            &McpSpec::default(),
+            &models,
+            Default::default(),
+        );
         let pod = deployment.spec.clone().template.spec.expect("pod");
         let volumes = pod.volumes.expect("volumes");
         assert_eq!(volumes[0].name, "model-keys");

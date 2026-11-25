@@ -1397,7 +1397,6 @@ async fn main() -> anyhow::Result<()> {
     model_probe::spawn_loop(Arc::clone(&state));
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
-    let default_theme = default_theme_from_env().map_err(anyhow::Error::msg)?;
 
     let protected = api_router();
     // Everything except /health, /openapi.json and /auth/* requires a principal
@@ -1448,7 +1447,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Every public response is counted for /metrics (stardelt-operator#607).
-    let app = app(state.clone(), api, &static_dir, default_theme)
+    let app = app(state.clone(), api, &static_dir, state.default_theme)
         .layer(axum::middleware::from_fn(metrics::count_requests));
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
