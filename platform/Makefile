@@ -306,6 +306,10 @@ verify-product-path-create: _context ## The product-path test's create half as `
 verify-access-requests: _context ## The visitor's access-request API: create, read, withdraw and the three refusals (#489)
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-access-requests.sh
 
+.PHONY: verify-table-health
+verify-table-health: _context ## The freshness promise round-trips as the visitor (#402)
+	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-table-health.sh
+
 .PHONY: verify-usage
 verify-usage: _context ## The usage answer adds up by group, states the estimate, and refuses scope=all to a visitor
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-usage.sh
