@@ -607,6 +607,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/compute/ensure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/compute/ensure`: the caller's group cluster, reused or created (#493 point 3).
+         * @description The caller's group cluster: the one already owned by `group`, or a new `SparkCluster` named `group` with `size: small`, `runtime: spark-4.1-py3.13`, `idleStopMinutes: 60` and `state: Running`. Only a member of `group` may call it (administrators are not exempt). An existing cluster is answered as it is, `Stopped` included; a group whose name is not a valid cluster name (1 to 40 lower-case letters, digits and dashes, starting with a letter) answers `400` and keeps its administrator-made cluster. Two callers at once create one cluster: the loser reads the winner's. Answers the `ComputeCluster` view of the cluster. `Cache-Control: no-store`.
+         */
+        post: operations["compute_ensure"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/compute/{name}/start": {
         parameters: {
             query?: never;
@@ -2939,6 +2959,11 @@ export interface components {
             workloadIdentity?: string | null;
             /** @description Whether this is the Spark the caller's own notebook uses. */
             yours?: boolean;
+        };
+        /** @description The body of `POST /api/compute/ensure`: the owner group whose cluster to reuse or create. */
+        ComputeEnsureBody: {
+            /** @description The owner group; the caller must be a member of it. */
+            group: string;
         };
         /**
          * @description One environment variable of the driver and executors. `value` only: the operator
@@ -7626,6 +7651,84 @@ export interface operations {
             };
             /** @description No token to sign in with */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The cluster did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No cluster connection */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    compute_ensure: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ComputeEnsureBody"];
+            };
+        };
+        responses: {
+            /** @description The group's cluster, existing or created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ComputeCluster"];
+                };
+            };
+            /** @description The group name cannot be a cluster name */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No token to sign in with */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller is not a member of the group */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The cluster changed while it was created */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
