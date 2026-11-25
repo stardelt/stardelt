@@ -44,15 +44,15 @@ flowchart LR
   end
   subgraph BE["backend/src (axum): areas and modules, production lines"]
     direction TB
-    be_core_identity["<b>Core & identity</b><br/><small>auth 2300 ⚠<br/>main 1497<br/>demo 1071<br/>audit 601<br/>openapi 450<br/>token_exchange 305<br/>catalog_token 287<br/>user_settings 173<br/>embed 153<br/>db 134<br/>people 124<br/>shared_accounts 123<br/>session_store 104<br/>seal 93<br/>metrics 90<br/>api_json 60<br/>error 47<br/>rfc3339 26</small>"]
-    be_catalog["<b>Catalog</b><br/><small>catalog_docs 1758 ⚠<br/>catalog 1404<br/>admin_catalogs 1107<br/>catalog_metrics 886<br/>verified_queries 751<br/>access_requests 416<br/>catalog_search 302<br/>catalog_doc_store 177</small>"]
-    be_sql_query_log["<b>SQL & query log</b><br/><small>query_log_api 1353<br/>statements 744<br/>data 713<br/>trino 594<br/>query_log_collector 549<br/>query_log_event 535<br/>warehouses 479<br/>saved_queries 384<br/>query_log_store 189<br/>query_hints 176<br/>query_log 111<br/>jobs 109</small>"]
-    be_pipelines_delivery["<b>Pipelines & delivery</b><br/><small>pipelines 8149 ⚠<br/>deployments 1108<br/>streams 951<br/>migrations 882<br/>superset 818<br/>airflow 740<br/>destinations 523<br/>pipeline_notice 461<br/>superset_archive 350<br/>stages 296</small>"]
-    be_notebooks_compute["<b>Notebooks & compute</b><br/><small>notebooks 2282 ⚠<br/>compute 1226<br/>workspace 401</small>"]
-    be_connections["<b>Connections</b><br/><small>connection_routes 1977 ⚠<br/>secret_store 699<br/>connections 616</small>"]
-    be_lineage["<b>Lineage</b><br/><small>lineage_api 1352<br/>lineage_store 179<br/>lineage_event 170</small>"]
-    be_ai_ask_mcp_models["<b>AI (Ask, MCP, models)</b><br/><small>mcp 1368<br/>ask 739<br/>model_probe 604<br/>model_calls 281<br/>model_endpoints 246<br/>mcp_audit 176<br/>model_usage 161<br/>model_chat 148</small>"]
-    be_platform_view["<b>Platform view</b><br/><small>apps 967<br/>cluster 296</small>"]
+    be_core_identity["<b>Core & identity</b><br/><small>auth 2300 ⚠<br/>main 1469<br/>audit 601<br/>openapi 450<br/>token_exchange 305<br/>catalog_token 287<br/>user_settings 173<br/>embed 153<br/>db 134<br/>people 124<br/>shared_accounts 123<br/>session_store 104<br/>seal 93<br/>metrics 90<br/>api_json 60<br/>error 47<br/>rfc3339 26</small>"]
+    be_catalog["<b>Catalog</b><br/><small>catalog_docs 1683 ⚠<br/>catalog 1348<br/>admin_catalogs 976<br/>catalog_metrics 833<br/>verified_queries 748<br/>access_requests 416<br/>catalog_search 297<br/>catalog_doc_store 177</small>"]
+    be_sql_query_log["<b>SQL & query log</b><br/><small>query_log_api 1353<br/>data 856<br/>statements 737<br/>trino 562<br/>query_log_collector 549<br/>query_log_event 535<br/>warehouses 477<br/>saved_queries 384<br/>query_log_store 189<br/>query_hints 176<br/>query_log 111<br/>jobs 109</small>"]
+    be_pipelines_delivery["<b>Pipelines & delivery</b><br/><small>pipelines 8071 ⚠<br/>deployments 1108<br/>streams 947<br/>migrations 862<br/>superset 818<br/>airflow 740<br/>destinations 523<br/>pipeline_notice 461<br/>superset_archive 350<br/>stages 296</small>"]
+    be_notebooks_compute["<b>Notebooks & compute</b><br/><small>notebooks 2277 ⚠<br/>compute 1226<br/>workspace 380</small>"]
+    be_connections["<b>Connections</b><br/><small>connection_routes 1949 ⚠<br/>secret_store 699<br/>connections 616</small>"]
+    be_lineage["<b>Lineage</b><br/><small>lineage_api 1175<br/>lineage_store 179<br/>lineage_event 170</small>"]
+    be_ai_ask_mcp_models["<b>AI (Ask, MCP, models)</b><br/><small>mcp 1368<br/>ask 739<br/>model_probe 601<br/>model_calls 281<br/>model_endpoints 246<br/>mcp_audit 176<br/>model_usage 161<br/>model_chat 148</small>"]
+    be_platform_view["<b>Platform view</b><br/><small>apps 946<br/>cluster 234</small>"]
   end
   subgraph EXT["external systems"]
     direction TB
@@ -72,30 +72,28 @@ flowchart LR
   agents -->|"/mcp, /api"| be_ai_ask_mcp_models
   fe_admin -->|2| be_ai_ask_mcp_models
   fe_admin -->|4| be_catalog
-  fe_admin -->|3| be_core_identity
+  fe_admin -->|1| be_core_identity
   fe_admin -->|3| be_pipelines_delivery
   fe_admin -->|4| be_platform_view
   fe_admin -->|1| be_sql_query_log
   fe_build -->|1| be_catalog
   fe_build -->|3| be_connections
-  fe_build -->|7| be_core_identity
   fe_build -->|12| be_notebooks_compute
   fe_build -->|20| be_pipelines_delivery
   fe_build -->|1| be_platform_view
   fe_build -->|3| be_sql_query_log
-  fe_detail_pages -->|6| be_core_identity
+  fe_detail_pages -->|2| be_core_identity
   fe_detail_pages -->|4| be_notebooks_compute
   fe_detail_pages -->|33| be_pipelines_delivery
   fe_detail_pages -->|2| be_platform_view
   fe_detail_pages -->|2| be_sql_query_log
   fe_explore -->|18| be_catalog
-  fe_explore -->|7| be_core_identity
+  fe_explore -->|3| be_core_identity
   fe_explore -->|5| be_lineage
   fe_explore -->|2| be_notebooks_compute
   fe_explore -->|7| be_pipelines_delivery
   fe_explore -->|1| be_platform_view
   fe_explore -->|13| be_sql_query_log
-  fe_share -->|1| be_core_identity
   fe_share -->|1| be_platform_view
   be_ai_ask_mcp_models -.->|1| x_airflow
   be_ai_ask_mcp_models -.->|3| x_k8s
@@ -111,7 +109,6 @@ flowchart LR
   be_connections -.->|3| x_vault
   be_core_identity -.->|3| x_idp
   be_core_identity -.->|6| x_pg
-  be_core_identity -.->|1| x_trino
   be_lineage -.->|2| x_pg
   be_notebooks_compute -.->|1| x_hub
   be_notebooks_compute -.->|1| x_k8s
