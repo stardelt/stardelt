@@ -439,7 +439,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:1852bf724e3f039ef4b4b24a23af51b6d7ccc52013f0b9a873ea56b7f5e134f6
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:258611b0f95cecdab6848bb90092351426f3ceb0c94390b0ee015e470c263d46
   # dbt tasks (#11): the DAG that runs them (demos/dags/stardelt_pipelines/dbt.py) gives a `dbt`
   # task a pod of its own, because the tool image has no Airflow. The image contains the sample
   # project (demos/examples/shop) and must be rebuilt by `demos / CI` on main; this is a moving
