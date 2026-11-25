@@ -162,6 +162,63 @@ baseline's.
 `python3 perf/pipelines.py --self-test` proves the measurement against a stub HTTP server:
 no cluster, no token.
 
+## Concurrent people: `perf-concurrency`
+
+`make perf-concurrency` is the third Sizing workload (#53 decisions 1(a) and 4): **N statements
+in flight through Nova as the visitor**, so the token check, the statement API and the engine
+queue are all inside the measurement. That is the number neither the Trino baseline (an
+administrator token straight against Trino) nor `perf-smoke` (one statement at a time) shows.
+
+One level = `repeats` rounds; in a round, `level` threads start at the same instant on a
+`threading.Barrier`, each submits `perf-smoke.sh`'s `cpu` statement (`POST /api/statements`,
+`SELECT count(*), sum(…) FROM UNNEST(sequence(1, 1000)) × UNNEST(sequence(1, 1000))`, no table
+and about 0.5 s alone) and polls `GET /api/statements/{id}?waitSeconds=10` until the state is
+terminal. The clock is `time.monotonic()` from the POST to the terminal poll — **client
+wall-clock**, like `perf-smoke.sh`, not Trino's own queue time. Every statement is freed with
+`DELETE /api/statements/{id}` afterwards: a person holds at most ten.
+
+**What it does not measure: N distinct people.** Every level is one token and one person, so
+the per-person directory read happens once; a level of four is four statements, not four
+sign-ins. A team of N people adds that one directory read per person and Nova's own
+per-user limits (ten statements held, ten pipeline starts per minute). The JSON's `note` says
+this too.
+
+| variable | default | meaning |
+|---|---|---|
+| `STARDELT_NOVA_URL` | `https://alpha.dev.stardelt.io` | Nova (a trailing `/` is trimmed) |
+| `ISSUER` | `https://id.alpha.dev.stardelt.io/realms/stardelt` | token issuer |
+| `PERF_PERSON` | `demo` | the person every level is measured as (password `demo`, public on purpose) |
+| `PERF_LEVELS` | `1,2,4,8` | statements in flight, comma separated, each 1..10 |
+| `PERF_REPEATS` | `5` | rounds per level |
+| `PERF_TIMEOUT` | `180` | seconds one statement may take before it counts as an error |
+| `PERF_OUT_DIR` | `$HOME/.cache/stardelt-perf` | where the JSON goes |
+
+The same values are flags (`--nova`, `--issuer`, `--person`, `--levels`, `--repeats`,
+`--out-dir`); a flag wins over the variable. One line per level, over all its rounds:
+
+```text
+perf-concurrency: demo, cpu, 5 round(s)
+level 1  p50=480ms p95=610ms max=640ms errors=0
+level 4  p50=1120ms p95=1980ms max=2240ms errors=0
+perf-concurrency: JSON at /home/<user>/.cache/stardelt-perf/concurrency-2026-11-25T00:12:34Z.json
+```
+
+`p50=-` means every run of that level failed. A `429` (`you already hold ten statements`), a
+timeout and a failed statement are counted as `errors=N` for the level and do not abort the
+run: the number is advisory, like `perf-compare`, and the command still exits 0. The JSON goes
+to `<PERF_OUT_DIR>/concurrency-<UTC timestamp>.json` and never overwrites an earlier one (`-2`,
+`-3` are added):
+
+```json
+{"timestamp": "2026-11-25T00:12:34Z", "nova": "https://alpha.dev.stardelt.io", "person": "demo",
+ "statement": "cpu", "repeats": 5,
+ "levels": [{"level": 1, "runs": 5, "p50": 480, "p95": 610, "max": 640, "errors": 0}],
+ "note": "client wall-clock per statement through Nova; all levels are one signed-in person"}
+```
+
+`make perf-report` picks it up as the `## concurrency` block. Tables for a release belong in
+`stardelt-internal`, like the baseline's.
+
 ## Memory high-water: `perf-highwater`
 
 `make perf-highwater` answers what a workload **cost the node**: it wraps a command
@@ -265,12 +322,13 @@ free-after-each-statement and the count check against a stub HTTP server: no clu
 
 `make perf-report` reads the newest run of each workload from
 `${PERF_OUT_DIR:-$HOME/.cache/stardelt-perf}` and prints one block per workload, so a
-release's numbers are one command instead of five files opened by hand.
+release's numbers are one command instead of six files opened by hand.
 
 | writer | file | block |
 |---|---|---|
 | `scripts/perf-smoke.sh` | `<UTC>.json` | `## smoke` |
 | `perf/pipelines.py` | `pipelines-<UTC>.json` | `## pipelines` |
+| `perf/concurrency.py` | `concurrency-<UTC>.json` | `## concurrency` |
 | `perf/ingest.py` | `ingest-<UTC>.json` | `## ingest` |
 | `perf/spark.sh` | `spark-<UTC>.json` | `## spark` |
 | `perf/highwater.py` | `highwater-<UTC>.json` | `## highwater` |
@@ -296,7 +354,8 @@ trino-coordinator-55c95f5bdd-l67rd  69m  1892Mi (!)
 …
 ```
 
-A budget line keeps its writer's own unit — milliseconds for `perf-smoke` and the Spark
+A budget line keeps its writer's own unit — milliseconds for `perf-smoke`,
+`perf-concurrency` and the Spark
 operations, seconds with one decimal for `perf-pipelines`, MiB and millicores for
 `perf-highwater` — and a number that is `None` (a level where nobody succeeded) prints `-`.
 `highwater` prints at most five pods, sorted by peak memory, and marks a row with a restart or an

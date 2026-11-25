@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """One table per perf workload, newest run of each — the release's and the Sizing page's numbers.
 
-Five harnesses write five differently shaped JSON files into
+Six harnesses write six differently shaped JSON files into
 `${PERF_OUT_DIR:-$HOME/.cache/stardelt-perf}`: `scripts/perf-smoke.sh` (`<UTC>.json`),
-`perf/pipelines.py`, `perf/ingest.py`, `perf/spark.sh` and `perf/highwater.py`. This reads the
-newest file of each kind and prints one `## <source>` block per workload, so a person preparing a
-release copies one table instead of retyping five files. `--json PATH` writes the combined
-document; that JSON is what a release copies into stardelt-internal.
+`perf/pipelines.py`, `perf/concurrency.py`, `perf/ingest.py`, `perf/spark.sh` and
+`perf/highwater.py`. This reads the newest file of each kind and prints one `## <source>` block
+per workload, so a person preparing a release copies one table instead of retyping six files.
+`--json PATH` writes the combined document; that JSON is what a release copies into
+stardelt-internal.
 
     python3 perf/report.py
     python3 perf/report.py --json /tmp/perf-report.json
@@ -26,7 +27,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
-SOURCES = ("smoke", "pipelines", "ingest", "spark", "highwater")
+SOURCES = ("smoke", "pipelines", "concurrency", "ingest", "spark", "highwater")
 
 # `scripts/perf-smoke.sh` writes `<UTC>.json` (and `<UTC>-2.json` on a repeat within one second).
 SMOKE_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z(?:-\d+)?\.json$")
@@ -149,6 +150,27 @@ def read_pipelines(document):
     }
 
 
+def read_concurrency(document):
+    """{"timestamp", "person", "statement", "levels": [{"level", "runs", "p50", "p95", "max",
+    "errors"}]}"""
+    return {
+        "timestamp": document.get("timestamp"),
+        "person": document.get("person"),
+        "statement": document.get("statement"),
+        "rows": [
+            {
+                "level": level.get("level"),
+                "runs": level.get("runs"),
+                "p50": level.get("p50"),
+                "p95": level.get("p95"),
+                "max": level.get("max"),
+                "errors": level.get("errors"),
+            }
+            for level in _rows(document, "levels")
+        ],
+    }
+
+
 def read_ingest(document):
     """{"timestamp", "table", "rows": [{"rows", "batches", "count", "seconds", "rowsPerSecond",
     "p50"}]}"""
@@ -215,6 +237,7 @@ def read_highwater(document):
 READERS = {
     "smoke": read_smoke,
     "pipelines": read_pipelines,
+    "concurrency": read_concurrency,
     "ingest": read_ingest,
     "spark": read_spark,
     "highwater": read_highwater,
@@ -302,6 +325,30 @@ def _block_pipelines(source: dict) -> list[str]:
     return lines
 
 
+def _block_concurrency(source: dict) -> list[str]:
+    lines = [
+        "## concurrency  %s  person=%s  statement=%s"
+        % (
+            _plain(source.get("timestamp")),
+            _plain(source.get("person")),
+            _plain(source.get("statement")),
+        )
+    ]
+    for row in source.get("rows") or []:
+        lines.append(
+            "level %s  runs=%s  p50=%s  p95=%s  max=%s  errors=%s"
+            % (
+                _plain(row.get("level")),
+                _plain(row.get("runs")),
+                _ms(row.get("p50")),
+                _ms(row.get("p95")),
+                _ms(row.get("max")),
+                _plain(row.get("errors")),
+            )
+        )
+    return lines
+
+
 def _block_ingest(source: dict) -> list[str]:
     lines = ["## ingest  %s  table=%s" % (_plain(source.get("timestamp")),
                                           _plain(source.get("table")))]
@@ -361,6 +408,7 @@ def _block_highwater(source: dict) -> list[str]:
 BLOCKS = {
     "smoke": _block_smoke,
     "pipelines": _block_pipelines,
+    "concurrency": _block_concurrency,
     "ingest": _block_ingest,
     "spark": _block_spark,
     "highwater": _block_highwater,
@@ -382,9 +430,9 @@ def render(result):
 
 
 def self_test() -> int:
-    """Five small fixture documents through report() and render(): the newest of each kind is
+    """Six small fixture documents through report() and render(): the newest of each kind is
     found, the pre-#1533 pipelines document still prints, the highwater block stops at five and
-    marks an OOM, an absent number is `-`, and an empty directory gives five None sources."""
+    marks an OOM, an absent number is `-`, and an empty directory gives six None sources."""
     stamp = "2026-11-25T00:12:34Z"
     with tempfile.TemporaryDirectory() as tmp:
         fixtures = {
@@ -406,6 +454,17 @@ def self_test() -> int:
                      "max": 500, "states": ["success"]},
                     {"level": 2, "runs": 2, "ok": 0, "errors": 2, "p50": None, "p95": None,
                      "max": None, "states": ["failed", "failed"]},
+                ],
+            },
+            "concurrency-%s.json" % stamp: {
+                "timestamp": stamp,
+                "nova": "https://alpha.dev.stardelt.io",
+                "person": "demo",
+                "statement": "cpu",
+                "repeats": 2,
+                "levels": [
+                    {"level": 1, "runs": 2, "p50": 480, "p95": 610, "max": 610, "errors": 0},
+                    {"level": 4, "runs": 8, "p50": None, "p95": None, "max": None, "errors": 8},
                 ],
             },
             "ingest-%s.json" % stamp: {
@@ -454,6 +513,10 @@ def self_test() -> int:
         pipelines = result["sources"]["pipelines"]
         assert pipelines["rows"][0]["pipelines"] == ["shop-1-bronze"], pipelines
 
+        concurrency = result["sources"]["concurrency"]
+        assert concurrency["statement"] == "cpu", concurrency
+        assert concurrency["rows"][1]["errors"] == 8, concurrency
+
         highwater = result["sources"]["highwater"]
         assert len(highwater["rows"]) == 5, highwater
         assert highwater["rows"][0]["pod"] == "oom-pod", highwater
@@ -461,7 +524,8 @@ def self_test() -> int:
         text = render(result)
         assert "(!)" in text, text
         assert "p50=-" in text, text
-        assert text.count("## ") == 5, text
+        assert "## concurrency" in text and "level 4  runs=8  p50=-" in text, text
+        assert text.count("## ") == 6, text
 
         with tempfile.TemporaryDirectory() as empty:
             blank = report(empty)
