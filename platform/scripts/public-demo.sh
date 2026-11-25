@@ -1124,12 +1124,19 @@ echo "  password of $PERSON reset (public on purpose)"
 path_password="$(kubectl -n "$NAMESPACE" get secret "$PATH_SECRET" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
 if [ -z "$path_password" ]; then
   path_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+  # Server-side apply: a client-side apply copies the whole object, `data` included, into the
+  # last-applied-configuration annotation, where anyone who may read the Secret's metadata
+  # (but not its data) can read the password (#1655).
   kubectl -n "$NAMESPACE" create secret generic "$PATH_SECRET" \
       --from-literal=password="$path_password" --dry-run=client -o yaml \
-    | kubectl -n "$NAMESPACE" apply -f - >/dev/null \
+    | kubectl -n "$NAMESPACE" apply --server-side --field-manager=stardelt-scripts -f - >/dev/null \
     || fail "cannot write Secret $PATH_SECRET"
   echo "› Secret $PATH_SECRET: created"
 else
+  # A Secret an older run created with a client-side apply still carries the password in
+  # kubectl.kubernetes.io/last-applied-configuration: heal it on rerun (#1655).
+  kubectl -n "$NAMESPACE" annotate secret "$PATH_SECRET" \
+      kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true
   echo "› Secret $PATH_SECRET: unchanged — the password is kept"
 fi
 

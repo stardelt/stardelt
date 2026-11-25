@@ -126,7 +126,7 @@ fi
 printf '%s\n' "$out"
 
 kubectl -n "$NS" create secret generic "$POD-token" --from-file=token="$tmp/token" \
-  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  --dry-run=client -o yaml | kubectl apply --server-side --field-manager=stardelt-scripts --force-conflicts -f - >/dev/null
 
 S3_BUCKET="$(kubectl -n "$NS" get secret stardelt-s3-creds -o jsonpath='{.data.bucket}' 2>/dev/null | base64 -d || true)"
 [ -n "$S3_BUCKET" ] || {
