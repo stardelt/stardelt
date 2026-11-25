@@ -63,27 +63,33 @@ data:
 {{- $ldap := $kc.ldap }}
 {{- if and $ldap $ldap.host }}
 {{- $sync := $ldap.syncSeconds | int | toString }}
+{{- $scheme := ternary "ldaps" "ldap" (eq (default "none" $ldap.tls) "ldaps") }}
+{{- $config := dict
+      "enabled" (list "true")
+      "vendor" (list "other")
+      "connectionUrl" (list (printf "%s://%s:%d" $scheme $ldap.host (int $ldap.port)))
+      "usersDn" (list $ldap.usersDn)
+      "authType" (list "simple")
+      "bindDn" (list "${STARDELT_LDAP_BIND_DN}")
+      "bindCredential" (list "${STARDELT_LDAP_BIND_PASSWORD}")
+      "editMode" (list "READ_ONLY")
+      "usernameLDAPAttribute" (list "cn")
+      "rdnLDAPAttribute" (list "cn")
+      "uuidLDAPAttribute" (list "entryUUID")
+      "userObjectClasses" (list "inetOrgPerson, organizationalPerson")
+      "searchScope" (list "2")
+      "importEnabled" (list "true")
+      "fullSyncPeriod" (list $sync)
+      "changedSyncPeriod" (list $sync) }}
+{{- /* Keycloak reads `startTls` as a string list; only `starttls` carries the key. */}}
+{{- if eq $ldap.tls "starttls" }}
+{{- $_ := set $config "startTls" (list "true") }}
+{{- end }}
 {{- $components := dict "org.keycloak.storage.UserStorageProvider" (list
       (dict
         "name" "ldap"
         "providerId" "ldap"
-        "config" (dict
-          "enabled" (list "true")
-          "vendor" (list "other")
-          "connectionUrl" (list (printf "ldap://%s:%d" $ldap.host (int $ldap.port)))
-          "usersDn" (list $ldap.usersDn)
-          "authType" (list "simple")
-          "bindDn" (list "${STARDELT_LDAP_BIND_DN}")
-          "bindCredential" (list "${STARDELT_LDAP_BIND_PASSWORD}")
-          "editMode" (list "READ_ONLY")
-          "usernameLDAPAttribute" (list "cn")
-          "rdnLDAPAttribute" (list "cn")
-          "uuidLDAPAttribute" (list "entryUUID")
-          "userObjectClasses" (list "inetOrgPerson, organizationalPerson")
-          "searchScope" (list "2")
-          "importEnabled" (list "true")
-          "fullSyncPeriod" (list $sync)
-          "changedSyncPeriod" (list $sync))
+        "config" $config
         "subComponents" (dict "org.keycloak.storage.ldap.mappers.LDAPStorageMapper" (list
           (dict
             "name" "username"

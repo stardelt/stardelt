@@ -212,6 +212,17 @@ pub struct IdentityClient {
     pub client_secret_ref: Option<ClientSecretRef>,
 }
 
+/// How the directory connection is protected. `none` is plaintext (389); `starttls`
+/// opens plaintext and upgrades with StartTLS; `ldaps` is TLS from the first byte (636).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityLdapTls {
+    #[default]
+    None,
+    Starttls,
+    Ldaps,
+}
+
 /// A customer directory reached through Keycloak's LDAP federation (design #39, measured in #1516).
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 pub struct IdentityLdap {
@@ -221,14 +232,13 @@ pub struct IdentityLdap {
         regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
     )]
     pub host: String,
-    /// LDAP port; 389 or 636 (LDAPS) in practice.
+    /// Port of the directory. `389` with `tls: none` or `tls: starttls`; `636` with `tls: ldaps`.
     #[serde(default = "default_ldap_port")]
     #[schemars(range(min = 1, max = 65535))]
     pub port: i32,
-    /// Base DN of the directory, for example `dc=example,dc=org`.
-    #[serde(rename = "baseDn")]
-    #[schemars(length(min = 3, max = 512), regex(pattern = r"^\S.*=\S.*$"))]
-    pub base_dn: String,
+    /// How the connection is protected; see [`IdentityLdapTls`]. Defaults to `none`.
+    #[serde(default)]
+    pub tls: IdentityLdapTls,
     /// Subtree that holds people, for example `ou=users,dc=example,dc=org`.
     #[serde(rename = "usersDn")]
     #[schemars(length(min = 3, max = 512), regex(pattern = r"^\S.*=\S.*$"))]
