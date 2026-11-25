@@ -183,6 +183,10 @@ use url::Url;
 
 pub struct AppState {
     pub dev_user: String,
+    /// `NOVA_AUTH_MODE` unset (`auth::AuthMode::Dev`): nobody signs in, so every caller is the
+    /// administrator ([`auth::Identity::dev_admin`]) and there is no token for the secret
+    /// store (#1621). `false` in tests unless a test is about dev mode.
+    pub auth_dev: bool,
     /// `NOVA_DEFAULT_THEME`: the instance's theme, one of the four theme ids. It only shapes
     /// the served `index.html` (`<html data-theme>`); a person's stored choice still wins.
     pub default_theme: &'static str,
@@ -1039,6 +1043,9 @@ async fn main() -> anyhow::Result<()> {
         auth::AuthMode::Oidc(cfg) => admin_console_url(&cfg.issuer),
         auth::AuthMode::Dev => None,
     };
+    // Sign-in off: every caller is the dev administrator, and no token exists (#1621). Read
+    // before `auth_mode` is consumed below.
+    let auth_dev = matches!(auth_mode, auth::AuthMode::Dev);
 
     let demo_mode = env_flag("NOVA_DEMO");
     let demo_state = if demo_mode {
@@ -1336,6 +1343,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
+        auth_dev,
         default_theme: default_theme_from_env().map_err(anyhow::Error::msg)?,
         trino_url: std::env::var("NOVA_TRINO_URL")
             .unwrap_or_else(|_| "http://trino.stardelt.svc.cluster.local:8080".into()),
@@ -1672,6 +1680,7 @@ mod router_tests {
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
+            auth_dev: false,
             default_theme,
             trino_url: trino_url.into(),
             lakekeeper_url: lakekeeper_url.into(),

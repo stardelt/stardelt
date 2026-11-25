@@ -2311,6 +2311,7 @@ mod tests {
     fn state(store: Option<NotebookStore>) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
+            auth_dev: false,
             default_theme: "graphite",
             trino_url: "http://127.0.0.1:1".into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
