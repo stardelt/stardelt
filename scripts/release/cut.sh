@@ -31,4 +31,12 @@ fi
 
 echo "› generate releases/v$version/"
 python3 scripts/release/generate.py "$version" --commit "$(git rev-parse HEAD)"
+
+echo "› Nova's architecture map at this commit (#1619)"
+# The generated page reads the hand-written request flow from its output directory, so copy it
+# there first; `arch_map.py --out` writes no copy of it.
+mkdir -p "releases/v$version/architecture"
+cp nova/docs/architecture/request-flow.mmd "releases/v$version/architecture/"
+(cd nova && python3 scripts/arch_map.py --out "../releases/v$version/architecture")
+
 echo "✓ v$version is releasable at $(git rev-parse HEAD)"
