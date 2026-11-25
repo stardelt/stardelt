@@ -29,3 +29,11 @@ def test_the_notebook_is_nbformat_4_and_reads_the_connection_from_the_environmen
     assert 'os.environ["CONN_RNACENTRAL_USER"]' in code
     assert 'os.environ["CONN_RNACENTRAL_PASSWORD"]' in code
     assert "NWDMCE5xdipIjRrp" not in code, "the password belongs to the Connection's Secret, never to a file"
+
+
+def test_notebook_creates_its_schema_first():
+    notebook = json.loads((PUBLIC_DB / "notebooks" / "load_rnacentral.ipynb").read_text())
+    cells = ["".join(cell["source"]) for cell in notebook["cells"]]
+    schema_cell = next(i for i, text in enumerate(cells) if "create schema if not exists bronze.public_db" in text.lower())
+    first_write = next(i for i, text in enumerate(cells) if "write_df(" in text)
+    assert schema_cell < first_write
