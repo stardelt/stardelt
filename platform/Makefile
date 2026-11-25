@@ -1288,15 +1288,24 @@ access-sync: _context ## Create/refresh the script ConfigMap and apply CronJob a
 	@kubectl apply -f manifests/access-sync.yaml
 
 trino-warehouse-configmaps: _context ## Create ConfigMaps trino-warehouses/trino-group-file when missing (access-sync fills them)
-	@# Only when missing: `kubectl apply` of the empty object over a ConfigMap the
-	@# sync has already written would blank the file (and, for trino-warehouses,
-	@# trigger a coordinator restart on the next `make trino`).
+	@# Only when missing: `kubectl apply` of a ConfigMap over one the sync has already
+	@# written would blank the file (and, for trino-warehouses, trigger a coordinator
+	@# restart on the next `make trino`).
+	@# trino-warehouses is seeded from manifests/trino-warehouses-seed.json — the same
+	@# document the operator writes (access_sync.rs SEED_RESOURCE_GROUPS, #1615): an empty
+	@# resource-groups.json is not valid JSON, so the coordinator crash-loops on it.
 	@for cm in trino-warehouses trino-group-file; do \
-	  key=resource-groups.json; [ "$$cm" = trino-group-file ] && key=groups.txt; \
 	  kubectl -n $(NAMESPACE) get configmap "$$cm" >/dev/null 2>&1 || { \
-	    echo "› ConfigMap $$cm does not exist — creating it empty (access-sync fills it)"; \
-	    kubectl -n $(NAMESPACE) create configmap "$$cm" --from-literal="$$key=" \
-	      --dry-run=client -o yaml | kubectl apply -f - >/dev/null; \
+	    if [ "$$cm" = trino-warehouses ]; then \
+	      echo "› ConfigMap $$cm does not exist — creating it with the seed (access-sync fills it)"; \
+	      kubectl -n $(NAMESPACE) create configmap "$$cm" \
+	        --from-file=resource-groups.json=manifests/trino-warehouses-seed.json \
+	        --dry-run=client -o yaml | kubectl apply -f - >/dev/null; \
+	    else \
+	      echo "› ConfigMap $$cm does not exist — creating it empty (access-sync fills it)"; \
+	      kubectl -n $(NAMESPACE) create configmap "$$cm" --from-literal=groups.txt= \
+	        --dry-run=client -o yaml | kubectl apply -f - >/dev/null; \
+	    fi; \
 	  }; \
 	done
 

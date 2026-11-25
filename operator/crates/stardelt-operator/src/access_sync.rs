@@ -306,6 +306,47 @@ pub fn cron_job(namespace: &str, admin_group: &str) -> CronJob {
     }
 }
 
+/// `render_resource_groups([])` of `access_sync_job.py`: the admin group and the
+/// zero-concurrency `no-warehouse`, so the coordinator starts before the first sync (#1615).
+///
+/// The ConfigMap is created only when it is missing (`provision.rs::ensure_trino_config_maps`),
+/// so this seed never overwrites what the sync wrote. An **empty** `resource-groups.json` is
+/// not a valid document — the coordinator refuses to start on it — so the file must be a real
+/// configuration from the first second.
+pub const SEED_RESOURCE_GROUPS: &str = r#"{
+  "rootGroups": [
+    {
+      "name": "global",
+      "softMemoryLimit": "90%",
+      "hardConcurrencyLimit": 100,
+      "maxQueued": 500,
+      "subGroups": []
+    },
+    {
+      "name": "admin",
+      "softMemoryLimit": "100%",
+      "hardConcurrencyLimit": 50,
+      "maxQueued": 100
+    },
+    {
+      "name": "no-warehouse",
+      "softMemoryLimit": "0%",
+      "hardConcurrencyLimit": 0,
+      "maxQueued": 0
+    }
+  ],
+  "selectors": [
+    {
+      "userGroup": "stardelt-admins",
+      "group": "admin"
+    },
+    {
+      "group": "no-warehouse"
+    }
+  ]
+}
+"#;
+
 /// The resource groups the coordinator loads (`resource-groups.json`, loaded once).
 pub fn warehouses_config_map(namespace: &str) -> ConfigMap {
     ConfigMap {
@@ -316,7 +357,7 @@ pub fn warehouses_config_map(namespace: &str) -> ConfigMap {
         },
         data: Some(BTreeMap::from([(
             "resource-groups.json".to_string(),
-            "".to_string(),
+            SEED_RESOURCE_GROUPS.to_string(),
         )])),
         ..Default::default()
     }
@@ -478,6 +519,24 @@ mod tests {
                 .iter()
                 .any(|n| n == "sp-catalog-operator"),
             "the Role must allow get on sp-catalog-operator"
+        );
+    }
+
+    #[test]
+    fn the_seed_resource_groups_is_valid_json_with_root_groups() {
+        let document: serde_json::Value =
+            serde_json::from_str(SEED_RESOURCE_GROUPS).expect("the seed must be valid JSON");
+        let root_groups = document
+            .get("rootGroups")
+            .and_then(|g| g.as_array())
+            .unwrap_or_else(|| panic!("rootGroups must be an array: {SEED_RESOURCE_GROUPS}"));
+        assert!(
+            !root_groups.is_empty(),
+            "rootGroups must not be empty: {SEED_RESOURCE_GROUPS}"
+        );
+        assert!(
+            document.get("selectors").is_some(),
+            "the seed must carry selectors: {SEED_RESOURCE_GROUPS}"
         );
     }
 
