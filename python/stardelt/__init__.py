@@ -54,7 +54,7 @@ try:
 except Exception:
     browse = None
 
-__version__ = "0.4.3"
+__version__ = "0.0.4"
 
 __all__ = [
     "sql",

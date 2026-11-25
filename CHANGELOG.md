@@ -8,6 +8,7 @@ One section per release, newest first; the `## v<version>` section is what `gh r
 
 - The Spark runtime is `spark-4.1-py3.13`; there is no alias for `spark-4.1-py3.11`, so a `SparkCluster` or `Pipeline` that names the old runtime is refused (`unknown runtime`) until it is edited (#558).
 - The notebook image and the Spark workers run Python 3.13 (the notebook base is `quay.io/jupyter/scipy-notebook:2026-11-16`); a notebook that pinned 3.11-only wheels must be updated (#78's decision, delivered in stardelt/stardelt-platform#1776).
+- The library is installed from the repository tag `v0.0.4`; the `python/v*` tags end with `python/v0.4.3`.
 
 ### Highlights
 
@@ -19,6 +20,8 @@ One section per release, newest first; the `## v<version>` section is what `gh r
 - dbt runs as a pipeline task (`kind: dbt`), with its own image (#10/#11/#112) and the demo's shop project.
 - The public demo (`demo`/`demo`, group `visitors`) shows pipelines, a stream, a notebook report, a Connection, a destination and a sandboxed Spark (stardelt/stardelt-platform#904, #477).
 - The CLI, the `stardelt` Python package and the MCP server ship as wheels next to `install.yaml`, `platform-minimal.yaml` and `versions.yaml` (#448).
+- A fresh install starts: `trino-warehouses` is seeded with the warehouses the platform declares, so the coordinator no longer crash-loops until the first access-sync succeeds (#1615).
+- The operator's catalog enforces permissions through the OpenFGA it deploys, instead of the Lakekeeper `allowall` authorizer (#1617).
 
 ### Upgrade
 

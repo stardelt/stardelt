@@ -12,6 +12,6 @@ CARD = PLATFORM.parent / "nova" / "frontend" / "src" / "routes" / "Overview.tsx"
 class PythonReleasePointer(unittest.TestCase):
     def test_the_first_run_card_installs_the_package_version(self):
         version = tomllib.loads(PACKAGE.read_text())["project"]["version"]
-        found = re.findall(r"python/v(\d+\.\d+\.\d+)", CARD.read_text())
-        self.assertTrue(found, "the card no longer names a python/vX.Y.Z tag")
-        self.assertEqual(set(found), {version}, f"the card must name python/v{version}")
+        found = re.findall(r"@(?:python/)?v(\d+\.\d+\.\d+)#subdirectory=python", CARD.read_text())
+        self.assertTrue(found, "the card no longer names a vX.Y.Z tag")
+        self.assertEqual(set(found), {version}, f"the card must name v{version}")
