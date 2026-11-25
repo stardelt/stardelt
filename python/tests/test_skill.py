@@ -1,6 +1,7 @@
 """The agent skill (stardelt.skill): the text ships, installs, and names only tools that exist."""
 
 import io
+import pathlib
 import re
 
 from stardelt import cli, mcp, skill
@@ -63,3 +64,26 @@ def test_the_skill_names_every_command_an_agent_needs():
         "stardelt bundle deploy",
     ):
         assert command in text, command
+
+
+def test_the_skill_size_classes_are_the_operator_presets():
+    """#108: the numbers an assistant offers are the operator's, not remembered."""
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    source = (repo / "operator/crates/stardelt-operator/src/spark_cluster.rs").read_text(encoding="utf-8")
+    expected = {}
+    for match in re.finditer(
+        r"SparkClusterSize::(Small|Medium|Large) => \((\d+), \"(\d+)Gi\", (\d+), \"(\d+)Gi\", (\d+)\)",
+        source,
+    ):
+        expected[match.group(1).lower()] = tuple(int(value) for value in match.groups()[1:])
+    assert set(expected) == {"small", "medium", "large"}, "spark_cluster.rs::preset no longer has three rows"
+
+    rows = {}
+    for match in re.finditer(
+        r"^\|\s*\*\*(small|medium|large)\*\*\s*\|\s*(\d+) cores?,\s*(\d+) GiB\s*\|"
+        r"\s*(\d+) cores?,\s*(\d+) GiB\s*\|\s*(\d+)\s*\|",
+        skill.text(),
+        re.M,
+    ):
+        rows[match.group(1)] = tuple(int(value) for value in match.groups()[1:])
+    assert rows == expected
