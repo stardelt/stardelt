@@ -18,6 +18,7 @@ declare -A recipe=(
   [verify-backups-all]='bash scripts/verify-backups-all.sh'
   [verify-streaming]='bash scripts/verify-streaming.sh'
   [verify-crds]='bash scripts/verify-crds.sh'
+  [verify-access-requests]='bash scripts/verify-access-requests.sh'
   [verify-access-sync-script]='python3 scripts/check_access_sync_live.py'
   [verify-pins]='bash scripts/verify-pins.sh'
   [verify-contract]='bash scripts/verify-contract.sh'
@@ -84,7 +85,7 @@ fi
 # #1490's entry points are useless if the bridge never loaded them.
 # #1488/#1489: the usage answer is the 0.0.6 exit's "usage and cost per group".
 default_targets="verify-trino-auth verify-bridge-policy verify-catalog-permissions verify-backups-all verify-streaming
-verify-crds verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
+verify-crds verify-access-requests verify-access-sync-script verify-pins verify-contract verify-spark-config verify-restarts check-spark-runtimes-live
 verify-operator-values verify-connections verify-maintenance verify-pod-security verify-cronjobs
 verify-trino-tls verify-oidc-clients verify-mcp verify-mcp-tools verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query verify-spark-janitor verify-spark-demo-security

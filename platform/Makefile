@@ -302,6 +302,10 @@ verify-product-path: _context ## The visitor's whole path as `demo`: search, tab
 verify-product-path-create: _context ## The product-path test's create half as `product-path`: create, schedule, run, log, delete
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-product-path.sh --create
 
+.PHONY: verify-access-requests
+verify-access-requests: _context ## The visitor's access-request API: create, read, withdraw and the three refusals (#489)
+	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-access-requests.sh
+
 .PHONY: verify-usage
 verify-usage: _context ## The usage answer adds up by group, states the estimate, and refuses scope=all to a visitor
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-usage.sh
