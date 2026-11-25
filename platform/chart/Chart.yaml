@@ -27,7 +27,7 @@ dependencies:
     condition: postgres.backup.enabled
   - name: seaweedfs
     repository: https://seaweedfs.github.io/seaweedfs/helm
-    version: 4.25.1
+    version: 4.55.0
     condition: seaweedfs.enabled
   - name: lakekeeper
     repository: https://lakekeeper.github.io/lakekeeper-charts/

@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(
             golden_values("seaweedfs")["image"]["tag"],
             serde_json::json!(
-                "4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+                "4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9"
             )
         );
         assert_eq!(

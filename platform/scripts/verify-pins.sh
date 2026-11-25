@@ -67,7 +67,7 @@ rows=(
   "keycloak|keycloak|manifests/keycloak.yaml|any-image"
   "lakekeeper|lakekeeper|helm-values/lakekeeper.yaml|tag:v0.15.0:make step-lakekeeper"
   "trino|trino-coordinator|helm-values/trino.yaml|tag:484:make step-trino"
-  "seaweedfs-s3|seaweedfs-s3|helm-values/seaweedfs.yaml|tag:4.25:make step-storage"
+  "seaweedfs-s3|seaweedfs-s3|helm-values/seaweedfs.yaml|tag:4.55:make step-storage"
   "openfga|openfga|helm-values/openfga.yaml|tag:v1.22.1:make step-openfga"
   "cnpg-operator|cnpg-cloudnative-pg|helm-values/cnpg.yaml|tag:1.30.1:make step-cnpg"
   "barman-cloud|barman-cloud-plugin-barman-cloud|helm-values/barman-cloud.yaml|tag:v0.16.0:make step-barman-cloud-plugin"

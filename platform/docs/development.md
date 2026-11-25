@@ -171,7 +171,7 @@ Collaboration/release branches are planned later (issue #38).
 | Component | Chart version | App version |
 |-----------|--------------|-------------|
 | CloudNative-PG | 0.29.1 | 1.30.1 |
-| SeaweedFS | 4.25.1 | 4.25 |
+| SeaweedFS | 4.55.0 | 4.55 |
 | Lakekeeper | 0.11.0 | 0.12.2 |
 | OpenFGA | 0.4.1 | v1.22.1 |
 | Trino | 1.45.0 | 484 |

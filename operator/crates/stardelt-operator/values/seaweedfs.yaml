@@ -6,11 +6,11 @@
 # it on makes the second lakehouse in a cluster fail to install — and
 # several lakehouses per cluster is the point of this CRD. Off here for
 # the same reason the platform chart sets it off.
-# Pinned by digest (the twin of stardelt-platform#1587). The chart's appVersion tag is `4.25`;
+# Pinned by digest (the twin of stardelt-platform#1587). The chart's appVersion tag is `4.55`;
 # the digest is what the kubelet pulls. The string is
 # stardelt-platform/helm-values/seaweedfs.yaml:8.
 image:
-  tag: "4.25@sha256:c42a5268ca13fcb65e0fae925886b107f4bf294d8db15e1be5509d55104eb509"
+  tag: "4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9"
 global:
   seaweedfs:
     createClusterRole: false
