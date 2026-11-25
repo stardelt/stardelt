@@ -195,3 +195,68 @@ that returned data, and the command exits with the child's exit code.
 counted as zero. `PERF_SAMPLE`, `PERF_LEVELS` and `PERF_OUT_DIR` pass through to the
 harness and the child. `python3 perf/highwater.py --self-test` proves the parsing with
 canned text: no cluster.
+
+## Ingest rows per second: `perf-ingest`
+
+`make perf-ingest` is the fifth Sizing workload (#53 decision 1(c) and 4): **rows per second
+into Iceberg** as `demo`, through the path a pipeline writes with. A `%sql` task in a pipeline
+runs on Trino, so the Trino write path is the product's ingest path today. One level = R rows
+inserted into one Iceberg table, wall-clock with `time.monotonic()` from the first insert's
+`POST /api/statements` to the last insert's terminal answer — the table reset and the
+`count(*)` check are outside it.
+
+Five measured facts shape the loop (lab, 2026-11-25):
+
+- **`demo` may `CREATE TABLE`, `INSERT` and `DELETE FROM` in `playground.scratch`, but not
+  `DROP TABLE`** (`PERMISSION_DENIED: Access Denied: Cannot drop table …`). The table is created
+  if absent, emptied at the start and at the end, and left in place for `demo-reset`.
+- **`sequence()` has a hard cap of 10 000 entries** (`INVALID_FUNCTION_ARGUMENT: result of
+  sequence function must not have more than 10000 entries`). A level of R rows is therefore
+  `ceil(R / 10000)` statements of at most 10 000 rows each, each with an `i + <offset>` shift.
+- **A person holds at most ten statements**: an eleventh submit answers `429 you already hold
+  ten statements; read or cancel one first`. Every statement is freed with
+  `DELETE /api/statements/{id}` (204) before the next one.
+- **The statement API is Nova's**: `POST /api/statements {"sql": …, "waitSeconds": 180}` →
+  a `StatementView` with `statementId`, `state`, `rowCount`, `error` (a string) and `rows`;
+  polls are `GET /api/statements/{id}?waitSeconds=10`; `state` is
+  `PENDING|RUNNING|SUCCEEDED|FAILED`.
+- **The token is minted exactly as `perf-pipelines` does it**: the public `demo` password in a
+  0600 temp file through `scripts/mint-user-token.py`.
+
+| variable | default | meaning |
+|---|---|---|
+| `STARDELT_NOVA_URL` | `https://alpha.dev.stardelt.io` | Nova (a trailing `/` is trimmed) |
+| `ISSUER` | `https://id.alpha.dev.stardelt.io/realms/stardelt` | token issuer |
+| `PERF_PERSON` | `demo` | the person (its password is `demo`, public on purpose) |
+| `PERF_TABLE` | `playground.scratch.perf_ingest` | the Iceberg table (created if absent) |
+| `PERF_ROWS` | `10000,50000` | rows per level, comma separated |
+| `PERF_TIMEOUT` | `180` | seconds one statement may take |
+| `PERF_OUT_DIR` | `$HOME/.cache/stardelt-perf` | where the JSON goes |
+
+One line per level (`ok` is 1 only when every statement succeeded and `count` is `rows`),
+then one summary line:
+
+```text
+rows=10000   ok=1  batches=1  count=10000  p50=…ms  rows/s=…
+rows=50000   ok=1  batches=5  count=50000  p50=…ms  rows/s=…
+perf-ingest: PASS (60000 rows in 3.1 s, 19354 rows/s as demo into playground.scratch.perf_ingest)
+```
+
+`p50` is the nearest rank of the individual batch durations (`pipelines.py::percentile`); the
+`rows/s` of a level is `rows` over the whole level. The JSON goes to
+`<PERF_OUT_DIR>/ingest-<UTC timestamp>.json` and never overwrites an earlier one (`-2`, `-3` are
+added):
+
+```json
+{"timestamp": "2026-11-25T00:06:00Z", "nova": "https://alpha.dev.stardelt.io", "person": "demo",
+ "table": "playground.scratch.perf_ingest",
+ "levels": [{"level": 1, "rows": 10000, "ok": 1, "batches": 1, "count": 10000,
+             "seconds": 0.476, "rowsPerSecond": 21008, "p50": 476}]}
+```
+
+Exit 0 means every level's count matched its rows; exit 1 names the level and the reason, e.g.
+`perf-ingest: FAIL level 2: 1 statement(s) failed (INVALID_FUNCTION_ARGUMENT…)`. The table is
+left empty for `demo-reset` (03:00 UTC, which clears `playground.scratch`).
+
+`python3 perf/ingest.py --self-test` proves the batching, the time arithmetic, the
+free-after-each-statement and the count check against a stub HTTP server: no cluster, no token.
