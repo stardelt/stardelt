@@ -740,8 +740,8 @@ fn release_ready(
 /// store's workloads: the chart's migration Job writes Lakekeeper's authorization model into
 /// the store during the release, and `apply_plan` keeps applying after a component failed, so
 /// the store's database being Ready is not enough (#1617). A catalog that was Ready keeps
-/// reconciling even while the store is down — a store outage fails the catalog closed, it must
-/// not drop the catalog from the status or uninstall it.
+/// reconciling while the store's workloads are down — a store outage fails the catalog closed,
+/// it must not drop the catalog from the status or uninstall it.
 fn catalog_may_apply(catalog_was_ready: bool, store_up: bool) -> bool {
     catalog_was_ready || store_up
 }
@@ -1871,9 +1871,12 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     let openfga_ready = openfga_database.ready;
     // A *new* catalog is applied only once the store's own release serves: the chart's
     // migration Job writes Lakekeeper's authorization model into the store, and `apply_plan`
-    // keeps applying after a component failed, so the database being Ready is not enough
-    // (#1617). A catalog that was Ready before keeps reconciling: its status must stay in the
-    // list, and a store outage fails the catalog closed rather than uninstalling it.
+    // keeps applying after a component failed, so the store's database being Ready is not
+    // enough (#1617). A catalog that was Ready before keeps reconciling while the store's
+    // *workloads* are down — fail-closed, not uninstalled, and its status stays in the list; a
+    // store *database* outage still holds it, and `release_ready` reports why. `previous` is
+    // last pass's status, so one bad pass (or a simultaneous store restart) puts the catalog
+    // back behind the gate until the store serves again.
     let catalog_was_ready = previous.iter().any(|p| p.name == "lakekeeper" && p.ready);
     let store_up = matches!(
         workloads_ready(&ctx.client, &namespace, "openfga").await,
