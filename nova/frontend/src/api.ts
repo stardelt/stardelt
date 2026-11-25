@@ -267,6 +267,19 @@ export type TableDocsUpdate = {
   guide?: string | null
 }
 
+/** The freshness promise and the status it yields (#402 slice 2). */
+export type TableFreshness = {
+  promise: { by: string; timezone: string; graceMinutes: number; setAt: string } | null
+  status: 'grey' | 'green' | 'amber' | 'red'
+  lastWrite: string | null
+  dueAt: string | null
+  nextDueAt: string | null
+  detail: string
+  canEdit: boolean
+}
+/** `by: null` removes the promise; an absent field changes nothing. */
+export type FreshnessUpdate = { by?: string | null; timezone?: string; graceMinutes?: number }
+
 /** One verified query: a question about a table that its owners answered (#1018, #912). */
 export type VerifiedQuery = {
   id: number
@@ -1844,6 +1857,10 @@ export const api = {
     jget<TableDocumentation>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`, catalog)),
   putTableDocs: (ns: string, tbl: string, body: TableDocsUpdate, catalog?: string) =>
     jput<TableDocumentation>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`, catalog), body),
+  tableFreshness: (ns: string, tbl: string, catalog?: string) =>
+    jget<TableFreshness>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/health`, catalog)),
+  putTableFreshness: (ns: string, tbl: string, body: FreshnessUpdate, catalog?: string) =>
+    jput<TableFreshness>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/health`, catalog), body),
   putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
     jput<TableDocumentation>(
       catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),

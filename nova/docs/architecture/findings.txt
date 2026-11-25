@@ -5,12 +5,12 @@ B1 file-size budget (1500 production lines): 5 backend files over
   connection_routes.rs 1949
   catalog_docs.rs 1683
 F-size frontend files over 800 lines: 6
-  api.ts 2068
+  api.ts 2085
   components/ScheduleDialog.tsx 1448
   routes/AdminCatalogs.tsx 1189
   components/ConnectionDialogs.tsx 1167
   routes/Query.tsx 1110
-  routes/Catalog.tsx 1002
+  routes/Catalog.tsx 1004
 Undeclared .rs files (dead): none
 OpenAPI: served /api operations not in nova.json: 0
 OpenAPI: nova.json operations not served by a scanned router: 0

@@ -11,6 +11,7 @@ import ErrorBox from '../components/ErrorBox'
 import { JobPill, LineageLists, lineageHref } from '../components/LineageLists'
 import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
+import TableFreshness from '../components/TableFreshness'
 import TableHealth from '../components/TableHealth'
 import { formatBytes, formatCount, formatTime, relativeTime, sqlTableRef, rowsLabel, sqlIdent } from '../format'
 import { isAdmin } from '../roles'
@@ -253,6 +254,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
       </header>
 
       {!isView && <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />}
+      {!isView && <TableFreshness ns={ns} tbl={tbl} catalog={catalog} />}
       {!isView && <TableHealth ns={ns} tbl={tbl} catalog={catalog} />}
 
       <div className="flex flex-wrap gap-2" role="tablist" aria-label="Table views">
