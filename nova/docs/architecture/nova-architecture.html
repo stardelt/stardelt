@@ -77,7 +77,7 @@ flowchart LR
   fe_admin --&gt;|1| be_sql_query_log
   fe_build --&gt;|1| be_catalog
   fe_build --&gt;|3| be_connections
-  fe_build --&gt;|12| be_notebooks_compute
+  fe_build --&gt;|13| be_notebooks_compute
   fe_build --&gt;|20| be_pipelines_delivery
   fe_build --&gt;|1| be_platform_view
   fe_build --&gt;|3| be_sql_query_log
@@ -183,7 +183,7 @@ sequenceDiagram
   catalog_docs.rs 1683
 F-size frontend files over 800 lines: 7
   api-schema.d.ts 14252
-  api.ts 2010
+  api.ts 2011
   components/ScheduleDialog.tsx 1448
   routes/AdminCatalogs.tsx 1189
   components/ConnectionDialogs.tsx 1167
