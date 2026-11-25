@@ -1318,12 +1318,29 @@ mod tests {
             l["externalDatabase"]["passwordSecret"],
             serde_json::json!("lakekeeper-pg-app")
         );
-        assert_eq!(l["authz"]["backend"], serde_json::json!("allowall"));
+        assert_eq!(l["authz"]["backend"], serde_json::json!("openfga"));
         assert_eq!(
             l["catalog"]["prometheus"]["setScrapeAnnotations"],
             serde_json::json!(true),
             "the chart adds the metrics port (9000) and the scrape annotations (#607)"
         );
+    }
+
+    #[test]
+    fn lakekeeper_golden_values_use_openfga() {
+        let mut l = effective_values("lakekeeper", Profile::Full, None, None);
+        assert_eq!(l["authz"]["backend"], serde_json::json!("openfga"));
+        assert_eq!(
+            l["internalOpenFGA"],
+            serde_json::json!(false),
+            "the operator deploys the OpenFGA release; the chart must not deploy a second one"
+        );
+        substitute_namespace(&mut l, "data");
+        let endpoint = l["authz"]["openfga"]["endpoint"]
+            .as_str()
+            .expect("lakekeeper has no authz.openfga.endpoint");
+        assert!(endpoint.contains(":8081"), "{endpoint}");
+        assert!(!endpoint.contains("__NAMESPACE__"), "{endpoint}");
     }
 
     #[test]

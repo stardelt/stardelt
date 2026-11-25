@@ -86,9 +86,9 @@ pub fn generate_sts_signing_key() -> Result<String, getrandom::Error> {
 
 /// The namespace the platform is installed into, with the `restricted` Pod Security floor
 /// (#1096 question 5): no privilege escalation, `capabilities.drop: ["ALL"]`, seccomp
-/// `RuntimeDefault`, non-root. Both install paths pass it; the operator path renders
-/// Lakekeeper with `authz.backend: allowall` and therefore no chart `opa` sidecar, which is
-/// the one container the platform path patches (`scripts/lakekeeper-opa-security.sh` (new), #1361).
+/// `RuntimeDefault`, non-root. Both install paths pass it; the operator path leaves the
+/// chart's OPA bridge off and therefore renders no `opa` sidecar, which is the one container
+/// the platform path patches (`scripts/lakekeeper-opa-security.sh` (new), #1361).
 pub fn platform_namespace(name: &str) -> Namespace {
     Namespace {
         metadata: ObjectMeta {

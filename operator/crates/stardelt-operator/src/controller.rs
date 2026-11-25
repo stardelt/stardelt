@@ -719,8 +719,9 @@ async fn trino_key_material_present(client: &Client, namespace: &str) -> bool {
     true
 }
 
-/// Whether a component's release may be applied now. Lakekeeper and OpenFGA wait for their
-/// database; Trino waits for its key material once the platform has an IdP.
+/// Whether a component's release may be applied now. Lakekeeper waits for its database and for
+/// the permission store's; OpenFGA waits for its database; Trino waits for its key material once
+/// the platform has an IdP.
 fn release_ready(
     component: &str,
     database_ready: bool,
@@ -728,7 +729,7 @@ fn release_ready(
     trino_ready: bool,
 ) -> bool {
     match component {
-        "lakekeeper" => database_ready,
+        "lakekeeper" => database_ready && openfga_ready,
         "openfga" => openfga_ready,
         "trino" => trino_ready,
         _ => true,
@@ -1875,11 +1876,16 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     )
     .await;
     outcome.components.push(namespace_status);
-    if !lh.spec.dry_run && !database_ready {
+    if !lh.spec.dry_run && !(database_ready && openfga_ready) {
+        let message = if !database_ready {
+            "waiting for the catalog database"
+        } else {
+            "waiting for the permission store's database"
+        };
         outcome.components.push(ComponentStatus {
             name: "lakekeeper".into(),
             ready: false,
-            message: Some("waiting for the catalog database".into()),
+            message: Some(message.into()),
             applied_hash: None,
         });
     }
@@ -3013,7 +3019,8 @@ mod tests {
     #[test]
     fn a_release_waits_for_what_it_reads() {
         assert!(!release_ready("lakekeeper", false, true, true));
-        assert!(release_ready("lakekeeper", true, false, false));
+        assert!(!release_ready("lakekeeper", true, false, false));
+        assert!(release_ready("lakekeeper", true, true, false));
         assert!(!release_ready("openfga", true, false, true));
         assert!(!release_ready("trino", true, true, false));
         assert!(release_ready("trino", false, false, true));
