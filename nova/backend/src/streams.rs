@@ -22,7 +22,8 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::api_json::ApiJson;
 use crate::auth::Identity;
-use crate::connection_routes::{Caller, Fail, SignedIn};
+use crate::connection_routes::{Caller, SignedIn};
+use crate::error::Fail;
 use crate::pipelines::{
     DIGEST_NOTE, DeploymentView, MANAGED_BY_LABEL, MANAGED_BY_NOVA, Provenance, ResourceError,
     answer, canonical, check_provenance, deployment_of_with, may_act, no_cluster, resource_fail,

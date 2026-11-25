@@ -23,7 +23,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 
 /// One endpoint as the UI and Ask need it. No `url`, no `keyRef`.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]

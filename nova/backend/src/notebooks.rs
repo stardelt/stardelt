@@ -73,7 +73,7 @@ use url::Url;
 
 use crate::AppState;
 use crate::auth::{Identity, Principal, Secret};
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 
 /// The largest notebook body Nova accepts, before stripping. A notebook is source
 /// code, not data: 5 MiB is generous for cells and still bounds one request.

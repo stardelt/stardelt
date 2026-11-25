@@ -27,7 +27,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::{Identity, Principal, Secret};
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 
 /// A call that has not answered within this time is a failure, not a hanging page.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

@@ -168,7 +168,7 @@ pub struct DatasetRef {
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response {
-    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+    crate::error::Fail::new(status, msg).into_response()
 }
 
 fn hidden_label() -> String {

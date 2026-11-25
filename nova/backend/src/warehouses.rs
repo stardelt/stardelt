@@ -48,7 +48,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::{Identity, Principal};
-use crate::connection_routes::Fail;
+use crate::error::Fail;
 use crate::pipelines::{answer_with, no_cluster};
 
 /// The class defaults, the table the access-sync job renders resource groups from

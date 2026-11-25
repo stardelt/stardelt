@@ -109,8 +109,9 @@ use crate::airflow::{
 use crate::api_json::ApiJson;
 use crate::audit::{self, PipelineWrite};
 use crate::auth::{Identity, Principal};
-use crate::connection_routes::{Fail, SignedIn};
+use crate::connection_routes::SignedIn;
 use crate::deployments::{BundlePlan, PlanChange, PlanFile, PlanIssue};
+use crate::error::Fail;
 use crate::notebooks::{self, NotebookStore};
 
 /// The `Pipeline` resources of the platform namespace: the cluster, or memory in tests.

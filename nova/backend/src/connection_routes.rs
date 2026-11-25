@@ -41,6 +41,7 @@ use crate::auth::{Identity, Principal, Secret};
 use crate::connections::{
     self, Action, BreakGlassNotice, ConnectionView, NewConnection, Scope, SyncView,
 };
+use crate::error::Fail;
 use crate::secret_store::{self, SecretMeta, StoreClient, StoreError, StoreScope, StoreToken};
 
 /// The annotation a break-glass read leaves on the group's `Connection`. The listing turns it
@@ -235,43 +236,6 @@ impl Resources {
 
 fn resource_name(resource: &Value) -> &str {
     resource["metadata"]["name"].as_str().unwrap_or_default()
-}
-
-/// One non-2xx answer: a status and a sentence. The sentence never contains a value.
-#[derive(Debug)]
-pub(crate) struct Fail {
-    status: StatusCode,
-    message: String,
-}
-
-impl Fail {
-    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            message: message.into(),
-        }
-    }
-
-    /// The status, for a caller that inspects a refusal without serialising it (the pipeline
-    /// loader tells a hidden pipeline's 404 from a viewer's 403 in the audit line).
-    pub(crate) fn status(&self) -> StatusCode {
-        self.status
-    }
-
-    /// The sentence of a refusal.
-    pub(crate) fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl IntoResponse for Fail {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(serde_json::json!({ "error": self.message })),
-        )
-            .into_response()
-    }
 }
 
 fn not_configured() -> Fail {
@@ -2222,7 +2186,7 @@ mod tests {
         .await
         .expect_err("the resource exists");
 
-        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.status(), StatusCode::CONFLICT);
         let fake = fake.lock().unwrap();
         assert!(
             !fake.data.contains_key("connections/group/analytics/crm-db"),
@@ -2254,7 +2218,7 @@ mod tests {
         let err = create_connection(&store, None, &alice, &Secret::new("good"), second)
             .await
             .expect_err("the name is taken");
-        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.status(), StatusCode::CONFLICT);
 
         let token = store.login(&Secret::new("good")).await.unwrap();
         let current = store
@@ -2340,7 +2304,7 @@ mod tests {
         let err = delete_group_resource(Some(&resources), &alice, "finance", "ledger")
             .await
             .expect_err("not a member");
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert!(items.lock().unwrap().contains_key("ledger"), "it stays");
     }
 
@@ -2351,7 +2315,7 @@ mod tests {
         let err = create_by_reference(None, &alice, reference(json!({})))
             .await
             .expect_err("no cluster");
-        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.message(), "no cluster connection");
     }
 
@@ -2367,7 +2331,7 @@ mod tests {
         )
         .await
         .expect_err("not a member");
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert!(items.lock().unwrap().is_empty(), "nothing was created");
     }
 
@@ -2382,7 +2346,7 @@ mod tests {
         let err = create_by_reference(Some(&resources), &alice, reference(json!({})))
             .await
             .expect_err("the name is taken");
-        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -2394,7 +2358,7 @@ mod tests {
         let err = create_connection(&store, None, &alice, &Secret::new("good"), req)
             .await
             .expect_err("not a member");
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert!(
             fake.lock().unwrap().data.is_empty(),
             "the store is untouched"
@@ -2410,7 +2374,7 @@ mod tests {
         let err = create_connection(&store, None, &admin, &Secret::new("admin"), req)
             .await
             .expect_err("an administrator is not a member");
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
         let fake = fake.lock().unwrap();
         assert!(fake.data.is_empty(), "the store is untouched");
         assert_eq!(fake.requests, 0, "not even a sign-in");
@@ -2430,7 +2394,7 @@ mod tests {
         let err = create_connection(&store, None, &alice, &Secret::new("good"), managed())
             .await
             .expect_err("only administrators");
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert!(fake.lock().unwrap().data.is_empty());
 
         let (resources, items) = memory();
@@ -2507,8 +2471,8 @@ mod tests {
         .await
         .expect_err("one field of two");
 
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert!(err.message.contains("every field"), "{}", err.message);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("every field"), "{}", err.message());
         assert_eq!(
             fake.lock().unwrap().data["connections/managed/crm-db"]["password"],
             "p",
@@ -2587,7 +2551,7 @@ mod tests {
         .await
         .expect_err("the cluster refused");
 
-        assert_eq!(err.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
         assert!(
             !fake
                 .lock()
@@ -2828,7 +2792,7 @@ mod tests {
         .await
         .expect_err("an administrator cannot write into a group");
 
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
         let fake = fake.lock().unwrap();
         assert_eq!(
             fake.requests, 0,
@@ -2984,12 +2948,12 @@ mod tests {
         let err = create_connection(&store, None, &alice, &Secret::new("good"), personal())
             .await
             .expect_err("the store is down");
-        assert_eq!(err.status, StatusCode::BAD_GATEWAY, "{err:?}");
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY, "{err:?}");
 
         let err = list_connections(&store, None, &alice, &Secret::new("good"))
             .await
             .expect_err("the store is down");
-        assert_eq!(err.status, StatusCode::BAD_GATEWAY, "{err:?}");
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY, "{err:?}");
     }
 
     #[tokio::test]
@@ -3230,8 +3194,8 @@ mod tests {
         .await;
 
         let (err, record) = expect_fail(result);
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
-        assert_eq!(err.message, "only administrators may do this");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.message(), "only administrators may do this");
         assert_eq!(record.outcome, "refused:not-admin");
         assert_eq!(
             fake.lock().unwrap().requests,
@@ -3265,8 +3229,8 @@ mod tests {
             )
             .await;
             let (err, record) = expect_fail(result);
-            assert_eq!(err.status, StatusCode::BAD_REQUEST, "{reason:?}");
-            assert_eq!(err.message, "give a reason of at least 20 characters");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{reason:?}");
+            assert_eq!(err.message(), "give a reason of at least 20 characters");
             assert_eq!(record.outcome, "refused:reason");
         }
         assert_eq!(
@@ -3396,12 +3360,12 @@ mod tests {
         .await;
 
         let (err, record) = expect_fail(result);
-        assert_eq!(err.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(
-            err.message,
+            err.message(),
             "could not record the notice; nothing was returned"
         );
-        assert!(!err.message.contains(CANARY), "no value in the error");
+        assert!(!err.message().contains(CANARY), "no value in the error");
         assert_eq!(record.outcome, "notice-failed");
         assert!(
             items.lock().unwrap()["crm-db"]["metadata"]
@@ -3431,8 +3395,8 @@ mod tests {
         .await;
 
         let (err, record) = expect_fail(result);
-        assert_eq!(err.status, StatusCode::NOT_FOUND);
-        assert_eq!(err.message, "no such connection");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), "no such connection");
         assert_eq!(record.outcome, "not-found");
     }
 
@@ -3457,8 +3421,8 @@ mod tests {
         .await;
 
         let (err, record) = expect_fail(result);
-        assert_eq!(err.status, StatusCode::FORBIDDEN);
-        assert_eq!(err.message, "the store refused the break-glass sign-in");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.message(), "the store refused the break-glass sign-in");
         assert_eq!(record.outcome, "refused:store");
         assert!(
             fake.lock().unwrap().reads.is_empty(),
@@ -3494,7 +3458,7 @@ mod tests {
         .await;
 
         let (err, record) = expect_fail(result);
-        assert_eq!(err.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(record.outcome, "refused:store");
     }
 
@@ -3537,8 +3501,8 @@ mod tests {
         )
         .await;
         let (err, record) = expect_fail(result);
-        assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(err.message, "too many break-glass reads; wait");
+        assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.message(), "too many break-glass reads; wait");
         assert_eq!(record.outcome, "refused:rate");
         assert_eq!(
             fake.lock().unwrap().reads.len(),
