@@ -149,7 +149,7 @@ fi
 secret_args=(--from-file=signed="$tmp/signed" --from-file=noaud="$tmp/noaud")
 [ "$visitor" = token ] && secret_args+=(--from-file=visitor="$tmp/visitor")
 kubectl -n "$NS" create secret generic "$POD-token" "${secret_args[@]}" \
-  --dry-run=client -o yaml | kubectl apply --server-side --field-manager=stardelt-scripts -f - >/dev/null
+  --dry-run=client -o yaml | kubectl apply --server-side --field-manager=stardelt-scripts --force-conflicts -f - >/dev/null
 
 # The client is the spawn image the hub runs; `scripts/check-notebook-image-pin.sh` keeps the
 # two in step. The `dev@sha256:` tag is the only one in that file.

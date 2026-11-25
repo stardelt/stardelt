@@ -423,7 +423,15 @@ labels["app.kubernetes.io/part-of"] = "stardelt"
 labels["stardelt.io/seed"] = "dev-access"
 json.dump(secret, sys.stdout)
 PY
-  kubectl -n "$NAMESPACE" apply -f "$tmp/secret-final.json"
+  # Server-side apply: a client-side apply copies the whole object, `data` included, into
+  # kubectl.kubernetes.io/last-applied-configuration, where a reader of the Secret's metadata
+  # but not its data reads the passwords (#1655).
+  kubectl -n "$NAMESPACE" apply --server-side --field-manager=stardelt-scripts --force-conflicts \
+    -f "$tmp/secret-final.json"
+  # A Secret an older run wrote client-side still carries that annotation; drop it here so a
+  # rerun heals the lab (#1655).
+  kubectl -n "$NAMESPACE" annotate secret "$SEED_SECRET" \
+    kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
