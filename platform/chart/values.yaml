@@ -193,7 +193,9 @@ identity:
     ldap:
       host: ""
       port: 389
-      baseDn: ""
+      # none | starttls | ldaps. `none` is plaintext (port 389); `starttls` upgrades a
+      # 389 connection; `ldaps` is TLS from the first byte (port 636).
+      tls: none
       usersDn: ""
       groupDn: ""
       bindSecretName: ""

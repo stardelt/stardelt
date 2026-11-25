@@ -29,7 +29,7 @@ use k8s_openapi::{
 use kube::api::ObjectMeta;
 
 use crate::{
-    crd::{IdentityLdap, PlatformInstanceSpec},
+    crd::{IdentityLdap, IdentityLdapTls, PlatformInstanceSpec},
     identity::{self, IdentityError},
 };
 
@@ -217,30 +217,51 @@ pub fn identity_secret(desired: &IdentitySecret, namespace: &str) -> Result<Secr
 /// timestamps and are not needed for the `groups` claim the platform reads.
 fn ldap_components(ldap: &IdentityLdap) -> serde_json::Value {
     let sync = ldap.sync_seconds.to_string();
+    let scheme = match ldap.tls {
+        IdentityLdapTls::Ldaps => "ldaps",
+        _ => "ldap",
+    };
+    let mut config = serde_json::Map::new();
+    config.insert("enabled".into(), serde_json::json!(["true"]));
+    config.insert("vendor".into(), serde_json::json!(["other"]));
+    config.insert(
+        "connectionUrl".into(),
+        serde_json::json!([format!("{scheme}://{}:{}", ldap.host, ldap.port)]),
+    );
+    // Keycloak reads `startTls` as a string list; a `null` value would fail the import, so
+    // the key is only present for `starttls`.
+    if ldap.tls == IdentityLdapTls::Starttls {
+        config.insert("startTls".into(), serde_json::json!(["true"]));
+    }
+    config.insert("usersDn".into(), serde_json::json!([ldap.users_dn.clone()]));
+    config.insert("authType".into(), serde_json::json!(["simple"]));
+    // Resolved by Keycloak's ${...} placeholders from the container env, so the
+    // bind DN and its password are never written into the ConfigMap.
+    config.insert(
+        "bindDn".into(),
+        serde_json::json!(["${STARDELT_LDAP_BIND_DN}"]),
+    );
+    config.insert(
+        "bindCredential".into(),
+        serde_json::json!(["${STARDELT_LDAP_BIND_PASSWORD}"]),
+    );
+    config.insert("editMode".into(), serde_json::json!(["READ_ONLY"]));
+    config.insert("usernameLDAPAttribute".into(), serde_json::json!(["cn"]));
+    config.insert("rdnLDAPAttribute".into(), serde_json::json!(["cn"]));
+    config.insert("uuidLDAPAttribute".into(), serde_json::json!(["entryUUID"]));
+    config.insert(
+        "userObjectClasses".into(),
+        serde_json::json!(["inetOrgPerson, organizationalPerson"]),
+    );
+    config.insert("searchScope".into(), serde_json::json!(["2"]));
+    config.insert("importEnabled".into(), serde_json::json!(["true"]));
+    config.insert("fullSyncPeriod".into(), serde_json::json!([sync.clone()]));
+    config.insert("changedSyncPeriod".into(), serde_json::json!([sync]));
     serde_json::json!({
         "org.keycloak.storage.UserStorageProvider": [{
             "name": "ldap",
             "providerId": "ldap",
-            "config": {
-                "enabled": ["true"],
-                "vendor": ["other"],
-                "connectionUrl": [format!("ldap://{}:{}", ldap.host, ldap.port)],
-                "usersDn": [ldap.users_dn.clone()],
-                "authType": ["simple"],
-                // Resolved by Keycloak's ${...} placeholders from the container env, so the
-                // bind DN and its password are never written into the ConfigMap.
-                "bindDn": ["${STARDELT_LDAP_BIND_DN}"],
-                "bindCredential": ["${STARDELT_LDAP_BIND_PASSWORD}"],
-                "editMode": ["READ_ONLY"],
-                "usernameLDAPAttribute": ["cn"],
-                "rdnLDAPAttribute": ["cn"],
-                "uuidLDAPAttribute": ["entryUUID"],
-                "userObjectClasses": ["inetOrgPerson, organizationalPerson"],
-                "searchScope": ["2"],
-                "importEnabled": ["true"],
-                "fullSyncPeriod": [sync.clone()],
-                "changedSyncPeriod": [sync],
-            },
+            "config": config,
             "subComponents": {
                 "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [{
                     "name": "username",
@@ -1346,7 +1367,7 @@ mod tests {
         IdentityLdap {
             host: "dir.example.com".into(),
             port: 389,
-            base_dn: "dc=example,dc=org".into(),
+            tls: IdentityLdapTls::None,
             users_dn: "ou=users,dc=example,dc=org".into(),
             group_dn: "ou=groups,dc=example,dc=org".into(),
             bind_secret_ref: IdentityLdapBindSecret {
@@ -1372,6 +1393,48 @@ mod tests {
             .remove("stardelt-realm.json")
             .expect("the realm");
         serde_json::from_str(&realm).expect("the realm is JSON")
+    }
+
+    /// The directory's transport is the schema's only switch: `none` and `starttls` speak
+    /// plaintext to 389 (StartTLS upgrades it), `ldaps` is TLS from the first byte to 636.
+    #[test]
+    fn the_ldap_connection_url_carries_the_tls_choice() {
+        let mut plain = ldap();
+        plain.tls = IdentityLdapTls::None;
+        let config =
+            &ldap_components(&plain)["org.keycloak.storage.UserStorageProvider"][0]["config"];
+        assert_eq!(
+            config["connectionUrl"],
+            serde_json::json!(["ldap://dir.example.com:389"])
+        );
+        assert!(
+            config.get("startTls").is_none(),
+            "plaintext carries no startTls key"
+        );
+
+        let mut starttls = ldap();
+        starttls.tls = IdentityLdapTls::Starttls;
+        let config =
+            &ldap_components(&starttls)["org.keycloak.storage.UserStorageProvider"][0]["config"];
+        assert_eq!(
+            config["connectionUrl"],
+            serde_json::json!(["ldap://dir.example.com:389"])
+        );
+        assert_eq!(config["startTls"], serde_json::json!(["true"]));
+
+        let mut ldaps = ldap();
+        ldaps.tls = IdentityLdapTls::Ldaps;
+        ldaps.port = 636;
+        let config =
+            &ldap_components(&ldaps)["org.keycloak.storage.UserStorageProvider"][0]["config"];
+        assert_eq!(
+            config["connectionUrl"],
+            serde_json::json!(["ldaps://dir.example.com:636"])
+        );
+        assert!(
+            config.get("startTls").is_none(),
+            "ldaps carries no startTls key"
+        );
     }
 
     /// The `components` object is the import form measured in #1516: `subComponents` is a sibling

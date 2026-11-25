@@ -132,12 +132,6 @@ spec:
                       Keycloak's read-only LDAP federation (#39).
                     nullable: true
                     properties:
-                      baseDn:
-                        description: Base DN of the directory, for example `dc=example,dc=org`.
-                        maxLength: 512
-                        minLength: 3
-                        pattern: ^\S.*=\S.*$
-                        type: string
                       bindSecretRef:
                         description: The Secret with the bind DN and its password; never the values themselves.
                         properties:
@@ -173,7 +167,7 @@ spec:
                         type: string
                       port:
                         default: 389
-                        description: LDAP port; 389 or 636 (LDAPS) in practice.
+                        description: 'Port of the directory. `389` with `tls: none` or `tls: starttls`; `636` with `tls: ldaps`.'
                         format: int32
                         maximum: 65535.0
                         minimum: 1.0
@@ -187,6 +181,14 @@ spec:
                         maximum: 86400.0
                         minimum: 60.0
                         type: integer
+                      tls:
+                        default: none
+                        description: How the connection is protected; see [`IdentityLdapTls`]. Defaults to `none`.
+                        enum:
+                        - none
+                        - starttls
+                        - ldaps
+                        type: string
                       usersDn:
                         description: Subtree that holds people, for example `ou=users,dc=example,dc=org`.
                         maxLength: 512
@@ -194,7 +196,6 @@ spec:
                         pattern: ^\S.*=\S.*$
                         type: string
                     required:
-                    - baseDn
                     - bindSecretRef
                     - groupDn
                     - host
