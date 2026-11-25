@@ -378,6 +378,28 @@ def _login(args, environ, stderr, session):
     return OK
 
 
+def _hoist_host(arguments):
+    """`stardelt <command> … --host URL` means `stardelt --host URL <command> …` (#1613).
+
+    Moves the first `--host URL` / `--host=URL` that comes after the command to the front,
+    unless it follows a `--` separator. A `--host` already in front is left alone.
+
+    `setup vscode` is exempt: it parses its own `--host` (whose default `None` would overwrite a
+    hoisted global one), so `stardelt setup vscode --host URL` keeps that flag in place."""
+    if not arguments or arguments[0].startswith("--host"):
+        return arguments
+    if arguments[0] == "setup":
+        return arguments
+    for index, token in enumerate(arguments):
+        if token == "--":
+            return arguments
+        if token.startswith("--host="):
+            return [token] + arguments[:index] + arguments[index + 1:]
+        if token == "--host" and index + 1 < len(arguments):
+            return ["--host", arguments[index + 1]] + arguments[:index] + arguments[index + 2:]
+    return arguments
+
+
 def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=None):
     environ = os.environ if environ is None else environ
     stdout = sys.stdout if stdout is None else stdout
@@ -388,7 +410,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
         stdout.write(f"stardelt {__version__}\n")
         return OK
     try:
-        args = _parser().parse_args(shortcuts.expand(arguments, api.operations()))
+        args = _parser().parse_args(shortcuts.expand(_hoist_host(arguments), api.operations()))
     except (_UsageError, ValueError) as err:
         stderr.write(f"stardelt: {err}\n")
         return USAGE

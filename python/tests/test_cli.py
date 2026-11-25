@@ -169,6 +169,18 @@ def test_the_host_flag_wins_over_the_environment():
     assert session.calls[0][1] == "https://other.example/api/me"
 
 
+def test_the_host_flag_may_follow_the_command():
+    _, _, _, session = run(["whoami", "--host", "https://other.example"], FakeResponse(payload={}))
+    assert session.calls[0][1] == "https://other.example/api/me"
+    _, _, _, session = run(["whoami", "--host=https://other.example"], FakeResponse(payload={}))
+    assert session.calls[0][1] == "https://other.example/api/me"
+
+
+def test_the_host_after_a_separator_stays_where_it_is():
+    assert cli._hoist_host(["api", "x", "--", "--host", "y"]) == ["api", "x", "--", "--host", "y"]
+    assert cli._hoist_host(["setup", "vscode", "--host", "y"]) == ["setup", "vscode", "--host", "y"]
+
+
 def test_a_401_exits_3_and_other_errors_exit_1_with_nova_s_sentence():
     code, _, err, _ = run(["whoami"], FakeResponse(status=401, payload={"error": "sign in again"}))
     assert code == 3 and "authentication needed: sign in again (HTTP 401)" in err
