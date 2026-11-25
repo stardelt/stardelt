@@ -1875,6 +1875,98 @@ mod tests {
             init["env"][0]["valueFrom"]["configMapKeyRef"]["optional"],
             serde_json::json!(true)
         );
+        assert_eq!(
+            init["securityContext"]["allowPrivilegeEscalation"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            init["securityContext"]["capabilities"]["drop"],
+            serde_json::json!(["ALL"])
+        );
+    }
+
+    /// Pod Security `restricted` admits no pod without a per-container
+    /// `securityContext`: the chart's pod/container keys do not reach an init
+    /// container. #1722: the release install was refused for the Trino
+    /// coordinator because this overlay's `wait-for-idp` had none.
+    #[test]
+    fn every_init_container_in_the_values_is_restricted() {
+        fn check(component: &str, value: &Value, at: &str, seen: &mut usize) {
+            match value {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        let path = format!("{at}.{key}");
+                        if key == "initContainers" {
+                            let containers: Vec<&Value> = match child {
+                                // a chart-level list
+                                Value::Array(items) => items.iter().collect(),
+                                // a map of lists (`coordinator`, `supersetNode`, …)
+                                Value::Object(lists) => lists
+                                    .values()
+                                    .filter_map(|v| v.as_array())
+                                    .flatten()
+                                    .collect(),
+                                _ => Vec::new(),
+                            };
+                            for container in containers {
+                                *seen += 1;
+                                let name = container["name"]
+                                    .as_str()
+                                    .unwrap_or("<unnamed>")
+                                    .to_string();
+                                assert_eq!(
+                                    container["securityContext"]["allowPrivilegeEscalation"],
+                                    serde_json::json!(false),
+                                    "{component}: init container {name} at {path} must set \
+                                     securityContext.allowPrivilegeEscalation: false"
+                                );
+                                assert_eq!(
+                                    container["securityContext"]["capabilities"]["drop"],
+                                    serde_json::json!(["ALL"]),
+                                    "{component}: init container {name} at {path} must drop ALL \
+                                     capabilities"
+                                );
+                            }
+                        }
+                        check(component, child, &path, seen);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        check(component, item, &format!("{at}[{index}]"), seen);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Every component `golden_values`, `identity_values` and `profile_values`
+        // know, with the identity overlay merged in as the controller does.
+        let mut seen = 0;
+        for component in [
+            "trino",
+            "lakekeeper",
+            "jupyterhub",
+            "seaweedfs",
+            "airflow",
+            "superset",
+            "openfga",
+            "cnpg",
+            "barman-cloud",
+            "external-secrets",
+            "openbao",
+            "kafka",
+            "spark-operator",
+        ] {
+            let values = deep_merge(
+                effective_values(component, Profile::Full, None, None),
+                identity_values(component),
+            );
+            check(component, &values, component, &mut seen);
+        }
+        // The walk must have looked at the Trino gate and the Superset waiters, or
+        // it proves nothing.
+        assert!(seen >= 4, "only {seen} init containers were walked");
     }
 
     #[test]
