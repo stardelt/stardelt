@@ -2161,7 +2161,7 @@ test.describe('pipelines', () => {
   })
 
   test('pause and resume refusals show the API sentence', async ({ browser }) => {
-    const sentence = 'the scheduler has not loaded this pipeline yet'
+    const sentence = 'the scheduler has not loaded this pipeline yet: it loads about a minute after a deploy, so try again'
     for (const [name, paused] of [['pause-me', false], ['resume-me', true]] as const) {
       const { context, page } = await open(browser, {
         rows: [pipeline({ name, paused, state: paused ? 'paused' : 'idle' })],

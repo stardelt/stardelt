@@ -3930,10 +3930,12 @@ fn no_such_task() -> Fail {
 
 /// Airflow has no DAG for the resource yet (or the loader refused it). Acting on a pipeline that
 /// does not exist in Airflow is a 409 with a sentence, not a 404: the resource does exist.
+/// The sentence names the wait because a deploy that just ran is the common case
+/// (`stardelt/stardelt#1571`).
 fn pipeline_not_loaded() -> Fail {
     Fail::new(
         StatusCode::CONFLICT,
-        "the scheduler has not loaded this pipeline yet",
+        "the scheduler has not loaded this pipeline yet: it loads about a minute after a deploy, so try again",
     )
 }
 
@@ -12092,7 +12094,7 @@ mod tests {
         assert_eq!(error.status(), StatusCode::CONFLICT);
         assert_eq!(
             error.message(),
-            "the scheduler has not loaded this pipeline yet"
+            "the scheduler has not loaded this pipeline yet: it loads about a minute after a deploy, so try again"
         );
         assert!(
             fake.lock().unwrap().trigger_bodies.is_empty(),
@@ -12250,7 +12252,7 @@ mod tests {
         assert_eq!(error.status(), StatusCode::CONFLICT);
         assert_eq!(
             error.message(),
-            "the scheduler has not loaded this pipeline yet"
+            "the scheduler has not loaded this pipeline yet: it loads about a minute after a deploy, so try again"
         );
     }
 
