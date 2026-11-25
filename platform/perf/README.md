@@ -115,11 +115,16 @@ dev node's and vary with its load.
 ## Pipelines at once: `perf-pipelines`
 
 `make perf-pipelines` is the third Sizing workload (#53 decisions 1(e) and 4): **N
-pipeline runs started at the same moment**, as one person, through Nova. It times
+different pipelines started at the same moment**, as one person, through Nova. It times
 start to terminal state with `time.monotonic()`, from the `POST /api/pipelines/{namespace}/{name}/runs`
 to the poll that saw `success`/`failed` — client wall-clock, not Airflow's own
 `durationSeconds`. It needs no `tpch` catalog and writes nothing to the cluster beyond the
 runs' own task pods; a DagRun is history, so there is no cleanup step.
+
+Each slot of a level is a *different* pipeline, because a second start of one `concurrency:
+Forbid` pipeline is refused: Nova answers `409 a run is already active` (measured
+2026-11-25), which would measure its gate and not the platform. A level therefore never
+repeats a name, and a duplicate in `PERF_PIPELINES` is an error.
 
 | variable | default | meaning |
 |---|---|---|
@@ -127,7 +132,7 @@ runs' own task pods; a DagRun is history, so there is no cleanup step.
 | `ISSUER` | `https://id.alpha.dev.stardelt.io/realms/stardelt` | token issuer |
 | `PERF_PERSON` | `demo` | the person the run is started as (its password is `demo`, public on purpose) |
 | `PERF_NAMESPACE` | `stardelt` | the pipeline's namespace |
-| `PERF_PIPELINE` | `shop-1-bronze` | the pipeline |
+| `PERF_PIPELINES` | `shop-1-bronze,shop-2-silver,shop-3-gold,shop-dbt` | the pipelines, one per slot of a level |
 | `PERF_LEVELS` | `1,2` | runs at once, comma separated, each 1..10 (`0` runs nothing) |
 | `PERF_TIMEOUT` | `900` | seconds one run may take before it counts as an error |
 | `PERF_POLL` | `2` | seconds between polls |
@@ -139,13 +144,14 @@ successful runs):
 ```text
 level 1  runs=1  ok=1  p50=38.9s  p95=38.9s  max=38.9s
 level 2  runs=2  ok=2  p50=41.2s  p95=44.7s  max=44.7s
-perf-pipelines: PASS (3 run(s) as demo on shop-1-bronze)
+perf-pipelines: PASS (3 run(s) as demo on shop-1-bronze, shop-2-silver)
 ```
 
 The JSON goes to `<PERF_OUT_DIR>/pipelines-<UTC timestamp>.json` and never overwrites an
-earlier one (`-2`, `-3` are added). Exit 0 means every run reached `success`; exit 1 names
-the level and the state that did not, e.g. `perf-pipelines: FAIL level 4: 1 run(s) did not
-succeed (failed)`.
+earlier one (`-2`, `-3` are added). It carries `"pipelines": […]` at the top level and, per
+level, the same `"pipelines"` list aligned with `"states"`. Exit 0 means every run reached
+`success`; exit 1 names the level, the state and the pipeline that did not, e.g.
+`perf-pipelines: FAIL level 4: 1 run(s) did not succeed (failed on shop-dbt)`.
 
 **No level above ten:** Nova refuses more than ten starts per user per minute (`429`), so a
 bigger level measures the refusal, not the platform. A refused start is counted as an error
@@ -159,8 +165,9 @@ no cluster, no token.
 ## Memory high-water: `perf-highwater`
 
 `make perf-highwater` answers what a workload **cost the node**: it wraps a command
-(`perf/highwater.py -- python3 perf/pipelines.py`, so one `shop-1-bronze` run by
-default) and samples `kubectl -n <PERF_NAMESPACE> top pods` every `PERF_SAMPLE`
+(`perf/highwater.py -- python3 perf/pipelines.py`, so the default `1,2` levels — one run on
+`shop-1-bronze`, then one each on `shop-1-bronze` and `shop-2-silver`) and samples
+`kubectl -n <PERF_NAMESPACE> top pods` every `PERF_SAMPLE`
 seconds (default `2`) until the child exits, then takes one final sample and the pods'
 restart counts. One row per pod, sorted by peak memory:
 
