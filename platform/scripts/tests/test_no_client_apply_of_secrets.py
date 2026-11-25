@@ -14,9 +14,9 @@ Two shapes exist in these scripts and both are checked:
    (`seed-dev-access.sh`). The receiver sits further down, so the rule is per shell function:
    a function that creates a Secret and applies a file must apply it server-side.
 
-Scope is `platform/scripts/*.sh`; `spike-*.sh` are scratch (`make lint` skips them too) and
-`platform/dev/` holds provisioning scripts, not release paths (the same pattern in
-`dev/ghcr-pull-secret.sh` is tracked separately).
+Scope is `platform/scripts/*.sh` and `platform/dev/*.sh`; `spike-*.sh` are scratch (`make lint`
+skips them too). `dev/ghcr-pull-secret.sh` writes the GHCR pull Secret with a client-side apply
+until #1663, which is exactly the shape this file exists to find.
 
 The scan reads the real scripts, so a fourth `create secret … | kubectl apply -f -` fails this
 test the moment it lands.
@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPTS = REPO / "scripts"
+SCRIPTS = (REPO / "scripts", REPO / "dev")
 
 CREATE_SECRET = re.compile(r"\bcreate\s+secret\b")
 # One pipeline segment that applies a manifest from stdin to the server.
@@ -60,19 +60,44 @@ def _functions(lines):
             index += 1
 
 
+def _logical(lines):
+    """`(first physical line index, text)` per shell logical line, with `\\` continuations joined.
+
+    A `kubectl create secret` that wraps over six lines (one flag per line, as
+    `dev/ghcr-pull-secret.sh` writes it) is one command; reading physical lines with a fixed
+    window missed it until #1663.
+    """
+    joined = []
+    buffer, start = "", None
+    for index, line in enumerate(lines):
+        if start is None:
+            start = index
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            buffer += stripped[:-1] + " "
+            continue
+        buffer += stripped
+        joined.append((start, buffer))
+        buffer, start = "", None
+    if buffer:
+        joined.append((start, buffer))
+    return joined
+
+
 def offending_commands(text, window=3):
     """Return `(line number, line)` for every client-side apply of a Secret in `text`."""
     lines = text.splitlines()
+    logical = _logical(lines)
     found = {}
 
     # Shape 1: the create command's own pipeline applies stdin.
-    for index, line in enumerate(lines):
-        if _comment(line) or not CREATE_SECRET.search(line):
+    for position, (index, command) in enumerate(logical):
+        if _comment(command) or not CREATE_SECRET.search(command):
             continue
-        joined = " ".join(lines[index : index + 1 + window])
+        joined = " ".join([command] + [later for _, later in logical[position + 1 : position + 1 + window]])
         for segment in PIPE.split(joined):
             if APPLY_STDIN.search(segment) and "--server-side" not in segment:
-                found[index + 1] = line.strip()
+                found[index + 1] = lines[index].strip()
                 break
 
     # Shape 2: the create command writes a file that the same function applies.
@@ -96,13 +121,16 @@ def offending_commands(text, window=3):
 
 def script_files():
     return sorted(
-        path for path in SCRIPTS.glob("*.sh") if not path.name.startswith("spike-")
+        path
+        for directory in SCRIPTS
+        for path in directory.glob("*.sh")
+        if not path.name.startswith("spike-")
     )
 
 
 class NoClientApplyOfSecretsTest(unittest.TestCase):
     def test_repository_scripts_apply_secrets_server_side(self):
-        self.assertNotEqual(script_files(), [], "no scripts/*.sh found — wrong REPO?")
+        self.assertNotEqual(script_files(), [], "no scripts/*.sh or dev/*.sh found — wrong REPO?")
         offences = []
         for path in script_files():
             for number, line in offending_commands(path.read_text()):
