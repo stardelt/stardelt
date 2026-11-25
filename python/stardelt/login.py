@@ -25,6 +25,7 @@ CLIENT_ASSERTION = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 ASSERTION_ENV = "STARDELT_CI_TOKEN"
 SKEW = 60
 TIMEOUT = 30
+REVOKE_TIMEOUT = 10  # a logout must not wait a minute on a provider that does not answer
 
 
 class LoginError(RuntimeError):
@@ -79,7 +80,7 @@ def revoke(session, creds):
             "POST",
             endpoint,
             data={"token": refresh, "token_type_hint": "refresh_token", "client_id": creds.get("client_id")},
-            timeout=TIMEOUT,
+            timeout=REVOKE_TIMEOUT,
         )
     except Exception:
         return False
@@ -92,11 +93,12 @@ def forget(environ, session=None):
     ``True`` when there was one.
     """
     path = credentials_path(environ)
+    if path is None:
+        return False
     try:
-        stored = load(environ)
-        revoke(session, stored)
+        revoke(session, load(environ))
         path.unlink()
-    except (OSError, AttributeError):
+    except OSError:
         return False
     return True
 

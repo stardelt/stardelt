@@ -73,6 +73,13 @@ def test_a_provider_that_refuses_offline_access_falls_back_to_openid():
     assert creds["access_token"] == CANARY and creds["refresh_token"] == "rt-1"
 
 
+def test_another_refusal_of_the_device_request_is_not_retried_without_offline_access():
+    session = FakeSession(FakeResponse(200, META), FakeResponse(400, {"error": "invalid_client"}))
+    with pytest.raises(login.LoginError, match="HTTP 400"):
+        login.device_login(session, ISSUER, "stardelt-dev", print, sleep=lambda s: None, clock=lambda: 0)
+    assert len([call for call in session.calls if "scope" in call[2].get("data", {})]) == 1
+
+
 def challenge_of(verifier):
     import base64
     import hashlib
@@ -214,6 +221,22 @@ def test_logout_revokes_the_refresh_token_when_the_provider_can(tmp_path):
     method, url, kwargs = session.calls[1]
     assert (method, url) == ("POST", ISSUER + "/protocol/openid-connect/revoke")
     assert kwargs["data"] == {"token": "rt-old", "token_type_hint": "refresh_token", "client_id": "stardelt-dev"}
+    assert login.load(environ) is None
+
+
+def test_logout_revokes_without_an_injected_session(tmp_path, monkeypatch):
+    environ = {"HOME": str(tmp_path)}
+    stored(tmp_path)
+    session = FakeSession(
+        FakeResponse(200, dict(META, revocation_endpoint=ISSUER + "/protocol/openid-connect/revoke")),
+        FakeResponse(200, {}),
+    )
+    monkeypatch.setattr(cli.requests, "Session", lambda: session)
+    assert run(["logout"], None, environ)[0] == 0
+    assert [call[:2] for call in session.calls] == [
+        ("GET", ISSUER + "/.well-known/openid-configuration"),
+        ("POST", ISSUER + "/protocol/openid-connect/revoke"),
+    ]
     assert login.load(environ) is None
 
 

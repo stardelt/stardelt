@@ -498,7 +498,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
     if args.command == "logout":
         stderr.write(
             "stardelt: signed out\n"
-            if login.forget(environ, session)
+            if login.forget(environ, session or requests.Session())
             else "stardelt: there was no stored sign-in\n"
         )
         return OK
