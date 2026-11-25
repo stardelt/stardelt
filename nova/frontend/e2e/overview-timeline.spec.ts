@@ -1,9 +1,8 @@
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test'
 
 // The Overview's merged timeline (stardelt-nova#761, slice 1 of #510): pipeline runs, queries
-// and loads in one list, newest first. Runs in the `demo` project (playwright.config.ts), so
-// the runs come from the demo seed. Demo mode keeps no query history on purpose, so the
-// query-log answer is canned here: the merge, not the seed, is what this spec reads.
+// and loads in one list, newest first. Every `/api/**` answer the card reads is stubbed here
+// (`page.route`), so the merge — not any server state — is what this spec measures.
 
 const AT = (iso: string) => Date.parse(iso)
 
@@ -41,10 +40,48 @@ const QUERY_ITEMS = [
 const json = (route: Route, body: unknown) =>
   route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
 
+/** One run row of `GET /api/runs`, at an absolute moment. */
+const runAt = (runId: string, name: string, state: string, at: number) => ({
+  namespace: 'default',
+  name,
+  ownerGroup: null,
+  kind: 'pipeline' as const,
+  runId,
+  state,
+  type: 'scheduled',
+  logicalDate: new Date(at).toISOString(),
+  startedAt: new Date(at).toISOString(),
+  endedAt: null,
+  durationSeconds: null,
+  triggeredBy: 'scheduler',
+  note: null,
+})
+
+const RUNS = {
+  runs: [runAt('r-1', 'ingest_orders', 'running', AT('2026-11-08T09:00:00Z'))],
+  groups: [],
+}
+
+/** One load, older than both the run and the query above. */
+const JOBS = [
+  {
+    id: 'job-1',
+    kind: 'load',
+    title: 'shop.orders',
+    status: 'succeeded',
+    started_at: AT('2026-11-08T08:00:00Z'),
+    detail: '1,204 rows via csv',
+    rows: 1204,
+    user: 'e2e',
+  },
+]
+
 async function open(page: Page) {
   await page.route('**/api/query-log**', (route) =>
     json(route, { items: QUERY_ITEMS, nextCursor: null }),
   )
+  await page.route('**/api/runs**', (route) => json(route, RUNS))
+  await page.route('**/api/jobs**', (route) => json(route, JOBS))
   await page.goto('/')
   const card = page.locator('div.card', { has: page.getByRole('heading', { name: 'Recent activity' }) })
   // The card is below the fold and reads its two lists only when it comes near (nova#859):
@@ -93,9 +130,9 @@ test.describe('overview timeline', () => {
     for (let i = 1; i < times.length; i++) {
       expect(times[i], `row ${i} is newer than row ${i - 1}`).toBeLessThanOrEqual(times[i - 1])
     }
-    // The canned query (10:00) is newer than the `ingest_orders` run (09:00) and older than
-    // the demo's own loads (now), so its place in the list proves the three sources were
-    // sorted together instead of one list being appended after another.
+    // The canned query (10:00) is newer than the `ingest_orders` run (09:00), which is newer
+    // than the load (08:00), so their places in the list prove the three sources were sorted
+    // together instead of one list being appended after another.
     const query = times.indexOf(AT('2026-11-08T10:00:00Z'))
     const run = times.indexOf(AT('2026-11-08T09:00:00Z'))
     expect(query).toBeGreaterThanOrEqual(0)

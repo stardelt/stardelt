@@ -3738,7 +3738,6 @@ mod tests {
             [
                 "admin_console_url",
                 "auth_mode",
-                "demo",
                 "peers",
                 "shared_account",
                 "stage_kind",

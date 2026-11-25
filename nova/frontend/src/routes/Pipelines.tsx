@@ -333,9 +333,6 @@ export default function Pipelines() {
     queryFn: api.servicePrincipals,
     refetchInterval: 60_000,
   })
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  // Demo mode has no scheduler, so every write route answers 503 (#500): offer none.
-  const demo = me.data?.demo === true
   // The source filter lives in the address, so a reload keeps the choice (stardelt-nova#618).
   const [params, setParams] = useSearchParams()
   const rawSource = params.get('source')
@@ -371,18 +368,11 @@ export default function Pipelines() {
         <div className="min-w-0">
           <h1 className="text-2xl font-bold tracking-tight">Pipelines</h1>
           <p className="text-text-dim text-sm mt-1">Scheduled work you and your groups own.</p>
-          {demo && (
-            <p className="text-text-dim text-sm mt-1">
-              Demo mode shows two sample pipelines. Scheduling a notebook needs a scheduler connection.
-            </p>
-          )}
         </div>
-        {!demo && (
-          <button type="button" className="btn-primary" onClick={() => setScheduling(true)}>
-            <Icon name="clock" className="w-4 h-4" />
-            Schedule a notebook
-          </button>
-        )}
+        <button type="button" className="btn-primary" onClick={() => setScheduling(true)}>
+          <Icon name="clock" className="w-4 h-4" />
+          Schedule a notebook
+        </button>
       </header>
 
       <PipelineFeedback notice={routedNotice ?? actions.notice} error={actions.error} />
@@ -451,7 +441,6 @@ export default function Pipelines() {
                   pipeline={pipeline}
                   pending={actions.pending}
                   onAct={actions.act}
-                  demo={demo}
                 />
               ))}
             </tbody>
@@ -588,12 +577,10 @@ function Row({
   pipeline,
   pending,
   onAct,
-  demo,
 }: {
   pipeline: PipelineView
   pending: string | null
   onAct: (pipeline: PipelineView, action: PipelineAction) => void | Promise<void>
-  demo: boolean
 }) {
   const last = pipeline.lastRun
   const lastWhen = last ? formatWhen(last.startedAt ?? last.logicalDate ?? last.endedAt) : null
@@ -651,7 +638,7 @@ function Row({
       <td className="td px-3">
         <div className="flex justify-end">
           {/* The list is the fast path: its Run now posts `{}` and opens no dialog (nova#817). */}
-          {!demo && <PipelineActions pipeline={pipeline} pending={pending} onAct={onAct} />}
+          <PipelineActions pipeline={pipeline} pending={pending} onAct={onAct} />
         </div>
       </td>
     </tr>

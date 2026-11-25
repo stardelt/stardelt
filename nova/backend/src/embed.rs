@@ -37,8 +37,8 @@ pub struct Embed {
 }
 
 impl Embed {
-    /// Nova could not read the app's headers — demo mode, an unreachable page, or
-    /// no external URL to frame. Not the same as "allowed".
+    /// Nova could not read the app's headers — an unreachable page, or no external URL
+    /// to frame. Not the same as "allowed".
     pub fn unknown(url: String, checked: Option<String>) -> Self {
         Self {
             url,

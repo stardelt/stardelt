@@ -496,7 +496,6 @@ async fn applied(
         (status = 400, description = "A malformed request, one sentence", body = crate::openapi::ErrorResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "The demo has no catalog to plan migrations against", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn plan_handler(
@@ -504,15 +503,6 @@ pub(crate) async fn plan_handler(
     ApiJson(request): ApiJson<PlanRequest>,
 ) -> Response {
     let state = caller.state();
-    if state.demo {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                serde_json::json!({"error": "the demo has no catalog to plan migrations against"}),
-            ),
-        )
-            .into_response();
-    }
     if let Err(message) = validate(&request) {
         return (
             StatusCode::BAD_REQUEST,
@@ -679,7 +669,6 @@ pub(crate) async fn approve_handler(
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
         (status = 409, description = "Refused before anything ran: a changed or reordered file (ApplyAnswer with the errors), or a breaking file without allowBreaking (one sentence)", body = ApplyAnswer),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "The demo has no catalog to run migrations against", body = crate::openapi::ErrorResponse),
     )
 )]
 pub(crate) async fn apply_handler(
@@ -687,15 +676,6 @@ pub(crate) async fn apply_handler(
     ApiJson(request): ApiJson<ApplyRequest>,
 ) -> Response {
     let state = caller.state();
-    if state.demo {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                serde_json::json!({"error": "the demo has no catalog to plan migrations against"}),
-            ),
-        )
-            .into_response();
-    }
     let allow_breaking = request.allow_breaking;
     let mode = request.mode.clone();
     let approval_id = request.approval_id.clone();

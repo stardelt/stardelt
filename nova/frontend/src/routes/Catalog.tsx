@@ -702,7 +702,7 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
     return (
       <div className="space-y-4">
         <div className="card p-6 text-text-mute text-sm">
-          No snapshots recorded. {me.data?.demo ? 'Demo mode has no table history.' : 'The table has no snapshots yet.'}
+          No snapshots recorded. The table has no snapshots yet.
         </div>
         {!canRollback && rollbackRule && (
           <p className="text-text-mute text-xs break-words">{rollbackRule}</p>

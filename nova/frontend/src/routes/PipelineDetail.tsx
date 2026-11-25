@@ -37,9 +37,6 @@ export default function PipelineDetail() {
   const newest = searchParams.get('edit') === 'newest'
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  // Demo mode has no cluster, so every write and the definition route answer 503 (#500).
-  const demo = me.data?.demo === true
   const [openRun, setOpenRun] = useState<string | null>(null)
   const [stopping, setStopping] = useState<RunView | null>(null)
   const [editing, setEditing] = useState(newest)
@@ -157,37 +154,33 @@ export default function PipelineDetail() {
               Report
             </Link>
           )}
-          {!demo && (
-            <>
-              <PipelineActions
-                pipeline={pipeline}
-                pending={actions.pending}
-                onAct={actions.act}
-                withRunForm
-                onRun={(start) => void actions.act(pipeline, 'run', start)}
-                error={actions.error}
-              />
-              {pipeline.canEdit && (
-                <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
-                  Edit schedule
-                </button>
-              )}
-              {pipeline.canEdit && (
-                <button
-                  type="button"
-                  className="btn-ghost py-1.5 text-xs text-bad"
-                  onClick={() => setDeleting(true)}
-                >
-                  Delete pipeline
-                </button>
-              )}
-              {!pipeline.canEdit && (
-                <p className="text-text-dim text-sm">
-                  Read-only: your group may run this pipeline;{' '}
-                  {pipeline.ownerGroup ?? 'the owner group'} changes it.
-                </p>
-              )}
-            </>
+          <PipelineActions
+            pipeline={pipeline}
+            pending={actions.pending}
+            onAct={actions.act}
+            withRunForm
+            onRun={(start) => void actions.act(pipeline, 'run', start)}
+            error={actions.error}
+          />
+          {pipeline.canEdit && (
+            <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
+              Edit schedule
+            </button>
+          )}
+          {pipeline.canEdit && (
+            <button
+              type="button"
+              className="btn-ghost py-1.5 text-xs text-bad"
+              onClick={() => setDeleting(true)}
+            >
+              Delete pipeline
+            </button>
+          )}
+          {!pipeline.canEdit && (
+            <p className="text-text-dim text-sm">
+              Read-only: your group may run this pipeline;{' '}
+              {pipeline.ownerGroup ?? 'the owner group'} changes it.
+            </p>
           )}
         </div>
       </header>
@@ -319,89 +312,87 @@ export default function PipelineDetail() {
         )}
       </section>
 
-      {!demo && (
-      <section className="card p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold">Definition</h2>
-            <p className="text-text-mute text-sm mt-1">
-              The pipeline as the document that creates it.
-              {showDefinition && definition.data ? (definition.data.editable ? ' Press Edit definition to change it.' : ' Read-only here.') : ''}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="btn-ghost py-1.5 text-xs"
-            aria-expanded={showDefinition}
-            aria-controls="pipeline-definition"
-            onClick={() => {
-              setShowDefinition(!showDefinition)
-              setEditingDefinition(false)
-            }}
-          >
-            {showDefinition ? 'Hide definition' : 'Show definition'}
-          </button>
+    <section className="card p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold">Definition</h2>
+          <p className="text-text-mute text-sm mt-1">
+            The pipeline as the document that creates it.
+            {showDefinition && definition.data ? (definition.data.editable ? ' Press Edit definition to change it.' : ' Read-only here.') : ''}
+          </p>
         </div>
-        {showDefinition && (
-          <div id="pipeline-definition" className="mt-3 space-y-2">
-            {pipeline.deployment && (
-              <p className="text-xs text-text-mute" data-testid="definition-owned-by-source">
-                {'Deployed from '}
-                {pipeline.deployment.bundle} · {pipeline.deployment.target}
-                {' — the next deploy overwrites changes made here.'}
-              </p>
-            )}
-            {definition.isLoading && <p className="text-sm text-text-mute">Loading the definition…</p>}
-            {definition.isError && <ErrorBox error={definition.error} onRetry={() => void definition.refetch()} />}
-            {definition.data && (
-              <>
-                {!definition.data.editable && (
-                  <p className="text-sm text-text-dim break-words">
-                    {definition.data.managedBy === 'other'
-                      ? 'This pipeline is managed outside Nova (kubectl or GitOps); change it where it comes from.'
-                      : 'This pipeline has a shape the form cannot edit.'}
-                  </p>
-                )}
-                {editingDefinition ? (
-                  <DefinitionEditor
-                    key={definition.dataUpdatedAt}
-                    namespace={namespace}
-                    name={name}
-                    spec={definition.data}
-                    onClose={() => setEditingDefinition(false)}
-                    onReload={() => void definition.refetch()}
-                    onSaved={(view) => {
-                      setEditingDefinition(false)
-                      actions.clearError()
-                      actions.announce(`Saved ${view.name}.`)
-                      void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
-                      void queryClient.invalidateQueries({ queryKey: ['pipeline-spec', namespace, name] })
-                      void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
-                    }}
-                  />
-                ) : (
-                  <>
-                    <pre
-                      role="region"
-                      aria-label="Definition as YAML"
-                      tabIndex={0}
-                      className="overflow-x-auto rounded border border-border bg-bg-soft p-3 font-mono text-xs"
-                    >
-                      {toYaml(definition.data.document)}
-                    </pre>
-                    {definition.data.editable && (
-                      <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditingDefinition(true)}>
-                        Edit definition
-                      </button>
-                    )}
-                  </>
-                )}
-              </>
-            )}
-          </div>
-        )}
-      </section>
+        <button
+          type="button"
+          className="btn-ghost py-1.5 text-xs"
+          aria-expanded={showDefinition}
+          aria-controls="pipeline-definition"
+          onClick={() => {
+            setShowDefinition(!showDefinition)
+            setEditingDefinition(false)
+          }}
+        >
+          {showDefinition ? 'Hide definition' : 'Show definition'}
+        </button>
+      </div>
+      {showDefinition && (
+        <div id="pipeline-definition" className="mt-3 space-y-2">
+          {pipeline.deployment && (
+            <p className="text-xs text-text-mute" data-testid="definition-owned-by-source">
+              {'Deployed from '}
+              {pipeline.deployment.bundle} · {pipeline.deployment.target}
+              {' — the next deploy overwrites changes made here.'}
+            </p>
+          )}
+          {definition.isLoading && <p className="text-sm text-text-mute">Loading the definition…</p>}
+          {definition.isError && <ErrorBox error={definition.error} onRetry={() => void definition.refetch()} />}
+          {definition.data && (
+            <>
+              {!definition.data.editable && (
+                <p className="text-sm text-text-dim break-words">
+                  {definition.data.managedBy === 'other'
+                    ? 'This pipeline is managed outside Nova (kubectl or GitOps); change it where it comes from.'
+                    : 'This pipeline has a shape the form cannot edit.'}
+                </p>
+              )}
+              {editingDefinition ? (
+                <DefinitionEditor
+                  key={definition.dataUpdatedAt}
+                  namespace={namespace}
+                  name={name}
+                  spec={definition.data}
+                  onClose={() => setEditingDefinition(false)}
+                  onReload={() => void definition.refetch()}
+                  onSaved={(view) => {
+                    setEditingDefinition(false)
+                    actions.clearError()
+                    actions.announce(`Saved ${view.name}.`)
+                    void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
+                    void queryClient.invalidateQueries({ queryKey: ['pipeline-spec', namespace, name] })
+                    void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+                  }}
+                />
+              ) : (
+                <>
+                  <pre
+                    role="region"
+                    aria-label="Definition as YAML"
+                    tabIndex={0}
+                    className="overflow-x-auto rounded border border-border bg-bg-soft p-3 font-mono text-xs"
+                  >
+                    {toYaml(definition.data.document)}
+                  </pre>
+                  {definition.data.editable && (
+                    <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditingDefinition(true)}>
+                      Edit definition
+                    </button>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
       )}
+    </section>
 
       <div className="[container-type:inline-size]">
       <section className="card relative overflow-x-auto">

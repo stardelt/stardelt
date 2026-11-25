@@ -42,7 +42,7 @@ pub struct PlatformApp {
     /// up | unreachable | unknown | not-installed
     pub status: String,
     /// Images the app's workloads actually run, read from the cluster. Empty when
-    /// there is no cluster to read (demo mode, local run) or the app is not installed.
+    /// there is no cluster to read (local run) or the app is not installed.
     pub images: Vec<String>,
 }
 
@@ -372,7 +372,7 @@ pub struct AppLink {
 ///
 /// Nova itself is not a destination (you are already in it), and an app with no
 /// browsable surface has no URL worth offering. When no base domain is configured
-/// (demo mode, a local run) every URL is empty, so the honest answer is no links
+/// (a local run) every URL is empty, so the honest answer is no links
 /// at all rather than anchors that go nowhere.
 fn links_for(base: &str, admin: bool) -> Vec<AppLink> {
     SPECS
@@ -427,7 +427,7 @@ pub async fn links(principal: Option<Extension<crate::auth::Principal>>) -> Json
     operation_id = "apps_list",
     path = "/api/apps",
     tag = "internal",
-    description = "Every service of the platform (`nova`, `trino`, `lakekeeper`, `superset`, `airflow`, `jupyterhub`) with its category, the address a browser opens (empty without a base domain and for an app with no browsable surface), `browsable`, the liveness `status` (`up`, `unreachable`, `unknown` or `not-installed`) and the images its workloads run, read from the cluster (empty in demo mode or when the app is not installed). Administrator-only: anybody else gets 403. Field names are snake_case.",
+    description = "Every service of the platform (`nova`, `trino`, `lakekeeper`, `superset`, `airflow`, `jupyterhub`) with its category, the address a browser opens (empty without a base domain and for an app with no browsable surface), `browsable`, the liveness `status` (`up`, `unreachable`, `unknown` or `not-installed`) and the images its workloads run, read from the cluster (empty when the app is not installed). Administrator-only: anybody else gets 403. Field names are snake_case.",
     responses(
         (status = 200, description = "One row per service, in the order the service catalog declares them", body = [PlatformApp]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -436,7 +436,7 @@ pub async fn links(principal: Option<Extension<crate::auth::Principal>>) -> Json
 )]
 pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
-    let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
+    let snapshot = s.workloads.snapshot(s.kube.as_ref()).await;
     let mut apps = Vec::with_capacity(SPECS.len());
 
     for spec in SPECS {
@@ -474,7 +474,7 @@ pub struct EmbedApp {
 )]
 pub async fn embeds(State(s): State<Arc<AppState>>) -> Json<Vec<EmbedApp>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
-    let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
+    let snapshot = s.workloads.snapshot(s.kube.as_ref()).await;
     let mut out = Vec::new();
     for spec in SPECS.iter().filter(|spec| spec.embed.is_some()) {
         let probed = probe(&s, &spec.probe.url(&targets(&s), spec.probe_path)).await;
@@ -518,7 +518,7 @@ pub async fn detail(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> R
     };
 
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
-    let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
+    let snapshot = s.workloads.snapshot(s.kube.as_ref()).await;
     let workloads = cluster::workloads_for(&snapshot.workloads, spec.workload_prefixes);
     let (ready, desired) = cluster::replicas(&workloads);
 
@@ -548,22 +548,12 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
                 "Open the UI",
                 "kubectl -n stardelt port-forward svc/trino 8443:8443, then open https://localhost:8443/ui/",
             )];
-            if state.demo {
-                facts.extend(trino_facts(&demo_trino_info(), "demo stub"));
-            } else if let Some(info) =
-                fetch_json(state, &format!("{}/v1/info", state.trino_url)).await
-            {
+            if let Some(info) = fetch_json(state, &format!("{}/v1/info", state.trino_url)).await {
                 facts.extend(trino_facts(&info, "Trino /v1/info"));
             }
             facts
         }
         "lakekeeper" => {
-            if state.demo {
-                return vec![
-                    Fact::sourced("Warehouse", &state.warehouse_name, "demo"),
-                    Fact::sourced("Warehouse id", "demo", "demo"),
-                ];
-            }
             let mut facts = Vec::new();
             match crate::catalog::resolve_warehouse_id(state).await {
                 Ok(id) => {
@@ -604,9 +594,6 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
         // Superset and Airflow answer their health endpoint with a component report; the
         // probe URL is that endpoint, so one fetch serves both purposes.
         "superset" | "airflow" => {
-            if state.demo {
-                return Vec::new();
-            }
             let url = spec.probe.url(&targets(state), spec.probe_path);
             match fetch_json(state, &url).await {
                 Some(health) if spec.id == "superset" => superset_facts(&health),
@@ -639,11 +626,6 @@ fn trino_facts(info: &Value, source: &str) -> Vec<Fact> {
         facts.push(Fact::sourced("Uptime", uptime, source));
     }
     facts
-}
-
-/// The stub `/api/trino/cluster` answers with in demo mode.
-fn demo_trino_info() -> Value {
-    json!({ "nodeVersion": { "version": "demo" }, "state": "ACTIVE", "demo": true })
 }
 
 /// Lakekeeper's `/management/v1/info`: the catalog's own version, whether the
@@ -854,7 +836,7 @@ async fn embed_report(state: &AppState, spec: &Spec, base: &str) -> Embed {
     };
     let checked = spec.probe.url(&targets(state), frame.path);
 
-    if state.demo || url.is_empty() {
+    if url.is_empty() {
         return Embed::unknown(url, Some(checked));
     }
 
@@ -939,9 +921,6 @@ fn framing_client(state: &AppState, own_hosts: Vec<String>) -> reqwest::Client {
 }
 
 async fn probe(state: &AppState, url: &str) -> String {
-    if state.demo {
-        return "up".into();
-    }
     match http_client(state).get(url).send().await {
         Ok(r) => {
             if r.status().as_u16() < 500 {
@@ -1074,7 +1053,7 @@ mod tests {
         // Lakekeeper has no UI and Nova is where the user already is.
         assert!(links.iter().all(|l| l.id != "nova" && l.id != "lakekeeper"));
 
-        // No base domain (demo mode, local run): no links, rather than empty hrefs.
+        // No base domain (local run): no links, rather than empty hrefs.
         assert!(links_for("", true).is_empty());
 
         // A plain realm user's Airflow role carries no global DAG read (FAB answers

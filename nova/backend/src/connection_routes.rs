@@ -1367,7 +1367,7 @@ async fn resource_rows(resources: Option<&Resources>, scope: Scope) -> Vec<Value
 
 /// The signed-in caller, checked **before** the body is parsed: a route that cannot serve this
 /// caller says so (`401` without a token) rather than complaining about a body it was never going
-/// to use. Demo mode and `static-dev` have no principal at all. A caller without a configured store
+/// to use. `static-dev` has no principal at all. A caller without a configured store
 /// (an install with `spec.secrets.mode: external`) is a valid caller: the read answers from the
 /// `Connection` resources, and a write says `503` itself.
 pub(crate) struct SignedIn {
@@ -1429,30 +1429,6 @@ fn resources(state: &AppState) -> Option<Resources> {
     state.kube.clone().map(Resources::cluster)
 }
 
-/// Demo mode has no principal and no store, so `SignedIn` refuses the read before the handler
-/// runs (#500). This lets exactly the routes with demo samples through.
-pub(crate) enum Caller {
-    Demo,
-    /// Boxed because `SignedIn` is large (208 bytes) and clippy's `large_enum_variant` is a gate.
-    Signed(Box<SignedIn>),
-}
-
-impl FromRequestParts<Arc<AppState>> for Caller {
-    type Rejection = Fail;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        if state.demo {
-            return Ok(Caller::Demo);
-        }
-        SignedIn::from_request_parts(parts, state)
-            .await
-            .map(|signed| Caller::Signed(Box::new(signed)))
-    }
-}
-
 #[utoipa::path(
     get,
     operation_id = "connections_list",
@@ -1466,11 +1442,7 @@ impl FromRequestParts<Arc<AppState>> for Caller {
         (status = 503, description = "The secret store is not configured", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn list(caller: Caller) -> Response {
-    let signed = match caller {
-        Caller::Demo => return Json(crate::demo::connections()).into_response(),
-        Caller::Signed(signed) => *signed,
-    };
+pub(crate) async fn list(signed: SignedIn) -> Response {
     let resources = resources(&signed.state);
     let Some(store) = signed.store() else {
         return Json(ConnectionsResponse {
@@ -2824,7 +2796,7 @@ mod tests {
     }
 
     /// The routes a body test needs, with `store` configured or not and a caller (`None` =
-    /// no principal at all, as in demo mode and `static-dev`).
+    /// no principal at all, as with `static-dev`).
     fn app(store: Option<StoreClient>, caller: Option<Principal>) -> Router {
         let router = Router::new()
             .route("/connections", get(list).post(create))
@@ -2876,14 +2848,12 @@ mod tests {
             catalog_layers: std::sync::Mutex::new(None),
             principal_owners: std::sync::Mutex::new(None),
             http: reqwest::Client::new(),
-            demo: false,
             forward_identity: false,
             redact_query_log_literals: false,
             showback: None,
             mcp: None,
             auth: None,
             jobs: Mutex::new(Vec::new()),
-            demo_state: std::sync::RwLock::new(crate::demo::DemoState::default()),
             kube: None,
             workloads: crate::cluster::WorkloadCache::default(),
             admin_console_url: None,
@@ -3020,7 +2990,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["error"], "the secret store is not configured");
 
-        // A caller with no principal at all (demo mode off, static-dev): both answer the sentence.
+        // A caller with no principal at all (static-dev): both answer the sentence.
         let app_without_caller = app(None, None);
         for method in ["GET", "POST"] {
             let request = Request::builder()
@@ -4000,31 +3970,5 @@ mod tests {
         let text = serde_json::to_string(&views).unwrap();
         assert!(!text.contains("hunter2"), "no value may appear: {text}");
         assert_eq!(views[0].secret_keys, ["user", "password"]);
-    }
-
-    /// Demo mode has neither a principal nor a store, so this goes through `Caller::Demo`; the
-    /// two sample rows are the answer and no value appears (#500).
-    #[tokio::test]
-    async fn demo_mode_lists_connections_without_a_store() {
-        let app = Router::new()
-            .route("/api/connections", get(list))
-            .with_state(crate::router_tests::test_state());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/connections")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("orders-postgres"), "{text}");
-        assert!(text.contains("my-bucket"), "{text}");
-        assert!(!text.contains("hunter2"), "no value may appear: {text}");
     }
 }

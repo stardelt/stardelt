@@ -132,7 +132,7 @@ pub struct LineageImpact {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadTable {
-    /// `<catalog>.<schema>` (demo data may carry the schema alone).
+    /// `<catalog>.<schema>` (the schema alone when the caller gave no catalog).
     pub namespace: String,
     pub name: String,
     /// Read-only queries against it in the window.
@@ -623,10 +623,6 @@ pub async fn graph(
         }
     };
 
-    if state.demo {
-        return demo_graph_response(&start_ns, &start_name);
-    }
-
     let allowed = match catalog::allowed_catalogs(&state, principal.as_ref()).await {
         Ok(a) => a,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "could not resolve catalogs"),
@@ -774,10 +770,6 @@ pub async fn read_tables(
     let days = q.days.unwrap_or(30).clamp(1, 365);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
 
-    if state.demo {
-        return demo_read_tables();
-    }
-
     let allowed = match catalog::allowed_catalogs(&state, principal.as_ref()).await {
         Ok(a) => a,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "could not resolve catalogs"),
@@ -842,130 +834,6 @@ pub async fn read_tables(
     }
 
     (StatusCode::OK, Json(ReadTables { tables })).into_response()
-}
-
-fn demo_read_tables() -> Response {
-    let table = |namespace: &str, name: &str, queries: i64| ReadTable {
-        namespace: namespace.to_string(),
-        name: name.to_string(),
-        queries,
-        last_read: "2026-01-01T00:00:00Z".to_string(),
-        last_write: Some("2026-01-01T00:00:00Z".to_string()),
-    };
-    (
-        StatusCode::OK,
-        Json(ReadTables {
-            tables: vec![
-                table("nyc_taxi", "yellow_trips", 42),
-                table("analytics", "trips_by_borough", 18),
-            ],
-        }),
-    )
-        .into_response()
-}
-
-fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
-    let last_write = Some("2026-01-01T00:00:00Z".to_string());
-    let graph = LineageGraph {
-        nodes: vec![
-            LineageNode {
-                id: "nyc_taxi|yellow_trips".to_string(),
-                namespace: "nyc_taxi".to_string(),
-                name: "yellow_trips".to_string(),
-                visible: true,
-                label: None,
-                level: Some(-1),
-                last_write: None,
-                hand_made: false,
-                readers: None,
-                writers: None,
-            },
-            LineageNode {
-                id: "analytics|trips_by_borough".to_string(),
-                namespace: "analytics".to_string(),
-                name: "trips_by_borough".to_string(),
-                visible: true,
-                label: None,
-                level: Some(0),
-                last_write: last_write.clone(),
-                hand_made: false,
-                readers: Some(LineageReaders {
-                    queries: 12,
-                    people: 3,
-                    last_read: "2026-01-01T00:00:00Z".to_string(),
-                    tools: vec!["supertable".to_string()],
-                }),
-                writers: Some(vec![LineageWriter {
-                    kind: "pipeline".to_string(),
-                    name: "trips_by_borough_job".to_string(),
-                    runs: 30,
-                    last_run: "2026-01-01T00:00:00Z".to_string(),
-                }]),
-            },
-            LineageNode {
-                id: "analytics|daily_revenue".to_string(),
-                namespace: "analytics".to_string(),
-                name: "daily_revenue".to_string(),
-                visible: true,
-                label: None,
-                level: Some(1),
-                last_write: last_write.clone(),
-                hand_made: false,
-                readers: Some(LineageReaders {
-                    queries: 5,
-                    people: 2,
-                    last_read: "2026-01-01T00:00:00Z".to_string(),
-                    tools: vec![],
-                }),
-                writers: None,
-            },
-        ],
-        edges: vec![
-            LineageEdge {
-                from: "nyc_taxi|yellow_trips".to_string(),
-                to: "analytics|trips_by_borough".to_string(),
-                job_namespace: "pipeline".to_string(),
-                job_name: "trips_by_borough_job".to_string(),
-                run_id: "00000000-0000-0000-0000-000000000001".to_string(),
-                event_time: "2026-01-01T00:00:00Z".to_string(),
-                runs: 30,
-            },
-            LineageEdge {
-                from: "nyc_taxi|yellow_trips".to_string(),
-                to: "analytics|daily_revenue".to_string(),
-                job_namespace: "pipeline".to_string(),
-                job_name: "daily_revenue_job".to_string(),
-                run_id: "00000000-0000-0000-0000-000000000002".to_string(),
-                event_time: "2026-01-01T00:00:00Z".to_string(),
-                runs: 30,
-            },
-        ],
-        jobs: vec![
-            LineageJob {
-                id: "pipeline|daily_revenue_job".to_string(),
-                kind: "pipeline".to_string(),
-                name: "daily_revenue_job".to_string(),
-                runs: 1,
-                last_run: "2026-01-01T00:00:00Z".to_string(),
-                hand_made: false,
-            },
-            LineageJob {
-                id: "pipeline|trips_by_borough_job".to_string(),
-                kind: "pipeline".to_string(),
-                name: "trips_by_borough_job".to_string(),
-                runs: 1,
-                last_run: "2026-01-01T00:00:00Z".to_string(),
-                hand_made: false,
-            },
-        ],
-        // One table on each side of the focus; the one downstream row is written by one job.
-        impact: LineageImpact {
-            downstream: 1,
-            upstream: 1,
-            downstream_jobs: 1,
-        },
-    };
-    (StatusCode::OK, Json(graph)).into_response()
 }
 
 /// The checked query string of `/api/lineage/columns` (stardelt-nova#646 slice L5).
@@ -1139,10 +1007,6 @@ pub async fn columns(
     };
     let days = q.days.clamp(1, 365);
 
-    if state.demo {
-        return (StatusCode::OK, Json(demo_columns_response())).into_response();
-    }
-
     let (catalog_name, _id) =
         match catalog::catalog_scope(&state, principal.as_ref(), Some(&catalog_name)).await {
             Ok(scope) => scope,
@@ -1181,35 +1045,6 @@ pub async fn columns(
         .into_response()
 }
 
-fn demo_columns_response() -> ColumnLineage {
-    let source = |table: &str, column: &str| ColumnSource {
-        catalog: Some("mobility".to_string()),
-        schema: Some("gold".to_string()),
-        table: Some(table.to_string()),
-        column: Some(column.to_string()),
-        hidden: false,
-    };
-    ColumnLineage {
-        columns: vec![
-            ColumnLineageEntry {
-                column: "total_trips".to_string(),
-                sources: vec![source("kpis", "total_trips")],
-                last_seen: "2026-01-01T00:00:00Z".to_string(),
-            },
-            ColumnLineageEntry {
-                column: "active_days".to_string(),
-                sources: vec![source("kpis", "active_days")],
-                last_seen: "2026-01-01T00:00:00Z".to_string(),
-            },
-            ColumnLineageEntry {
-                column: "total_revenue".to_string(),
-                sources: vec![source("kpis", "total_revenue")],
-                last_seen: "2026-01-01T00:00:00Z".to_string(),
-            },
-        ],
-    }
-}
-
 #[utoipa::path(
     get,
     operation_id = "lineage_run_detail",
@@ -1231,18 +1066,6 @@ pub async fn run_detail(
     Path(run_id): Path<String>,
 ) -> Response {
     let principal = principal.map(|Extension(p)| p);
-    if state.demo {
-        return Json(serde_json::json!({
-            "run_id": run_id,
-            "job_namespace": "default",
-            "job_name": "demo_job",
-            "event_type": "COMPLETE",
-            "event_time": "2026-01-01T00:00:00Z",
-            "inputs": [{"namespace": "nyc_taxi", "name": "yellow_trips"}],
-            "outputs": [{"namespace": "analytics", "name": "trips_by_borough"}]
-        }))
-        .into_response();
-    }
 
     let pool = match &state.db {
         Some(p) => p,

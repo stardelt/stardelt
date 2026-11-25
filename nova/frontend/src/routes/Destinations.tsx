@@ -6,7 +6,6 @@ import { Icon } from '../components/Icon'
 
 const EMAIL_NOTE = 'Email needs the platform’s SMTP relay; it is not configured yet.'
 const NO_GROUP = 'You are not in a group, so you cannot add a destination.'
-const DEMO_NOTE = 'The demo has no database for Nova, so notification destinations are not available.'
 
 /** The address a person reads: the webhook URL, or the recipients joined. */
 const address = (row: Destination) =>
@@ -23,12 +22,10 @@ const byName = (a: Destination, b: Destination) => a.name.localeCompare(b.name)
 export default function Destinations() {
   const queryClient = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  const demo = me.data?.demo === true
-  // Demo mode has no state store, so the list itself would answer 503: do not ask.
   const list = useQuery({
     queryKey: ['destinations'],
     queryFn: api.destinations,
-    enabled: me.data !== undefined && me.data.demo !== true,
+    enabled: me.data !== undefined,
   })
   const [creating, setCreating] = useState(false)
   const [toDelete, setToDelete] = useState<Destination | null>(null)
@@ -54,7 +51,7 @@ export default function Destinations() {
           Named webhook or email addresses your group can send notifications to.
         </p>
       </div>
-      {!demo && !storeMissing && groups.length > 0 && !creating && (
+      {!storeMissing && groups.length > 0 && !creating && (
         <button type="button" className="btn-primary" onClick={() => setCreating(true)}>
           <Icon name="plus" className="h-4 w-4" />
           New destination
@@ -62,11 +59,6 @@ export default function Destinations() {
       )}
     </header>
   )
-
-  // Demo mode has no state store: say so and offer nothing that could only answer 503.
-  if (demo) {
-    return <div className="max-w-6xl space-y-5">{header}<p className="text-sm text-text-dim">{DEMO_NOTE}</p></div>
-  }
 
   return (
     <div className="max-w-6xl space-y-5">

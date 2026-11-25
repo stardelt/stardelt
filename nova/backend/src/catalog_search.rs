@@ -161,7 +161,7 @@ fn matches_words(namespace: &str, table: &str, words: &[String]) -> bool {
     operation_id = "catalog_search",
     path = "/api/catalog/search",
     tag = "public",
-    description = "Find tables in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case, or when one of its documented fields (the description, a tag, the owner, the domain) contains every word — a table found both ways appears once. `tag`, `owner` and `domain` narrow the answer to documented tables: a table without a documentation row has no tag, owner or domain, so it is not shown. Those three filters need the state store and answer 503 without it (demo mode has none). The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only single-level namespaces are searched. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
+    description = "Find tables in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case, or when one of its documented fields (the description, a tag, the owner, the domain) contains every word — a table found both ways appears once. `tag`, `owner` and `domain` narrow the answer to documented tables: a table without a documentation row has no tag, owner or domain, so it is not shown. Those three filters need the state store and answer 503 without it. The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only single-level namespaces are searched. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
     params(SearchParams),
     responses(
         (status = 200, description = "The matching tables", body = SearchResult),
@@ -218,14 +218,9 @@ pub async fn search(
         Err(response) => return response,
     };
 
-    let namespaces = if s.demo {
-        let demo = s.demo_state.read().expect("demo state poisoned");
-        namespaces_of(&demo.namespaces_json())
-    } else {
-        match get_json(&s, &format!("/catalog/v1/{id}/namespaces")).await {
-            Ok(answer) => namespaces_of(&answer),
-            Err(response) => return response,
-        }
+    let namespaces = match get_json(&s, &format!("/catalog/v1/{id}/namespaces")).await {
+        Ok(answer) => namespaces_of(&answer),
+        Err(response) => return response,
     };
     let truncated = namespaces.len() > MAX_NAMESPACES;
 
@@ -236,17 +231,17 @@ pub async fn search(
     if !filtering {
         let scan_cap = limit.saturating_mul(4);
         'scan: for namespace in namespaces.iter().take(MAX_NAMESPACES) {
-            let tables = if s.demo {
-                let demo = s.demo_state.read().expect("demo state poisoned");
-                tables_of(&demo.tables_json(namespace))
-            } else {
-                let Some(segment) = path_segment(namespace) else {
-                    continue;
-                };
-                match get_json(&s, &format!("/catalog/v1/{id}/namespaces/{segment}/tables")).await {
-                    Ok(answer) => tables_of(&answer),
-                    Err(response) => return response,
-                }
+            let Some(segment) = path_segment(namespace) else {
+                continue;
+            };
+            let tables = match get_json(
+                &s,
+                &format!("/catalog/v1/{id}/namespaces/{segment}/tables"),
+            )
+            .await
+            {
+                Ok(answer) => tables_of(&answer),
+                Err(response) => return response,
             };
             for table in tables {
                 if !matches_words(namespace, &table, &words) {

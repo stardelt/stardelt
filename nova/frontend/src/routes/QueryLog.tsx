@@ -72,8 +72,6 @@ function useDebounced<T>(value: T, ms: number): T {
 export default function QueryLog() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const admin = isAdmin(me.data)
-  // Demo mode has no state store, so the log route answers 503 (#500). Do not ask.
-  const demo = me.data?.demo === true
 
   const [scope, setScope] = useState<'mine' | 'team' | 'all'>('mine')
   const [state, setState] = useState<StateFilter>('')
@@ -104,9 +102,9 @@ export default function QueryLog() {
 
   const log = useInfiniteQuery({
     queryKey: ['query-log', effectiveScope, state, rangeIdx, q],
-    // Wait for /api/me first: on the first render it is still in flight, and `enabled` would
-    // otherwise be true in demo mode and ask the 503 route once anyway.
-    enabled: me.isSuccess && me.data?.demo !== true && view === 'queries',
+    // Wait for /api/me first: on the first render it is still in flight, and the route
+    // would be asked once before the caller's scope is known.
+    enabled: me.isSuccess && view === 'queries',
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       api.queryLog({
@@ -308,14 +306,7 @@ export default function QueryLog() {
                 {log.isLoading && (
                   <tr><td className="px-4 py-5 text-text-mute" colSpan={colCount}>loading…</td></tr>
                 )}
-                {demo && (
-                  <tr>
-                    <td className="px-4 py-6 text-text-mute" colSpan={colCount}>
-                      Demo mode keeps no query history. Run a query in the <Link className="underline" to="/query">SQL editor</Link> to see one in a real install.
-                    </td>
-                  </tr>
-                )}
-                {!demo && log.isError && !log.data && (
+                {log.isError && !log.data && (
                   <tr>
                     <td className="px-4 py-5 text-bad" colSpan={colCount}>
                       {errorMessage(log.error)}{' '}

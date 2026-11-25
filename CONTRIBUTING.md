@@ -135,7 +135,7 @@ shows up later somewhere else. Make one pull request per repository, in the orde
 1. **Nova.** Add the route in `frontend/src/routes/`, register it in `frontend/src/App.tsx`, and add the
    navigation entry in `frontend/src/components/Shell.tsx`.
 2. Back it with an API route ([Change the API](#change-the-api)), so it works from scripts too.
-3. Try it with `make demo`, and check it with `npm --prefix frontend run build`.
+3. Run `make dev`, and check it with `npm --prefix frontend run build`.
 4. **Docs.** Use the same words as the screen, because readers look for the label they see.
 
 ### Add or upgrade a service

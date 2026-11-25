@@ -51,7 +51,7 @@
 //! `^[a-z0-9][a-z0-9_-]{0,39}$`. Validation happens before any request is sent. A key that
 //! is absent from a write body changes nothing; `null` (or an empty tag list, or a blank
 //! description) removes the property. A write with nothing to change sends no commit and
-//! answers the current documentation. Demo mode answers 503.
+//! answers the current documentation.
 //!
 //! The route logic sits in plain `async fn`s that take their inputs, so the tests below run
 //! them against a fake Lakekeeper and a recorded SQL closure without a cluster.
@@ -1032,17 +1032,6 @@ async fn catalog_owner_from_kube(state: &AppState, catalog_name: &str) -> Option
     }
 }
 
-fn catalog_owner_demo(state: &AppState, catalog_name: &str) -> Option<String> {
-    if catalog_name == state.warehouse_name {
-        let demo = state.demo_state.read().ok()?;
-        if let Some(row) = &demo.admin_catalog {
-            return row.owner.clone();
-        }
-        return Some("stardelt-admins".to_string());
-    }
-    None
-}
-
 /// `GET /api/catalog/tables/{ns}/{tbl}/documentation`.
 async fn read_documentation(
     state: &AppState,
@@ -1052,11 +1041,7 @@ async fn read_documentation(
     tbl: &str,
 ) -> Result<TableDocumentation, DocError> {
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let catalog_owner = if state.demo {
-        catalog_owner_demo(state, catalog.name)
-    } else {
-        catalog_owner_from_kube(state, catalog.name).await
-    };
+    let catalog_owner = catalog_owner_from_kube(state, catalog.name).await;
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
     Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
@@ -1079,11 +1064,7 @@ async fn write_documentation(
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let catalog_owner = if state.demo {
-        catalog_owner_demo(state, catalog.name)
-    } else {
-        catalog_owner_from_kube(state, catalog.name).await
-    };
+    let catalog_owner = catalog_owner_from_kube(state, catalog.name).await;
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
     let current = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
@@ -1171,11 +1152,7 @@ async fn write_documentation(
 
     audit::catalog_doc_event(who, &format!("{ns}.{tbl}"), &changed);
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let catalog_owner = if state.demo {
-        catalog_owner_demo(state, catalog.name)
-    } else {
-        catalog_owner_from_kube(state, catalog.name).await
-    };
+    let catalog_owner = catalog_owner_from_kube(state, catalog.name).await;
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
     let doc = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
@@ -1332,11 +1309,7 @@ where
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let catalog_owner = if state.demo {
-        catalog_owner_demo(state, catalog.name)
-    } else {
-        catalog_owner_from_kube(state, catalog.name).await
-    };
+    let catalog_owner = catalog_owner_from_kube(state, catalog.name).await;
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
     let current = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
@@ -1360,11 +1333,7 @@ where
             catalog.load(ns, tbl).await.map_err(catalog_fail)?
         }
     };
-    let catalog_owner = if state.demo {
-        catalog_owner_demo(state, catalog.name)
-    } else {
-        catalog_owner_from_kube(state, catalog.name).await
-    };
+    let catalog_owner = catalog_owner_from_kube(state, catalog.name).await;
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
     let doc = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
@@ -1407,14 +1376,6 @@ pub fn caller_identity(state: &AppState, caller: Option<&Principal>) -> Identity
     crate::auth::caller_identity(&state.dev_user, caller)
 }
 
-pub(crate) fn demo_unavailable() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({ "error": "not available in demo mode" })),
-    )
-        .into_response()
-}
-
 /// Build the catalog client for one request from a resolved warehouse id.
 ///
 /// The catalog is called with Nova's own service token (`catalog_token.rs`), never the
@@ -1448,7 +1409,7 @@ async fn catalog_or_error(
     operation_id = "table_documentation_get",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain`/`stardelt.guide` custom properties, and the description and type of every column of the **current** schema. `stardelt.guide` is a guide in plain text or Markdown, at most 16000 characters: how to use the table. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers the seeded table's documentation read-only (`canEdit` and `canRollback` are false).",
+    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain`/`stardelt.guide` custom properties, and the description and type of every column of the **current** schema. `stardelt.guide` is a guide in plain text or Markdown, at most 16000 characters: how to use the table. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1469,17 +1430,6 @@ pub async fn read(
     Query(q): Query<crate::catalog::CatalogParam>,
     caller: Option<axum::Extension<Principal>>,
 ) -> Response {
-    if s.demo {
-        let demo = s.demo_state.read().expect("demo state");
-        return match demo.documentation(&ns, &tbl) {
-            Some(doc) => Json(doc).into_response(),
-            None => (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": format!("no such table {ns}.{tbl}") })),
-            )
-                .into_response(),
-        };
-    }
     let caller = caller.as_ref().map(|c| &c.0);
     match documentation_for(&s, caller, q.catalog.as_deref(), &ns, &tbl).await {
         Ok((_catalog, doc)) => Json(doc).into_response(),
@@ -1492,8 +1442,7 @@ pub async fn read(
 ///
 /// Shared with the routes that need the same visibility and the same owner rule without
 /// repeating them (`verified_queries.rs`): a table the caller cannot see answers exactly
-/// what `read` answers. Demo mode is not handled here; a caller that serves demo data
-/// answers it before calling this.
+/// what `read` answers.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn documentation_for(
     s: &Arc<AppState>,
@@ -1522,7 +1471,7 @@ pub(crate) async fn documentation_for(
     operation_id = "table_documentation_update",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
+    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1535,7 +1484,6 @@ pub(crate) async fn documentation_for(
         (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable, did not answer, or stayed busy", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -1546,9 +1494,6 @@ pub async fn update(
     caller: Option<axum::Extension<Principal>>,
     ApiJson(req): ApiJson<DocumentationUpdate>,
 ) -> Response {
-    if s.demo {
-        return demo_unavailable();
-    }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
     let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
@@ -1576,7 +1521,7 @@ pub async fn update(
     operation_id = "table_freshness_get",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. Demo mode answers grey with `canEdit: false`.",
+    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1597,18 +1542,6 @@ pub async fn health(
     Query(q): Query<crate::catalog::CatalogParam>,
     caller: Option<axum::Extension<Principal>>,
 ) -> Response {
-    if s.demo {
-        return Json(TableFreshness {
-            promise: None,
-            status: "grey".into(),
-            last_write: None,
-            due_at: None,
-            next_due_at: None,
-            detail: NO_PROMISE.into(),
-            can_edit: false,
-        })
-        .into_response();
-    }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
     let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
@@ -1636,7 +1569,7 @@ pub async fn health(
     operation_id = "table_freshness_update",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property. Demo mode answers 503.",
+    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1649,7 +1582,6 @@ pub async fn health(
         (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable, did not answer, or stayed busy", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -1660,9 +1592,6 @@ pub async fn update_health(
     caller: Option<axum::Extension<Principal>>,
     ApiJson(req): ApiJson<FreshnessUpdate>,
 ) -> Response {
-    if s.demo {
-        return demo_unavailable();
-    }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
     let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
@@ -1690,7 +1619,7 @@ pub async fn update_health(
     operation_id = "column_description_update",
     path = "/api/catalog/tables/{ns}/{tbl}/columns/{column}/description",
     tag = "public",
-    description = "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
+    description = "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1704,7 +1633,6 @@ pub async fn update_health(
         (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog, no such table or no such column in the current schema", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -1715,9 +1643,6 @@ pub async fn update_column(
     caller: Option<axum::Extension<Principal>>,
     ApiJson(req): ApiJson<ColumnDescriptionUpdate>,
 ) -> Response {
-    if s.demo {
-        return demo_unavailable();
-    }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
     let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
@@ -1997,14 +1922,12 @@ mod tests {
             catalog_layers: std::sync::Mutex::new(None),
             principal_owners: std::sync::Mutex::new(None),
             http: reqwest::Client::new(),
-            demo: false,
             forward_identity: false,
             redact_query_log_literals: false,
             showback: None,
             mcp: None,
             auth: None,
             jobs: Mutex::new(Vec::new()),
-            demo_state: std::sync::RwLock::new(crate::demo::DemoState::default()),
             kube: None,
             workloads: crate::cluster::WorkloadCache::default(),
             admin_console_url: None,
@@ -2713,29 +2636,6 @@ mod tests {
             "the audit line never carries the text: {line}"
         );
         assert!(line.contains("sales.orders"), "the table is named: {line}");
-    }
-
-    #[test]
-    fn demo_documentation_is_read_only_and_covers_the_seeded_tables() {
-        let state = test_state();
-        *state.demo_state.write().expect("demo state") = crate::demo::DemoState::seed();
-        let demo = state.demo_state.read().expect("demo state");
-
-        let doc = demo
-            .documentation("nyc_taxi", "yellow_trips")
-            .expect("the seeded table has documentation");
-        assert_eq!(
-            doc.description.as_deref(),
-            Some("NYC yellow-taxi trips, one row per completed trip.")
-        );
-        assert_eq!(doc.tags, ["bronze", "taxi"]);
-        assert_eq!(doc.owner.as_deref(), Some("mobility-analytics"));
-        assert_eq!(doc.domain.as_deref(), Some("mobility"));
-        assert!(!doc.can_edit);
-        assert!(!doc.can_rollback);
-        assert_eq!(doc.columns.len(), 10);
-        assert!(doc.columns.iter().all(|c| c.description.is_none()));
-        assert!(demo.documentation("nyc_taxi", "nope").is_none());
     }
 
     // -----------------------------------------------------------------------

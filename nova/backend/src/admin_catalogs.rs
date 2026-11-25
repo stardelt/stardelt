@@ -203,7 +203,7 @@ pub struct NewTeamResponse {
     operation_id = "admin_catalogs_list",
     path = "/api/admin/catalogs",
     tag = "internal",
-    description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name; `environment`: `production` when the resource carries `stardelt.io/environment: production`, absent otherwise): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
+    description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name; `environment`: `production` when the resource carries `stardelt.io/environment: production`, absent otherwise): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (a local run) the answer is an empty list. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per catalog, medallion layers first, then by name", body = [AdminCatalog]),
         (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
@@ -228,7 +228,7 @@ pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
     operation_id = "admin_catalogs_access_update",
     path = "/api/admin/catalogs/{name}/access",
     tag = "internal",
-    description = "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`, and a catalog a GitOps tool owns (Argo CD or Flux, from its annotations or labels) is a 409 `<name> is managed by <tool>: change its grants in Git` with nothing patched; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
+    description = "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`, and a catalog a GitOps tool owns (Argo CD or Flux, from its annotations or labels) is a 409 `<name> is managed by <tool>: change its grants in Git` with nothing patched; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova`. Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
     params(("name" = String, Path, description = "The catalog's name")),
     request_body = CatalogAccessUpdate,
     responses(
@@ -260,9 +260,6 @@ pub(crate) async fn update_access(
     let who = actor(principal, &state);
 
     let Some(client) = state.kube.clone() else {
-        if state.demo {
-            return demo_update(&state, &name, &update, &who);
-        }
         return Fail::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "the cluster is not reachable from Nova",
@@ -769,65 +766,6 @@ fn take_slot(
     true
 }
 
-/// The change in memory, for a Nova with no cluster (demo mode). The demo lakehouse is one
-/// catalog named `warehouse`, so any other name is a 404 exactly as in the cluster.
-fn demo_update(
-    state: &AppState,
-    name: &str,
-    update: &CatalogAccessUpdate,
-    who: &Identity,
-) -> Response {
-    let mut demo = state.demo_state.write().expect("demo state poisoned");
-    let mut row = demo.admin_catalog.clone().unwrap_or_else(demo_row);
-    if row.name != name {
-        return no_such_catalog().into_response();
-    }
-    let current_version = row
-        .resource_version
-        .clone()
-        .unwrap_or_else(|| "1".to_string());
-    if update.resource_version != current_version {
-        return catalog_changed().into_response();
-    }
-    if !take_access_change_slot(&state.catalog_access_changes, &who.sub) {
-        return too_many_changes().into_response();
-    }
-
-    let owner_before = row.owner.clone();
-    let grants_before = row.grants.clone();
-    let generation = row.generation.unwrap_or(1) + 1;
-    row.owner = Some(update.owner.clone());
-    row.managed_access = update.managed_access;
-    row.grants = update.grants.clone();
-    row.generation = Some(generation);
-    row.observed_generation = Some(generation);
-    row.resource_version = Some(next_resource_version(&current_version));
-    row.phase = "Ready".to_string();
-    row.conditions = demo_conditions();
-    demo.admin_catalog = Some(row.clone());
-
-    audit_change(
-        who,
-        name,
-        owner_before.as_deref(),
-        &update.owner,
-        &grants_before,
-        &update.grants,
-    );
-    (
-        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
-        Json(row),
-    )
-        .into_response()
-}
-
-fn next_resource_version(current: &str) -> String {
-    current
-        .parse::<u64>()
-        .map(|version| (version + 1).to_string())
-        .unwrap_or_else(|_| "2".to_string())
-}
-
 /// The audit line for one change: who, which catalog, the owner before and after, and the
 /// added and removed `(group, verb)` pairs. Group names and verbs are permissions, not
 /// secrets; no body, description or credential can reach the record.
@@ -861,11 +799,10 @@ fn audit_change(
     );
 }
 
-/// The rows the page shows: from the cluster, or the demo one when Nova has no
-/// cluster client (demo mode, or a local run outside a cluster).
+/// The rows the page shows, from the cluster.
 async fn catalog_rows(state: &AppState) -> Result<Vec<AdminCatalog>, Fail> {
     let Some(client) = state.kube.clone() else {
-        return Ok(vec![demo_row_for(state)]);
+        return Ok(Vec::new());
     };
     let api = catalogs_api(client);
     let objects = api
@@ -1035,74 +972,6 @@ fn integer(value: Option<&Value>) -> Option<i64> {
 
 fn sort_by_layer(rows: &mut [AdminCatalog]) {
     crate::catalog::sort_by_layer(rows, |row| row.layer.as_deref(), |row| row.name.as_str());
-}
-
-/// What a Nova without a cluster client answers: the in-memory demo lakehouse,
-/// which is the one catalog `GET /api/catalog/catalogs` lists in demo mode.
-/// It is `Ready` by construction — there is no `Catalog` resource and no sync
-/// job behind it. The generations start at 1 so an edit through the dialog can
-/// poll the same way it does against a cluster; a change is kept in
-/// `demo_state.admin_catalog`.
-fn demo_row_for(state: &AppState) -> AdminCatalog {
-    state
-        .demo_state
-        .read()
-        .expect("demo state poisoned")
-        .admin_catalog
-        .clone()
-        .unwrap_or_else(demo_row)
-}
-
-fn demo_row() -> AdminCatalog {
-    AdminCatalog {
-        name: "warehouse".to_string(),
-        // The demo catalog is `warehouse`: not one of the three layer names.
-        layer: None,
-        environment: None,
-        display_name: None,
-        description: None,
-        owner: Some("stardelt-admins".to_string()),
-        managed_access: false,
-        key_prefix: None,
-        phase: "Ready".to_string(),
-        warehouse_id: None,
-        generation: Some(1),
-        observed_generation: Some(1),
-        resource_version: Some("1".to_string()),
-        managed_by: None,
-        grants: ["browse", "select", "write", "create"]
-            .into_iter()
-            .map(|verb| CatalogGrant {
-                group: "stardelt-admins".to_string(),
-                verb: verb.to_string(),
-            })
-            .collect(),
-        conditions: Vec::new(),
-        maintenance: None,
-    }
-}
-
-/// The conditions a demo edit reports: there is no sync job, so the change is applied by
-/// construction. `GrantsReady` carries the same shape the page reads from a cluster.
-fn demo_conditions() -> Vec<CatalogCondition> {
-    [
-        (
-            "CatalogReady",
-            "True",
-            "Ready",
-            "catalog and its grants are ready",
-        ),
-        ("GrantsReady", "True", "Ready", "grants match the resource"),
-        ("Drift", "False", "Clean", "no foreign grants"),
-    ]
-    .into_iter()
-    .map(|(r#type, status, reason, message)| CatalogCondition {
-        r#type: r#type.to_string(),
-        status: status.to_string(),
-        reason: Some(reason.to_string()),
-        message: Some(message.to_string()),
-    })
-    .collect()
 }
 
 #[cfg(test)]
@@ -1336,39 +1205,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demo_mode_row() {
-        let state = crate::router_tests::test_state();
-        let rows = catalog_rows(&state).await.expect("the demo row");
-        assert_eq!(rows.len(), 1);
-        let row = &rows[0];
-        assert_eq!(row.name, "warehouse");
-        assert_eq!(row.owner.as_deref(), Some("stardelt-admins"));
-        assert_eq!(
-            row.grants,
-            vec![
-                CatalogGrant {
-                    group: "stardelt-admins".into(),
-                    verb: "browse".into()
-                },
-                CatalogGrant {
-                    group: "stardelt-admins".into(),
-                    verb: "select".into()
-                },
-                CatalogGrant {
-                    group: "stardelt-admins".into(),
-                    verb: "write".into()
-                },
-                CatalogGrant {
-                    group: "stardelt-admins".into(),
-                    verb: "create".into()
-                },
-            ]
-        );
-        assert_eq!(row.phase, "Ready");
-        assert!(row.conditions.is_empty());
-    }
-
-    #[tokio::test]
     async fn admin_only_403() {
         use crate::auth::{Principal, require_admin};
 
@@ -1428,10 +1264,10 @@ mod tests {
         let (status, _) = status_for(None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        // An administrator reaches the handler; with no cluster client it answers the demo row.
+        // An administrator reaches the handler; with no cluster client it answers an empty list.
         let (status, body) = status_for(Some(identity(true))).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("\"warehouse\""));
+        assert_eq!(body, "[]");
     }
 
     #[tokio::test]
@@ -1803,10 +1639,10 @@ mod tests {
         let (status, _) = status_for(None, &body).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        // An administrator reaches the handler; in demo mode it changes memory.
+        // An administrator reaches the handler; without a cluster it is a 503.
         let (status, answer) = status_for(Some(identity(true)), &body).await;
-        assert_eq!(status, StatusCode::OK, "{answer}");
-        assert!(answer.contains("\"warehouse\""));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert!(answer.contains("the cluster is not reachable from Nova"));
     }
 
     #[tokio::test]
@@ -2079,7 +1915,18 @@ mod tests {
         use crate::auth::{Identity, Principal};
 
         const CANARY: &str = "canary-7f3a-DO-NOT-LEAK";
-        let state = crate::router_tests::test_state();
+        let mut object = catalog_object("warehouse", Some("Ready"));
+        object["metadata"]["resourceVersion"] = json!("1");
+        object["spec"]["owner"] = json!("stardelt-admins");
+        object["spec"]["grants"] = json!([
+            { "group": "stardelt-admins", "verb": "browse" },
+            { "group": "stardelt-admins", "verb": "select" },
+            { "group": "stardelt-admins", "verb": "write" },
+            { "group": "stardelt-admins", "verb": "create" }
+        ]);
+        let (client, _) =
+            fake_kube::start_with_patch(vec![object], StatusCode::OK, StatusCode::OK).await;
+        let state = crate::router_tests::test_state_with_kube(client);
         let app = axum::Router::new()
             .route(
                 "/admin/catalogs/{name}/access",
@@ -2146,75 +1993,6 @@ mod tests {
         assert_eq!(record.unchanged, 0);
         assert_eq!(record.actor, "ada");
         assert!(!format!("{record:?}").contains(CANARY));
-    }
-
-    #[tokio::test]
-    async fn demo_mode_roundtrip() {
-        let state = crate::router_tests::test_state();
-        let update = CatalogAccessUpdate {
-            resource_version: "1".into(),
-            owner: "stardelt-finops".into(),
-            managed_access: true,
-            grants: vec![CatalogGrant {
-                group: "stardelt-analytics".into(),
-                verb: "select".into(),
-            }],
-        };
-        let response = update_access(
-            State(state.clone()),
-            Path("warehouse".to_string()),
-            None,
-            ApiJson(update),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let row: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(row["owner"], "stardelt-finops");
-        assert_eq!(row["managedAccess"], true);
-        assert_eq!(row["grants"][0]["group"], "stardelt-analytics");
-        assert_eq!(row["generation"], 2);
-        assert_eq!(row["observedGeneration"], 2);
-
-        // The change is what the list now answers, not a one-request echo.
-        let rows = catalog_rows(&state).await.expect("the demo row");
-        assert_eq!(rows[0].owner.as_deref(), Some("stardelt-finops"));
-        assert_eq!(
-            rows[0].grants,
-            vec![CatalogGrant {
-                group: "stardelt-analytics".into(),
-                verb: "select".into()
-            }]
-        );
-
-        // The page's old resourceVersion is refused rather than overwriting.
-        let stale = CatalogAccessUpdate {
-            resource_version: "1".into(),
-            owner: "stardelt-users".into(),
-            managed_access: false,
-            grants: vec![],
-        };
-        let response = update_access(
-            State(state.clone()),
-            Path("warehouse".to_string()),
-            None,
-            ApiJson(stale),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-
-        // A real run without a cluster is a 503, never a panic or a memory change.
-        let no_cluster = crate::router_tests::catalog_test_state("http://127.0.0.1:1", None);
-        let response = update_access(
-            State(no_cluster),
-            Path("warehouse".to_string()),
-            None,
-            ApiJson(wanted_update()),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("the cluster is not reachable from Nova"));
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ Browser
   └─── :5173 (dev) / :8080 (prod)
          │
          ├─ GET  /api/health           liveness + state-store status (never behind sign-in)
-         ├─ GET  /api/me               current user + demo flag
+         ├─ GET  /api/me               current user and auth mode
          ├─ GET  /api/auth/login       start OIDC sign-in (oidc mode)
          ├─ GET  /api/auth/callback    OIDC redirect target (oidc mode)
          ├─ POST /api/auth/logout      sign out here and at the IdP
@@ -116,7 +116,7 @@ a member of the owner group may edit; a table with no owner may be edited by any
 the first editor must set the owner to one of their own groups. Everyone else gets 403.
 Anyone who reaches Lakekeeper or Trino directly can still change these properties until
 the catalog enforces permissions. The lock covers one Nova replica; more than one replica
-needs a database lock (a later change). Demo mode answers 503.
+needs a database lock (a later change).
 
 ### Several catalogs
 
@@ -174,15 +174,15 @@ outside that list:
 
 Unreachable Trino or Lakekeeper stays `502`; a configured default warehouse Lakekeeper does
 not know is `404` on the catalog routes (`503` on `/api/catalog/warehouse`, which names the
-configured warehouse itself). In `dev` mode and in demo mode there is one catalog — the
-configured warehouse — and no permission bridge, so every request works exactly as before.
+configured warehouse itself). In `dev` mode there is one catalog — the configured
+warehouse — and no permission bridge, so every request works exactly as before.
 Table documentation, history and rollback are scoped to the same catalog: the SQL they run
 names `"<catalog>".<ns>.<tbl>`, and the per-table edit lock keys on all three.
 
 In the UI the **Catalog** page and the **SQL editor** carry the choice: a switcher above the
 table filter (and above the editor) lists the catalogs the API returned, writes
-`?catalog=` into the URL, and every request the pages make names it. With one catalog — demo
-mode, a single-warehouse install — the switcher is not shown at all. Generated SQL names the
+`?catalog=` into the URL, and every request the pages make names it. With one catalog — a
+single-warehouse install — the switcher is not shown at all. Generated SQL names the
 chosen catalog (`finance.seed.nation`), so a statement keeps working after it is pasted
 elsewhere; a catalog the person may not browse answers with the API's own refusal instead of
 an empty list.
@@ -208,8 +208,7 @@ runs no query over the data. At most 200 tables per catalog are loaded: `tables`
 exact, `truncated: true` says `records` and `sizeBytes` are a sample. A catalog whose scan
 failed keeps its last numbers and carries an `error` sentence (zeros for one that never
 answered) rather than failing the page; only an unreachable engine or catalog is `502`, and
-no catalog open to the caller is `403` with the sentence above. Demo mode derives the
-numbers from its seeded tables.
+no catalog open to the caller is `403` with the sentence above.
 
 The numbers describe the catalog, not the person, so Nova reads them **in the background**:
 one round every five minutes (`NOVA_METRICS_REFRESH_SECS`), with Nova's own service token,
@@ -279,7 +278,7 @@ The resource stays the source of truth. A later GitOps source or `kubectl apply`
 same resource overwrites a change made in the dialog; keep the manifest as the record, or
 do not reconcile this resource from both places. Nova's ServiceAccount needs `patch` on
 `catalogs.stardelt.io` for the dialog (part of the platform's `nova-pipelines` Role);
-without a cluster connection the route answers `503` and demo mode changes memory.
+without a cluster connection the route answers `503`.
 
 ### SQL warehouses
 
@@ -306,22 +305,9 @@ placement rather than an admission decision. The SQL editor shows
 `Warehouse: <displayName or name> (<size>)` next to **Run**, and the Profile page shows the
 same line as `SQL warehouse`; the `title` tooltip carries the three numbers. This is not
 `me.warehouse`, which is the default **catalog** a query addresses. Without a cluster
-connection (demo mode, a local run) the answer is the one `small` class. Nova's
+connection (a local run) the answer is the one `small` class. Nova's
 ServiceAccount needs `get`/`list` on `sqlwarehouses.stardelt.io` (part of the platform's
 `nova-pipelines` Role); a cluster that refuses or fails is a `502`, never an empty list.
-
-## Demo mode (no cluster)
-
-`NOVA_DEMO=1` serves an in-memory lakehouse — a seeded Iceberg-shaped catalog
-(`nyc_taxi`, `analytics`), a small SQL responder, and working load/transfer — so the
-whole UI can be explored without Kubernetes:
-
-```bash
-make demo        # backend :8080 + frontend :5173
-```
-
-In this mode every operation mutates memory and is recorded as a job. Set
-`NOVA_DEMO` unset to talk to real Trino and Lakekeeper.
 
 ```
 nova/
@@ -379,7 +365,7 @@ the reason hidden in the console.
 `allowed` / `blocked` / `unknown`, with the header that blocks it), read from the
 app's own response. Those pages show an “embeds ok” badge when framing is
 permitted, and the offending header plus what to change when it is not — while
-still offering the deep link out. `unknown` (demo mode, or a service Nova cannot
+still offering the deep link out. `unknown` (a service Nova cannot
 reach) makes no claim either way.
 
 The header check follows redirects only while they stay on the app's own hosts:
@@ -702,7 +688,7 @@ ID, Okta, any standards-compliant OIDC provider) or the platform's Keycloak. The
 contract is [Identity](https://stardelt.io/architecture/identity).
 
 `NOVA_AUTH_MODE=dev` (the default) keeps the no-login behaviour that CI
-and `make demo` use. `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except
+that CI uses. `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except
 `/api/health` and `/api/auth/*` behind sign-in: a browser gets a 401 and the UI sends
 it to `/api/auth/login?return_to=<path>` (authorization code + PKCE + `state` +
 `nonce`); scripts send `Authorization: Bearer <access token>`. Any configuration

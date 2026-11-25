@@ -14,12 +14,13 @@ the Lakekeeper Iceberg REST catalog and the Trino query engine.
 The running development environment is the Hetzner k3s cluster
 (`alpha.dev.stardelt.io`), provisioned from `stardelt-platform/dev/hetzner-k3s`; Nova
 is deployed there by the platform install (`manifests/nova-deployment.yaml`). UI work
-needs no cluster: `make demo` serves in-memory data.
+needs no cluster: `npm run e2e` runs the backend with no cluster behind it, and every spec
+stubs `/api/**` with Playwright's `page.route`.
 
 ## Layout
 
 - `backend/` — Rust crate: axum server, Lakekeeper/Trino proxies, kube client for the
-  platform app launcher (`apps.rs`), demo mode (`demo.rs`), OIDC sign-in (`auth.rs`).
+  platform app launcher (`apps.rs`), OIDC sign-in (`auth.rs`).
 - `frontend/` — Vite + React + TypeScript + Tailwind SPA.
 - `image/Dockerfile` — multi-stage node → rust → debian-slim image.
 - `.github/workflows/ci.yml` — CI: `cargo fmt --check`, `cargo clippy -D warnings`,
@@ -31,7 +32,6 @@ Requires Rust (rustup) and Node + npm. In this machine's shell, `~/.cargo/bin` m
 be on `PATH`.
 
 ```bash
-make demo        # backend :8080 (NOVA_DEMO=1) + Vite :5173, in-memory, no cluster
 make dev         # same pair, but talks to real Trino/Lakekeeper (see NOVA_* env vars)
 cargo check --all-targets        # backend check
 npm --prefix frontend ci         # install frontend dependencies

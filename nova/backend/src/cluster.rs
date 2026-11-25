@@ -102,16 +102,8 @@ const TTL: Duration = Duration::from_secs(15);
 impl WorkloadCache {
     /// A cached snapshot of the namespace. Returns the last known good list when the
     /// cluster is temporarily unreachable, or an empty list when there is no client
-    /// (demo mode, local run).
-    pub async fn snapshot(&self, client: Option<&Client>, demo: bool) -> Snapshot {
-        if demo {
-            return Snapshot {
-                workloads: demo_workloads(),
-                error: None,
-                age_seconds: Some(0),
-                state: "ok".into(),
-            };
-        }
+    /// (local run).
+    pub async fn snapshot(&self, client: Option<&Client>) -> Snapshot {
         let Some(client) = client else {
             // No client at all (outside a cluster): say so rather than pretending the
             // namespace is empty.
@@ -223,67 +215,13 @@ pub fn replicas(workloads: &[Workload]) -> (i32, i32) {
     })
 }
 
-/// Plausible in-memory workloads so `make demo` shows the same UI without a cluster.
-fn demo_workloads() -> Vec<Workload> {
-    let specs = [
-        ("hub", "Deployment", "quay.io/jupyterhub/k8s-hub:4.4.3", 1),
-        (
-            "lakekeeper",
-            "Deployment",
-            "quay.io/lakekeeper/catalog:v0.12.2",
-            1,
-        ),
-        ("nova", "Deployment", "ghcr.io/stardelt/nova:dev", 1),
-        (
-            "proxy",
-            "Deployment",
-            "quay.io/jupyterhub/configurable-http-proxy:5.2.0",
-            1,
-        ),
-        ("seaweedfs-s3", "Deployment", "chrislusf/seaweedfs:4.25", 1),
-        (
-            "stardelt-operator",
-            "Deployment",
-            "ghcr.io/stardelt/stardelt-operator:dev",
-            1,
-        ),
-        ("trino-coordinator", "Deployment", "trinodb/trino:480", 1),
-        ("trino-worker", "Deployment", "trinodb/trino:480", 1),
-        (
-            "user-placeholder",
-            "StatefulSet",
-            "registry.k8s.io/pause:3.10.1",
-            0,
-        ),
-        (
-            "user-scheduler",
-            "Deployment",
-            "registry.k8s.io/kube-scheduler:v1.30.14",
-            2,
-        ),
-    ];
-    let mut out: Vec<Workload> = specs
-        .iter()
-        .map(|(name, kind, image, replicas)| Workload {
-            name: (*name).into(),
-            kind: (*kind).into(),
-            image: (*image).into(),
-            ready: *replicas,
-            desired: *replicas,
-        })
-        .collect();
-    // The live snapshot is sorted by name; the demo one should be too.
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
 /// `GET /api/workloads` — every workload Nova can see, with the image it runs.
 #[utoipa::path(
     get,
     operation_id = "workloads_list",
     path = "/api/workloads",
     tag = "internal",
-    description = "Every Deployment and StatefulSet of Nova's namespace, flattened to `name`, `kind`, the `image` exactly as the cluster has it (tag or digest) and the `ready` and `desired` replica counts, ordered by name. The answer says how far to trust the list: `state` is `ok` (just read), `stale` (the last read failed, so `workloads` is the last good one, `error` says why and `age_seconds` how old it is) or `unreachable` (the read failed and there never was a good one: an empty list then does NOT mean nothing runs). Reads are cached for a few seconds. Administrator-only: anybody else gets 403. Without a cluster connection (demo mode, a local run) the list is empty or the demo set. Field names are snake_case.",
+    description = "Every Deployment and StatefulSet of Nova's namespace, flattened to `name`, `kind`, the `image` exactly as the cluster has it (tag or digest) and the `ready` and `desired` replica counts, ordered by name. The answer says how far to trust the list: `state` is `ok` (just read), `stale` (the last read failed, so `workloads` is the last good one, `error` says why and `age_seconds` how old it is) or `unreachable` (the read failed and there never was a good one: an empty list then does NOT mean nothing runs). Reads are cached for a few seconds. Administrator-only: anybody else gets 403. Without a cluster connection (a local run) the list is empty. Field names are snake_case.",
     responses(
         (status = 200, description = "The workloads and how fresh they are", body = Snapshot),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -291,7 +229,7 @@ fn demo_workloads() -> Vec<Workload> {
     )
 )]
 pub async fn list_handler(State(s): State<Arc<AppState>>) -> Json<Snapshot> {
-    Json(s.workloads.snapshot(s.kube.as_ref(), s.demo).await)
+    Json(s.workloads.snapshot(s.kube.as_ref()).await)
 }
 
 #[cfg(test)]
