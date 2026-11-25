@@ -19,7 +19,13 @@ minted by the token endpoint:
                           token; the subcommand `scripts/tests/test_mint_user_token.py` calls.
 
 Environment: ISSUER, USER, PASSWORD_FILE (mode 0600; the password never reaches argv),
-TOKEN_FILE (mode 0600), CLIENT_ID (default `stardelt-dev`). Nothing here prints the token.
+TOKEN_FILE (mode 0600), CLIENT_ID (default `stardelt-dev`), SCOPE (default `openid`; the device
+grant asks for it and the token request names it again). Nothing here prints the token.
+
+`RESPONSE_FILE` (optional): when it is set, the device grant also writes the token endpoint's whole
+answer there (mode 0600), so a caller that needs the refresh token does not have to grant twice
+(`scripts/spike-pat-downstream.sh`, stardelt/stardelt#1700). It is never printed, and a caller that
+does not ask gets no second file.
 
 Keycloak's device-approval page is plain HTML forms, so this drives it with urllib only: no
 browser and no direct-access grant (which the realm keeps off on purpose).
@@ -101,13 +107,13 @@ def describe(token):
         claims.get("preferred_username") or claims.get("sub") or "-"))
 
 
-def mint_device(issuer, user, password, client_id):
+def mint_device(issuer, user, password, client_id, scope):
     """The user's own token through the device grant on a public client, PKCE S256."""
     verifier = base64.urlsafe_b64encode(os.urandom(48)).rstrip(b"=").decode()
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     req = urllib.request.Request(
         f"{issuer}/protocol/openid-connect/auth/device",
-        data=urllib.parse.urlencode({"client_id": client_id, "scope": "openid",
+        data=urllib.parse.urlencode({"client_id": client_id, "scope": scope,
                                      "code_challenge": challenge,
                                      "code_challenge_method": "S256"}).encode(),
         method="POST",
@@ -130,7 +136,7 @@ def mint_device(issuer, user, password, client_id):
     # Exchange the device code for the user's own access token.
     token = None
     for _ in range(20):
-        token = token_endpoint(issuer, {"client_id": client_id, "scope": "openid",
+        token = token_endpoint(issuer, {"client_id": client_id, "scope": scope,
                                         "device_code": device["device_code"],
                                         "code_verifier": verifier,
                                         "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
@@ -141,7 +147,7 @@ def mint_device(issuer, user, password, client_id):
         time.sleep(5 if token.get("error") == "slow_down" else 2)
     if not token or "access_token" not in token:
         sys.exit("device authorization was never approved")
-    return token["access_token"]
+    return token
 
 
 def mint_password(issuer, user, password):
@@ -159,6 +165,19 @@ def write_token(path, token):
     try:
         with open(path, "w") as f:
             f.write(token)
+    finally:
+        os.umask(umask)
+
+
+def write_response(path, response):
+    """The device grant's whole answer beside the token: a caller may need the refresh token.
+
+    Written for the caller (a 0700 temp dir) like the token, never printed.
+    """
+    umask = os.umask(0o077)
+    try:
+        with open(path, "w") as f:
+            json.dump(response, f)
     finally:
         os.umask(umask)
 
@@ -181,7 +200,12 @@ def main(argv):
     if os.environ.get("ADMIN_PASSWORD_GRANT", "") not in ("", "0"):
         token = mint_password(issuer, user, password)
     else:
-        token = mint_device(issuer, user, password, os.environ.get("CLIENT_ID") or "stardelt-dev")
+        scope = os.environ.get("SCOPE") or "openid"
+        response = mint_device(issuer, user, password,
+                               os.environ.get("CLIENT_ID") or "stardelt-dev", scope)
+        token = response["access_token"]
+        if os.environ.get("RESPONSE_FILE"):
+            write_response(os.environ["RESPONSE_FILE"], response)
     write_token(token_file, token)
     print("minted: ", end="")
     describe(token)
