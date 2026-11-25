@@ -10,6 +10,8 @@ MANIFEST = PLATFORM / "manifests" / "spark.yaml"
 README = PLATFORM.parent / "python" / "stardelt" / "README.md"
 GUIDE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "spark.md"
 HELPER = PLATFORM.parent / "python" / "stardelt" / "__init__.py"
+CONNECT_GUIDE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "connect-your-tools.md"
+OPERATOR = PLATFORM.parent / "operator" / "crates" / "stardelt-operator" / "src" / "spark_cluster.rs"
 
 
 def spark_tips():
@@ -61,6 +63,34 @@ def manifest_numbers():
     }
 
 
+def size_presets():
+    """`preset()`'s three classes: name -> (driver cores, driver GiB, executor cores, executor GiB, max)."""
+    rows = {}
+    pattern = re.compile(
+        r'SparkClusterSize::(Small|Medium|Large) => \((\d+), "(\d+)Gi", (\d+), "(\d+)Gi", (\d+)\)'
+    )
+    for match in pattern.finditer(OPERATOR.read_text()):
+        rows[match.group(1).lower()] = tuple(int(value) for value in match.groups()[1:])
+    if set(rows) != {"small", "medium", "large"}:
+        raise AssertionError("spark_cluster.rs::preset no longer has the three size classes")
+    return rows
+
+
+def guide_presets():
+    """The Compute guide's size table, in the same shape."""
+    rows = {}
+    pattern = re.compile(
+        r"^[ \t]*\|[ \t]*\*\*(small|medium|large)\*\*[ \t]*\|[ \t]*(\d+) cores?, (\d+) GiB[ \t]*\|"
+        r"[ \t]*(\d+) cores?, (\d+) GiB[ \t]*\|[ \t]*(\d+)[ \t]*\|",
+        re.M,
+    )
+    for match in pattern.finditer(CONNECT_GUIDE.read_text()):
+        rows[match.group(1)] = tuple(int(value) for value in match.groups()[1:])
+    if set(rows) != {"small", "medium", "large"}:
+        raise AssertionError("connect-your-tools.md no longer carries the three size rows")
+    return rows
+
+
 class SparkGuidanceNumbers(unittest.TestCase):
     def test_the_helper_readme_quotes_the_manifest(self):
         text = README.read_text()
@@ -104,6 +134,11 @@ class SparkGuidanceNumbers(unittest.TestCase):
         self.assertIn(f"above {n['max_result_mib']} MiB", text)
         self.assertIn(f"{n['executor_gib']} GiB each", text)
         self.assertEqual(len(tips), len(readme_table_rows()))
+
+    def test_the_compute_guide_states_the_operator_presets(self):
+        if not CONNECT_GUIDE.exists():
+            self.skipTest(f"no docs checkout at {CONNECT_GUIDE}")
+        self.assertEqual(guide_presets(), size_presets())
 
 
 if __name__ == "__main__":
