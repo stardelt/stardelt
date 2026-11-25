@@ -6,7 +6,7 @@
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `catalog_docs.rs` ⚠ | Catalog | 1683 | 1292 | 5 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
-| `main.rs` | Core & identity | 1469 | 1593 | 3 | - |
+| `main.rs` | Core & identity | 1472 | 1609 | 3 | - |
 | `mcp.rs` | AI (Ask, MCP, models) | 1401 | 1269 | 4 | Airflow REST, Trino |
 | `query_log_api.rs` | SQL & query log | 1353 | 298 | 5 | Kubernetes API (CRDs), PostgreSQL state store |
 | `catalog.rs` | Catalog | 1348 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -34,7 +34,7 @@
 | `destinations.rs` | Pipelines & delivery | 523 | 330 | 4 | PostgreSQL state store |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 461 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
-| `openapi.rs` | Core & identity | 450 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 452 | 688 | 1 | - |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
@@ -66,5 +66,6 @@
 | `metrics.rs` | Core & identity | 90 | 32 | 1 | - |
 | `api_json.rs` | Core & identity | 60 | 90 | 0 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
+| `version.rs` | Core & identity | 46 | 28 | 1 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (66 files)** | | **46873** | **42127** | **153** | |
+| **total (67 files)** | | **46924** | **42171** | **154** | |

@@ -84,6 +84,7 @@ GET	/api/statements/{id}	statements	statements	signed-in
 GET	/api/statements/{id}/chunks/{n}	statements	statements	signed-in
 GET	/api/streams	streams	streams	signed-in
 GET	/api/trino/cluster	main	main	admin
+GET	/api/version	version	main	signed-in
 GET	/api/warehouses	warehouses	main	signed-in
 GET	/api/workloads	cluster	main	admin
 GET	/api/workspace	workspace	main	signed-in
