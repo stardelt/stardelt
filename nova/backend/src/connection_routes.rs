@@ -1744,14 +1744,8 @@ pub(crate) async fn create(
             Ok(access) => access,
             Err(e) => return e.into_response(),
         };
-        return match create_connection(
-            store,
-            resources.as_ref(),
-            &signed.identity,
-            access,
-            req,
-        )
-        .await
+        return match create_connection(store, resources.as_ref(), &signed.identity, access, req)
+            .await
         {
             Ok((status, view)) => (status, Json(view)).into_response(),
             Err(e) => e.into_response(),
