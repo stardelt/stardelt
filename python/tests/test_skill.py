@@ -46,6 +46,10 @@ def test_the_skill_teaches_lineage_and_bundles():
     assert "stardelt bundle plan" in text and "stardelt bundle deploy" in text
 
 
+def test_the_skill_sends_the_assistant_to_the_performance_rules():
+    assert "https://stardelt.io/docs/guides/performance" in skill.text()
+
+
 def test_the_skill_names_every_command_an_agent_needs():
     text = skill.text()
     for command in (

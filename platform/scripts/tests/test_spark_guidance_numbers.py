@@ -9,6 +9,7 @@ PLATFORM = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST = PLATFORM / "manifests" / "spark.yaml"
 README = PLATFORM.parent / "python" / "stardelt" / "README.md"
 GUIDE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "spark.md"
+PERFORMANCE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "performance.md"
 HELPER = PLATFORM.parent / "python" / "stardelt" / "__init__.py"
 
 
@@ -95,6 +96,22 @@ class SparkGuidanceNumbers(unittest.TestCase):
             match, "the guide no longer carries the sentence 'collect() and toPandas() stop at 512 MB'"
         )
         self.assertEqual(int(match.group(1)), n["max_result_mib"])
+
+    def test_the_performance_page_quotes_the_manifest(self):
+        if not PERFORMANCE.exists():
+            return
+        text = PERFORMANCE.read_text()
+        numbers = manifest_numbers()
+        for phrase in (
+            f"{numbers['driver_heap_gib']} GiB",
+            f"{numbers['driver_pod_gib']} GiB",
+            f"{numbers['max_result_mib']} MiB",
+            f"{numbers['executor_gib']} GiB",
+            f"{numbers['executor_cores']} core",
+            f"{numbers['max_executors']} executors",
+        ):
+            self.assertIn(phrase, text, f"the Performance page does not quote {phrase!r} from the manifest")
+        self.assertIn("stardelt skill", text, "the Performance page must name how an assistant gets the rules")
 
     def test_the_helper_tips_quote_the_manifest(self):
         tips = spark_tips()
