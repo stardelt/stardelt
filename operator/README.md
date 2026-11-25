@@ -400,7 +400,7 @@ Every planned component is configurable from the CR — chart values, resource s
 storage class, ingress, image registry — without editing code. The operator ships **golden
 values** per component (the curated settings that make the stack work, e.g. Trino's
 `http-server.process-forwarded=true` behind an ingress, SeaweedFS' PVC-backed volumes) and
-layers the CR on top. Lakekeeper's golden values use the operator-created database (lakekeeper-pg, Secret lakekeeper-pg-app) and authz allowall; SeaweedFS reads its S3 identities from Secret seaweedfs-s3-config. Merge order per component, later wins:
+layers the CR on top. Lakekeeper's golden values use the operator-created database (lakekeeper-pg, Secret lakekeeper-pg-app) and authz through the operator-deployed OpenFGA (`authz.backend: openfga`); SeaweedFS reads its S3 identities from Secret seaweedfs-s3-config. Merge order per component, later wins:
 
 1. the operator's golden defaults (`src/values.rs`),
 2. `spec.valuesFrom.<component>` — an external YAML document from a ConfigMap or Secret key,

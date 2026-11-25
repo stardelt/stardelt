@@ -719,8 +719,9 @@ async fn trino_key_material_present(client: &Client, namespace: &str) -> bool {
     true
 }
 
-/// Whether a component's release may be applied now. Lakekeeper and OpenFGA wait for their
-/// database; Trino waits for its key material once the platform has an IdP.
+/// Whether a component's release may be applied now. Lakekeeper waits for its database and for
+/// the permission store's; OpenFGA waits for its database; Trino waits for its key material once
+/// the platform has an IdP.
 fn release_ready(
     component: &str,
     database_ready: bool,
@@ -728,11 +729,21 @@ fn release_ready(
     trino_ready: bool,
 ) -> bool {
     match component {
-        "lakekeeper" => database_ready,
+        "lakekeeper" => database_ready && openfga_ready,
         "openfga" => openfga_ready,
         "trino" => trino_ready,
         _ => true,
     }
+}
+
+/// Whether the catalog may be applied in this pass. A new install waits for the permission
+/// store's workloads: the chart's migration Job writes Lakekeeper's authorization model into
+/// the store during the release, and `apply_plan` keeps applying after a component failed, so
+/// the store's database being Ready is not enough (#1617). A catalog that was Ready keeps
+/// reconciling while the store's workloads are down — a store outage fails the catalog closed,
+/// it must not drop the catalog from the status or uninstall it.
+fn catalog_may_apply(catalog_was_ready: bool, store_up: bool) -> bool {
+    catalog_was_ready || store_up
 }
 
 /// Ready when every Deployment/StatefulSet of the release reports all replicas ready.
@@ -1858,10 +1869,26 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     // The permission store's database: the OpenFGA release waits for it, like Lakekeeper.
     let openfga_database = ensure_openfga_database(&ctx, &lh, &namespace).await;
     let openfga_ready = openfga_database.ready;
+    // A *new* catalog is applied only once the store's own release serves: the chart's
+    // migration Job writes Lakekeeper's authorization model into the store, and `apply_plan`
+    // keeps applying after a component failed, so the store's database being Ready is not
+    // enough (#1617). A catalog that was Ready before keeps reconciling while the store's
+    // *workloads* are down — fail-closed, not uninstalled, and its status stays in the list; a
+    // store *database* outage still holds it, and `release_ready` reports why. `previous` is
+    // last pass's status, so one bad pass (or a simultaneous store restart) puts the catalog
+    // back behind the gate until the store serves again.
+    let catalog_was_ready = previous.iter().any(|p| p.name == "lakekeeper" && p.ready);
+    let store_up = matches!(
+        workloads_ready(&ctx.client, &namespace, "openfga").await,
+        Ok((ready, total)) if ready_from_counts(ready, total)
+    );
+    let permission_store_up = catalog_may_apply(catalog_was_ready, store_up);
     let plan: Vec<ComponentPlan> = plan
         .into_iter()
         .filter(|c| {
-            lh.spec.dry_run || release_ready(c.name, database_ready, openfga_ready, trino_ready)
+            lh.spec.dry_run
+                || (release_ready(c.name, database_ready, openfga_ready, trino_ready)
+                    && (c.name != "lakekeeper" || permission_store_up))
         })
         .collect();
     let mut outcome = apply_plan(
@@ -1875,11 +1902,18 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     )
     .await;
     outcome.components.push(namespace_status);
-    if !lh.spec.dry_run && !database_ready {
+    if !lh.spec.dry_run && !(database_ready && openfga_ready && permission_store_up) {
+        let message = if !database_ready {
+            "waiting for the catalog database"
+        } else if !openfga_ready {
+            "waiting for the permission store's database"
+        } else {
+            "waiting for the permission store's workloads"
+        };
         outcome.components.push(ComponentStatus {
             name: "lakekeeper".into(),
             ready: false,
-            message: Some("waiting for the catalog database".into()),
+            message: Some(message.into()),
             applied_hash: None,
         });
     }
@@ -3011,9 +3045,21 @@ mod tests {
     }
 
     #[test]
+    fn a_new_catalog_waits_for_the_permission_store() {
+        assert!(!catalog_may_apply(false, false));
+        assert!(catalog_may_apply(false, true));
+        assert!(
+            catalog_may_apply(true, false),
+            "a Ready catalog keeps reconciling"
+        );
+        assert!(catalog_may_apply(true, true));
+    }
+
+    #[test]
     fn a_release_waits_for_what_it_reads() {
         assert!(!release_ready("lakekeeper", false, true, true));
-        assert!(release_ready("lakekeeper", true, false, false));
+        assert!(!release_ready("lakekeeper", true, false, false));
+        assert!(release_ready("lakekeeper", true, true, false));
         assert!(!release_ready("openfga", true, false, true));
         assert!(!release_ready("trino", true, true, false));
         assert!(release_ready("trino", false, false, true));
