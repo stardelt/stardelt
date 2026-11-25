@@ -109,6 +109,13 @@
       ],
       "body": true
     },
+    "compute_ensure": {
+      "method": "POST",
+      "path": "/api/compute/ensure",
+      "path_params": [],
+      "query_params": [],
+      "body": true
+    },
     "compute_list": {
       "method": "GET",
       "path": "/api/compute",
