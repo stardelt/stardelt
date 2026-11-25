@@ -1,4 +1,5 @@
-"""Every install pin in the READMEs names the version this package is (v0.3.0).
+"""Every install pin in the READMEs names the version this package is (from v0.0.4 on
+the repository tag, `v0.0.4`).
 
 Release v0.2.1 shipped with both READMEs still telling a reader to install
 v0.2.0, and v0.3.0 had to fix them (#145). A release is a Git tag: it cannot be
@@ -15,9 +16,9 @@ import stardelt
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-# `stardelt` or `stardelt[jupyter]`, from python/ of this repository at a python/v* tag.
+# `stardelt` or `stardelt[jupyter]`, from python/ of this repository at the repository's v0.0.N tag.
 INSTALL_PIN = re.compile(
-    r"stardelt(?:\[[a-z,]+\])? @ git\+https://github\.com/stardelt/stardelt@python/(v\d+\.\d+\.\d+)#subdirectory=python"
+    r"stardelt(?:\[[a-z,]+\])? @ git\+https://github\.com/stardelt/stardelt@(?:python/)?(v\d+\.\d+\.\d+)#subdirectory=python"
 )
 
 READMES = ["README.md", "stardelt/README.md"]

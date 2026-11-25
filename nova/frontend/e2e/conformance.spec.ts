@@ -200,7 +200,7 @@ test.describe('project footer', () => {
     const footer = page.locator('#primary-nav footer')
     await expect(footer).toBeVisible()
     // The version of the frontend package (frontend/package.json), read at build time.
-    await expect(footer).toContainText('stardelt v0.1.0')
+    await expect(footer).toContainText('stardelt v0.0.4')
 
     for (const [name, href] of LINKS) {
       const link = footer.getByRole('link', { name })
@@ -5592,7 +5592,7 @@ test.describe('overview metrics', () => {
     const card = firstRunCard(page)
     await expect(card).toBeVisible()
     await expect(card.locator('pre')).toHaveJSProperty('textContent', [
-      'pip install "stardelt @ git+https://github.com/stardelt/stardelt@python/v0.4.3#subdirectory=python"',
+      'pip install "stardelt @ git+https://github.com/stardelt/stardelt@v0.0.4#subdirectory=python"',
       `export STARDELT_NOVA_URL=${new URL(page.url()).origin}`,
       'stardelt login',
       'stardelt bundle init shop --name shop-etl --group analysts',
