@@ -19,17 +19,19 @@
 #       `400 invalid_grant` (the way `python/stardelt/login.py::revoke` revokes).
 #   E6  the control: an opaque `sdp_…` secret is useless downstream — `/api/me` answers 401.
 #
-# It changes no realm object, no route and no product code: it reads Secret `stardelt-oidc-clients`
-# (key `nova`) for the actor and nothing else.
+# It changes no realm object, route or product code: it reads Secret `stardelt-oidc-clients`
+# (key `nova`) for the actor and nothing else. It does open one sign-in session for `demo` and
+# revokes it (R1, E1, E5) — that session is the measurement.
 #
 # The person is `demo`, the public visitor: its password is printed by `scripts/public-demo.sh`
 # and hardcoded by `scripts/verify-product-path.sh`, so it protects nothing. (The ticket named a
 # Secret `public-demo-person`; no such Secret exists on the lab — see the #1700 comment.)
 #
 # It prints no password, secret or token: the password and every token travel through mode-0600
-# files in a 0700 `mktemp -d`, the actor's credentials go through curl's `-K` config and every
-# token in a request body through `--data-urlencode name@file`. Output is status codes, claim
-# names and numbers of seconds; a credential in a log line would be a defect.
+# files in a 0700 `mktemp -d`, the authorization header goes through `-H @file`, the actor's
+# credentials through curl's `-K` config and every token in a request body through
+# `--data-urlencode name@file` — no credential in argv. Output is status codes, claim names and
+# numbers of seconds; a credential in a log line would be a defect.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 umask 077
@@ -68,7 +70,8 @@ chmod 600 "$tmp/password"
 mint() { # mint <scope>: the device grant for $PERSON; the token and its response land in $tmp
   rm -f "$tmp/access" "$tmp/access.response"
   ISSUER="$REALM" USER="$PERSON" PASSWORD_FILE="$tmp/password" TOKEN_FILE="$tmp/access" \
-    CLIENT_ID="$CLIENT" SCOPE="$1" python3 scripts/mint-user-token.py > "$tmp/mint.log" 2>&1 \
+    RESPONSE_FILE="$tmp/access.response" CLIENT_ID="$CLIENT" SCOPE="$1" \
+    python3 scripts/mint-user-token.py > "$tmp/mint.log" 2>&1 \
     && [ -s "$tmp/access" ] && [ -s "$tmp/access.response" ]
 }
 
@@ -139,7 +142,9 @@ PY
     echo "E2 $e2"
 
     # --- E3: Nova accepts the refreshed token -----------------------------------------------
-    me_status="$(curl -sS --max-time 30 -H "Authorization: Bearer $(cat "$tmp/refreshed")" \
+    printf 'Authorization: Bearer %s' "$(cat "$tmp/refreshed")" > "$tmp/auth-header"
+    chmod 600 "$tmp/auth-header"
+    me_status="$(curl -sS --max-time 30 -H @"$tmp/auth-header" \
       "$NOVA/api/me" -o "$tmp/me" -w '%{http_code}' 2>/dev/null)" || me_status="000"
     [ -n "$me_status" ] || me_status="000"
     echo "E3 me=$me_status name=$(jq -r '.name // .user // "-"' "$tmp/me" 2>/dev/null || echo -)"

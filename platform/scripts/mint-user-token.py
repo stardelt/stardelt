@@ -22,9 +22,10 @@ Environment: ISSUER, USER, PASSWORD_FILE (mode 0600; the password never reaches 
 TOKEN_FILE (mode 0600), CLIENT_ID (default `stardelt-dev`), SCOPE (default `openid`; the device
 grant asks for it and the token request names it again). Nothing here prints the token.
 
-The device grant also writes the token endpoint's answer to `<TOKEN_FILE>.response` (mode 0600),
-so a caller that needs the refresh token can read it without a second grant
-(`scripts/spike-pat-downstream.sh`, stardelt/stardelt#1700). It is never printed.
+`RESPONSE_FILE` (optional): when it is set, the device grant also writes the token endpoint's whole
+answer there (mode 0600), so a caller that needs the refresh token does not have to grant twice
+(`scripts/spike-pat-downstream.sh`, stardelt/stardelt#1700). It is never printed, and a caller that
+does not ask gets no second file.
 
 Keycloak's device-approval page is plain HTML forms, so this drives it with urllib only: no
 browser and no direct-access grant (which the realm keeps off on purpose).
@@ -203,7 +204,8 @@ def main(argv):
         response = mint_device(issuer, user, password,
                                os.environ.get("CLIENT_ID") or "stardelt-dev", scope)
         token = response["access_token"]
-        write_response(token_file + ".response", response)
+        if os.environ.get("RESPONSE_FILE"):
+            write_response(os.environ["RESPONSE_FILE"], response)
     write_token(token_file, token)
     print("minted: ", end="")
     describe(token)
