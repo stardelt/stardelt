@@ -8,9 +8,14 @@ import { Icon } from '../components/Icon'
 const EMAIL_NOTE = 'Email needs the platform’s SMTP relay; it is not configured yet.'
 const NO_GROUP = 'You are not in a group, so you cannot add a destination.'
 
-/** The address a person reads: the webhook URL, or the recipients joined. */
-const address = (row: Destination) =>
-  row.kind === 'email' ? (row.config.recipients ?? []).join(', ') : (row.config.url ?? '')
+/**
+ * The address a person reads: the webhook URL, or the recipients joined. The document types
+ * `config` as `unknown` (the API sends an object per kind), so the two keys are read here.
+ */
+const address = (row: Destination) => {
+  const config = row.config as { recipients?: string[]; url?: string }
+  return row.kind === 'email' ? (config.recipients ?? []).join(', ') : (config.url ?? '')
+}
 
 /** Name order, so a section does not reshuffle between two reads of the same list. */
 const byName = (a: Destination, b: Destination) => a.name.localeCompare(b.name)

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "e2e": "playwright test",
     "e2e:public-demo": "PUBLIC_DEMO=1 playwright test --config=playwright.live.config.ts",
+    "api:types": "npx -y -p typescript@5.9.3 -p openapi-typescript@7.13.0 openapi-typescript \"$(git rev-parse --show-toplevel)/nova/openapi/nova.json\" -o src/api-schema.d.ts",
     "lint:vocab": "node scripts/vocab-lint.mjs"
   },
   "dependencies": {

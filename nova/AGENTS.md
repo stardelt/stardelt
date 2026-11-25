@@ -50,6 +50,7 @@ make image       # docker build -t ghcr.io/stardelt/nova:dev
   `../../stardelt-docs/docs/architecture/licenses.md`; do not add dependencies outside it.
 - Read the master spec before implementing. Nova is a viewport — platform state lives in
   CRDs; nothing in Nova is state that is not a resource.
+- API types come from `npm run api:types`; never hand-write a type the OpenAPI document has.
 
 ## Gotchas
 
