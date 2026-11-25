@@ -1374,7 +1374,8 @@ pub(crate) struct SignedIn {
     state: Arc<AppState>,
     identity: Identity,
     /// The caller's own token, the one the store is signed in with — never a service identity.
-    access: Secret,
+    /// `None` with sign-in off (`auth::AuthMode::Dev`), where nobody has a token (#1621).
+    access: Option<Secret>,
     /// The ingress/proxy request id, recorded with a break-glass read when present.
     request_id: Option<String>,
 }
@@ -1384,6 +1385,16 @@ impl SignedIn {
     /// read answers from the `Connection` resources and a write answers `503`.
     fn store(&self) -> Option<&StoreClient> {
         self.state.store.as_ref()
+    }
+
+    /// The caller's token for the secret store. With sign-in off there is none (#1621).
+    pub(crate) fn access(&self) -> Result<&Secret, Fail> {
+        self.access.as_ref().ok_or_else(|| {
+            Fail::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "connections need sign-in: this Nova runs without an identity provider",
+            )
+        })
     }
 
     /// The application state, for a route (like the pipelines one) that needs another client.
@@ -1404,21 +1415,31 @@ impl FromRequestParts<Arc<AppState>> for SignedIn {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let Some(principal) = parts.extensions.get::<Principal>().cloned() else {
-            return Err(not_configured());
-        };
-        let Some(access) = principal.access_token else {
-            return Err(sign_in_again());
-        };
         let request_id = parts
             .headers
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .map(|v| v.chars().take(200).collect());
+        let Some(principal) = parts.extensions.get::<Principal>().cloned() else {
+            // Sign-in off: nobody signed in, so the caller is the one dev administrator and
+            // there is no store token (#1621).
+            if state.auth_dev {
+                return Ok(Self {
+                    state: Arc::clone(state),
+                    identity: crate::auth::caller_identity(&state.dev_user, None),
+                    access: None,
+                    request_id,
+                });
+            }
+            return Err(not_configured());
+        };
+        let Some(access) = principal.access_token else {
+            return Err(sign_in_again());
+        };
         Ok(Self {
             state: Arc::clone(state),
             identity: principal.identity,
-            access,
+            access: Some(access),
             request_id,
         })
     }
@@ -1479,7 +1500,11 @@ pub(crate) async fn list(caller: Caller) -> Response {
         })
         .into_response();
     };
-    match list_connections(store, resources.as_ref(), &signed.identity, &signed.access).await {
+    let access = match signed.access() {
+        Ok(access) => access,
+        Err(e) => return e.into_response(),
+    };
+    match list_connections(store, resources.as_ref(), &signed.identity, access).await {
         Ok(connections) => Json(ConnectionsResponse {
             connections,
             store: true,
@@ -1519,6 +1544,10 @@ pub(crate) async fn break_glass_group(
     let Some(store) = signed.store() else {
         return not_configured().into_response();
     };
+    let access = match signed.access() {
+        Ok(access) => access,
+        Err(e) => return e.into_response(),
+    };
     let resources = resources(&signed.state);
     let result = break_glass_group_at(
         store,
@@ -1526,7 +1555,7 @@ pub(crate) async fn break_glass_group(
         &signed.state.break_glass_reads,
         signed.state.db.as_ref(),
         &signed.identity,
-        &signed.access,
+        access,
         &group,
         &name,
         &req.reason,
@@ -1711,14 +1740,12 @@ pub(crate) async fn create(
             .into_response();
         }
         let resources = resources(&signed.state);
-        return match create_connection(
-            store,
-            resources.as_ref(),
-            &signed.identity,
-            &signed.access,
-            req,
-        )
-        .await
+        let access = match signed.access() {
+            Ok(access) => access,
+            Err(e) => return e.into_response(),
+        };
+        return match create_connection(store, resources.as_ref(), &signed.identity, access, req)
+            .await
         {
             Ok((status, view)) => (status, Json(view)).into_response(),
             Err(e) => e.into_response(),
@@ -1837,12 +1864,16 @@ async fn rotate_at(
     let Some(store) = signed.store() else {
         return not_configured().into_response();
     };
+    let access = match signed.access() {
+        Ok(access) => access,
+        Err(e) => return e.into_response(),
+    };
     let resources = resources(&signed.state);
     match rotate_connection(
         store,
         resources.as_ref(),
         &signed.identity,
-        &signed.access,
+        access,
         scope,
         name,
         body.secret,
@@ -1949,11 +1980,15 @@ async fn delete_at(
             Err(e) => e.into_response(),
         };
     };
+    let access = match signed.access() {
+        Ok(access) => access,
+        Err(e) => return e.into_response(),
+    };
     match delete_connection(
         store,
         resources.as_ref(),
         &signed.identity,
-        &signed.access,
+        access,
         scope,
         name,
     )
@@ -2826,6 +2861,11 @@ mod tests {
     /// The routes a body test needs, with `store` configured or not and a caller (`None` =
     /// no principal at all, as in demo mode and `static-dev`).
     fn app(store: Option<StoreClient>, caller: Option<Principal>) -> Router {
+        app_with_state(test_state(store), caller)
+    }
+
+    /// The same routes over a state the caller built: dev mode needs its own (#1621).
+    fn app_with_state(state: Arc<AppState>, caller: Option<Principal>) -> Router {
         let router = Router::new()
             .route("/connections", get(list).post(create))
             .route("/connections/personal/{name}", delete(delete_personal))
@@ -2838,11 +2878,51 @@ mod tests {
                 post(break_glass_managed),
             )
             .route("/connections/break-glass-log", get(break_glass_log))
-            .with_state(test_state(store));
+            .with_state(state);
         match caller {
             Some(principal) => router.layer(axum::Extension(principal)),
             None => router,
         }
+    }
+
+    /// A Kubernetes API that answers an empty `Pipeline` list, so `GET /api/pipelines` reaches
+    /// the list rather than "no cluster connection".
+    async fn empty_cluster() -> kube::Client {
+        async fn list() -> axum::Json<Value> {
+            axum::Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "PipelineList",
+                "items": []
+            }))
+        }
+        let app = Router::new().fallback(list);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}").parse().unwrap();
+        kube::Client::try_from(kube::Config::new(url)).expect("a client for the fake API")
+    }
+
+    /// Dev mode (`NOVA_AUTH_MODE` unset): nobody signs in, so the caller is the dev
+    /// administrator. A cluster and a scheduler are configured so the pipeline list answers
+    /// rather than reporting them missing; neither is called with no visible pipeline.
+    async fn dev_state(store: Option<StoreClient>) -> Arc<AppState> {
+        let kube = empty_cluster().await;
+        let mut state = test_state_db(store, None);
+        let state_mut = Arc::get_mut(&mut state).expect("a fresh state");
+        state_mut.auth_dev = true;
+        state_mut.kube = Some(kube);
+        state_mut.airflow = Some(crate::airflow::AirflowClient::new(
+            reqwest::Client::new(),
+            crate::airflow::AirflowConfig {
+                url: "http://127.0.0.1:1".into(),
+                user: "nova-api".into(),
+                password: Secret::new("never-called"),
+            },
+        ));
+        state
     }
 
     fn test_state(store: Option<StoreClient>) -> Arc<AppState> {
@@ -2852,6 +2932,7 @@ mod tests {
     fn test_state_db(store: Option<StoreClient>, db: Option<sqlx::PgPool>) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
+            auth_dev: false,
             default_theme: "graphite",
             trino_url: "http://127.0.0.1:1".into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
@@ -3041,6 +3122,65 @@ mod tests {
             let value: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(value["error"], "the secret store is not configured");
         }
+    }
+
+    #[tokio::test]
+    async fn dev_mode_lists_pipelines_as_the_administrator() {
+        // Sign-in off (#1621): no principal, and the caller is the dev administrator, so the
+        // pipeline list answers instead of the SignedIn extractor's 503.
+        let app = Router::new()
+            .nest("/api", crate::pipelines::router())
+            .with_state(dev_state(None).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dev mode is not 'the secret store is not configured'"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["pipelines"],
+            serde_json::json!([]),
+            "the list answered; the cluster has none"
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_mode_connection_write_names_the_missing_sign_in() {
+        // The one thing a dev-mode caller cannot do is reach the secret store: there is no
+        // token. The answer says that, not "the secret store is not configured" (#1621).
+        let (store, _fake) = fake::start().await;
+        let response = app_with_state(dev_state(Some(store)).await, None)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/connections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"crm-db","type":"sqlserver","scope":"personal","config":{"host":"crm.example.com"},"secret":{"user":"etl","password":"p1"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["error"],
+            "connections need sign-in: this Nova runs without an identity provider"
+        );
     }
 
     #[tokio::test]
