@@ -2142,6 +2142,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stardelt-crds"
+version = "0.0.4"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "stardelt-operator"
 version = "0.0.4"
 dependencies = [
@@ -2159,6 +2170,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "stardelt-crds",
  "thiserror",
  "tokio",
  "tower",
