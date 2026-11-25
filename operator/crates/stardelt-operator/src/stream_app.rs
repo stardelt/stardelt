@@ -186,8 +186,9 @@ pub fn topic_satisfied(existing: &[DynamicObject], topic: &str, desired: &Dynami
     })
 }
 
-/// The request is half a core so two streams fit on the 8-CPU dev node; the CPU limit stays
-/// a full core (`coreLimit` on the driver, `cores` on the executor).
+/// The request is a quarter core so four streams fit on the 8-CPU dev node and a release gate's
+/// Spark executor still finds a free core; the CPU limit stays a full core (`coreLimit` on the
+/// driver, `cores` on the executor), so a stream bursts when it needs to.
 pub fn spark_application(
     namespace: &str,
     app: &str,
@@ -284,7 +285,7 @@ pub fn spark_application(
                 "sparkConf": spark_conf,
                 "driver": {
                     "cores": 1,
-                    "coreRequest": "500m",
+                    "coreRequest": "250m",
                     "coreLimit": "1200m",
                     "memory": "2g",
                     "memoryOverhead": "1g",
@@ -318,7 +319,7 @@ pub fn spark_application(
                 },
                 "executor": {
                     "cores": 1,
-                    "coreRequest": "500m",
+                    "coreRequest": "250m",
                     "instances": 1,
                     // The admission policy `spark-connect-executor-pods` (platform#1096
                     // question 2) admits only executor pods that run as the token-less
@@ -1630,7 +1631,7 @@ mod tests {
         )
         .expect("ok");
         for part in ["driver", "executor"] {
-            assert_eq!(a.data["spec"][part]["coreRequest"], "500m", "{part}");
+            assert_eq!(a.data["spec"][part]["coreRequest"], "250m", "{part}");
             assert_eq!(a.data["spec"][part]["memory"], "2g", "{part}");
             assert_eq!(a.data["spec"][part]["memoryOverhead"], "1g", "{part}");
         }
