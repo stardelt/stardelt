@@ -107,3 +107,20 @@ def test_default_names_every_cluster_when_a_person_is_in_several_groups():
     c, _ = client(FakeResponse(payload=payload))
     with pytest.raises(LookupError, match=r"2 Spark clusters \(a-team, b-team\)"):
         compute.default(c)
+
+
+def test_ensure_posts_the_group_and_answers_the_cluster():
+    c, session = client(FakeResponse(payload={"name": "visitors", "phase": "Starting"}))
+    view = compute.ensure("visitors", client=c)
+    assert view["name"] == "visitors"
+    assert session.calls[0][:2] == ("POST", "https://nova.example/api/compute/ensure")
+    assert session.calls[0][2]["json"] == {"group": "visitors"}
+
+
+def test_default_names_ensure_in_the_no_cluster_sentence():
+    payload = {"clusters": [
+        {"name": "shared", "kind": "cluster", "shared": True, "canUse": True, "canAct": False},
+    ]}
+    c, _ = client(FakeResponse(payload=payload))
+    with pytest.raises(LookupError, match=r"stardelt\.compute\.ensure"):
+        compute.default(c)
