@@ -34,10 +34,13 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # Helm creates the target namespace (--create-namespace).
+  # Helm creates the target namespace (--create-namespace), without labels. `patch` adds the
+  # Pod Security floor to a namespace that carries no `pod-security.kubernetes.io/*` label of
+  # its own (provision.rs `ensure_namespace`, stardelt/stardelt#1706); it also lets the
+  # server-side apply of a new namespace through.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   # The operator installs upstream charts with Helm, so it applies whatever the
   # charts contain, cluster-wide. This is the documentation-worthy part of the
   # RBAC: an installer operator is a privileged component by nature.

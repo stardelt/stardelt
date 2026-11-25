@@ -226,14 +226,49 @@ fn bucket(lh: &Lakehouse) -> String {
         .unwrap_or_else(|| DEFAULT_BUCKET.to_string())
 }
 
+/// Whether an existing namespace still needs the Pod Security floor: true when it carries no
+/// `pod-security.kubernetes.io/*` label at all. A namespace that carries one keeps it — an
+/// administrator who set their own level is not overridden (stardelt/stardelt#1706).
+pub fn needs_floor(labels: &BTreeMap<String, String>) -> bool {
+    !labels
+        .keys()
+        .any(|key| key.starts_with("pod-security.kubernetes.io/"))
+}
+
 /// Creates the namespace the platform is installed into, with the Pod Security floor of
 /// the platform repo's `manifests/namespace.yaml` (platform#1096 question 5). An existing
-/// namespace is left alone: an administrator may have set a stricter level there.
+/// namespace that carries no `pod-security.kubernetes.io/*` label gets the floor merged onto it:
+/// Helm's `--create-namespace` creates it without labels (stardelt/stardelt#1706). A namespace
+/// that carries such a label is left alone: an administrator may have set a stricter level there.
 pub async fn ensure_namespace(ctx: &Context, namespace: &str, dry_run: bool) -> ComponentStatus {
     const NAME: &str = "namespace";
     let api: Api<Namespace> = Api::all(ctx.client.clone());
     match api.get_opt(namespace).await {
-        Ok(Some(_)) => status(NAME, true, "present (labels left as they are)"),
+        Ok(Some(existing)) => {
+            let present = existing.metadata.labels.unwrap_or_default();
+            if !needs_floor(&present) {
+                return status(NAME, true, "present (labels left as they are)");
+            }
+            if dry_run {
+                return status(
+                    NAME,
+                    false,
+                    "planned (dry-run): would add the Pod Security floor to the existing namespace",
+                );
+            }
+            let labels = platform_namespace(namespace)
+                .metadata
+                .labels
+                .unwrap_or_default();
+            let patch = json!({ "metadata": { "labels": labels } });
+            match api
+                .patch(namespace, &PatchParams::default(), &Patch::Merge(&patch))
+                .await
+            {
+                Ok(_) => status(NAME, true, "present; the Pod Security floor added"),
+                Err(e) => status(NAME, false, e.to_string()),
+            }
+        }
         Ok(None) if dry_run => status(
             NAME,
             false,
@@ -3855,6 +3890,50 @@ mod tests {
         (kube::Client::new(service, "stardelt"), requests)
     }
 
+    /// A kube client for the namespace: `GET /api/v1/namespaces/stardelt` answers `labels`,
+    /// every `PATCH` echoes its body. Requests are recorded.
+    fn mock_namespace(labels: serde_json::Value) -> (kube::Client, Recorded) {
+        let requests: Recorded = Arc::default();
+        let recorder = requests.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let recorder = recorder.clone();
+            let labels = labels.clone();
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            async move {
+                let body = request
+                    .into_body()
+                    .collect_bytes()
+                    .await
+                    .expect("mock body");
+                let body = String::from_utf8_lossy(&body).to_string();
+                recorder.lock().expect("requests poisoned").push((
+                    method.clone(),
+                    path.clone(),
+                    body.clone(),
+                ));
+                let document = if method == "PATCH" {
+                    body
+                } else {
+                    serde_json::json!({
+                        "apiVersion": "v1",
+                        "kind": "Namespace",
+                        "metadata": { "name": "stardelt", "labels": labels },
+                    })
+                    .to_string()
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(document.into_bytes()))
+                        .expect("valid mock response"),
+                )
+            }
+        });
+        (kube::Client::new(service, "stardelt"), requests)
+    }
+
     fn external_with_groups() -> PlatformInstanceSpec {
         let mut spec = platform("external", false);
         spec.secrets.mode = SecretsMode::External;
@@ -6995,5 +7074,113 @@ mod tests {
                 .all(|(method, _, _)| method != "PUT" && method != "POST"),
             "no store writes expected: {reqs:?}"
         );
+    }
+
+    /// stardelt/stardelt#1706: a namespace Helm created with `--create-namespace` carries no
+    /// `pod-security.kubernetes.io/*` label, so the operator adds the floor.
+    #[test]
+    fn needs_floor_is_true_when_the_namespace_carries_no_pod_security_label() {
+        let labels = BTreeMap::from([(
+            "kubernetes.io/metadata.name".to_string(),
+            "stardelt".to_string(),
+        )]);
+        assert!(needs_floor(&labels));
+        assert!(needs_floor(&BTreeMap::new()));
+    }
+
+    /// An administrator's own level is not overridden.
+    #[test]
+    fn needs_floor_is_false_when_an_administrator_set_the_enforce_level() {
+        let labels = BTreeMap::from([(
+            "pod-security.kubernetes.io/enforce".to_string(),
+            "baseline".to_string(),
+        )]);
+        assert!(!needs_floor(&labels));
+    }
+
+    /// stardelt/stardelt#1706: the patch carries `metadata.labels` and nothing else.
+    #[tokio::test]
+    async fn an_existing_namespace_without_the_floor_is_patched_with_labels_only() {
+        let (client, requests) = mock_namespace(serde_json::json!({
+            "kubernetes.io/metadata.name": "stardelt"
+        }));
+        let status = ensure_namespace(&context(client), "stardelt", false).await;
+        assert!(status.ready);
+        assert_eq!(
+            status.message.as_deref(),
+            Some("present; the Pod Security floor added")
+        );
+        let reqs = requests.lock().expect("requests poisoned");
+        let patches: Vec<_> = reqs
+            .iter()
+            .filter(|(method, _, _)| method == "PATCH")
+            .collect();
+        assert_eq!(patches.len(), 1, "{reqs:?}");
+        let body: serde_json::Value = serde_json::from_str(&patches[0].2).expect("patch body");
+        let object = body.as_object().expect("an object");
+        assert_eq!(object.keys().cloned().collect::<Vec<_>>(), vec!["metadata"]);
+        let metadata = object["metadata"].as_object().expect("metadata");
+        assert_eq!(metadata.keys().cloned().collect::<Vec<_>>(), vec!["labels"]);
+        let labels = metadata["labels"].as_object().expect("labels");
+        assert_eq!(labels.len(), 7, "{labels:?}");
+        assert_eq!(labels["pod-security.kubernetes.io/enforce"], "restricted");
+        assert_eq!(labels["pod-security.kubernetes.io/warn"], "restricted");
+        assert_eq!(labels["pod-security.kubernetes.io/audit"], "restricted");
+    }
+
+    /// An administrator's level is a decision: the operator sends no patch at all.
+    #[tokio::test]
+    async fn an_existing_namespace_with_its_own_level_is_left_alone() {
+        let (client, requests) = mock_namespace(serde_json::json!({
+            "pod-security.kubernetes.io/enforce": "baseline"
+        }));
+        let status = ensure_namespace(&context(client), "stardelt", false).await;
+        assert!(status.ready);
+        assert_eq!(
+            status.message.as_deref(),
+            Some("present (labels left as they are)")
+        );
+        let reqs = requests.lock().expect("requests poisoned");
+        assert!(
+            reqs.iter().all(|(method, _, _)| method != "PATCH"),
+            "{reqs:?}"
+        );
+    }
+
+    /// A dry run reports the plan and writes nothing.
+    #[tokio::test]
+    async fn a_dry_run_names_the_floor_but_sends_no_patch() {
+        let (client, requests) = mock_namespace(serde_json::json!({}));
+        let status = ensure_namespace(&context(client), "stardelt", true).await;
+        assert!(!status.ready);
+        assert!(
+            status
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("planned (dry-run)"),
+            "{:?}",
+            status.message
+        );
+        let reqs = requests.lock().expect("requests poisoned");
+        assert!(
+            reqs.iter().all(|(method, _, _)| method != "PATCH"),
+            "{reqs:?}"
+        );
+    }
+
+    /// The floor the platform installs is complete: all six labels cause no further patch.
+    #[test]
+    fn needs_floor_is_false_when_all_six_labels_are_present() {
+        let labels = platform_namespace("stardelt")
+            .metadata
+            .labels
+            .expect("the floor has labels");
+        let six = labels
+            .iter()
+            .filter(|(key, _)| key.starts_with("pod-security.kubernetes.io/"))
+            .count();
+        assert_eq!(six, 6);
+        assert!(!needs_floor(&labels));
     }
 }
