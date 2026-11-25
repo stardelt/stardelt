@@ -1,4 +1,4 @@
-"""N pipeline runs at once: the arithmetic and the stub proof (#1533, stardelt/stardelt#53)."""
+"""N pipeline runs at once: the arithmetic and the stub proof (#1533 repair, stardelt/stardelt#53)."""
 
 import subprocess
 import sys
@@ -11,7 +11,7 @@ PLATFORM = Path(__file__).resolve().parents[2]
 # dist-packages that wins the name; import the script by its own directory instead.
 sys.path.insert(0, str(PLATFORM / "perf"))
 
-from pipelines import parse_levels, percentile, summarize  # noqa: E402
+from pipelines import parse_levels, parse_pipelines, percentile, pipelines_for_level, summarize  # noqa: E402
 
 
 class PercentileTest(unittest.TestCase):
@@ -41,6 +41,21 @@ class ParseLevelsTest(unittest.TestCase):
         for raw in ("0,2", "-1", "11", "1,,2", "two"):
             with self.assertRaises(SystemExit, msg=raw):
                 parse_levels(raw)
+
+
+class PipelinesForLevelTest(unittest.TestCase):
+    def test_one_level_keeps_the_pipelines_distinct(self):
+        self.assertEqual(pipelines_for_level(["a", "b", "c"], 2), ["a", "b"])
+        self.assertEqual(pipelines_for_level(["a"], 1), ["a"])
+        for level in (3, 10):
+            with self.assertRaises(SystemExit, msg=level):
+                pipelines_for_level(["a", "b"], level)
+
+    def test_parse_pipelines_rejects_a_duplicate_and_a_blank(self):
+        self.assertEqual(parse_pipelines("shop-1-bronze, shop-2-silver"), ["shop-1-bronze", "shop-2-silver"])
+        for raw in ("", "a,,b", "a,a", " , "):
+            with self.assertRaises(SystemExit, msg=raw):
+                parse_pipelines(raw)
 
 
 class SelfTestTest(unittest.TestCase):

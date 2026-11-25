@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """N pipeline runs started at once: start-to-terminal p50/p95 as one person (#53, decision 1(e)).
 
-What a team feels when its schedules fire together: N runs of one pipeline started at the
-same moment through Nova, timed with `time.monotonic()` from the `POST …/runs` to the poll
-that saw `success`/`failed` — client wall-clock, not Airflow's own `durationSeconds`.
+What a team feels when its schedules fire together: N runs on N different pipelines started
+at the same moment through Nova, timed with `time.monotonic()` from the `POST …/runs` to the
+poll that saw `success`/`failed` — client wall-clock, not Airflow's own `durationSeconds`.
 Standard library only. The numbers feed the Sizing page (#53 decision 4); see perf/README.md.
 """
 
@@ -75,6 +75,34 @@ def parse_levels(raw: str) -> list[int]:
     if any(level < 1 or level > MAX_LEVEL for level in levels):
         raise SystemExit("PERF_LEVELS must be a comma-separated list of 1..%d" % MAX_LEVEL)
     return levels
+
+
+def parse_pipelines(raw: str) -> list[str]:
+    """PERF_PIPELINES="shop-1-bronze,shop-2-silver" -> ["shop-1-bronze", "shop-2-silver"].
+
+    A blank entry, an empty list and a repeated name are SystemExit: two starts on one
+    `Forbid` pipeline answer 409, so a duplicate would measure Nova's gate, not the platform."""
+    if raw.strip() == "":
+        raise SystemExit("PERF_PIPELINES is empty")
+    names = [part.strip() for part in raw.split(",")]
+    if any(name == "" for name in names):
+        raise SystemExit("PERF_PIPELINES has a blank entry")
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            raise SystemExit("PERF_PIPELINES names %s twice" % name)
+        seen.add(name)
+    return names
+
+
+def pipelines_for_level(names: list[str], level: int) -> list[str]:
+    """The first `level` names; SystemExit when the list is shorter than the level."""
+    if level > len(names):
+        raise SystemExit(
+            "PERF_LEVELS asks for %d pipelines at once but PERF_PIPELINES names %d"
+            % (level, len(names))
+        )
+    return names[:level]
 
 
 def mint_token(nova: str, issuer: str, person: str, password_file: str) -> str:
@@ -182,29 +210,30 @@ def measure_level(
     nova: str,
     token: str,
     namespace: str,
-    name: str,
-    level: int,
+    names: list[str],
     timeout: float,
     poll: float,
 ) -> dict[str, object]:
-    """One level: start N runs at the same moment, wait for all, return the dict the JSON records."""
+    """One level: start one run on each named pipeline at the same moment, wait for all,
+    return the dict the JSON records."""
+    level = len(names)
     barrier = Barrier(level)
     lock = Lock()
-    outcomes: list[tuple[str, int | None]] = []
+    outcomes: list[tuple[str, int | None] | None] = [None] * level
 
-    def one() -> None:
+    def one(index: int, name: str) -> None:
         barrier.wait()
         try:
             run_id = start_run(nova, token, namespace, name)
         except RunStartError as exc:
             with lock:
-                outcomes.append((f"start-{exc.status}", None))
+                outcomes[index] = (f"start-{exc.status}", None)
             return
         state, milliseconds = wait_run(nova, token, namespace, name, run_id, timeout, poll)
         with lock:
-            outcomes.append((state, milliseconds))
+            outcomes[index] = (state, milliseconds)
 
-    threads = [Thread(target=one) for _ in range(level)]
+    threads = [Thread(target=one, args=(index, name)) for index, name in enumerate(names)]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -222,6 +251,7 @@ def measure_level(
         "p95": summary["p95"],
         "max": summary["max"],
         "states": states,
+        "pipelines": list(names),
     }
     print(
         "level %d  runs=%d  ok=%d  p50=%s  p95=%s  max=%s"
@@ -295,18 +325,22 @@ def self_test() -> int:
     thread.start()
     try:
         nova = "http://127.0.0.1:%d" % server.server_address[1]
-        one = measure_level(nova, "test-token", "stardelt", "shop-1-bronze", 1, 10, 0.01)
+        one = measure_level(nova, "test-token", "stardelt", ["shop-1-bronze"], 10, 0.01)
         assert one["runs"] == 1 and one["ok"] == 1, f"level 1 did not succeed: {one}"
         assert one["errors"] == 0, f"level 1 counted an error: {one}"
         assert one["states"] == ["success"], f"level 1 states: {one}"
+        assert one["pipelines"] == ["shop-1-bronze"], f"level 1 pipelines: {one}"
         assert one["p50"] == one["p95"] == one["max"], f"one run's p50/p95/max differ: {one}"
         assert isinstance(one["p50"], int) and one["p50"] >= 0, f"timing missing: {one}"
 
         _StubHandler.fail_all = True
-        two = measure_level(nova, "test-token", "stardelt", "shop-1-bronze", 2, 10, 0.01)
+        two = measure_level(
+            nova, "test-token", "stardelt", ["shop-1-bronze", "shop-2-silver"], 10, 0.01
+        )
         assert two["runs"] == 2 and two["ok"] == 0, f"level 2 counted a success: {two}"
         assert two["errors"] == 2, f"level 2 error count: {two}"
         assert two["states"] == ["failed", "failed"], f"level 2 states: {two}"
+        assert two["pipelines"] == ["shop-1-bronze", "shop-2-silver"], f"level 2 pipelines: {two}"
         assert two["p50"] is None and two["p95"] is None and two["max"] is None, (
             f"a failed run produced a latency: {two}"
         )
@@ -335,13 +369,17 @@ def main() -> int:
     issuer = (os.environ.get("ISSUER") or "https://id.alpha.dev.stardelt.io/realms/stardelt").rstrip("/")
     person = os.environ.get("PERF_PERSON") or "demo"
     namespace = os.environ.get("PERF_NAMESPACE") or "stardelt"
-    name = os.environ.get("PERF_PIPELINE") or "shop-1-bronze"
+    names = parse_pipelines(
+        os.environ.get("PERF_PIPELINES") or "shop-1-bronze,shop-2-silver,shop-3-gold,shop-dbt"
+    )
     levels = parse_levels(os.environ.get("PERF_LEVELS") or "1,2")
     timeout = float(os.environ.get("PERF_TIMEOUT") or "900")
     poll = float(os.environ.get("PERF_POLL") or "2")
     out_dir = os.environ.get("PERF_OUT_DIR") or os.path.expanduser("~/.cache/stardelt-perf")
     if not levels:
         raise SystemExit("PERF_LEVELS lists no level to run")
+    for level in levels:
+        pipelines_for_level(names, level)  # SystemExit names the count when the level is too high
     if poll <= 0 or timeout <= 0:
         raise SystemExit("PERF_POLL and PERF_TIMEOUT must be positive")
 
@@ -358,7 +396,8 @@ def main() -> int:
             pass
 
     rows = [
-        measure_level(nova, token, namespace, name, level, timeout, poll) for level in levels
+        measure_level(nova, token, namespace, pipelines_for_level(names, level), timeout, poll)
+        for level in levels
     ]
     total = sum(int(row["runs"]) for row in rows)
 
@@ -370,7 +409,7 @@ def main() -> int:
             "timestamp": timestamp,
             "nova": nova,
             "person": person,
-            "pipeline": name,
+            "pipelines": names,
             "levels": rows,
         },
     )
@@ -378,13 +417,16 @@ def main() -> int:
     for row in rows:
         if not row["errors"]:
             continue
-        failed = next(state for state in row["states"] if state != "success")
+        failed_index = next(i for i, state in enumerate(row["states"]) if state != "success")
         print(
-            "perf-pipelines: FAIL level %d: %d run(s) did not succeed (%s)"
-            % (row["level"], row["errors"], failed)
+            "perf-pipelines: FAIL level %d: %d run(s) did not succeed (%s on %s)"
+            % (row["level"], row["errors"], row["states"][failed_index], row["pipelines"][failed_index])
         )
         return 1
-    print("perf-pipelines: PASS (%d run(s) as %s on %s)" % (total, person, name))
+    measured = pipelines_for_level(names, max(levels))
+    print(
+        "perf-pipelines: PASS (%d run(s) as %s on %s)" % (total, person, ", ".join(measured))
+    )
     return 0
 
 
