@@ -196,6 +196,16 @@ attempt() { # component [extra args...] -> one read; 0 when every probe of it pa
       kafka)
         check_contains "kafka: cluster operator image" "$out" "$STRIMZI_OPERATOR"
         ;;
+      lakekeeper)
+        # #1617/#1629: the operator installed the catalog with authz.backend allowall, so every
+        # token could read and write every catalog. A unit test guards the golden values; this
+        # row proves the RUNNING binary prints them. Measured 2026-11-25: the pinned operator
+        # answered allowall while `values lakekeeper full` was asserted nowhere (#1644).
+        local authz
+        authz="$(printf '%s\n' "$out" | section_of authz)"
+        check_contains "lakekeeper: authz backend" "$authz" "backend: openfga"
+        check_contains "lakekeeper: OpenFGA endpoint" "$authz" "endpoint: http://openfga."
+        ;;
     esac
   fi
   [ "${#FAIL_LINES[@]}" -eq 0 ]
@@ -222,7 +232,7 @@ probe() { # component [extra args...] -> one read, and a second when the first m
   return 0
 }
 
-for component in airflow jupyterhub superset seaweedfs external-secrets spark-operator kafka; do
+for component in airflow jupyterhub superset seaweedfs external-secrets spark-operator kafka lakekeeper; do
   probe "$component"
 done
 

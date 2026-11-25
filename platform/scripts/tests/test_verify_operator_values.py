@@ -208,6 +208,11 @@ def fixtures():
         "spark-operator-plain.yaml": f'controller:\n  replicas: 1\nimage:\n  tag: "2.5.2@{spark_operator}"\n',
         "kafka-plain.yaml": f'image:\n  tag: "1.3.1@{strimzi}"\n'
         f'topicOperator:\n  image:\n    tag: "1.3.1@{strimzi}"\n',
+        # #1617/#1629: the operator path used authz.backend allowall; the probe reads this section.
+        "lakekeeper-plain.yaml": "authz:\n"
+        "  backend: openfga\n"
+        "  openfga:\n"
+        "    endpoint: http://openfga.__NAMESPACE__.svc.cluster.local:8081\n",
     }
     # Every digest the loop probes, in the document `values <component> full` prints for it.
     for component, path, pattern in SHARED:
@@ -255,26 +260,39 @@ class TestVerifyOperatorValues(unittest.TestCase):
     def test_a_full_document_passes_every_probe_without_a_retry(self):
         done = self.run_script()
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (46 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (48 probes)", done.stdout)
         self.assertNotIn("re-reading values once", done.stderr)
         self.assertEqual(
-            len(self.calls()), 24, "seven plain reads, four with --identity, thirteen digest reads"
+            len(self.calls()), 25, "eight plain reads, four with --identity, thirteen digest reads"
         )
 
     def test_a_first_read_that_misses_the_tail_is_re_read_and_passes(self):
         done = self.run_script("first")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (46 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (48 probes)", done.stdout)
         self.assertIn("re-reading values once", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
 
     def test_a_second_read_that_also_misses_fails_once(self):
         done = self.run_script("always")
         self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertIn("verify-operator-values: FAIL (2 of 46 probes)", done.stdout)
+        self.assertIn("verify-operator-values: FAIL (2 of 48 probes)", done.stdout)
         self.assertEqual((done.stdout + done.stderr).count("trino identity: password file"), 1)
         self.assertIn("is not in the running operator", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
+
+    def test_a_lakekeeper_allowall_backend_fails_even_with_the_endpoint(self):
+        """#1617/#1629: the operator path shipped allowall once; the row must never pass it."""
+        (self.dir / "lakekeeper-plain.yaml").write_text(
+            "authz:\n"
+            "  backend: allowall\n"
+            "  openfga:\n"
+            "    endpoint: http://openfga.stardelt.svc.cluster.local:8081\n"
+        )
+        done = self.run_script()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("lakekeeper: authz backend", done.stderr)
+        self.assertIn("is not in the running operator", done.stderr)
 
     def test_a_kafka_operator_pin_the_operator_does_not_carry_fails(self):
         (self.dir / "kafka-plain.yaml").write_text(
@@ -292,7 +310,7 @@ class TestVerifyOperatorValues(unittest.TestCase):
         done = self.run_script()
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn(f"✗ cnpg {absent[7:22]}…: `{absent}` is not in the running operator", done.stderr)
-        self.assertIn("verify-operator-values: FAIL (1 of 46 probes)", done.stdout)
+        self.assertIn("verify-operator-values: FAIL (1 of 48 probes)", done.stdout)
 
     def test_the_pod_running_the_pinned_digest_is_the_one_probed(self):
         """platform#192: two old pods stay Ready while they terminate; the pinned one answers."""
@@ -305,12 +323,12 @@ class TestVerifyOperatorValues(unittest.TestCase):
         )
         done = self.run_script()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("verify-operator-values: PASS (46 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (48 probes)", done.stdout)
         self.assertIn(
             f"✓ values             probed stardelt-operator-pinned ({pin[:15]}…)", done.stdout
         )
         self.assertEqual(set(self.probed_pods()), {"stardelt-operator-pinned"})
-        self.assertEqual(len(self.calls()), 24)
+        self.assertEqual(len(self.calls()), 25)
 
     def test_no_pod_runs_the_pinned_digest_proves_nothing_and_exits_3(self):
         """A not-yet-rolled-out pin is UNVERIFIED, never FAIL: nothing has been disproved."""
