@@ -292,6 +292,20 @@ def test_setup_vscode_prints_the_kernelspec_path(tmp_path):
     assert Path(out.getvalue().strip()).exists()
 
 
+def test_setup_vscode_takes_the_host_before_the_command(tmp_path):
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.main(
+        ["--host", "https://partner.example.com", "setup", "vscode"],
+        environ={"JUPYTER_DATA_DIR": str(tmp_path)},
+        stdout=out,
+        stderr=err,
+    )
+    assert (code, err.getvalue()) == (0, "")
+    slug = "stardelt-partner-example-com"
+    assert out.getvalue().endswith(f"kernels/{slug}/kernel.json\n")
+    assert Path(out.getvalue().strip()).exists()
+
+
 def test_bundle_validate_json_prints_one_object(tmp_path):
     bundle.init(tmp_path, "shop-etl", "shop")
     code, out, err, _ = run(["bundle", "validate", str(tmp_path), "--format", "json"])
