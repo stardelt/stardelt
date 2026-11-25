@@ -436,6 +436,20 @@ def _spark_pipeline_files(root, project):
     return contents
 
 
+def _statement_count_problem(at, text):
+    """Trino runs a task's SQL as one statement: refuse a second one (#1601)."""
+    body = re.sub(r"--[^\n]*", "", text)
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"'(?:[^']|'')*'", "''", body)
+    body = re.sub(r'"(?:[^"]|"")*"', '""', body)
+    body = body.strip()
+    if body.endswith(";"):
+        body = body[:-1].rstrip()
+    if ";" in body:
+        return [(at, "one statement per task: Trino runs a task's SQL as one statement — split it into tasks joined by dependsOn")]
+    return []
+
+
 def _task_problems(where, tasks, files, root):
     """What a ``tasks`` list must say, offline: names, one source each (``sql``, ``sqlFile``, ``notebook``,
     ``dbt``, ``quality`` or ``spark-pipeline``), and the dependency graph."""
@@ -465,6 +479,10 @@ def _task_problems(where, tasks, files, root):
         problems.extend(_spark_pipeline_problems(at, task, root))
         if "sqlFile" in task and task["sqlFile"] not in files:
             problems.append((at, f"sqlFile {task['sqlFile']!r} is not among the bundle's files"))
+        if isinstance(task.get("sql"), str):
+            problems.extend(_statement_count_problem(at, task["sql"]))
+        if task.get("sqlFile") in files:
+            problems.extend(_statement_count_problem(at, (root / task["sqlFile"]).read_text(encoding="utf-8")))
         if "writes" in task:
             writes = task["writes"]
             if (

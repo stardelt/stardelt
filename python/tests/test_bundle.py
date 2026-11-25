@@ -739,6 +739,19 @@ def test_task_rules_are_reported(tmp_path):
         assert expected in problems, problems
 
 
+def test_a_task_sql_file_with_two_statements_is_refused(tmp_path):
+    files = dict(TASK_FILES, **{"sql/two.sql": "CREATE SCHEMA IF NOT EXISTS a.b;\nCREATE TABLE a.b.c (x int);\n"})
+    make(tmp_path, resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: pair, sqlFile: sql/two.sql}\n"}, files=files)
+    problems = said(bundle.validate(tmp_path)[0])
+    assert "resources/gold.yaml (dev), task 'pair': one statement per task" in problems
+
+
+def test_a_semicolon_inside_a_string_and_a_trailing_one_are_one_statement(tmp_path):
+    files = dict(TASK_FILES, **{"sql/quoted.sql": "SELECT ';' AS x;\n"})
+    make(tmp_path, resources={"gold.yaml": "name: shop-gold\ntasks:\n  - {name: quoted, sqlFile: sql/quoted.sql}\n"}, files=files)
+    assert bundle.validate(tmp_path)[0] == []
+
+
 def test_a_pipeline_cannot_give_both_tasks_and_one_source(tmp_path):
     task_bundle(tmp_path, ["{name: x, sql: select 1}"], extra="sql: select 1\n")
     assert "give tasks, or one of sql, sqlFile or notebook — not both" in said(bundle.validate(tmp_path)[0])
