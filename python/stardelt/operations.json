@@ -946,6 +946,30 @@
       ],
       "body": true
     },
+    "table_freshness_get": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}/health",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
+    "table_freshness_update": {
+      "method": "PUT",
+      "path": "/api/catalog/tables/{ns}/{tbl}/health",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
     "table_history": {
       "method": "GET",
       "path": "/api/catalog/tables/{ns}/{tbl}/history",

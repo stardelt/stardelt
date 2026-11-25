@@ -57,6 +57,7 @@
 //! them against a fake Lakekeeper and a recorded SQL closure without a cluster.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{
@@ -65,6 +66,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Days, Duration, LocalResult, SecondsFormat, TimeZone, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
@@ -123,6 +126,69 @@ pub struct TableDocumentation {
     #[serde(rename = "rollbackRule")]
     #[schema(rename = "rollbackRule")]
     pub rollback_rule: String,
+}
+
+/// The Iceberg table property that carries the freshness promise (#402).
+pub const FRESHNESS_PROPERTY: &str = "stardelt.freshness";
+const FRESHNESS_DEFAULT_GRACE_MINUTES: u32 = 60;
+const FRESHNESS_MAX_GRACE_MINUTES: u32 = 1440;
+const NO_PROMISE: &str = "No freshness promise is set.";
+
+/// The freshness promise stored as JSON text in [`FRESHNESS_PROPERTY`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Freshness {
+    /// The deadline: a 24-hour clock time, `HH:MM`.
+    pub by: String,
+    /// The IANA zone the deadline is a wall-clock time in.
+    pub timezone: String,
+    /// How long after the deadline the table is still `amber`.
+    #[serde(default = "default_grace_minutes")]
+    pub grace_minutes: u32,
+    /// When Nova wrote the promise (RFC 3339); the baseline of a table with no snapshot.
+    pub set_at: String,
+}
+
+fn default_grace_minutes() -> u32 {
+    FRESHNESS_DEFAULT_GRACE_MINUTES
+}
+
+/// One table's freshness: the promise, the newest commit and the status both imply.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TableFreshness {
+    /// The stored promise, or `null` when the table carries none (or one that does not parse).
+    pub promise: Option<Freshness>,
+    /// `grey`, `green`, `amber` or `red`.
+    pub status: String,
+    /// The newest commit, RFC 3339, or `null` for a table with no snapshot.
+    pub last_write: Option<String>,
+    /// The most recent deadline at or before now, RFC 3339, or `null`.
+    pub due_at: Option<String>,
+    /// The first deadline strictly after now, RFC 3339, or `null`.
+    pub next_due_at: Option<String>,
+    /// One sentence a person or an assistant can repeat.
+    pub detail: String,
+    /// Whether the interim rule lets this caller set the promise.
+    pub can_edit: bool,
+}
+
+/// `PUT /api/catalog/tables/{ns}/{tbl}/health` body.
+///
+/// `by: null` removes the promise; an absent key changes nothing.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FreshnessUpdate {
+    /// The deadline (`null` removes the promise).
+    // `present` separates an absent key from a `null` one; a plain `Option<Option<String>>`
+    // folds both into `None`, which would make `by: null` unrepresentable.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub by: Option<Option<String>>,
+    /// The IANA zone of the deadline; required with a deadline.
+    pub timezone: Option<String>,
+    /// How long after the deadline the table is still `amber` (0 to 1440, default 60).
+    pub grace_minutes: Option<u32>,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.
@@ -245,6 +311,8 @@ fn catalog_fail(e: CatalogError) -> DocError {
 struct Loaded {
     properties: serde_json::Map<String, Value>,
     columns: Vec<LoadedColumn>,
+    /// The newest commit's time (`snapshots[].timestamp-ms` of `current-snapshot-id`).
+    last_write: Option<DateTime<Utc>>,
 }
 
 struct LoadedColumn {
@@ -425,7 +493,29 @@ fn parse_loaded(body: &str) -> Result<Loaded, CatalogError> {
     Ok(Loaded {
         properties,
         columns,
+        last_write: last_write_of(metadata),
     })
+}
+
+/// The commit time of the newest snapshot, when the table has one. `current-snapshot-id`
+/// names one entry of `snapshots`; a table with no snapshot (`-1` or no entry) has none.
+/// Anything missing or malformed answers `None`, never an error: a table whose snapshot list
+/// a person edited must still load.
+fn last_write_of(metadata: &Value) -> Option<DateTime<Utc>> {
+    let current = metadata
+        .get("current-snapshot-id")
+        .and_then(Value::as_i64)?;
+    if current == -1 {
+        return None;
+    }
+    let timestamp = metadata
+        .get("snapshots")?
+        .as_array()?
+        .iter()
+        .find(|snapshot| snapshot.get("snapshot-id").and_then(Value::as_i64) == Some(current))?
+        .get("timestamp-ms")?
+        .as_i64()?;
+    DateTime::from_timestamp_millis(timestamp)
 }
 
 fn property(properties: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
@@ -443,6 +533,194 @@ fn split_tags(raw: &str) -> Vec<String> {
         .filter(|t| !t.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The freshness promise (#402 slice 1): `stardelt.freshness`
+// ---------------------------------------------------------------------------
+
+/// A deadline as it is stored: trimmed `HH:MM` on a 24-hour clock.
+fn checked_by(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    match by_clock(text) {
+        Some(_) => Ok(text.to_string()),
+        None => Err("the deadline is a 24-hour clock time like 07:00".into()),
+    }
+}
+
+/// The hour and minute of an `HH:MM` deadline; `None` when the clock is not a wall time.
+fn by_clock(by: &str) -> Option<(u32, u32)> {
+    let bytes = by.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b':' {
+        return None;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| i == 2 || b.is_ascii_digit())
+    {
+        return None;
+    }
+    let hour = by.get(0..2)?.parse::<u32>().ok()?;
+    let minute = by.get(3..5)?.parse::<u32>().ok()?;
+    (hour <= 23 && minute <= 59).then_some((hour, minute))
+}
+
+fn checked_timezone(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    match Tz::from_str(text) {
+        Ok(_) => Ok(text.to_string()),
+        Err(_) => Err("the timezone is an IANA name like Europe/Berlin".into()),
+    }
+}
+
+/// The stored promise, or `None` when the text is not one. A hand-edited property that does
+/// not parse is **no promise** (grey), never an error: the status route keeps answering.
+fn parse_freshness(raw: &str) -> Option<Freshness> {
+    let promise: Freshness = serde_json::from_str(raw).ok()?;
+    let by = checked_by(&promise.by).ok()?;
+    let timezone = checked_timezone(&promise.timezone).ok()?;
+    if promise.grace_minutes > FRESHNESS_MAX_GRACE_MINUTES {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(&promise.set_at).ok()?;
+    Some(Freshness {
+        by,
+        timezone,
+        ..promise
+    })
+}
+
+/// One wall-clock deadline in `zone`, or `None` when the zone skips that wall clock at a DST
+/// jump. An ambiguous wall clock is its first occurrence — the rule `pipelines.rs`'s
+/// `next_runs` states.
+fn instant_on(day: chrono::NaiveDate, hour: u32, minute: u32, zone: Tz) -> Option<DateTime<Utc>> {
+    let local = day.and_hms_opt(hour, minute, 0)?;
+    match zone.from_local_datetime(&local) {
+        LocalResult::None => None,
+        LocalResult::Single(at) => Some(at.with_timezone(&Utc)),
+        LocalResult::Ambiguous(first, _) => Some(first.with_timezone(&Utc)),
+    }
+}
+
+/// The most recent deadline at or before `now`, and the first one strictly after it.
+///
+/// "Most recent" tries today, then yesterday; "next" tries today, tomorrow and the day after.
+/// A wall clock the zone skips does not exist and is not a deadline, so the previous day's is.
+fn deadlines(
+    by: &str,
+    zone: Tz,
+    now: DateTime<Utc>,
+) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+    let Some((hour, minute)) = by_clock(by) else {
+        return (None, None);
+    };
+    let today = now.with_timezone(&zone).date_naive();
+    let mut due = None;
+    for back in 0..=1u64 {
+        let Some(day) = today.checked_sub_days(Days::new(back)) else {
+            continue;
+        };
+        if let Some(at) = instant_on(day, hour, minute, zone)
+            && at <= now
+        {
+            due = Some(at);
+            break;
+        }
+    }
+    let mut next = None;
+    for ahead in 0..=2u64 {
+        let Some(day) = today.checked_add_days(Days::new(ahead)) else {
+            continue;
+        };
+        if let Some(at) = instant_on(day, hour, minute, zone)
+            && at > now
+        {
+            next = Some(at);
+            break;
+        }
+    }
+    (due, next)
+}
+
+/// The status of one promise at `now`: the status, the most recent deadline, the next one and
+/// the sentence a person can repeat.
+fn freshness_health(
+    promise: &Freshness,
+    last_write: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String) {
+    const FRESH: &str = "Fresh: the newest write is after the deadline.";
+    const AMBER: &str = "Late, within the grace period.";
+    const RED: &str =
+        "Late: the newest write is before the deadline and the grace period has passed.";
+    let Ok(zone) = Tz::from_str(&promise.timezone) else {
+        return ("green".into(), None, None, FRESH.into());
+    };
+    let (due, next) = deadlines(&promise.by, zone, now);
+    // A zone oddity that names no deadline still leaves the route answering: a valid promise
+    // is never an error (#402).
+    let Some(due) = due else {
+        return ("green".into(), None, next, FRESH.into());
+    };
+    // The baseline: the newest commit, or — for a table with no snapshot yet — the moment the
+    // promise was set, so a promise on an empty table is not instantly red.
+    let baseline = last_write.or_else(|| {
+        DateTime::parse_from_rfc3339(&promise.set_at)
+            .ok()
+            .map(|at| at.with_timezone(&Utc))
+    });
+    let grace = Duration::minutes(i64::from(promise.grace_minutes));
+    let (status, detail) = match baseline {
+        Some(at) if at >= due => ("green", FRESH),
+        _ if now < due + grace => ("amber", AMBER),
+        _ => ("red", RED),
+    };
+    (status.to_string(), Some(due), next, detail.to_string())
+}
+
+fn rfc3339(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Now, in UTC. The workspace builds `chrono` without its `clock` feature (`nova/Cargo.toml`),
+/// so `Utc::now()` does not exist; the standard library's clock does.
+fn now() -> DateTime<Utc> {
+    DateTime::<Utc>::from(std::time::SystemTime::now())
+}
+
+/// The read answer for a loaded table: the promise, its status and what the caller may do.
+fn health_of(loaded: &Loaded, who: &Identity) -> TableFreshness {
+    let can_edit = may_edit(
+        who,
+        property(&loaded.properties, "stardelt.owner").as_deref(),
+    )
+    .is_ok();
+    let last_write = loaded.last_write;
+    let promise = property(&loaded.properties, FRESHNESS_PROPERTY)
+        .as_deref()
+        .and_then(parse_freshness);
+    let Some(promise) = promise else {
+        return TableFreshness {
+            promise: None,
+            status: "grey".into(),
+            last_write: last_write.map(rfc3339),
+            due_at: None,
+            next_due_at: None,
+            detail: NO_PROMISE.into(),
+            can_edit,
+        };
+    };
+    let (status, due, next, detail) = freshness_health(&promise, last_write, now());
+    TableFreshness {
+        promise: Some(promise),
+        status,
+        last_write: last_write.map(rfc3339),
+        due_at: due.map(rfc3339),
+        next_due_at: next.map(rfc3339),
+        detail,
+        can_edit,
+    }
 }
 
 /// The interim rule: who may roll back this table.
@@ -905,6 +1183,121 @@ async fn write_documentation(
     Ok(doc)
 }
 
+/// `GET /api/catalog/tables/{ns}/{tbl}/health`: the table's freshness, evaluated at the read.
+async fn freshness_for(
+    _state: &Arc<AppState>,
+    catalog: &Catalog<'_>,
+    who: &Identity,
+    ns: &str,
+    tbl: &str,
+) -> Result<TableFreshness, DocError> {
+    let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
+    Ok(health_of(&loaded, who))
+}
+
+/// The validated write: remove the promise, or store this one.
+enum FreshnessWrite {
+    Remove,
+    Set(Freshness),
+}
+
+/// `PUT /api/catalog/tables/{ns}/{tbl}/health`.
+///
+/// Validation runs before the lock and before any request. The lock covers the load that
+/// decides the rule and the commit; the answer is built from a fresh load.
+async fn write_freshness(
+    state: &Arc<AppState>,
+    catalog: &Catalog<'_>,
+    who: &Identity,
+    ns: &str,
+    tbl: &str,
+    req: FreshnessUpdate,
+) -> Result<TableFreshness, DocError> {
+    let write = validate_freshness(req)?;
+    let lock = table_lock(state, catalog.name, ns, tbl);
+    let _guard = lock.lock().await;
+
+    let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
+    may_edit(
+        who,
+        property(&loaded.properties, "stardelt.owner").as_deref(),
+    )
+    .map_err(|e| DocError::new(StatusCode::FORBIDDEN, e))?;
+
+    let current_text = property(&loaded.properties, FRESHNESS_PROPERTY);
+    // A write of the promise that is already stored sends no commit. It compares the promise
+    // itself, not only the text: Nova stamps a new `setAt` on every write, so the text would
+    // differ every second even when nothing else changed.
+    let unchanged = match &write {
+        FreshnessWrite::Remove => current_text.is_none(),
+        FreshnessWrite::Set(next) => current_text
+            .as_deref()
+            .and_then(parse_freshness)
+            .is_some_and(|current| {
+                current.by == next.by
+                    && current.timezone == next.timezone
+                    && current.grace_minutes == next.grace_minutes
+            }),
+    };
+    if unchanged {
+        return Ok(health_of(&loaded, who));
+    }
+
+    let updates = match &write {
+        FreshnessWrite::Remove => {
+            vec![json!({ "action": "remove-properties", "removals": [FRESHNESS_PROPERTY] })]
+        }
+        FreshnessWrite::Set(promise) => {
+            let text = serde_json::to_string(promise).map_err(|_| {
+                DocError::new(
+                    StatusCode::BAD_REQUEST,
+                    "the freshness promise could not be encoded",
+                )
+            })?;
+            let mut set = serde_json::Map::new();
+            set.insert(FRESHNESS_PROPERTY.to_string(), Value::String(text));
+            vec![json!({ "action": "set-properties", "updates": set })]
+        }
+    };
+    let body = json!({ "requirements": [], "updates": updates });
+    catalog.commit(ns, tbl, &body).await.map_err(catalog_fail)?;
+
+    audit::catalog_doc_event(who, &format!("{ns}.{tbl}"), &["freshness"]);
+    let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
+    Ok(health_of(&loaded, who))
+}
+
+/// The body of a freshness write, validated before the lock.
+fn validate_freshness(req: FreshnessUpdate) -> Result<FreshnessWrite, DocError> {
+    let bad = |message: &str| DocError::new(StatusCode::BAD_REQUEST, message);
+    let Some(by) = req.by else {
+        return Err(bad(
+            "by is required: name a deadline like 07:00, or null to remove the promise",
+        ));
+    };
+    let Some(raw) = by else {
+        if req.timezone.is_some() || req.grace_minutes.is_some() {
+            return Err(bad("removing a promise takes only by: null"));
+        }
+        return Ok(FreshnessWrite::Remove);
+    };
+    let by = checked_by(&raw).map_err(|e| bad(&e))?;
+    let Some(timezone) = req.timezone else {
+        return Err(bad("a timezone is required with a deadline"));
+    };
+    let timezone = checked_timezone(&timezone).map_err(|e| bad(&e))?;
+    let grace_minutes = req.grace_minutes.unwrap_or(FRESHNESS_DEFAULT_GRACE_MINUTES);
+    if grace_minutes > FRESHNESS_MAX_GRACE_MINUTES {
+        return Err(bad("graceMinutes must be 0 to 1440"));
+    }
+    Ok(FreshnessWrite::Set(Freshness {
+        by,
+        timezone,
+        grace_minutes,
+        set_at: rfc3339(now()),
+    }))
+}
+
 /// `PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description`.
 ///
 /// The column must be a field of the **current** schema, matched exactly; the name from the
@@ -1186,6 +1579,120 @@ pub async fn update(
     };
     match write_documentation(&s, &catalog, &who, &ns, &tbl, req).await {
         Ok(doc) => Json(doc).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "table_freshness_get",
+    path = "/api/catalog/tables/{ns}/{tbl}/health",
+    tag = "public",
+    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. Demo mode answers grey with `canEdit: false`.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        crate::catalog::CatalogParam,
+    ),
+    responses(
+        (status = 200, description = "The table's freshness at the moment of the read", body = TableFreshness),
+        (status = 400, description = "A name is not a single path segment, or the catalog name is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn health(
+    State(s): State<Arc<AppState>>,
+    Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<crate::catalog::CatalogParam>,
+    caller: Option<axum::Extension<Principal>>,
+) -> Response {
+    if s.demo {
+        return Json(TableFreshness {
+            promise: None,
+            status: "grey".into(),
+            last_write: None,
+            due_at: None,
+            next_due_at: None,
+            detail: NO_PROMISE.into(),
+            can_edit: false,
+        })
+        .into_response();
+    }
+    let caller = caller.as_ref().map(|c| &c.0);
+    let who = caller_identity(&s, caller);
+    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let (base, authorization) = match catalog_or_error(&s, &id).await {
+        Ok(v) => v,
+        Err(response) => return *response,
+    };
+    let catalog = Catalog {
+        http: &s.http,
+        base,
+        authorization: authorization.as_deref(),
+        name: &name,
+    };
+    match freshness_for(&s, &catalog, &who, &ns, &tbl).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    put,
+    operation_id = "table_freshness_update",
+    path = "/api/catalog/tables/{ns}/{tbl}/health",
+    tag = "public",
+    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property. Demo mode answers 503.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        crate::catalog::CatalogParam,
+    ),
+    request_body = FreshnessUpdate,
+    responses(
+        (status = 200, description = "The table's freshness after the change, freshly loaded", body = TableFreshness),
+        (status = 400, description = "The body is invalid, the catalog name is invalid, or the table has no owner and this request does not claim it", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable, did not answer, or stayed busy", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn update_health(
+    State(s): State<Arc<AppState>>,
+    Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<crate::catalog::CatalogParam>,
+    caller: Option<axum::Extension<Principal>>,
+    ApiJson(req): ApiJson<FreshnessUpdate>,
+) -> Response {
+    if s.demo {
+        return demo_unavailable();
+    }
+    let caller = caller.as_ref().map(|c| &c.0);
+    let who = caller_identity(&s, caller);
+    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let (base, authorization) = match catalog_or_error(&s, &id).await {
+        Ok(v) => v,
+        Err(response) => return *response,
+    };
+    let catalog = Catalog {
+        http: &s.http,
+        base,
+        authorization: authorization.as_deref(),
+        name: &name,
+    };
+    match write_freshness(&s, &catalog, &who, &ns, &tbl, req).await {
+        Ok(view) => Json(view).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -2146,6 +2653,7 @@ mod tests {
                 let mut loaded = Loaded {
                     properties: loaded.properties.clone(),
                     columns: Vec::new(),
+                    last_write: None,
                 };
                 match owner {
                     Some(owner) => {
@@ -2365,5 +2873,214 @@ mod tests {
             .await
             .expect("the table loads");
         assert!(doc.guide.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. The freshness promise (#402 slice 1): status, parse, DST, write
+    // -----------------------------------------------------------------------
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("a test time parses")
+            .with_timezone(&Utc)
+    }
+
+    fn promise(by: &str, timezone: &str, grace_minutes: u32) -> Freshness {
+        Freshness {
+            by: by.into(),
+            timezone: timezone.into(),
+            grace_minutes,
+            set_at: "2026-11-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn freshness_is_green_before_the_deadline_amber_inside_the_grace_and_red_after() {
+        let promise = promise("07:00", "Europe/Berlin", 60);
+        let last_write = Some(at("2026-11-25T04:00:00Z"));
+        // 07:00 Berlin is 06:00Z in November, so the grace ends at 07:00Z.
+        assert_eq!(
+            freshness_health(&promise, last_write, at("2026-11-25T05:00:00Z")).0,
+            "green",
+            "the newest write is after yesterday's deadline"
+        );
+        assert_eq!(
+            freshness_health(&promise, last_write, at("2026-11-25T06:30:00Z")).0,
+            "amber",
+            "past today's deadline, inside the grace"
+        );
+        assert_eq!(
+            freshness_health(&promise, last_write, at("2026-11-25T07:30:00Z")).0,
+            "red",
+            "the grace has passed"
+        );
+    }
+
+    #[test]
+    fn a_promise_is_grey_without_a_promise_and_when_it_does_not_parse() {
+        assert_eq!(parse_freshness("{}"), None, "no deadline, no promise");
+        assert_eq!(
+            parse_freshness(
+                r#"{"by":"25:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"2026-11-01T00:00:00Z"}"#
+            ),
+            None,
+            "25:00 is not a wall-clock time"
+        );
+        assert_eq!(
+            parse_freshness(
+                r#"{"by":"07:00","timezone":"Mars/Olympus","graceMinutes":60,"setAt":"2026-11-01T00:00:00Z"}"#
+            ),
+            None,
+            "an unknown zone is not a promise"
+        );
+
+        let loaded = parse_loaded(&load_fixture().to_string()).expect("the fixture parses");
+        let view = health_of(&loaded, &admin());
+        assert_eq!(view.status, "grey");
+        assert_eq!(view.detail, NO_PROMISE);
+        assert!(view.promise.is_none());
+        assert!(view.last_write.is_none(), "the fixture has no snapshot");
+    }
+
+    #[test]
+    fn a_deadline_in_the_dst_gap_is_skipped() {
+        // 2026-03-29 is the Berlin spring-forward: 02:00 jumps to 03:00, so 02:30 does not
+        // exist that day and the most recent deadline is the previous day's.
+        let promise = promise("02:30", "Europe/Berlin", 60);
+        let (status, due, _, _) = freshness_health(
+            &promise,
+            Some(at("2026-03-28T03:00:00Z")),
+            at("2026-03-29T02:00:00Z"),
+        );
+        assert_eq!(status, "green");
+        assert_eq!(
+            due,
+            Some(at("2026-03-28T01:30:00Z")),
+            "02:30 CET is 01:30Z, a day earlier"
+        );
+    }
+
+    fn freshness_body() -> FreshnessUpdate {
+        FreshnessUpdate {
+            by: Some(Some("07:00".into())),
+            timezone: Some("Europe/Berlin".into()),
+            grace_minutes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn freshness_is_written_removed_and_read_back_through_the_fake_catalog() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        write_freshness(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            freshness_body(),
+        )
+        .await
+        .expect("the promise is stored");
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(commits.len(), 1, "one commit stores the promise");
+        assert_eq!(commits[0]["requirements"], json!([]), "no requirements");
+        assert_eq!(commits[0]["updates"][0]["action"], json!("set-properties"));
+        let text = commits[0]["updates"][0]["updates"][FRESHNESS_PROPERTY]
+            .as_str()
+            .expect("the promise is the property's JSON text")
+            .to_string();
+        assert!(text.contains("\"graceMinutes\":60"), "the default: {text}");
+        assert!(text.contains("\"setAt\""), "the write stamps setAt: {text}");
+        assert!(text.contains("\"by\":\"07:00\""), "{text}");
+
+        // The fake catalog does not store a commit, so hand it the property the write sent;
+        // writing the same promise again then changes nothing and sends nothing.
+        let mut stored = load_fixture();
+        stored["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert(FRESHNESS_PROPERTY.into(), json!(text));
+        fake.set_load(stored);
+        fake.reset_stats();
+        write_freshness(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            freshness_body(),
+        )
+        .await
+        .expect("the same promise answers the current status");
+        assert!(
+            fake.snapshot().0.is_empty(),
+            "nothing changed, so nothing was sent"
+        );
+
+        // An absent `by` is a refusal, not a removal.
+        let absent = write_freshness(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            FreshnessUpdate::default(),
+        )
+        .await
+        .expect_err("a body without a deadline names nothing");
+        assert_eq!(absent.status(), StatusCode::BAD_REQUEST);
+
+        // The removal body as it arrives: an explicit `null` is a removal, an absent key
+        // changes nothing (and is refused above).
+        let removal: FreshnessUpdate =
+            serde_json::from_str(r#"{"by":null}"#).expect("a removal body parses");
+        assert_eq!(
+            removal.by,
+            Some(None),
+            "an explicit null is not an absent key"
+        );
+        write_freshness(&state, &catalog, &member, "sales", "orders", removal)
+            .await
+            .expect("the promise is removed");
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits[0]["updates"],
+            json!([{ "action": "remove-properties", "removals": [FRESHNESS_PROPERTY] }]),
+            "by: null is a remove-properties of stardelt.freshness"
+        );
+    }
+
+    #[test]
+    fn the_last_write_is_the_current_snapshots_time() {
+        let mut body = load_fixture();
+        body["metadata"]["current-snapshot-id"] = json!(7);
+        body["metadata"]["snapshots"] = json!([
+            { "snapshot-id": 6, "timestamp-ms": 1789000000000i64 },
+            { "snapshot-id": 7, "timestamp-ms": 1790000000000i64 }
+        ]);
+        let loaded = parse_loaded(&body.to_string()).expect("the fixture parses");
+        assert_eq!(
+            loaded.last_write,
+            DateTime::from_timestamp_millis(1790000000000),
+            "the time of the snapshot current-snapshot-id names"
+        );
+        assert_eq!(
+            rfc3339(loaded.last_write.expect("a snapshot")),
+            "2026-09-21T14:13:20Z"
+        );
+
+        // `-1` is an empty table, and so is a fixture without snapshot keys.
+        let mut empty = load_fixture();
+        empty["metadata"]["current-snapshot-id"] = json!(-1);
+        empty["metadata"]["snapshots"] = json!([]);
+        let loaded = parse_loaded(&empty.to_string()).expect("the fixture parses");
+        assert_eq!(loaded.last_write, None);
+        let loaded = parse_loaded(&load_fixture().to_string()).expect("the fixture parses");
+        assert_eq!(loaded.last_write, None);
     }
 }
