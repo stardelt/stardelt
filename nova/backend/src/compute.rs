@@ -838,6 +838,14 @@ fn default_idle_stop_minutes() -> i32 {
     60
 }
 
+/// The body of `POST /api/compute/ensure`: the owner group whose cluster to reuse or create.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComputeEnsureBody {
+    /// The owner group; the caller must be a member of it.
+    pub group: String,
+}
+
 /// A cluster name: 1 to 40 lower-case letters, digits and dashes, starting with a letter
 /// and not ending in a dash — the same rule as the CRD's.
 fn cluster_name_ok(name: &str) -> bool {
@@ -1222,6 +1230,124 @@ pub(crate) async fn remove(
         Err(kube::Error::Api(e)) if e.code == 404 => not_found().into_response(),
         Err(e) => resource_fail(ResourceError::Unavailable(e.to_string())).into_response(),
     }
+}
+
+/// `POST /api/compute/ensure`: the caller's group cluster, reused or created (#493 point 3).
+#[utoipa::path(
+    post,
+    operation_id = "compute_ensure",
+    path = "/api/compute/ensure",
+    tag = "public",
+    description = "The caller's group cluster: the one already owned by `group`, or a new `SparkCluster` named `group` with `size: small`, `runtime: spark-4.1-py3.13`, `idleStopMinutes: 60` and `state: Running`. Only a member of `group` may call it (administrators are not exempt). An existing cluster is answered as it is, `Stopped` included; a group whose name is not a valid cluster name (1 to 40 lower-case letters, digits and dashes, starting with a letter) answers `400` and keeps its administrator-made cluster. Two callers at once create one cluster: the loser reads the winner's. Answers the `ComputeCluster` view of the cluster. `Cache-Control: no-store`.",
+    request_body = ComputeEnsureBody,
+    responses(
+        (status = 200, description = "The group's cluster, existing or created", body = ComputeCluster),
+        (status = 400, description = "The group name cannot be a cluster name", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the group", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The cluster changed while it was created", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn ensure(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    ApiJson(body): ApiJson<ComputeEnsureBody>,
+) -> Response {
+    answer(ensure_cluster(&state, &actor(principal, &state), &body.group).await)
+}
+
+/// The group's cluster, or a new one named after the group. Never starts, stops or patches an
+/// existing cluster: it is answered as it is.
+async fn ensure_cluster(
+    state: &AppState,
+    who: &Identity,
+    group: &str,
+) -> Result<ComputeCluster, Fail> {
+    if !who.in_group(group) {
+        return Err(Fail::new(
+            StatusCode::FORBIDDEN,
+            format!("you are not a member of the group `{group}`"),
+        ));
+    }
+    if !cluster_name_ok(group) {
+        return Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "the group name `{group}` cannot be a cluster name (1 to 40 lower-case letters, digits and dashes, starting with a letter): ask an administrator to create a cluster with a name of its choice"
+            ),
+        ));
+    }
+    let api = compute_api(state)?;
+    if let Some(cluster) = group_cluster(&api, group, who).await? {
+        return Ok(cluster);
+    }
+    let object = kube::api::DynamicObject {
+        types: Some(kube::core::TypeMeta {
+            api_version: "stardelt.io/v1alpha1".into(),
+            kind: "SparkCluster".into(),
+        }),
+        metadata: kube::core::ObjectMeta {
+            name: Some(group.to_string()),
+            namespace: Some(crate::cluster::namespace()),
+            ..Default::default()
+        },
+        data: json!({"spec": {
+            "owner": {"group": group},
+            "size": "small",
+            "runtime": "spark-4.1-py3.13",
+            "idleStopMinutes": 60,
+            "state": "Running"
+        }}),
+    };
+    match api.create(&PostParams::default(), &object).await {
+        Ok(written) => {
+            let value = serde_json::to_value(&written)
+                .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+            view(&value, who).ok_or_else(|| {
+                Fail::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the cluster changed while it was created",
+                )
+            })
+        }
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            // Two callers at once: the loser reads the winner's cluster.
+            group_cluster(&api, group, who).await?.ok_or_else(|| {
+                Fail::new(
+                    StatusCode::CONFLICT,
+                    "the cluster changed while it was created",
+                )
+            })
+        }
+        Err(e) => Err(resource_fail(ResourceError::Unavailable(e.to_string()))),
+    }
+}
+
+/// The caller's cluster owned by `group`, if there is one. The platform's `shared` cluster is
+/// everyone's, so it is never this group's, whatever its owner says.
+async fn group_cluster(
+    api: &Api<kube::api::DynamicObject>,
+    group: &str,
+    who: &Identity,
+) -> Result<Option<ComputeCluster>, Fail> {
+    let objects = api
+        .list(&kube::api::ListParams::default())
+        .await
+        .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+    for object in objects.items {
+        let value = serde_json::to_value(object)
+            .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+        if value.pointer("/metadata/name").and_then(Value::as_str) == Some("shared") {
+            continue;
+        }
+        let owner = owner_of(value.get("spec").unwrap_or(&value));
+        if owner.group.as_deref() == Some(group) {
+            return Ok(view(&value, who));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -2085,6 +2211,7 @@ mod tests {
             .route("/compute", axum::routing::get(super::list))
             .route("/compute/{name}/start", post(super::start))
             .route("/compute/{name}/stop", post(super::stop))
+            .route("/compute/ensure", post(super::ensure))
             .route(
                 "/admin/compute/{name}",
                 axum::routing::put(super::upsert).delete(super::remove),
@@ -2166,6 +2293,74 @@ mod tests {
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0]["name"], "trial");
         assert_eq!(clusters[0]["owner"]["group"], "sales");
+    }
+
+    #[tokio::test]
+    async fn ensure_creates_the_groups_cluster_once() {
+        let (app, shared) = app_with(vec![], Some(who("demo", &["visitors"], false))).await;
+        let (status, body) = call_json(
+            app.clone(),
+            "POST",
+            "/compute/ensure",
+            json!({"group": "visitors"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "visitors");
+        assert_eq!(body["owner"]["group"], "visitors");
+        assert_eq!(body["phase"], "Starting");
+        let (status, again) =
+            call_json(app, "POST", "/compute/ensure", json!({"group": "visitors"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["name"], "visitors");
+        let created = shared.lock().unwrap().created.clone();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0]["metadata"]["name"], "visitors");
+        assert_eq!(
+            created[0]["spec"],
+            json!({
+                "owner": {"group": "visitors"},
+                "size": "small",
+                "runtime": "spark-4.1-py3.13",
+                "idleStopMinutes": 60,
+                "state": "Running"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_refuses_a_group_the_caller_is_not_in() {
+        let (app, shared) = app_with(vec![], Some(who("demo", &["visitors"], false))).await;
+        let (status, body) =
+            call_json(app, "POST", "/compute/ensure", json!({"group": "sales"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not a member of the group")
+        );
+        assert!(shared.lock().unwrap().created.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_refuses_a_group_name_that_cannot_be_a_cluster_name() {
+        let (app, shared) = app_with(vec![], Some(who("team", &["Data.Team"], false))).await;
+        let (status, body) = call_json(
+            app,
+            "POST",
+            "/compute/ensure",
+            json!({"group": "Data.Team"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot be a cluster name")
+        );
+        assert!(shared.lock().unwrap().created.is_empty());
     }
 
     #[tokio::test]

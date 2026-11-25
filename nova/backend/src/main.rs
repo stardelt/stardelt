@@ -783,6 +783,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/compute", get(compute::list))
         .route("/compute/{name}/start", post(compute::start))
         .route("/compute/{name}/stop", post(compute::stop))
+        .route("/compute/ensure", post(compute::ensure))
         // What is in each of them (stardelt-nova#249): one row per catalog, read in the
         // background every five minutes by the refresher (#263).
         .route("/catalog/metrics", get(catalog_metrics::get))
