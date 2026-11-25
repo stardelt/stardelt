@@ -1901,12 +1901,20 @@ mod tests {
                                 // a chart-level list
                                 Value::Array(items) => items.iter().collect(),
                                 // a map of lists (`coordinator`, `supersetNode`, …)
-                                Value::Object(lists) => lists
-                                    .values()
-                                    .filter_map(|v| v.as_array())
-                                    .flatten()
-                                    .collect(),
-                                _ => Vec::new(),
+                                Value::Object(lists) => {
+                                    let mut containers = Vec::new();
+                                    for (workload, list) in lists {
+                                        let list = list.as_array().unwrap_or_else(|| {
+                                            panic!(
+                                                "{component}: initContainers.{workload} at \
+                                                 {path} is not a list of containers"
+                                            )
+                                        });
+                                        containers.extend(list.iter());
+                                    }
+                                    containers
+                                }
+                                _ => panic!("{component}: {path} is not a list of containers"),
                             };
                             for container in containers {
                                 *seen += 1;
@@ -1958,11 +1966,14 @@ mod tests {
             "kafka",
             "spark-operator",
         ] {
-            let values = deep_merge(
-                effective_values(component, Profile::Full, None, None),
-                identity_values(component),
-            );
-            check(component, &values, component, &mut seen);
+            // Both profiles: `profile_values` is one of the layers the test covers.
+            for profile in [Profile::Full, Profile::Demo] {
+                let values = deep_merge(
+                    effective_values(component, profile, None, None),
+                    identity_values(component),
+                );
+                check(component, &values, component, &mut seen);
+            }
         }
         // The walk must have looked at the Trino gate and the Superset waiters, or
         // it proves nothing.
