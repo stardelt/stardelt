@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
@@ -72,7 +73,7 @@ function useNearViewport<T extends Element>() {
 export default function Overview() {
   // The page's own budget (#510 item 6): an answer younger than 30 s is not read again when
   // this page is mounted another time. `refetchInterval` still re-reads while it is open.
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: 30_000 })
+  const me = useMe()
   // The numbers are read in the background (#263), so the first answer is already there.
   // A catalog that has none yet is `pending`: re-ask every 5 s until it has numbers, and
   // stop after a minute — a scan that never finishes must not turn this page into a poller.

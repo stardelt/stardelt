@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState, type ReactNode } from 'react'
 import { ApiError, api, type Connection } from '../api'
@@ -56,7 +57,7 @@ function byName(a: Connection, b: Connection): number {
 
 export default function Connections() {
   const queryClient = useQueryClient()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const admin = isAdmin(me.data)
   const list = useQuery({ queryKey: ['connections'], queryFn: api.connections })
   // `store: false` is `spec.secrets.mode: external`: the list is built from the Connection

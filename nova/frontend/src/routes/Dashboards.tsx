@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage } from '../api'
@@ -22,7 +23,7 @@ export default function Dashboards() {
   // `/api/embeds` is readable by every signed-in user; `/api/apps` and its detail are
   // operator views (they carry workloads and images), so this page cannot depend on them.
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const admin = isAdmin(me.data)
   const superset = apps.data?.find(a => a.id === 'superset')
   const deployed = superset?.status === 'up'

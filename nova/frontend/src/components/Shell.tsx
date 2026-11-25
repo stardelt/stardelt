@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -148,7 +149,7 @@ function AppSwitcher() {
 }
 
 export default function Shell() {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   // The catalog tree's browser cache belongs to this person (stardelt-nova#644).
   useEffect(() => { if (me.data) bindUser(me.data.sub) }, [me.data])
   const location = useLocation()

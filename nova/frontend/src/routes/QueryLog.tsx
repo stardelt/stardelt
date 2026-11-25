@@ -1,3 +1,4 @@
+import { useMe, useDebounced } from '../hooks'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -60,17 +61,9 @@ function saveColumns(columns: ColumnId[]) {
   }
 }
 
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), ms)
-    return () => clearTimeout(t)
-  }, [value, ms])
-  return debounced
-}
 
 export default function QueryLog() {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const admin = isAdmin(me.data)
 
   const [scope, setScope] = useState<'mine' | 'team' | 'all'>('mine')

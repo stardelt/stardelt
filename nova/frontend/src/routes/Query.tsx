@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -584,7 +585,7 @@ export default function Query() {
   const [verifying, setVerifying] = useState(false)
   const [verifySql, setVerifySql] = useState('')
   const saved = useQuery({ queryKey: ['saved-queries'], queryFn: () => api.savedQueries() })
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   // The engine behind this person's queries, for the scaler's word while a query waits
   // (#1059): the first query after a quiet hour waits for the engine to come up.
   const yourWarehouse = useYourWarehouse()

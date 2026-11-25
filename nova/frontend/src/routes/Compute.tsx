@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -67,7 +68,7 @@ export default function Compute() {
   const [params, setParams] = useSearchParams()
   const tab = params.get('tab') === 'sql' ? 'sql' : 'spark'
   const qc = useQueryClient()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const admin = isAdmin(me.data)
   const clusters = useQuery({ queryKey: ['compute'], queryFn: api.compute, refetchInterval: 15_000 })
   const [editing, setEditing] = useState<null | { cluster: ComputeCluster | null }>(null)

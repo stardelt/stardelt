@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -262,7 +263,7 @@ function RecordedDeploys({ keep401 }: { keep401: boolean }) {
 
 export default function Deployments() {
   const list = useQuery({ queryKey: ['pipelines'], queryFn: api.pipelines, refetchInterval: 30_000 })
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const peers = me.data?.peers ?? []
   const [peer, setPeer] = useState<string | null>(null)
   const [params] = useSearchParams()

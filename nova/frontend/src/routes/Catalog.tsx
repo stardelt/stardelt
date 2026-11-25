@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -145,7 +146,7 @@ export default function Catalog() {
 function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?: 'table' | 'view' }) {
   const [tab, setTab] = useState<'preview' | 'profile' | 'columns' | 'details' | 'history' | 'lineage'>('preview')
   const qc = useQueryClient()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const isView = kind === 'view'
   const meta = useQuery({
     queryKey: ['catalog', 'table', catalog, ns, tbl],
@@ -652,7 +653,7 @@ function rangeText(row: unknown[], i: number, type: string | object): string {
 
 function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
   const qc = useQueryClient()
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const history = useQuery({
     queryKey: ['catalog', 'history', catalog, ns, tbl],
     queryFn: () => api.tableHistory(ns, tbl, catalog),

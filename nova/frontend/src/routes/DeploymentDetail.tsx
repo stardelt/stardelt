@@ -1,3 +1,4 @@
+import { useMe } from '../hooks'
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -71,7 +72,7 @@ export function promotions(here: DeploymentRecord, all: DeploymentRecord[]): Pee
 export default function DeploymentDetail() {
   const { id = '' } = useParams()
   const deploymentId = Number(id)
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const me = useMe()
   const keep401 = me.data ? me.data.auth_mode !== 'oidc' : false
   const navigate = useNavigate()
   const [confirming, setConfirming] = useState(false)
