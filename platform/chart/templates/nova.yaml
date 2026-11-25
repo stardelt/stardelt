@@ -200,6 +200,12 @@ spec:
               value: {{ .Values.nova.warehouseName | quote }}
             - name: NOVA_DEV_USER
               value: {{ .Values.nova.devUser | quote }}
+{{- $theme := .Values.nova.defaultTheme | default "graphite" }}
+{{- if not (has $theme (list "dark" "light" "graphite" "silver")) }}
+{{- fail (printf "nova.defaultTheme must be dark, light, graphite or silver, got %q" $theme) }}
+{{- end }}
+            - name: NOVA_DEFAULT_THEME
+              value: {{ $theme | quote }}
 {{- with .Values.nova.sharedAccounts }}
             - name: NOVA_SHARED_ACCOUNTS
               value: {{ . | quote }}

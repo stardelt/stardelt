@@ -433,6 +433,7 @@ mod tests {
     fn mode_config_map_carries_the_mode_for_each_kind() {
         use crate::crd::{ComponentValues, IdentitySpec, IngressSettings, Pillars, Profile};
         let base = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Profile::Demo,
             pillars: Pillars::default(),
             dry_run: true,
@@ -472,6 +473,7 @@ mod tests {
     fn mode_config_map_carries_the_groups() {
         use crate::crd::{ComponentValues, IdentitySpec, IngressSettings, Pillars, Profile};
         let mut spec = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Profile::Demo,
             pillars: Pillars::default(),
             dry_run: true,
@@ -546,6 +548,7 @@ mod tests {
     fn external_store_keeps_the_cluster_store_without_groups_and_drops_it_with_groups() {
         use crate::crd::{ComponentValues, IdentitySpec, IngressSettings, Pillars, Profile};
         let spec = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Profile::Demo,
             pillars: Pillars::default(),
             dry_run: true,
@@ -581,6 +584,7 @@ mod tests {
     fn external_store_behaviour() {
         use crate::crd::{ComponentValues, IdentitySpec, IngressSettings, Pillars, Profile};
         let mut spec = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Profile::Demo,
             pillars: Pillars::default(),
             dry_run: true,
@@ -626,6 +630,7 @@ mod tests {
         // The old rule still refuses the block: this test pins that the exception is deliberate.
         assert!(credential_secret_name(&kubernetes_auth).is_err());
         let spec = PlatformInstanceSpec {
+            default_theme: Default::default(),
             profile: Profile::Demo,
             pillars: Pillars::default(),
             dry_run: true,

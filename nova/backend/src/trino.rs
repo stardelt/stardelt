@@ -754,6 +754,7 @@ mod tests {
     fn test_state(forward: bool, dev_user: &str) -> AppState {
         AppState {
             dev_user: dev_user.into(),
+            default_theme: "graphite",
             trino_url: "http://trino:8080".into(),
             lakekeeper_url: "http://lakekeeper:8181".into(),
             shared_accounts: vec![],

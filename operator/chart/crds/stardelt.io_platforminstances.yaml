@@ -50,6 +50,17 @@ spec:
                       namespace's CNPG databases, and report `Stopped`. Data, PVCs and Secrets stay.
                     type: boolean
                 type: object
+              defaultTheme:
+                default: graphite
+                description: |-
+                  Default theme for Nova's interface (the four ids of the theme library); a person's own
+                  choice in Preferences wins. One of `dark`, `light`, `graphite` or `silver`.
+                enum:
+                - dark
+                - light
+                - graphite
+                - silver
+                type: string
               dryRun:
                 default: true
                 description: Plan only (no cluster changes) until explicitly disabled. Safe default.

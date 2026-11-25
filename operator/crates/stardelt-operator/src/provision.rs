@@ -2651,6 +2651,7 @@ pub async fn ensure_nova(
         spec.pillars.pipelines,
         &spec.mcp,
         &models,
+        spec.default_theme,
     );
     let applied =
         match apply_owned::<Deployment>(client, namespace, owner, &deployment, dry_run).await {
