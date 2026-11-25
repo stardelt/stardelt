@@ -261,9 +261,14 @@ git add "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" "$AIRFLOW_FILE" "$AIRFLOW_GROUP_FI
   "$OPERATOR_DIR/crates/stardelt-operator/values/superset.yaml" \
   "$OPERATOR_DIR/crates/stardelt-operator/values/jupyterhub.yaml" \
   "$OPERATOR_DIR/crates/stardelt-operator/src/values.rs"
-git commit -m "chore(pins): rollup image digests
-
-$(for c in "${changes[@]}"; do echo "- $c"; done)"
+# The summary is generated, never hand-written, and regenerated whenever a pin moves after this
+# point: the #746 branch rebuild replaces the operator digest, and an `--amend --no-edit` used to
+# keep the pre-rebuild message. A merge commit then named a digest the tree does not carry (#1644).
+rollup_message() {
+  printf 'chore(pins): rollup image digests\n\n'
+  for c in "${changes[@]}"; do printf -- '- %s\n' "$c"; done
+}
+git commit -m "$(rollup_message)"
 
 # The checkout has no remote-tracking ref for the rolling branch, and
 # `--force-with-lease` refuses to overwrite a ref it has not seen ("stale info"):
@@ -303,7 +308,17 @@ if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then
   rewrite_files "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" \
     "$operator_branch_digest" "$nova_digest" "$spark_digest"
   git add "$OP_FILE"
-  git commit --amend --no-edit
+  # The message must name the digest the tree now pins, not the main-build digest the branch
+  # rebuild replaced (#1644).
+  operator_line="operator $(short "$old_operator") → $(short "$operator_branch_digest") (rebuilt from $branch)"
+  replaced=no
+  for i in "${!changes[@]}"; do
+    case "${changes[$i]}" in
+      operator\ *) changes[i]="$operator_line"; replaced=yes ;;
+    esac
+  done
+  [ "$replaced" = yes ] || changes+=("$operator_line")
+  git commit --amend -m "$(rollup_message)"
   git push --force-with-lease origin "$branch"
   {
     echo ""
