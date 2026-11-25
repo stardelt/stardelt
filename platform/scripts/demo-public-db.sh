@@ -2,7 +2,7 @@
 # The demo's public-database pipeline (#79 point 2): the bundle that reads RNAcentral's
 # public PostgreSQL through the `rnacentral` Connection and writes bronze.public_db.
 #
-#   make demo-public-db YES=1   # the bundle (it names viewers=[visitors]) and the connection's usableBy
+#   make demo-public-db YES=1   # the bundle (it names viewers=[visitors]); the Connection is make demo-connection YES=1
 #   make demo-public-db         # the plan and the prerequisite checks, exit 1
 #
 # In order, and idempotently:
@@ -51,6 +51,15 @@ principal="$(kubectl -n "$NAMESPACE" get serviceprincipals.stardelt.io pipeline-
   || fail "ServicePrincipal pipeline-demo is not ready (${principal:-absent}) — run make demo-access YES=1 first"
 echo "› ServicePrincipal pipeline-demo: ready"
 
+# The loader refuses a notebook task whose managed Connection does not list the pipeline's
+# owner group (plan.py, _connection_for_pipeline): check it before deploying (#1605).
+usable="$(kubectl -n "$NAMESPACE" get connections.stardelt.io rnacentral \
+  -o jsonpath='{.spec.usableBy}' 2>/dev/null || true)"
+case "$usable" in
+  *'"demo"'*) echo "› Connection rnacentral: usable by demo" ;;
+  *) fail "Connection rnacentral is not usable by group demo (usableBy=${usable:-absent}) — run make demo-connection YES=1 first" ;;
+esac
+
 # `--host` is a global option of the CLI: it comes before the subcommand.
 plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
   || fail "the stardelt CLI is not signed in to $NOVA ($(printf '%s' "$plan" | tail -1)) — run: stardelt login --host $NOVA"
@@ -61,6 +70,16 @@ if [ "$YES" = 1 ]; then
   "$CLI" --host "$NOVA" bundle deploy "$BUNDLE" -t prod \
     || fail "stardelt bundle deploy $BUNDLE -t prod failed"
   echo "› public-db bundle: deployed ($NAME 05:00 Europe/Berlin, notebook connection rnacentral)"
+
+  for _ in $(seq 1 24); do
+    kubectl -n "$NAMESPACE" exec deploy/airflow-scheduler -c scheduler -- \
+      airflow dags list -o plain 2>/dev/null | grep -q "stardelt__$NAME " && break
+    sleep 5
+  done
+  kubectl -n "$NAMESPACE" exec deploy/airflow-scheduler -c scheduler -- \
+    airflow dags list -o plain 2>/dev/null | grep -q "stardelt__$NAME " \
+    || fail "$NAME was deployed but Airflow did not load it within 120 s — Nova shows the reason on the pipeline page"
+  echo "› $NAME: loaded by Airflow"
 
   # 2. What is left for the maintainer: the pipeline's first history entry.
   echo "$NAME's first run: kubectl -n $NAMESPACE exec deploy/airflow-scheduler -c scheduler -- airflow dags trigger stardelt__$NAME"
