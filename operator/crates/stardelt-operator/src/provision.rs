@@ -2224,13 +2224,16 @@ pub async fn ensure_airflow_group_roles(
 }
 
 /// The two ConfigMaps the warehouse half of the access sync writes (`trino-warehouses`,
-/// `trino-group-file`): created empty when they are absent, and **never** applied over an
-/// existing one — a server-side apply with force would blank the file the sync wrote
-/// (`make trino-warehouse-configmaps` in stardelt-platform has the same rule). Runs for **any**
-/// identity provider (`mode != none`): the access-sync CronJob fills the two files in `platform`
-/// mode, while an `external` install gets them empty — the identity overlay refuses to start
-/// Trino with a *missing* file, not with an empty one. `None` when no identity provider is
-/// configured: the identity overlay is not applied then, so nothing reads these files.
+/// `trino-group-file`): created when they are absent, and **never** applied over an existing
+/// one — a server-side apply with force would blank the file the sync wrote (`make
+/// trino-warehouse-configmaps` in stardelt-platform has the same rule). `trino-warehouses`
+/// starts with `access_sync::SEED_RESOURCE_GROUPS` (the admin group and the zero-concurrency
+/// `no-warehouse`, #1615) because an empty `resource-groups.json` is not valid JSON and the
+/// coordinator crash-loops on it; `trino-group-file` starts empty, which the group provider
+/// reads as "no groups". Runs for **any** identity provider (`mode != none`): the access-sync
+/// CronJob fills the two files in `platform` mode, while an `external` install keeps the seed
+/// and the empty group file. `None` when no identity provider is configured: the identity
+/// overlay is not applied then, so nothing reads these files.
 pub async fn ensure_trino_config_maps(
     ctx: &Context,
     spec: &PlatformInstanceSpec,

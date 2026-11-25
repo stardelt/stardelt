@@ -1,0 +1,32 @@
+{
+  "rootGroups": [
+    {
+      "name": "global",
+      "softMemoryLimit": "90%",
+      "hardConcurrencyLimit": 100,
+      "maxQueued": 500,
+      "subGroups": []
+    },
+    {
+      "name": "admin",
+      "softMemoryLimit": "100%",
+      "hardConcurrencyLimit": 50,
+      "maxQueued": 100
+    },
+    {
+      "name": "no-warehouse",
+      "softMemoryLimit": "0%",
+      "hardConcurrencyLimit": 0,
+      "maxQueued": 0
+    }
+  ],
+  "selectors": [
+    {
+      "userGroup": "stardelt-admins",
+      "group": "admin"
+    },
+    {
+      "group": "no-warehouse"
+    }
+  ]
+}
