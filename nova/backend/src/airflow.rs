@@ -565,6 +565,30 @@ impl AirflowClient {
         Ok(page.dag_runs)
     }
 
+    /// The newest runs of several DAGs in one call (`POST /api/v2/dags/~/dagRuns/list`,
+    /// Airflow 3.x), newest `start_date` first, at most `limit` **in total**, not per DAG.
+    pub async fn runs_batch(
+        &self,
+        dag_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<(String, DagRun)>, AirflowError> {
+        let url = self.url(&format!("{API}/dags/~/dagRuns/list"));
+        let payload = json!({
+            "dag_ids": dag_ids,
+            "order_by": "-start_date",
+            "page_limit": limit
+        });
+        let body = self
+            .send(|token| self.http.post(&url).bearer_auth(token).json(&payload))
+            .await?;
+        let page: BatchRunsPage = Self::parse(body)?;
+        Ok(page
+            .dag_runs
+            .into_iter()
+            .map(|row| (row.dag_id, row.run))
+            .collect())
+    }
+
     /// The task instances of one run.
     pub async fn task_instances(
         &self,
@@ -725,6 +749,20 @@ struct DagsPage {
 struct RunsPage {
     #[serde(default)]
     dag_runs: Vec<DagRun>,
+}
+
+/// The batch listing's envelope: each run carries its `dag_id`.
+#[derive(Deserialize)]
+struct BatchRunsPage {
+    #[serde(default)]
+    dag_runs: Vec<BatchRun>,
+}
+
+#[derive(Deserialize)]
+struct BatchRun {
+    dag_id: String,
+    #[serde(flatten)]
+    run: DagRun,
 }
 
 /// The task-instance envelope: `{"task_instances":[…],"total_entries":N}`.

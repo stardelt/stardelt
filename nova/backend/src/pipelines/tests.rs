@@ -242,6 +242,10 @@ mod fake_airflow {
         pub clear_bodies: Vec<Value>,
         /// When set, the clear selects nothing: a run with no failed task.
         pub clear_empty: bool,
+        /// Delay before every `dags`, `runs` and batch answer, to time Nova's fan-out (spike).
+        pub latency: std::time::Duration,
+        /// Every batch listing's JSON body, in order.
+        pub batch_bodies: Vec<Value>,
     }
 
     pub type Shared = Arc<Mutex<Fake>>;
@@ -310,6 +314,8 @@ mod fake_airflow {
         Query(query): Query<BTreeMap<String, String>>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, Refusal> {
+        let latency = state.lock().unwrap().latency;
+        tokio::time::sleep(latency).await;
         let mut state = state.lock().unwrap();
         remember(&mut state, "GET", &uri);
         authorize(&headers)?;
@@ -357,6 +363,8 @@ mod fake_airflow {
         Query(query): Query<BTreeMap<String, String>>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, Refusal> {
+        let latency = state.lock().unwrap().latency;
+        tokio::time::sleep(latency).await;
         let mut state = state.lock().unwrap();
         remember(&mut state, "GET", &uri);
         authorize(&headers)?;
@@ -380,6 +388,55 @@ mod fake_airflow {
         Ok(Json(
             json!({ "dag_runs": page, "total_entries": runs.len() }),
         ))
+    }
+
+    /// Airflow 3.2.2's `POST /api/v2/dags/~/dagRuns/list`: the runs of `dag_ids`, newest
+    /// `start_date` first, at most `page_limit` (default 100) in total, each with its `dag_id`.
+    async fn runs_batch(
+        State(state): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        Path(dag_id): Path<String>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, Refusal> {
+        let latency = state.lock().unwrap().latency;
+        tokio::time::sleep(latency).await;
+        let mut state = state.lock().unwrap();
+        remember(&mut state, "POST", &uri);
+        authorize(&headers)?;
+        if dag_id != "~" {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "detail": "the batch listing takes the dag_id ~" })),
+            ));
+        }
+        state.batch_bodies.push(body.clone());
+        let wanted: Vec<String> = body["dag_ids"]
+            .as_array()
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let limit = body["page_limit"].as_u64().unwrap_or(100) as usize;
+        let mut runs: Vec<Value> = state
+            .runs
+            .iter()
+            .filter(|(id, _)| wanted.is_empty() || wanted.contains(*id))
+            .flat_map(|(id, runs)| {
+                runs.iter().map(move |run| {
+                    let mut run = run.clone();
+                    run["dag_id"] = json!(id);
+                    run
+                })
+            })
+            .collect();
+        runs.sort_by(|a, b| b["start_date"].as_str().cmp(&a["start_date"].as_str()));
+        let total = runs.len();
+        runs.truncate(limit);
+        Ok(Json(json!({ "dag_runs": runs, "total_entries": total })))
     }
 
     fn run_belongs(state: &Fake, dag_id: &str, run_id: &str) -> bool {
@@ -549,6 +606,7 @@ mod fake_airflow {
             .route("/api/v2/dags", get(dags))
             .route("/api/v2/dags/{dag_id}", get(one_dag).patch(patch_dag))
             .route("/api/v2/dags/{dag_id}/dagRuns", get(runs).post(trigger))
+            .route("/api/v2/dags/{dag_id}/dagRuns/list", post(runs_batch))
             .route("/api/v2/dags/{dag_id}/dagRuns/{run_id}", patch(patch_run))
             .route(
                 "/api/v2/dags/{dag_id}/dagRuns/{run_id}/clear",
@@ -980,6 +1038,79 @@ async fn list_hides_other_groups_pipelines() {
             .any(|call| call.contains("stardelt__smoke/dagRuns")),
         "the visible pipeline's last run was read: {calls:?}"
     );
+}
+
+/// Spike: Airflow calls and time of `GET /api/pipelines` today, and of the batch listing.
+/// Ignored: it prints numbers (`--ignored --nocapture`).
+#[tokio::test]
+#[ignore]
+async fn spike_airflow_fanout_timing() {
+    const LATENCY: std::time::Duration = std::time::Duration::from_millis(20);
+    for (n, busy) in [(10usize, 0usize), (50, 0), (200, 0), (50, 150)] {
+        let (airflow, fake) = fake_airflow::start().await;
+        let mut names: Vec<String> = (0..n).map(|i| format!("p{i:03}")).collect();
+        if busy > 0 {
+            names.push("busy".to_string());
+        }
+        {
+            let mut f = fake.lock().unwrap();
+            f.latency = LATENCY;
+            f.dags = names
+                .iter()
+                .map(|name| dag(&format!("stardelt__{name}")))
+                .collect();
+            f.runs.clear();
+            for (i, name) in names.iter().enumerate() {
+                let count = if name == "busy" { busy } else { 1 };
+                let day = if name == "busy" { 2 } else { 1 };
+                let runs = (0..count)
+                    .map(|k| {
+                        let mut r = run(&format!("{name}__run{k}"), "success");
+                        let s = if name == "busy" { k } else { i };
+                        r["start_date"] =
+                            json!(format!("2026-11-{day:02}T{:02}:{:02}:00Z", s / 60, s % 60));
+                        r
+                    })
+                    .collect();
+                f.runs.insert(format!("stardelt__{name}"), runs);
+            }
+        }
+        let items: Vec<(&str, Value)> = names
+            .iter()
+            .map(|name| (name.as_str(), resource(name, Some("analytics"))))
+            .collect();
+        let resources = memory(&items);
+        let caller = who("sub-ada", &["analytics"], false);
+        let dag_ids: Vec<String> = names
+            .iter()
+            .map(|name| format!("stardelt__{name}"))
+            .collect();
+        // Sign in once, so neither measurement pays for the token.
+        airflow.list_dags("pipeline", true).await.expect("warm-up");
+
+        fake.lock().unwrap().calls.clear();
+        let started = std::time::Instant::now();
+        let answer = list_pipelines(Some(&resources), Some(&airflow), &caller)
+            .await
+            .expect("the list succeeds");
+        let quo_ms = started.elapsed().as_millis();
+        let quo_calls = fake.lock().unwrap().calls.len();
+        assert_eq!(answer.pipelines.len(), names.len());
+
+        fake.lock().unwrap().calls.clear();
+        let started = std::time::Instant::now();
+        airflow.list_dags("pipeline", true).await.expect("dags");
+        let runs = airflow.runs_batch(&dag_ids, 100).await.expect("batch");
+        let batch_ms = started.elapsed().as_millis();
+        let batch_calls = fake.lock().unwrap().calls.len();
+        let covered: BTreeSet<&str> = runs.iter().map(|(id, _)| id.as_str()).collect();
+        println!(
+            "n={n} busy={busy} status_quo_calls={quo_calls} status_quo_ms={quo_ms} \
+             batch_calls={batch_calls} batch_ms={batch_ms} batch_covered={}/{}",
+            covered.len(),
+            names.len()
+        );
+    }
 }
 
 #[tokio::test]
