@@ -134,7 +134,8 @@ class FreshNode(unittest.TestCase):
         self.assertTrue(self.config.exists(), "a dry run removed the config")
 
     # -- teardown -----------------------------------------------------------
-    def test_down_deletes_the_recorded_volumes_after_the_cluster(self):
+    def fake_cloud_bin(self):
+        """kubectl, helm, hcloud and hetzner-k3s on PATH; every call is logged."""
         fake_bin = self.tmp / "bin"
         fake_bin.mkdir()
         calls = self.tmp / "calls.log"
@@ -156,6 +157,38 @@ class FreshNode(unittest.TestCase):
                     "exit 0\n".format(name=name, calls=calls)
                 )
             script.chmod(0o755)
+        return fake_bin, calls
+
+    def test_down_deletes_the_recorded_volumes_after_the_cluster(self):
+        fake_bin, calls = self.fake_cloud_bin()
+        self.kubeconfig.write_text("fake\n")
+        self.write_config("stardelt-fresh-test")
+
+        result = self.run_script(
+            "down",
+            DRY_RUN="0",
+            PATH="{}:{}".format(fake_bin, os.environ.get("PATH", "/usr/bin:/bin")),
+            FRESH_VOLUME_SLEEP="0",
+            FORCE="1",
+            # hcloud reads the token from the environment; the teardown fails fast without
+            # one (#1632).
+            HCLOUD_TOKEN="fake-token",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = calls.read_text().splitlines()
+        self.assertIn("hcloud volume delete 101", lines)
+        self.assertIn("hcloud volume delete 102", lines)
+        cluster_at = next(i for i, l in enumerate(lines) if l.startswith("hetzner-k3s delete"))
+        volume_at = next(i for i, l in enumerate(lines) if l.startswith("hcloud volume delete"))
+        self.assertLess(cluster_at, volume_at, "the volumes were deleted before the server")
+        self.assertFalse([l for l in lines if "--wait=true" in l])
+        self.assertFalse((self.tmp / "fresh.volumes").exists())
+
+    def test_down_without_a_token_warns_once_and_keeps_the_volume_ids(self):
+        # #1632: without HCLOUD_TOKEN every `hcloud volume delete` failed, the retry loop ran
+        # 12 times per volume and the warning did not say why. One sentence, no retries.
+        fake_bin, calls = self.fake_cloud_bin()
         self.kubeconfig.write_text("fake\n")
         self.write_config("stardelt-fresh-test")
 
@@ -168,13 +201,38 @@ class FreshNode(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("warning: no HCLOUD_TOKEN", result.stderr)
+        self.assertIn("101 102", result.stderr)
+        # No attempt, so no retry loop: the ids stay on disk for the by-hand delete.
+        self.assertFalse(
+            [l for l in calls.read_text().splitlines() if l.startswith("hcloud volume delete")]
+        )
+        self.assertTrue((self.tmp / "fresh.volumes").exists())
+
+    def test_down_reads_the_token_from_hetzner_env(self):
+        # #1632: the maintainer keeps the token in ~/.config/stardelt/hetzner.env, which
+        # provision.sh loads and fresh-node.sh did not — so hcloud ran without it.
+        fake_bin, calls = self.fake_cloud_bin()
+        self.kubeconfig.write_text("fake\n")
+        self.write_config("stardelt-fresh-test")
+        env_file = self.tmp / "hetzner.env"
+        env_file.write_text("HCLOUD_TOKEN=fake-token-from-env-file\n")
+        env_file.chmod(0o600)
+
+        result = self.run_script(
+            "down",
+            DRY_RUN="0",
+            PATH="{}:{}".format(fake_bin, os.environ.get("PATH", "/usr/bin:/bin")),
+            FRESH_VOLUME_SLEEP="0",
+            FORCE="1",
+            HETZNER_ENV=str(env_file),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("no HCLOUD_TOKEN", result.stderr)
         lines = calls.read_text().splitlines()
         self.assertIn("hcloud volume delete 101", lines)
         self.assertIn("hcloud volume delete 102", lines)
-        cluster_at = next(i for i, l in enumerate(lines) if l.startswith("hetzner-k3s delete"))
-        volume_at = next(i for i, l in enumerate(lines) if l.startswith("hcloud volume delete"))
-        self.assertLess(cluster_at, volume_at, "the volumes were deleted before the server")
-        self.assertFalse([l for l in lines if "--wait=true" in l])
         self.assertFalse((self.tmp / "fresh.volumes").exists())
 
 
