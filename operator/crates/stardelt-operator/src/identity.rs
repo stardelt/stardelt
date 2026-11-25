@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::ObjectMeta;
 
-use crate::crd::{IdentityMode, IdentityProvider, PlatformInstanceSpec};
+use crate::crd::{IdentityLdapTls, IdentityMode, IdentityProvider, PlatformInstanceSpec};
 
 /// The client names an `external` instance may use (the app registrations of D31), in the
 /// order the checklist prints them.
@@ -50,6 +50,18 @@ pub fn validate(spec: &PlatformInstanceSpec) -> Result<(), IdentityError> {
         return Err(IdentityError(
             "ldap only works with mode platform, which runs the Keycloak that imports it".into(),
         ));
+    }
+    if let Some(ldap) = identity.ldap.as_ref() {
+        if ldap.tls == IdentityLdapTls::Ldaps && ldap.port != 636 {
+            return Err(IdentityError(
+                "identity.ldap.port must be 636 when tls is ldaps".into(),
+            ));
+        }
+        if ldap.tls != IdentityLdapTls::Ldaps && ldap.port == 636 {
+            return Err(IdentityError(
+                "identity.ldap.port 636 needs tls: ldaps".into(),
+            ));
+        }
     }
     if identity.mode != IdentityMode::External {
         if identity.provider != IdentityProvider::Oidc
@@ -343,7 +355,9 @@ pub fn mode_label(mode: IdentityMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ClientSecretRef, IdentityClient, IdentitySpec};
+    use crate::crd::{
+        ClientSecretRef, IdentityClient, IdentityLdap, IdentityLdapBindSecret, IdentitySpec,
+    };
 
     fn spec(identity: IdentitySpec, base_domain: Option<&str>) -> PlatformInstanceSpec {
         serde_json::from_value(serde_json::json!({
@@ -825,11 +839,57 @@ mod tests {
             "external mode needs a nova client",
             "client names are nova, trino, lakekeeper, superset, airflow, jupyterhub and trino-group-sync",
             "every client except lakekeeper needs a clientSecretRef",
+            "identity.ldap.port must be 636 when tls is ldaps",
+            "identity.ldap.port 636 needs tls: ldaps",
         ] {
             assert!(crd.contains(message), "the schema carries: {message}");
         }
         let s: PlatformInstanceSpec = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(s.identity, IdentitySpec::default());
         assert_eq!(s.base_domain, None);
+    }
+
+    #[test]
+    fn ldap_tls_and_the_port_must_pair() {
+        let ldap = |tls, port| IdentityLdap {
+            host: "dir.example.com".into(),
+            port,
+            tls,
+            users_dn: "ou=people,dc=example,dc=org".into(),
+            group_dn: "ou=groups,dc=example,dc=org".into(),
+            bind_secret_ref: IdentityLdapBindSecret {
+                name: "corp-directory".into(),
+                dn_key: "bind-dn".into(),
+                password_key: "bind-password".into(),
+            },
+            sync_seconds: 3600,
+        };
+        let platform = |ldap| {
+            spec(
+                IdentitySpec {
+                    mode: IdentityMode::Platform,
+                    ldap: Some(ldap),
+                    ..IdentitySpec::default()
+                },
+                Some("data.example.com"),
+            )
+        };
+
+        assert_eq!(
+            err(&platform(ldap(IdentityLdapTls::Ldaps, 389))),
+            "identity.ldap.port must be 636 when tls is ldaps"
+        );
+        assert_eq!(
+            err(&platform(ldap(IdentityLdapTls::Starttls, 636))),
+            "identity.ldap.port 636 needs tls: ldaps"
+        );
+        assert_eq!(
+            err(&platform(ldap(IdentityLdapTls::None, 636))),
+            "identity.ldap.port 636 needs tls: ldaps"
+        );
+        assert_eq!(
+            validate(&platform(ldap(IdentityLdapTls::Ldaps, 636))),
+            Ok(())
+        );
     }
 }

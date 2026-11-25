@@ -64,6 +64,22 @@ def ldap_config(realm):
     return providers[0]["config"]
 
 
+def render_failure(extra):
+    """The stderr of a `helm template` run that must fail."""
+    command = [HELM, "template", "stardelt", "chart", "-n", "stardelt",
+               "--set", "identity.mode=platform",
+               "--set", "platform.baseDomain=example.com",
+               "--set", f"identity.keycloak.ldap.host={HOST}",
+               "--set", f"identity.keycloak.ldap.usersDn={USERS_DN}",
+               "--set", f"identity.keycloak.ldap.groupDn={GROUP_DN}",
+               "--set", "identity.keycloak.ldap.bindSecretName=corp-directory"]
+    for item in extra:
+        command += ["--set", item]
+    out = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
+    assert out.returncode != 0, "the chart accepted an invalid directory"
+    return out.stderr
+
+
 class ChartKeycloakLdapTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -98,6 +114,30 @@ class ChartKeycloakLdapTest(unittest.TestCase):
         ]))
         self.assertEqual(config["connectionUrl"], ["ldap://dir.example.com:389"])
         self.assertNotIn("startTls", config, "plaintext carries no startTls key")
+
+    def test_an_unknown_tls_is_refused(self):
+        stderr = render_failure(["identity.keycloak.ldap.tls=startls"])
+        self.assertIn(
+            'identity.keycloak.ldap.tls must be none, starttls or ldaps, got "startls"',
+            stderr)
+
+    def test_ldaps_needs_port_636(self):
+        stderr = render_failure([
+            "identity.keycloak.ldap.tls=ldaps",
+            "identity.keycloak.ldap.port=389",
+        ])
+        self.assertIn(
+            "identity.keycloak.ldap.port must be 636 when tls is ldaps, got 389",
+            stderr)
+
+    def test_port_636_needs_ldaps(self):
+        stderr = render_failure([
+            "identity.keycloak.ldap.tls=starttls",
+            "identity.keycloak.ldap.port=636",
+        ])
+        self.assertIn(
+            'identity.keycloak.ldap.port 636 needs tls: ldaps, got "starttls"',
+            stderr)
 
 
 if __name__ == "__main__":
