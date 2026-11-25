@@ -128,6 +128,22 @@ def script_files():
     )
 
 
+# A value that must never be a process argument: `--docker-password=…` or a literal Secret value
+# is readable from /proc/<pid>/cmdline while the command runs (#1682).
+CREDENTIAL_ARGV = re.compile(
+    r"--(?:docker-password|from-literal=[^\s\"']*(?:password|token|secret))", re.IGNORECASE
+)
+
+
+def credential_arguments(text):
+    """Return `(line number, line)` for every credential passed as a command argument."""
+    return [
+        (number, line.strip())
+        for number, line in enumerate(text.splitlines(), start=1)
+        if not _comment(line) and CREDENTIAL_ARGV.search(line)
+    ]
+
+
 class NoClientApplyOfSecretsTest(unittest.TestCase):
     def test_repository_scripts_apply_secrets_server_side(self):
         self.assertNotEqual(script_files(), [], "no scripts/*.sh or dev/*.sh found — wrong REPO?")
@@ -198,6 +214,38 @@ class NoClientApplyOfSecretsTest(unittest.TestCase):
             "}\n"
         )
         self.assertEqual(offending_commands(text), [])
+
+
+class NoCredentialInArgvTest(unittest.TestCase):
+    def test_dev_scripts_keep_credentials_off_the_command_line(self):
+        offenders = []
+        for path in sorted((REPO / "dev").glob("*.sh")):
+            if path.name.startswith("spike-"):
+                continue
+            for number, line in credential_arguments(path.read_text()):
+                offenders.append(f"{path.name}:{number}: {line}")
+        self.assertEqual(
+            offenders,
+            [],
+            "a credential is passed as a command argument, where `ps` can read it; pass it in "
+            "the environment or on stdin:\n" + "\n".join(offenders),
+        )
+
+    def test_detector_flags_docker_password(self):
+        self.assertEqual(
+            len(credential_arguments('  --docker-password="$token" \\\n')), 1
+        )
+
+    def test_detector_flags_a_literal_secret(self):
+        self.assertEqual(
+            len(credential_arguments('kubectl create secret generic s --from-literal=password="$p"\n')),
+            1,
+        )
+
+    def test_detector_accepts_a_manifest_on_stdin(self):
+        self.assertEqual(
+            credential_arguments('printf \'%s\' "$m" | kubectl apply --server-side -f -\n'), []
+        )
 
 
 if __name__ == "__main__":
