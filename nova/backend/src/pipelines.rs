@@ -85,6 +85,7 @@ use std::time::Instant;
 #[cfg(test)]
 use std::sync::Mutex;
 
+use crate::rfc3339::{format_rfc3339, parse_rfc3339};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -700,98 +701,8 @@ fn options_of(spec: &Value) -> PipelineOptionsView {
 }
 
 // ---------------------------------------------------------------------------
-// Time: Airflow's RFC 3339 strings and a run's duration (no date dependency)
+// Time: Airflow's RFC 3339 strings and a run's duration
 // ---------------------------------------------------------------------------
-
-/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = (year - era * 400) as u64;
-    let month_index = if month > 2 { month - 3 } else { month + 9 } as u64;
-    let doy = (153 * month_index + 2) / 5 + u64::from(day) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe as i64 - 719_468
-}
-
-/// Seconds since the Unix epoch for an RFC 3339 timestamp, fraction included. Answers `None`
-/// for anything Airflow would not send (a missing date, an unknown zone, trailing text).
-fn parse_rfc3339(text: &str) -> Option<f64> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 20 {
-        return None;
-    }
-    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
-    let year = number(0..4)?;
-    if bytes.get(4) != Some(&b'-') {
-        return None;
-    }
-    let month = number(5..7)? as u32;
-    if bytes.get(7) != Some(&b'-') {
-        return None;
-    }
-    let day = number(8..10)? as u32;
-    if !matches!(bytes.get(10), Some(b'T') | Some(b't') | Some(b' ')) {
-        return None;
-    }
-    let hour = number(11..13)?;
-    if bytes.get(13) != Some(&b':') {
-        return None;
-    }
-    let minute = number(14..16)?;
-    if bytes.get(16) != Some(&b':') {
-        return None;
-    }
-    let second = number(17..19)?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || !(0..=23).contains(&hour)
-        || !(0..=59).contains(&minute)
-        || !(0..=60).contains(&second)
-    {
-        return None;
-    }
-
-    let mut at = 19;
-    let mut fraction = 0.0;
-    if bytes.get(at) == Some(&b'.') {
-        at += 1;
-        let start = at;
-        while at < bytes.len() && bytes[at].is_ascii_digit() {
-            at += 1;
-        }
-        if at == start {
-            return None;
-        }
-        let digits: String = text[start..at].chars().take(9).collect();
-        fraction = format!("0.{digits}").parse::<f64>().ok()?;
-    }
-
-    let offset = match bytes.get(at) {
-        Some(b'Z') | Some(b'z') => {
-            at += 1;
-            0
-        }
-        Some(sign @ (b'+' | b'-')) => {
-            let sign = if *sign == b'+' { 1 } else { -1 };
-            let hours = number(at + 1..at + 3)?;
-            if bytes.get(at + 3) != Some(&b':') {
-                return None;
-            }
-            let minutes = number(at + 4..at + 6)?;
-            at += 6;
-            sign * (hours * 3_600 + minutes * 60)
-        }
-        _ => return None,
-    };
-    if at != bytes.len() {
-        return None;
-    }
-
-    let seconds =
-        days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second - offset;
-    Some(seconds as f64 + fraction)
-}
 
 /// The seconds between two Airflow timestamps, rounded to microseconds; `None` unless both
 /// parse and the end is not before the start. Airflow's ISO strings carry microseconds, and a
@@ -801,36 +712,6 @@ pub(crate) fn duration_seconds(started: Option<&str>, ended: Option<&str>) -> Op
     let started = parse_rfc3339(started?)?;
     let duration = ended - started;
     (duration >= 0.0).then(|| (duration * 1_000_000.0).round() / 1_000_000.0)
-}
-
-/// The civil date for a number of days since 1970-01-01 (the inverse of [`days_from_civil`]).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let days = days + 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-    (year, month, day)
-}
-
-/// `YYYY-MM-DDTHH:MM:SSZ` for whole seconds since the epoch, always UTC and always with `Z`.
-/// Airflow 3 wants a `logical_date`; Nova always sends the current second (`now_rfc3339`).
-fn format_rfc3339(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let of_day = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let (hour, minute, second) = (of_day / 3_600, (of_day % 3_600) / 60, of_day % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Whole seconds since the epoch, as a float for the age comparison.

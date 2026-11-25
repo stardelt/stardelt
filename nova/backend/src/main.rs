@@ -148,6 +148,7 @@ mod query_log_collector;
 #[allow(dead_code)]
 mod query_log_event;
 mod query_log_store;
+mod rfc3339;
 mod saved_queries;
 mod seal;
 mod secret_store;

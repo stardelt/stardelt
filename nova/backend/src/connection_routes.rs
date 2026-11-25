@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::{
     Json,
@@ -487,31 +487,7 @@ fn meta_from_resource(resource: &Value) -> SecretMeta {
     }
 }
 
-/// The civil date of a day count since 1970-01-01 (Howard Hinnant's algorithm, no dependency).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (y + i64::from(month <= 2), month, day)
-}
-
-/// RFC 3339 in UTC, second precision: `2026-10-20T08:15:00Z`.
-pub(crate) fn rfc3339_utc(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default();
-    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-    let day_secs = secs.rem_euclid(86_400);
-    let (hour, minute, second) = (day_secs / 3_600, day_secs % 3_600 / 60, day_secs % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
+pub(crate) use crate::rfc3339::rfc3339_utc;
 
 /// `POST …/break-glass` body. No `Debug`: a reason can be sensitive and nothing here should ever
 /// be printed by accident.
@@ -2002,6 +1978,7 @@ async fn delete_at(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::UNIX_EPOCH;
 
     use axum::{
         Router,
