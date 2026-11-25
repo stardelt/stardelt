@@ -78,11 +78,11 @@ fi
 
 # 1. The bundle: the on-demand pipeline that creates the sink table.
 "$CLI" --host "$NOVA" bundle deploy "$BUNDLE" -t prod \
-  || fail "the stardelt CLI is not signed in to $NOVA, or the deploy failed — run: stardelt login --host $NOVA"
+  || fail "the stardelt CLI is not signed in to $NOVA, or the deploy failed — run: stardelt --host $NOVA login"
 echo "› demo-stream bundle: deployed ($NAME, on demand)"
 
 # 2. The sink. Without the table the stream's driver cannot read the sink's schema.
-"$CLI" --host "$NOVA" run demo "$NAME" --wait --timeout 900 \
+"$CLI" --host "$NOVA" run "$NAMESPACE" "$NAME" --wait --timeout 900 \
   || fail "$NAME did not succeed — its run above names the failing task"
 echo "› $NAME: succeeded"
 
