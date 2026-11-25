@@ -25,7 +25,6 @@
 //!
 //! Nothing in this module logs a request body, a password or a token, and no error carries one.
 //! This is the client only; the HTTP routes that use it land in the follow-up ticket.
-#![allow(dead_code)]
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -261,13 +260,6 @@ pub struct LogFrame {
 /// have no underscore, so the `__` separator is unambiguous.
 pub fn dag_id_for(namespace: &str, name: &str) -> String {
     format!("{namespace}__{name}")
-}
-
-/// The `(namespace, name)` behind a `dag_id`, or `None` when the id is not a pipeline DAG
-/// (Airflow and the operator create DAGs of their own). Splits on the first `__`.
-pub fn pipeline_of(dag_id: &str) -> Option<(String, String)> {
-    let (namespace, name) = dag_id.split_once("__")?;
-    Some((namespace.to_string(), name.to_string()))
 }
 
 /// Percent-encode one path segment. Airflow's run ids carry `:` and `+`; only unreserved
@@ -1587,11 +1579,6 @@ mod tests {
     #[test]
     fn dag_ids_round_trip() {
         assert_eq!(dag_id_for("stardelt", "spike-j1"), "stardelt__spike-j1");
-        assert_eq!(
-            pipeline_of("stardelt__spike-j1"),
-            Some(("stardelt".to_string(), "spike-j1".to_string()))
-        );
-        assert_eq!(pipeline_of("nyc_taxi_load"), None);
     }
 
     #[tokio::test]
