@@ -1738,6 +1738,13 @@ OPERATOR_DIR ?= ../operator
 install-operator: _context ## Install the stardelt Operator (needs ../operator)
 	@test -f $(OPERATOR_DIR)/chart/Chart.yaml || { \
 	  echo "operator chart not found at $(OPERATOR_DIR)/chart — set OPERATOR_DIR"; exit 1; }
+	@# The namespace carries the Pod Security floor: `helm --create-namespace` creates it without
+	@# labels, and the operator then finds no `pod-security.kubernetes.io/*` label to keep
+	@# (stardelt/stardelt#1706). Same order as the release's install.yaml (namespace first), and
+	@# `name` is rendered from $(NAMESPACE) like `make step-namespace`. An existing namespace keeps
+	@# the labels it has: an administrator's own Pod Security level is not overwritten.
+	@kubectl get namespace $(NAMESPACE) >/dev/null 2>&1 || \
+	  sed "s/^  name: stardelt$$/  name: $(NAMESPACE)/" manifests/namespace.yaml | kubectl apply -f -
 	@helm upgrade --install stardelt-operator $(OPERATOR_DIR)/chart \
 	  --namespace $(NAMESPACE) --create-namespace --wait --atomic --timeout 5m \
 	  -f helm-values/operator.yaml \
