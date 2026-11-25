@@ -1,0 +1,42 @@
+%% One typical call, traced in the code (2026-11-25, main c8c9a2ad):
+%% POST /api/pipelines/{namespace}/{name}/runs  ("Run now" on the Pipelines page)
+%% Hand-written: update it when one of the named functions changes.
+sequenceDiagram
+    autonumber
+    actor P as Person (browser)
+    participant UI as frontend/src/routes/Pipelines.tsx<br/>usePipelineActions → api.startPipelineRun
+    participant AX as axum app (main.rs app)<br/>metrics::count_requests, security_headers, TraceLayer
+    participant RA as auth::require_auth<br/>(session cookie or bearer)
+    participant AU as audit::record_mutations
+    participant H as pipelines::trigger_run<br/>(SignedIn extractor) → run_now
+    participant K as Kubernetes API<br/>Pipeline CRD (PipelineResources)
+    participant AF as Airflow REST /api/v2<br/>(airflow::AirflowClient, service user)
+
+    P->>UI: click Run now
+    UI->>AX: POST /api/pipelines/stardelt/orders/runs {date?}
+    AX->>RA: route_layer on api_router()
+    RA->>RA: authenticate(headers): session store or JWT (JWKS)
+    alt not signed in
+        RA-->>UI: 401 {"error": ...}
+    end
+    RA->>AU: Principal + MeFacts in request extensions
+    AU->>H: non-GET: remember method, path, actor
+    H->>H: run_start(body) → RunStart (400 on a bad body)
+    H->>H: RUN_START_GATE.lock() (one process-wide gate)
+    H->>K: GET Pipeline orders (load_runnable)
+    K-->>H: resource (spec.ownerGroup, viewers)
+    H->>H: visible(identity, spec)? else 404 (hidden) / 403
+    H->>AF: GET /dags/stardelt__orders (is_paused?)
+    AF-->>H: DagSummary (404 → 409 not loaded)
+    H->>H: take_run_slot(sub): 10 starts per minute, else 429
+    opt spec.concurrency != Allow
+        H->>AF: GET /dags/stardelt__orders/dagRuns (active?)
+        AF-->>H: runs (queued/running → 409)
+    end
+    H->>AF: POST /dags/stardelt__orders/dagRuns {logical_date, note, conf}
+    AF-->>H: DagRun
+    H->>H: audit::pipeline_event("run", ok)
+    H-->>AU: 201 RunView (pipelines::no_store: Cache-Control no-store)
+    AU-->>UI: audit log line (actor, method, path, status)
+    UI->>UI: invalidateQueries(['pipelines']) → GET /api/pipelines
+    UI-->>P: toast + new run row

@@ -6,6 +6,7 @@ the Lakekeeper Iceberg REST catalog and the Trino query engine.
 
 ## Read first
 
+- `ARCHITECTURE.md` — how Nova is built and the code guidelines; after adding a module, a route or a client, run `python3 scripts/arch_map.py --doc ARCHITECTURE.md` and commit what it writes.
 - `../../stardelt-internal/design/master-spec.md` — canonical spec; when documents
   disagree, it wins. Also `execution-plan.md` and `gap-decisions.md` in the same folder.
 - `../../stardelt-docs/docs/architecture/licenses.md` — license policy.
