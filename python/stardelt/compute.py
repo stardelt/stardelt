@@ -53,12 +53,25 @@ def default(client=None):
     if not clusters:
         raise LookupError(
             "you have no Spark cluster of your own: no group you are in owns one — "
-            "use the shared Spark server (or %sql), or ask an administrator for a cluster"
+            "use the shared Spark server (or %sql), ask an administrator for a cluster, "
+            'or create your group\'s with stardelt.compute.ensure("<your group>")'
         )
     raise LookupError(
         f"you may act on {len(clusters)} Spark clusters ({names}): name one with "
         "STARDELT_CLUSTER, or pass its name to stardelt.compute.get/start"
     )
+
+
+def ensure(group, client=None):
+    """The group's Spark cluster: reuse it, or create it now (``POST /api/compute/ensure``).
+
+    The caller must be a member of ``group``; Nova answers the cluster the group already owns,
+    whatever its phase, and creates one otherwise (`size: small`, `runtime: spark-4.1-py3.13`,
+    stops after 60 minutes without a job). A group whose name is not a valid cluster name
+    (1 to 40 lower-case letters, digits and dashes) cannot create one this way: an
+    administrator names that cluster with ``PUT /api/admin/compute/{name}``.
+    """
+    return _client(client).call("compute_ensure", body={"group": group})
 
 
 def start(name, wait=True, timeout=300, interval=2, client=None):
