@@ -581,8 +581,10 @@ function CellNumber({ pending, children }: { pending: boolean; children: ReactNo
  * runs anything, and nothing is written but the one personal "dismissed" setting.
  */
 function FirstRunCard({ group, onDismiss }: { group: string; onDismiss: () => void }) {
+  // The release tag here is checked against python/pyproject.toml by
+  // platform/scripts/tests/test_python_release_pointer.py: bump both in the release.
   const commands = [
-    'pip install "stardelt @ git+https://github.com/stardelt/stardelt@python/v0.2.0#subdirectory=python"',
+    'pip install "stardelt @ git+https://github.com/stardelt/stardelt@python/v0.4.3#subdirectory=python"',
     `export STARDELT_NOVA_URL=${window.location.origin}`,
     'stardelt login',
     `stardelt bundle init shop --name shop-etl --group ${group}`,
