@@ -63,7 +63,17 @@ data:
 {{- $ldap := $kc.ldap }}
 {{- if and $ldap $ldap.host }}
 {{- $sync := $ldap.syncSeconds | int | toString }}
-{{- $scheme := ternary "ldaps" "ldap" (eq (default "none" $ldap.tls) "ldaps") }}
+{{- $tls := default "none" $ldap.tls }}
+{{- if not (has $tls (list "none" "starttls" "ldaps")) }}
+{{- fail (printf "identity.keycloak.ldap.tls must be none, starttls or ldaps, got %q" $tls) }}
+{{- end }}
+{{- if and (eq $tls "ldaps") (ne (int $ldap.port) 636) }}
+{{- fail (printf "identity.keycloak.ldap.port must be 636 when tls is ldaps, got %d" (int $ldap.port)) }}
+{{- end }}
+{{- if and (ne $tls "ldaps") (eq (int $ldap.port) 636) }}
+{{- fail (printf "identity.keycloak.ldap.port 636 needs tls: ldaps, got %q" $tls) }}
+{{- end }}
+{{- $scheme := ternary "ldaps" "ldap" (eq $tls "ldaps") }}
 {{- $config := dict
       "enabled" (list "true")
       "vendor" (list "other")
@@ -82,7 +92,7 @@ data:
       "fullSyncPeriod" (list $sync)
       "changedSyncPeriod" (list $sync) }}
 {{- /* Keycloak reads `startTls` as a string list; only `starttls` carries the key. */}}
-{{- if eq $ldap.tls "starttls" }}
+{{- if eq $tls "starttls" }}
 {{- $_ := set $config "startTls" (list "true") }}
 {{- end }}
 {{- $components := dict "org.keycloak.storage.UserStorageProvider" (list

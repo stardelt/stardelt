@@ -325,6 +325,14 @@ fn default_ldap_password_key() -> String {
     {
         "rule": "!has(self.ldap) || self.mode == 'platform'",
         "message": "ldap only works with mode platform, which runs the Keycloak that imports it"
+    },
+    {
+        "rule": "!has(self.ldap) || self.ldap.tls != 'ldaps' || self.ldap.port == 636",
+        "message": "identity.ldap.port must be 636 when tls is ldaps"
+    },
+    {
+        "rule": "!has(self.ldap) || self.ldap.tls == 'ldaps' || self.ldap.port != 636",
+        "message": "identity.ldap.port 636 needs tls: ldaps"
     }
 ]))]
 pub struct IdentitySpec {
