@@ -14,15 +14,26 @@ class RunError(RuntimeError):
     """The run did not end in the time given; the message is one sentence for the person."""
 
 
-def start(nova, namespace, name, wait=False, timeout=None, interval=5, clock=time.monotonic, sleep=time.sleep):
+def start(
+    nova, namespace, name, wait=False, timeout=None, interval=5, clock=time.monotonic, sleep=time.sleep, *, run_date=None, params=None
+):
     """Start a run now and return ``(run, tasks)``.
 
     Without ``wait`` that is the queued run and ``[]``. With ``wait`` it returns once the run is no longer
     ``queued`` or ``running`` (any other state is the end), with the run's tasks; ``timeout`` (seconds, default
     no limit) raises ``RunError`` instead, and the run keeps going.
+
+    ``run_date`` (``YYYY-MM-DD``) runs it for that date and ``params`` (a dict) gives this run's values of the
+    schedule's ``${params.<name>}`` placeholders; Nova checks both, and the stored schedule never changes. Without
+    either, no body is sent: a run for today with the schedule's values, as before.
     """
     path = {"namespace": namespace, "name": name}
-    run = nova.call("pipelines_run_trigger", path=path)
+    body = {}
+    if run_date:
+        body["runDate"] = run_date
+    if params:
+        body["params"] = dict(params)
+    run = nova.call("pipelines_run_trigger", path=path, body=body or None)
     if not wait:
         return run, []
     deadline = None if timeout is None else clock() + timeout
