@@ -5,7 +5,7 @@
 | `auth.rs` ⚠ | Core & identity | 2300 | 2033 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
-| `catalog_docs.rs` ⚠ | Catalog | 1862 | 1429 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
+| `catalog_docs.rs` ⚠ | Catalog | 1875 | 1429 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `main.rs` | Core & identity | 1482 | 1617 | 3 | - |
 | `mcp.rs` | AI (Ask, MCP, models) | 1428 | 1270 | 4 | Airflow REST, Trino |
 | `query_log_api.rs` | SQL & query log | 1353 | 298 | 5 | Kubernetes API (CRDs), PostgreSQL state store |
@@ -18,10 +18,10 @@
 | `apps.rs` | Platform view | 946 | 346 | 4 | JupyterHub, Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Superset, Trino |
 | `migrations.rs` | Pipelines & delivery | 862 | 395 | 3 | PostgreSQL state store, Trino |
 | `data.rs` | SQL & query log | 856 | 104 | 2 | Trino |
+| `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
 | `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
 | `airflow.rs` | Pipelines & delivery | 778 | 949 | 0 | Airflow REST |
-| `verified_queries.rs` | Catalog | 748 | 294 | 5 | PostgreSQL state store, Trino |
 | `ask.rs` | AI (Ask, MCP, models) | 739 | 452 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
 | `secret_store.rs` | Connections | 699 | 363 | 0 | Secret store (OpenBao) |
@@ -69,4 +69,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (68 files)** | | **47622** | **42524** | **157** | |
+| **total (68 files)** | | **47723** | **42611** | **157** | |

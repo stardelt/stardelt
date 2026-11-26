@@ -497,7 +497,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"2026-11-25T06:00:00Z"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. */
+        /** @description Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"2026-11-25T06:00:00Z"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured). */
         get: operations["table_freshness_get"];
         /** @description Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"..."}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property. */
         put: operations["table_freshness_update"];
@@ -3364,6 +3364,15 @@ export interface components {
             tone?: string | null;
             value: string;
         };
+        /** @description One verified query whose last check failed. */
+        FailingCheck: {
+            /** @description When its last check ran, RFC 3339, or `null` when it never ran. */
+            lastCheckAt?: string | null;
+            /** @description What the last check found, in one sentence. */
+            lastCheckMessage?: string | null;
+            /** @description The question the query answers, in words. */
+            question: string;
+        };
         /** @description The freshness promise stored as JSON text in [`FRESHNESS_PROPERTY`]. */
         Freshness: {
             /** @description The deadline: a 24-hour clock time, `HH:MM`. */
@@ -4910,6 +4919,17 @@ export interface components {
             ready: boolean;
             reason: string;
         };
+        /** @description The verified-query checks of one table, as they last ran (`#402` point 2). */
+        TableChecks: {
+            /** @description How many of them failed their last check. */
+            failed: number;
+            /** @description At most five, newest check first. */
+            failing: components["schemas"]["FailingCheck"][];
+            /** @description The newest check time, RFC 3339, or absent when no query ever ran a check. */
+            lastCheckedAt?: string | null;
+            /** @description How many verified queries the table has. */
+            total: number;
+        };
         /** @description The documentation of one table, plus what the caller may do with it. */
         TableDocumentation: {
             /** @description Whether the interim rule lets this caller edit (see the module docs). */
@@ -4937,6 +4957,7 @@ export interface components {
         TableFreshness: {
             /** @description Whether the interim rule lets this caller set the promise. */
             canEdit: boolean;
+            checks?: components["schemas"]["TableChecks"] | null;
             /** @description One sentence a person or an assistant can repeat. */
             detail: string;
             /** @description The most recent deadline at or before now, RFC 3339, or `null`. */

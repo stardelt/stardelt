@@ -105,6 +105,11 @@ export default function FreshnessCard() {
                     )}
                   </span>
                 </Link>
+                {h?.checks != null && h.checks.failed > 0 && (
+                  <p className="text-xs text-bad pb-2 -mt-1" title={h.checks.failing[0]?.lastCheckMessage ?? undefined}>
+                    {h.checks.failed} of {h.checks.total} checks failed
+                  </p>
+                )}
               </li>
             )
           })}

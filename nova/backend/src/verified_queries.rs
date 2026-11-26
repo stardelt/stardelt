@@ -98,6 +98,94 @@ pub struct VerifiedQuery {
     pub last_check_message: Option<String>,
 }
 
+/// The verified-query checks of one table, as they last ran (`#402` point 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TableChecks {
+    /// How many verified queries the table has.
+    pub total: usize,
+    /// How many of them failed their last check.
+    pub failed: usize,
+    /// The newest check time, RFC 3339, or absent when no query ever ran a check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<String>,
+    /// At most five, newest check first.
+    pub failing: Vec<FailingCheck>,
+}
+
+/// One verified query whose last check failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FailingCheck {
+    /// The question the query answers, in words.
+    pub question: String,
+    /// When its last check ran, RFC 3339, or `null` when it never ran.
+    pub last_check_at: Option<String>,
+    /// What the last check found, in one sentence.
+    pub last_check_message: Option<String>,
+}
+
+/// How many failed checks one summary names.
+const FAILING_LIMIT: usize = 5;
+
+/// `checks` from the table's rows: totals, the newest check time, and the failing rows.
+/// A row that never ran a check counts in `total` and not in `failed`.
+pub fn summarise_checks(rows: &[VerifiedQuery]) -> TableChecks {
+    let failed = rows
+        .iter()
+        .filter(|row| row.last_check_passed == Some(false))
+        .count();
+    let last_checked_at = rows
+        .iter()
+        .filter_map(|row| row.last_check_at.as_deref())
+        .max()
+        .map(str::to_string);
+    let mut failing: Vec<&VerifiedQuery> = rows
+        .iter()
+        .filter(|row| row.last_check_passed == Some(false))
+        .collect();
+    // The check times are RFC 3339 in UTC, so text order is time order; a row that never
+    // ran one sorts last.
+    failing.sort_by(|a, b| b.last_check_at.cmp(&a.last_check_at));
+    let failing = failing
+        .into_iter()
+        .take(FAILING_LIMIT)
+        .map(|row| FailingCheck {
+            question: row.question.clone(),
+            last_check_at: row.last_check_at.clone(),
+            last_check_message: row.last_check_message.clone(),
+        })
+        .collect();
+    TableChecks {
+        total: rows.len(),
+        failed,
+        last_checked_at,
+        failing,
+    }
+}
+
+/// The `TableChecks` of one table, or the store's error.
+pub(crate) async fn checks_for(
+    pool: &sqlx::PgPool,
+    catalog: &str,
+    namespace: &str,
+    table: &str,
+) -> Result<TableChecks, sqlx::Error> {
+    // The same SELECT as `list`, so the two answers cannot drift.
+    let sql = format!(
+        "SELECT {ROW_COLUMNS} FROM verified_query \
+         WHERE catalog = $1 AND namespace = $2 AND table_name = $3 \
+         ORDER BY verified_at DESC LIMIT {LIST_LIMIT}"
+    );
+    let rows = sqlx::query_as::<_, VerifiedQuery>(sqlx::AssertSqlSafe(sql))
+        .bind(catalog)
+        .bind(namespace)
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    Ok(summarise_checks(&rows))
+}
+
 /// `POST /api/catalog/tables/{ns}/{tbl}/verified-queries` body.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct NewVerifiedQuery {
@@ -952,6 +1040,93 @@ mod tests {
     #[test]
     fn totals_of_no_rows_are_zero() {
         assert_eq!(totals(&[]), (0, 0, 0));
+    }
+
+    fn checked_row(
+        question: &str,
+        at: Option<&str>,
+        passed: Option<bool>,
+        message: Option<&str>,
+    ) -> VerifiedQuery {
+        VerifiedQuery {
+            id: 1,
+            question: question.into(),
+            sql: "SELECT 1".into(),
+            verified_by: "ada".into(),
+            verified_at: "2026-11-15T11:03:46.000Z".into(),
+            expected: None,
+            last_check_at: at.map(str::to_string),
+            last_check_passed: passed,
+            last_check_message: message.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn summarise_checks_counts_the_rows_and_names_the_failing_one() {
+        let rows = [
+            checked_row(
+                "How many orders per day?",
+                Some("2026-11-26T09:12:04.000Z"),
+                Some(false),
+                Some("the result does not match the expected result"),
+            ),
+            checked_row(
+                "Who ordered most?",
+                Some("2026-11-26T10:00:00.000Z"),
+                Some(true),
+                Some(RESULT_MATCHES),
+            ),
+            checked_row("What is the average order?", None, None, None),
+        ];
+        let checks = summarise_checks(&rows);
+        assert_eq!(checks.total, 3);
+        assert_eq!(checks.failed, 1);
+        assert_eq!(
+            checks.last_checked_at.as_deref(),
+            Some("2026-11-26T10:00:00.000Z")
+        );
+        assert_eq!(checks.failing.len(), 1);
+        assert_eq!(checks.failing[0].question, "How many orders per day?");
+        assert_eq!(
+            checks.failing[0].last_check_message.as_deref(),
+            Some("the result does not match the expected result")
+        );
+    }
+
+    #[test]
+    fn summarise_checks_names_at_most_five_failing_rows_newest_first() {
+        let rows: Vec<VerifiedQuery> = (0..7)
+            .map(|i| {
+                checked_row(
+                    &format!("question {i}"),
+                    Some(&format!("2026-11-26T09:0{i}:00.000Z")),
+                    Some(false),
+                    Some("differs"),
+                )
+            })
+            .collect();
+        let checks = summarise_checks(&rows);
+        assert_eq!(checks.failed, 7);
+        assert_eq!(checks.failing.len(), 5);
+        let questions: Vec<&str> = checks
+            .failing
+            .iter()
+            .map(|row| row.question.as_str())
+            .collect();
+        assert_eq!(
+            questions,
+            [
+                "question 6",
+                "question 5",
+                "question 4",
+                "question 3",
+                "question 2"
+            ]
+        );
+        assert_eq!(
+            checks.last_checked_at.as_deref(),
+            Some("2026-11-26T09:06:00.000Z")
+        );
     }
 
     #[test]
