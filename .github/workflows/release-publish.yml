@@ -9,18 +9,22 @@ on:
   workflow_dispatch: {}   # re-run after a failed publish; it skips what already exists
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Retag the images, tag the commit, create the release
+  # The wheels depend on third-party build code (pip, jlpm lifecycle scripts), so they are built
+  # in a job without an identity token, registry or release write access (#1849). The publish job
+  # downloads them as an artifact.
+  wheels:
+    name: Build the wheels at the tested commit
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,6 +39,61 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
+
+      - name: Which release
+        id: rel
+        run: |
+          set -euo pipefail
+          todo=""
+          for dir in releases/v*/; do
+            v="$(basename "$dir")"
+            git ls-remote --exit-code --tags origin "refs/tags/$v" >/dev/null || todo="$todo $v"
+          done
+          set -- $todo
+          [ "$#" -eq 1 ] || { echo "✗ expected one untagged release folder, found: ${todo:-none}"; exit 1; }
+          v="$1"
+          commit="$(sed -n 's/^commit: \([0-9a-f]\{40\}\)$/\1/p' "releases/$v/versions.yaml")"
+          [ -n "$commit" ] || { echo "✗ releases/$v/versions.yaml names no commit"; exit 1; }
+          git merge-base --is-ancestor "$commit" origin/main || { echo "✗ $commit is not on main"; exit 1; }
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Build the wheels at the tested commit
+        env:
+          COMMIT: ${{ steps.rel.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git worktree add "$RUNNER_TEMP/src" "$COMMIT"
+          python3 -m pip install -U build "jupyterlab>=4.0.0,<5"
+          python3 -m build "$RUNNER_TEMP/src/python" --outdir "$RUNNER_TEMP/dist"
+          (cd "$RUNNER_TEMP/src/python/jupyterlab" && jlpm install)
+          python3 -m build --wheel "$RUNNER_TEMP/src/python/jupyterlab" --outdir "$RUNNER_TEMP/dist"
+          ls -l "$RUNNER_TEMP/dist"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Retag the images, tag the commit, create the release
+    needs: wheels
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
       - name: Which release
         id: rel
@@ -90,17 +149,10 @@ jobs:
             esac
           done < "$RUNNER_TEMP/images.txt"
 
-      - name: Build the wheels at the tested commit
-        env:
-          COMMIT: ${{ steps.rel.outputs.commit }}
-        run: |
-          set -euo pipefail
-          git worktree add "$RUNNER_TEMP/src" "$COMMIT"
-          python3 -m pip install -U build "jupyterlab>=4.0.0,<5"
-          python3 -m build "$RUNNER_TEMP/src/python" --outdir "$RUNNER_TEMP/dist"
-          (cd "$RUNNER_TEMP/src/python/jupyterlab" && jlpm install)
-          python3 -m build --wheel "$RUNNER_TEMP/src/python/jupyterlab" --outdir "$RUNNER_TEMP/dist"
-          ls -l "$RUNNER_TEMP/dist"
+      - uses: actions/download-artifact@v7
+        with:
+          name: wheels
+          path: ${{ runner.temp }}/dist
 
       - name: Tag the commit and create the release
         env:

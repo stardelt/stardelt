@@ -111,6 +111,14 @@ class ReleaseSigningTest(unittest.TestCase):
             "the installer is pinned to a digest, like every other action in the workflow",
         )
 
+    def test_only_main_publishes(self) -> None:
+        self.assertEqual(self.text.count("if: github.ref == 'refs/heads/main'"), 2)
+
+    def test_the_wheel_build_holds_no_identity(self) -> None:
+        wheels = self.text[self.text.index("\n  wheels:"):self.text.index("\n  publish:")]
+        self.assertNotIn("id-token", wheels)
+        self.assertNotIn("packages: write", wheels)
+
     def test_signing_follows_the_retag(self) -> None:
         self.assertGreater(
             self.text.index("Sign every release image"),

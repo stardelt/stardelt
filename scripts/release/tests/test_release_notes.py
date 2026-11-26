@@ -64,6 +64,8 @@ class SectionTest(unittest.TestCase):
         self.assertIn("cosign verify ghcr.io/stardelt/nova:v0.0.9", text)
         self.assertIn("--format '{{ json .SBOM }}'", text)
         self.assertIn("## Verify", text)
+        self.assertIn("release-publish.yml@refs/heads/main", text)
+        self.assertNotIn("identity-regexp", text)
 
 
 class RepositoryChangelogTest(unittest.TestCase):

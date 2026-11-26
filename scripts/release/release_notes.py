@@ -44,7 +44,7 @@ VERIFY = """\
 Every image of this release is signed by the release workflow of `stardelt/stardelt`:
 ```console
 $ cosign verify ghcr.io/stardelt/nova:v{version} \\
-    --certificate-identity-regexp '^https://github.com/stardelt/stardelt/\\.github/workflows/release-publish\\.yml@' \\
+    --certificate-identity 'https://github.com/stardelt/stardelt/.github/workflows/release-publish.yml@refs/heads/main' \\
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 The same works for `stardelt-operator`, `spark`, `superset`, `airflow`, `jupyter-singleuser` and
