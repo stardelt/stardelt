@@ -1881,8 +1881,9 @@ async fn write_freshness(
 
     let current_text = property(&loaded.properties, FRESHNESS_PROPERTY);
     // A write of the promise that is already stored sends no commit. It compares the promise
-    // itself, not only the text: Nova stamps a new `setAt` on every write, so the text would
-    // differ every second even when nothing else changed.
+    // without `setAt`, not only the text: Nova stamps a new `setAt` on every write, so the text
+    // would differ every second even when nothing else changed. `setAt` is the only field left
+    // out; the pipeline reference belongs to the promise too.
     let unchanged = match &write {
         FreshnessWrite::Remove => current_text.is_none(),
         FreshnessWrite::Set(next) => current_text
@@ -1893,6 +1894,7 @@ async fn write_freshness(
                     && current.timezone == next.timezone
                     && current.grace_minutes == next.grace_minutes
                     && current.notify == next.notify
+                    && current.check_pipeline == next.check_pipeline
             }),
     };
     if unchanged {
@@ -3828,6 +3830,61 @@ mod tests {
             commits[0]["updates"],
             json!([{ "action": "remove-properties", "removals": [FRESHNESS_PROPERTY] }]),
             "by: null is a remove-properties of stardelt.freshness"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_that_changes_only_the_check_pipeline_is_stored() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        write_freshness(
+            &state,
+            &catalog,
+            &member,
+            "sales",
+            "orders",
+            freshness_body(),
+        )
+        .await
+        .expect("the promise is stored");
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(commits.len(), 1);
+        let text = commits[0]["updates"][0]["updates"][FRESHNESS_PROPERTY]
+            .as_str()
+            .expect("the promise is the property's JSON text")
+            .to_string();
+        assert!(
+            !text.contains("checkPipeline"),
+            "the first write names no pipeline: {text}"
+        );
+
+        // The fake catalog does not keep a commit: hand it the property the first write sent.
+        let mut stored = load_fixture();
+        stored["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert(FRESHNESS_PROPERTY.into(), json!(text));
+        fake.set_load(stored);
+        fake.reset_stats();
+
+        let mut body = freshness_body();
+        body.check_pipeline = Some("ns/pipe".into());
+        write_freshness(&state, &catalog, &member, "sales", "orders", body)
+            .await
+            .expect("the changed reference is stored");
+
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(commits.len(), 1, "the changed reference is one commit");
+        assert_eq!(commits[0]["updates"][0]["action"], json!("set-properties"));
+        let text = commits[0]["updates"][0]["updates"][FRESHNESS_PROPERTY]
+            .as_str()
+            .expect("the promise is the property's JSON text");
+        assert!(
+            text.contains("\"checkPipeline\":\"ns/pipe\""),
+            "the stored promise names the pipeline: {text}"
         );
     }
 
