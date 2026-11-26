@@ -4940,6 +4940,72 @@ fn wap_branch_present(publish: Option<&str>, instances: &[crate::airflow::TaskIn
         && state("wap-publish") != Some("success")
 }
 
+/// One task's log as text: up to ten pages, each line joined with `\n`.
+async fn task_log_text(
+    airflow: &AirflowClient,
+    dag_id: &str,
+    run_id: &str,
+    task: &str,
+    try_number: u32,
+) -> Result<String, AirflowError> {
+    let mut text = String::new();
+    let mut token: Option<String> = None;
+    for _ in 0..10 {
+        let page = airflow
+            .logs(dag_id, run_id, task, try_number, token.as_deref())
+            .await?;
+        let view = log_view(page);
+        for line in &view.lines {
+            text.push_str(&line.text);
+            text.push('\n');
+        }
+        match view.next_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+    }
+    Ok(text)
+}
+
+/// The declared checks of every `quality` task of `pipeline`, with the verdict its log carries.
+async fn declared_quality_checks(
+    airflow: &AirflowClient,
+    dag_id: &str,
+    run_id: &str,
+    instances: &[TaskInstance],
+    pipeline: &Value,
+) -> Result<Vec<CheckView>, AirflowError> {
+    let mut checks = Vec::new();
+    for (task, declared) in quality_tasks(pipeline) {
+        let last_try = instances
+            .iter()
+            .filter(|instance| instance.task_id == task)
+            .filter_map(|instance| instance.try_number)
+            .max();
+        let mut found: std::collections::BTreeMap<String, (String, i64)> =
+            std::collections::BTreeMap::new();
+        if let Some(try_number) = last_try {
+            let text = task_log_text(airflow, dag_id, run_id, &task, try_number).await?;
+            for line in text.lines() {
+                if let Some((check, severity, rows)) = check_result(line) {
+                    found.insert(check, (severity, rows));
+                }
+            }
+        }
+        for (check, severity) in declared {
+            let hit = found.get(&check);
+            checks.push(CheckView {
+                task: task.clone(),
+                name: check,
+                severity: hit.map(|(s, _)| s.clone()).unwrap_or(severity),
+                rows: hit.map(|(_, rows)| *rows),
+                passed: hit.map(|(_, rows)| *rows == 0),
+            });
+        }
+    }
+    Ok(checks)
+}
+
 /// `GET …/runs/{run_id}/checks`: every declared check of the run's quality tasks, with the
 /// verdict its log carries. Ten log pages per task at most; a check not found stays `None`.
 async fn run_checks(
@@ -4965,53 +5031,9 @@ async fn run_checks(
         .task_instances(&dag_id, &run.dag_run_id)
         .await
         .map_err(task_lookup_fail)?;
-    let mut checks = Vec::new();
-    for (task, declared) in quality_tasks(&pipeline) {
-        let last_try = instances
-            .iter()
-            .filter(|instance| instance.task_id == task)
-            .filter_map(|instance| instance.try_number)
-            .max();
-        let mut found: std::collections::BTreeMap<String, (String, i64)> =
-            std::collections::BTreeMap::new();
-        if let Some(try_number) = last_try {
-            let mut token: Option<String> = None;
-            for _ in 0..10 {
-                let page = airflow
-                    .logs(
-                        &dag_id,
-                        &run.dag_run_id,
-                        &task,
-                        try_number,
-                        token.as_deref(),
-                    )
-                    .await
-                    .map_err(task_lookup_fail)?;
-                let view = log_view(page);
-                for line in &view.lines {
-                    if let Some((check, severity, rows)) = check_result(&line.text) {
-                        found.insert(check, (severity, rows));
-                    }
-                }
-                match view.next_token {
-                    Some(next) => token = Some(next),
-                    None => break,
-                }
-            }
-        }
-        for (check, severity) in declared {
-            let hit = found.get(&check);
-            checks.push(CheckView {
-                task: task.clone(),
-                name: check,
-                severity: hit
-                    .map(|(severity, _)| severity.clone())
-                    .unwrap_or(severity),
-                rows: hit.map(|(_, rows)| *rows),
-                passed: hit.map(|(_, rows)| *rows == 0),
-            });
-        }
-    }
+    let checks = declared_quality_checks(airflow, &dag_id, &run.dag_run_id, &instances, &pipeline)
+        .await
+        .map_err(task_lookup_fail)?;
     let publish = pipeline
         .get("spec")
         .and_then(|s| s.get("publish"))
@@ -5026,6 +5048,136 @@ async fn run_checks(
             Vec::new()
         },
     })
+}
+
+/// The `dbt` tasks of a pipeline, by task id.
+fn dbt_tasks(pipeline: &Value) -> Vec<String> {
+    pipeline
+        .get("spec")
+        .and_then(|spec| spec.get("tasks"))
+        .and_then(Value::as_array)
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter(|task| task.get("kind").and_then(Value::as_str) == Some("dbt"))
+                .filter_map(|task| task.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A declared quality check that failed, when its severity is `error` (a `warn` never fails
+/// its run either).
+fn quality_failure(check: &CheckView) -> Option<crate::catalog_docs::FailedCheck> {
+    (check.severity == "error" && check.passed == Some(false)).then(|| {
+        crate::catalog_docs::FailedCheck {
+            task: check.task.clone(),
+            check: check.name.clone(),
+            table: None,
+        }
+    })
+}
+
+/// The failed dbt tests of one task's log that guard `table`, from the lines
+/// `dbt: ✗ <unique_id> (<catalog>.<schema>.<table>) — <message>` (#1948).
+fn dbt_failed_checks(task: &str, text: &str, table: &str) -> Vec<crate::catalog_docs::FailedCheck> {
+    let mut failed = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("dbt: ✗ ") else {
+            continue;
+        };
+        let Some((id, tail)) = rest.split_once(" (") else {
+            continue;
+        };
+        let Some((guarded, _)) = tail.split_once(')') else {
+            continue;
+        };
+        if !guarded.split(", ").any(|name| name == table) {
+            continue;
+        }
+        let check = id.trim().to_string();
+        if failed
+            .iter()
+            .any(|f: &crate::catalog_docs::FailedCheck| f.task == task && f.check == check)
+        {
+            continue;
+        }
+        failed.push(crate::catalog_docs::FailedCheck {
+            task: task.to_string(),
+            check,
+            table: Some(table.to_string()),
+        });
+    }
+    failed
+}
+
+/// The checks of the pipeline a table's promise requires (#402): the newest completed run's
+/// failed `quality` checks (severity `error`) and the `dbt` tests whose line names `table`.
+pub(crate) async fn table_check_health(
+    state: &AppState,
+    who: &Identity,
+    catalog: &str,
+    ns: &str,
+    tbl: &str,
+    reference: &str,
+) -> Result<crate::catalog_docs::PipelineChecks, Fail> {
+    let (pipeline_ns, pipeline_name) = reference.split_once('/').ok_or_else(|| {
+        Fail::new(
+            StatusCode::BAD_REQUEST,
+            "checkPipeline is <namespace>/<name>",
+        )
+    })?;
+    let resources = resources(state).ok_or_else(no_cluster)?;
+    let airflow = scheduler(state.airflow.as_ref())?;
+    let (dag_id, pipeline) = load_visible(&resources, who, pipeline_ns, pipeline_name).await?;
+    let mut answer = crate::catalog_docs::PipelineChecks {
+        pipeline: reference.to_string(),
+        run_id: None,
+        state: None,
+        failed: Vec::new(),
+    };
+    let runs = airflow
+        .runs(&dag_id, LATEST_RUNS)
+        .await
+        .map_err(run_lookup_fail)?;
+    let Some(run) = runs
+        .iter()
+        .find(|run| matches!(run.state.as_deref(), Some("success" | "failed")))
+    else {
+        return Ok(answer);
+    };
+    answer.run_id = Some(run.dag_run_id.clone());
+    answer.state = run.state.clone();
+    let instances = airflow
+        .task_instances(&dag_id, &run.dag_run_id)
+        .await
+        .map_err(task_lookup_fail)?;
+    for check in declared_quality_checks(airflow, &dag_id, &run.dag_run_id, &instances, &pipeline)
+        .await
+        .map_err(task_lookup_fail)?
+    {
+        if let Some(failed) = quality_failure(&check) {
+            answer.failed.push(failed);
+        }
+    }
+    let table = format!("{catalog}.{ns}.{tbl}");
+    for task in dbt_tasks(&pipeline) {
+        let last_try = instances
+            .iter()
+            .filter(|instance| instance.task_id == task)
+            .filter_map(|instance| instance.try_number)
+            .max();
+        if let Some(try_number) = last_try {
+            let text = task_log_text(airflow, &dag_id, &run.dag_run_id, &task, try_number)
+                .await
+                .map_err(task_lookup_fail)?;
+            answer
+                .failed
+                .extend(dbt_failed_checks(&task, &text, &table));
+        }
+    }
+    Ok(answer)
 }
 
 /// `^\S{1,64}$` of `[A-Za-z0-9_-]`: what a task id in a run's object key can be.

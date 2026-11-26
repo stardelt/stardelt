@@ -497,9 +497,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"2026-11-25T06:00:00Z"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured). */
+        /** @description Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"2026-11-25T06:00:00Z"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured). `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) does not evaluate it yet. */
         get: operations["table_freshness_get"];
-        /** @description Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"..."}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property. */
+        /** @description Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{"by":"07:00","timezone":"Europe/Berlin","graceMinutes":60,"setAt":"..."}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property.. `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) does not evaluate it yet. */
         put: operations["table_freshness_update"];
         post?: never;
         delete?: never;
@@ -3447,6 +3447,15 @@ export interface components {
             tone?: string | null;
             value: string;
         };
+        /** @description One failed check of the required pipeline. */
+        FailedCheck: {
+            /** @description A quality check's name, or a dbt test's unique id. */
+            check: string;
+            /** @description The table a dbt test guards, when its log line names one. */
+            table?: string | null;
+            /** @description The task that ran the check. */
+            task: string;
+        };
         /** @description One verified query whose last check failed. */
         FailingCheck: {
             /** @description When its last check ran, RFC 3339, or `null` when it never ran. */
@@ -3460,6 +3469,8 @@ export interface components {
         Freshness: {
             /** @description The deadline: a 24-hour clock time, `HH:MM`. */
             by: string;
+            /** @description The pipeline whose checks must pass (`<namespace>/<name>`), or `None` (#402). */
+            checkPipeline?: string | null;
             /**
              * Format: int32
              * @description How long after the deadline the table is still `amber`.
@@ -3483,6 +3494,8 @@ export interface components {
         FreshnessUpdate: {
             /** @description The deadline (`null` removes the promise). */
             by?: string | null;
+            /** @description The pipeline whose checks must pass; absent or empty removes it. */
+            checkPipeline?: string | null;
             /**
              * Format: int32
              * @description How long after the deadline the table is still `amber` (0 to 1440, default 60).
@@ -4048,6 +4061,17 @@ export interface components {
             name: string;
             /** @description The peer's base URL, without a trailing slash. */
             url: string;
+        };
+        /** @description The verdict of the pipeline a promise requires (#402). */
+        PipelineChecks: {
+            /** @description The failed checks; empty when every declared check passed. */
+            failed: components["schemas"]["FailedCheck"][];
+            /** @description The pipeline the promise names, `<namespace>/<name>`. */
+            pipeline: string;
+            /** @description The run the verdict comes from; absent when the pipeline has no completed run yet. */
+            runId?: string | null;
+            /** @description That run's state: `success` or `failed`. */
+            state?: string | null;
         };
         /**
          * @description `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's
@@ -5071,6 +5095,7 @@ export interface components {
             lastWrite?: string | null;
             /** @description The first deadline strictly after now, RFC 3339, or `null`. */
             nextDueAt?: string | null;
+            pipelineChecks?: components["schemas"]["PipelineChecks"] | null;
             promise?: components["schemas"]["Freshness"] | null;
             /** @description `grey`, `green`, `amber` or `red`. */
             status: string;

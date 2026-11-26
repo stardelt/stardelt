@@ -3158,6 +3158,63 @@ fn a_check_line_carries_its_verdict() {
 }
 
 #[test]
+fn a_dbt_failure_line_names_the_table_it_guards() {
+    let line = "dbt: ✗ test.shop.unique_customers_id (bronze.shop_dbt.customers) — Got 1 result, configured to fail if != 0\n";
+    assert_eq!(
+        dbt_failed_checks("build", line, "bronze.shop_dbt.customers"),
+        vec![crate::catalog_docs::FailedCheck {
+            task: "build".into(),
+            check: "test.shop.unique_customers_id".into(),
+            table: Some("bronze.shop_dbt.customers".into()),
+        }],
+        "a ✗ line that names the table is its failure"
+    );
+    assert!(
+        dbt_failed_checks("build", line, "silver.shop_dbt.customers").is_empty(),
+        "a ✗ line on another table changes nothing"
+    );
+    assert!(
+        dbt_failed_checks(
+            "build",
+            "dbt: ✗ test.shop.unique_customers_id — Got 1 result\n",
+            "bronze.shop_dbt.customers"
+        )
+        .is_empty(),
+        "a ✗ line without a table changes nothing"
+    );
+}
+
+#[test]
+fn only_an_error_severity_check_that_failed_is_a_failure() {
+    let check = |severity: &str, passed: Option<bool>| CheckView {
+        task: "checks".into(),
+        name: "not_null".into(),
+        severity: severity.into(),
+        rows: passed.map(|p| if p { 0 } else { 1 }),
+        passed,
+    };
+    assert_eq!(
+        quality_failure(&check("error", Some(false))),
+        Some(crate::catalog_docs::FailedCheck {
+            task: "checks".into(),
+            check: "not_null".into(),
+            table: None,
+        }),
+        "an error check that failed is a failure"
+    );
+    assert_eq!(
+        quality_failure(&check("warn", Some(false))),
+        None,
+        "a warn check never reddens"
+    );
+    assert_eq!(
+        quality_failure(&check("error", None)),
+        None,
+        "a check without a verdict is not a failure"
+    );
+}
+
+#[test]
 fn the_quality_tasks_of_a_pipeline_carry_their_checks() {
     let pipeline = serde_json::json!({"spec": {"tasks": [
         {"name": "load", "kind": "notebook"},
