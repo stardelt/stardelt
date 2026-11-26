@@ -162,6 +162,8 @@ def _parser():
     ship.add_argument("--accept-drift", action="store_true", help="overwrite a pipeline changed after its last deploy even when the target says drift: block")
     ship.add_argument("--diff", action="store_true", help="also show, on standard error, what each update changes (the deployed value against the bundle's)")
     ship.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
+    ship.add_argument("--smoke", metavar="NAME", help="after the deploy, run this pipeline of the bundle and fail unless it succeeds")
+    ship.add_argument("--smoke-timeout", type=int, default=0, metavar="SECONDS", help="with --smoke: give up waiting after N seconds (0: no limit); the run is not stopped")
     approve = package_commands.add_parser(
         "approve", help="approve a migration plan that a production deploy needs a second person for"
     )
@@ -770,6 +772,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             problems, results = bundle.deploy(
                 nova, args.directory, args.target, dry_run=args.bundle_command == "plan" or args.dry_run, prune=args.prune,
                 accept_drift=args.accept_drift, diff=args.diff, allow_breaking=args.allow_breaking,
+                smoke=getattr(args, "smoke", None), smoke_timeout=getattr(args, "smoke_timeout", 0) or None,
             )
             shown = []
             plan_rows = []
