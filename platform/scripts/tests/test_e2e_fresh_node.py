@@ -92,6 +92,53 @@ exit 1
 """
 
 
+# A kubectl for the retrying hook Job (#1736): one Job has failed 12 times and has two pods that
+# still exist; every other diagnostics call is refused, so the first phase that touches the
+# cluster fails and collect_diagnostics runs.
+FAKE_KUBECTL_RETRYING_HOOK = """#!/usr/bin/env bash
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n | --namespace) shift 2 ;;
+    *) args+=("$1") && shift ;;
+  esac
+done
+set -- "${args[@]:-}"
+case "${1:-}" in
+  get)
+    case "${2:-}" in
+      jobs)
+        if [ "${3:-}" = "-o" ] && [ "${4:-}" = "json" ]; then
+          cat <<'JSON'
+{"items":[{"metadata":{"name":"superset-init-db"},"status":{"failed":12,"active":1}}]}
+JSON
+          exit 0
+        fi
+        ;;
+      pods)
+        if [ "${3:-}" = "-l" ]; then
+          echo "superset-init-db-abc superset-init-db-def"
+          exit 0
+        fi
+        echo '{"items":[]}'
+        exit 0
+        ;;
+      pod)
+        echo "init init-db Error restarts=1"
+        exit 0
+        ;;
+    esac
+    ;;
+  logs)
+    echo "HOOK LOG ${2:-}"
+    exit 0
+    ;;
+esac
+echo "kubectl: refusing ${*}" >&2
+exit 1
+"""
+
+
 # A kubectl that records what the install asked it to do and succeeds (#1625).
 FAKE_KUBECTL_RECORDING = """#!/usr/bin/env bash
 echo "${*}" >> "$HOME/kubectl.calls"
@@ -197,6 +244,16 @@ class E2EFreshNode(unittest.TestCase):
         pod_log = run_dir / "pod-logs" / "bootstrap-trino.log"
         self.assertTrue(pod_log.exists(), done.stdout + done.stderr)
         self.assertIn("POD LOGS bootstrap-trino", pod_log.read_text(), done.stdout)
+
+    def test_a_retrying_hook_job_keeps_each_pods_log(self):
+        self._write(self.bindir / "kubectl", FAKE_KUBECTL_RETRYING_HOOK)
+        done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", DRY_RUN="")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        run_dir = self.home / ".cache" / "stardelt-e2e" / "testid"
+        for pod in ("superset-init-db-abc", "superset-init-db-def"):
+            log = run_dir / "pod-logs" / "jobs" / f"superset-init-db-{pod}.log"
+            self.assertTrue(log.exists(), done.stdout + done.stderr)
+            self.assertIn(f"HOOK LOG {pod}", log.read_text(), done.stdout)
 
     def test_release_dir_installs_the_release_files(self):
         release = self.tmp / "release"
