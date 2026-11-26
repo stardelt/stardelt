@@ -15,11 +15,14 @@ pub struct ComponentPlan {
     pub chart: Option<&'static str>,
 }
 
-/// Platform-level prerequisites, installed once per `PlatformInstance` (not per
-/// Lakehouse). The CNPG operator is cluster-scoped, so it lives here.
+/// Platform-level prerequisites, installed once per `PlatformInstance` (not per Lakehouse). The
+/// CNPG operator is cluster-scoped, so it lives here.
+///
+/// The optional pillars are [`plan_pillars`] and are applied **after** the core: each of their
+/// charts runs with `helm --wait --timeout 10m`, so a failing hook there must not hold identity
+/// and Nova (#1735, fresh-node run #9).
 pub fn plan_platform(spec: &PlatformInstanceSpec) -> Vec<ComponentPlan> {
-    // Cluster-scoped prerequisites first, then the pillar components that belong
-    // to the platform rather than to one lakehouse.
+    // Cluster-scoped prerequisites first.
     let mut plan = vec![ComponentPlan {
         name: "cnpg",
         chart: Some("cnpg/cloudnative-pg"),
@@ -42,6 +45,23 @@ pub fn plan_platform(spec: &PlatformInstanceSpec) -> Vec<ComponentPlan> {
             chart: Some("openbao/openbao"),
         });
     }
+    // The barman-cloud plugin (platform#1234, the operator twin): CloudNativePG 1.32.0 removes
+    // `spec.backup.barmanObjectStore`, and this plugin's `ObjectStore` CRD is what replaces it.
+    // It is planned last because nothing else in the plan depends on it: the four ObjectStores
+    // are applied after the whole plan (`provision::ensure_barman_cloud`), so its CRD exists by
+    // then. `stop_platform` scales its Deployment to zero like any other component.
+    plan.push(ComponentPlan {
+        name: "barman-cloud",
+        chart: Some("cnpg/plugin-barman-cloud"),
+    });
+    plan
+}
+
+/// The optional pillars, in apply order. Applied **after** the core steps of the platform
+/// (identity, catalog, Trino, Nova): every release runs with `helm --wait --timeout 10m`, and a
+/// failing hook in a pillar must not hold sign-in and Nova (#1735, fresh-node run #9).
+pub fn plan_pillars(spec: &PlatformInstanceSpec) -> Vec<ComponentPlan> {
+    let mut plan = Vec::new();
     if spec.pillars.notebooks {
         plan.push(ComponentPlan {
             name: "jupyterhub",
@@ -60,30 +80,18 @@ pub fn plan_platform(spec: &PlatformInstanceSpec) -> Vec<ComponentPlan> {
             chart: Some("superset/superset"),
         });
     }
-    // The streaming bus (D42): Strimzi is the operator, not the broker. A `Kafka` resource
-    // is applied separately once the pillar is on, so a cluster that does not stream pays
-    // for nothing but the controller it asked for.
+    // The streaming bus (D42): Strimzi is the operator, not the broker. A `Kafka` resource is
+    // applied separately once the pillar is on (`ensure_kafka_broker`).
     if spec.pillars.streaming {
         plan.push(ComponentPlan {
             name: "kafka",
             chart: Some("strimzi/strimzi-kafka-operator"),
         });
-        // The engine of a `StreamApp` (D42): Spark Structured Streaming runs as a
-        // `SparkApplication`, so the pillar that streams also owns the operator that reconciles it.
         plan.push(ComponentPlan {
             name: "spark-operator",
             chart: Some("spark-operator/spark-operator"),
         });
     }
-    // The barman-cloud plugin (platform#1234, the operator twin): CloudNativePG 1.32.0 removes
-    // `spec.backup.barmanObjectStore`, and this plugin's `ObjectStore` CRD is what replaces it.
-    // It is planned last because nothing else in the plan depends on it: the four ObjectStores
-    // are applied after the whole plan (`provision::ensure_barman_cloud`), so its CRD exists by
-    // then. `stop_platform` scales its Deployment to zero like any other component.
-    plan.push(ComponentPlan {
-        name: "barman-cloud",
-        chart: Some("cnpg/plugin-barman-cloud"),
-    });
     plan
 }
 
@@ -346,6 +354,7 @@ mod tests {
             names(&plan_platform(&without)),
             vec!["cnpg", "barman-cloud"]
         );
+        assert_eq!(names(&plan_pillars(&without)), Vec::<&str>::new());
 
         let with = PlatformInstanceSpec {
             pillars: Pillars {
@@ -354,10 +363,8 @@ mod tests {
             },
             ..without
         };
-        assert_eq!(
-            names(&plan_platform(&with)),
-            vec!["cnpg", "jupyterhub", "barman-cloud"]
-        );
+        assert_eq!(names(&plan_platform(&with)), vec!["cnpg", "barman-cloud"]);
+        assert_eq!(names(&plan_pillars(&with)), vec!["jupyterhub"]);
     }
 
     #[test]
@@ -411,7 +418,17 @@ mod tests {
         });
         assert_eq!(
             names(&plan_external),
-            vec!["cnpg", "external-secrets", "jupyterhub", "barman-cloud"]
+            vec!["cnpg", "external-secrets", "barman-cloud"]
+        );
+        assert_eq!(
+            names(&plan_pillars(&PlatformInstanceSpec {
+                pillars: Pillars {
+                    notebooks: true,
+                    ..Default::default()
+                },
+                ..base.clone()
+            })),
+            vec!["jupyterhub"]
         );
         let plan_platform_mode = plan_platform(&PlatformInstanceSpec {
             secrets: SecretsSpec {
@@ -427,13 +444,7 @@ mod tests {
         });
         assert_eq!(
             names(&plan_platform_mode),
-            vec![
-                "cnpg",
-                "external-secrets",
-                "openbao",
-                "jupyterhub",
-                "barman-cloud"
-            ]
+            vec!["cnpg", "external-secrets", "openbao", "barman-cloud"]
         );
     }
 
@@ -538,16 +549,17 @@ mod tests {
             mcp: Default::default(),
         };
         assert!(!base.pillars.pipelines, "pipelines stay opt-in");
-        let plan = plan_platform(&PlatformInstanceSpec {
+        assert_eq!(names(&plan_platform(&base)), vec!["cnpg", "barman-cloud"]);
+        let plan = plan_pillars(&PlatformInstanceSpec {
             pillars: Pillars {
                 pipelines: true,
                 ..Default::default()
             },
             ..base.clone()
         });
-        assert_eq!(names(&plan), vec!["cnpg", "airflow", "barman-cloud"]);
-        assert_eq!(plan[1].chart, Some("apache-airflow/airflow"));
-        let both = plan_platform(&PlatformInstanceSpec {
+        assert_eq!(names(&plan), vec!["airflow"]);
+        assert_eq!(plan[0].chart, Some("apache-airflow/airflow"));
+        let both = plan_pillars(&PlatformInstanceSpec {
             pillars: Pillars {
                 notebooks: true,
                 pipelines: true,
@@ -555,10 +567,7 @@ mod tests {
             },
             ..base
         });
-        assert_eq!(
-            names(&both),
-            vec!["cnpg", "jupyterhub", "airflow", "barman-cloud"]
-        );
+        assert_eq!(names(&both), vec!["jupyterhub", "airflow"]);
     }
 
     #[test]
@@ -588,16 +597,16 @@ mod tests {
             mcp: Default::default(),
         };
         assert!(!base.pillars.dashboards, "dashboards stay opt-in");
-        let plan = plan_platform(&PlatformInstanceSpec {
+        let plan = plan_pillars(&PlatformInstanceSpec {
             pillars: Pillars {
                 dashboards: true,
                 ..Default::default()
             },
             ..base.clone()
         });
-        assert_eq!(names(&plan), vec!["cnpg", "superset", "barman-cloud"]);
-        assert_eq!(plan[1].chart, Some("superset/superset"));
-        let both = plan_platform(&PlatformInstanceSpec {
+        assert_eq!(names(&plan), vec!["superset"]);
+        assert_eq!(plan[0].chart, Some("superset/superset"));
+        let both = plan_pillars(&PlatformInstanceSpec {
             pillars: Pillars {
                 pipelines: true,
                 dashboards: true,
@@ -605,10 +614,7 @@ mod tests {
             },
             ..base
         });
-        assert_eq!(
-            names(&both),
-            vec!["cnpg", "airflow", "superset", "barman-cloud"]
-        );
+        assert_eq!(names(&both), vec!["airflow", "superset"]);
     }
 
     #[test]
@@ -631,7 +637,7 @@ mod tests {
             monitoring: Default::default(),
             mcp: Default::default(),
         };
-        let plan = plan_platform(&with);
+        let plan = plan_pillars(&with);
         let kafka = plan
             .iter()
             .find(|c| c.name == "kafka")
@@ -645,16 +651,14 @@ mod tests {
             },
             ..with
         };
-        assert!(!names(&plan_platform(&without)).contains(&"kafka"));
+        assert!(!names(&plan_pillars(&without)).contains(&"kafka"));
+        assert_eq!(names(&plan_pillars(&without)), Vec::<&str>::new());
 
         assert_eq!(
             chart_version("strimzi/strimzi-kafka-operator"),
             Some("1.3.1")
         );
-        assert_eq!(
-            names(&plan),
-            vec!["cnpg", "kafka", "spark-operator", "barman-cloud"]
-        );
+        assert_eq!(names(&plan), vec!["kafka", "spark-operator"]);
         assert_eq!(
             chart_version("spark-operator/spark-operator"),
             Some("2.5.2")
@@ -686,6 +690,42 @@ mod tests {
         // It must not leak into a per-Lakehouse plan.
         let lh = plan_lakehouse(&spec(CatalogImpl::Lakekeeper, StorageImpl::Seaweedfs));
         assert!(!names(&lh).contains(&"cnpg"));
+    }
+
+    #[test]
+    fn the_pillars_are_not_in_the_core_plan() {
+        let pi = PlatformInstanceSpec {
+            default_theme: Default::default(),
+            profile: Default::default(),
+            pillars: Pillars {
+                notebooks: true,
+                pipelines: true,
+                dashboards: true,
+                streaming: true,
+                ..Pillars::default()
+            },
+            dry_run: true,
+            cluster_operation: Default::default(),
+            component_values: Default::default(),
+            namespace: "stardelt".into(),
+            base_domain: None,
+            identity: Default::default(),
+            secrets: Default::default(),
+            ingress: Default::default(),
+            monitoring: Default::default(),
+            mcp: Default::default(),
+        };
+        assert_eq!(names(&plan_platform(&pi)), vec!["cnpg", "barman-cloud"]);
+        assert_eq!(
+            names(&plan_pillars(&pi)),
+            vec![
+                "jupyterhub",
+                "airflow",
+                "superset",
+                "kafka",
+                "spark-operator"
+            ]
+        );
     }
 
     #[test]
@@ -730,6 +770,26 @@ mod tests {
         for c in plan_lakehouse(&spec(CatalogImpl::Lakekeeper, StorageImpl::Seaweedfs))
             .into_iter()
             .chain(platform)
+            .chain(plan_pillars(&PlatformInstanceSpec {
+                default_theme: Default::default(),
+                profile: Default::default(),
+                pillars: Pillars {
+                    notebooks: true,
+                    pipelines: true,
+                    streaming: true,
+                    ..Default::default()
+                },
+                dry_run: true,
+                cluster_operation: Default::default(),
+                component_values: Default::default(),
+                namespace: "stardelt".into(),
+                base_domain: None,
+                identity: Default::default(),
+                secrets: Default::default(),
+                ingress: Default::default(),
+                monitoring: Default::default(),
+                mcp: Default::default(),
+            }))
         {
             if let Some(chart) = c.chart {
                 assert!(chart_version(chart).is_some(), "no pin for {chart}");
@@ -761,6 +821,25 @@ mod tests {
         for c in plan_lakehouse(&spec(CatalogImpl::Lakekeeper, StorageImpl::Seaweedfs))
             .into_iter()
             .chain(platform)
+            .chain(plan_pillars(&PlatformInstanceSpec {
+                default_theme: Default::default(),
+                profile: Default::default(),
+                pillars: Pillars {
+                    notebooks: true,
+                    pipelines: true,
+                    ..Default::default()
+                },
+                dry_run: true,
+                cluster_operation: Default::default(),
+                component_values: Default::default(),
+                namespace: "stardelt".into(),
+                base_domain: None,
+                identity: Default::default(),
+                secrets: Default::default(),
+                ingress: Default::default(),
+                monitoring: Default::default(),
+                mcp: Default::default(),
+            }))
         {
             if let Some(chart) = c.chart {
                 assert!(chart_repo(chart).is_some(), "no repo for {chart}");

@@ -49,7 +49,9 @@ use crate::helm::{
     manifest_args, rendered_workloads, stuck_pending,
 };
 use crate::objects::{cnpg_cluster_resource, platform_owner};
-use crate::planner::{ComponentPlan, chart_repo, chart_version, plan_lakehouse, plan_platform};
+use crate::planner::{
+    ComponentPlan, chart_repo, chart_version, plan_lakehouse, plan_pillars, plan_platform,
+};
 use crate::prerequisites::{CATALOG_CLUSTER, NOVA_CLUSTER};
 use crate::principal::reconcile_principal;
 use crate::provision::{
@@ -1373,7 +1375,11 @@ async fn delete_platform(
         return Ok(Action::await_change());
     }
 
-    for component in plan_platform(&instance.spec).iter().rev() {
+    for component in plan_platform(&instance.spec)
+        .into_iter()
+        .chain(plan_pillars(&instance.spec))
+        .rev()
+    {
         if PLATFORM_SHARED_RELEASES.contains(&component.name) {
             tracing::info!(
                 instance = %name,
@@ -2049,6 +2055,7 @@ async fn stop_platform(
     let resource = resource_name("PlatformInstance", &name);
     let plan: Vec<ComponentPlan> = plan_platform(&instance.spec)
         .into_iter()
+        .chain(plan_pillars(&instance.spec))
         .filter(|component| component.name != "cnpg")
         .collect();
     let annotation = instance
@@ -2239,6 +2246,7 @@ async fn reconcile_platform(
     }
 
     let plan = plan_platform(&instance.spec);
+    let pillar_plan = plan_pillars(&instance.spec);
     let issuer = crate::identity::issuer_url(&instance.spec).ok().flatten();
     let overrides = OverridesContext {
         // PlatformInstance is cluster-scoped: valuesFrom refs must name their
@@ -2314,20 +2322,6 @@ async fn reconcile_platform(
     if let Some(rbac) = ensure_airflow_rbac(&ctx, &instance.spec, &owner).await {
         outcome.components.push(rbac);
     }
-    if let Some(job) = ensure_airflow_group_roles(&ctx, &instance.spec, &owner).await {
-        outcome.components.push(job);
-    }
-    // The app databases' dumps: they read the releases' Secrets and upload with the Lakehouse keys.
-    if let Some(dumps) = ensure_pg_dumps(&ctx, &instance.spec, &owner).await {
-        outcome.components.push(dumps);
-    }
-    if let Some(job) = ensure_superset_group_roles(&ctx, &instance.spec, &owner).await {
-        outcome.components.push(job);
-    }
-    // The streaming bus is a CR of the operator the plan installed above (D42).
-    if let Some(bus) = ensure_kafka_broker(&ctx, &instance.spec).await {
-        outcome.components.push(bus);
-    }
     // The backup stores precede any Cluster that names one (platform#1234); the plugin release
     // is in the plan applied above, so its CRD exists by now.
     outcome
@@ -2381,6 +2375,33 @@ async fn reconcile_platform(
     }
     if let Some(nova) = ensure_nova(&ctx, &instance.spec, &owner).await {
         outcome.components.push(nova);
+    }
+    // The optional pillars come after the core (#1735): their charts run with
+    // `helm --wait --timeout 10m`, so a failing hook in one of them must not hold sign-in and
+    // Nova. Their own steps follow the releases they need.
+    if let Some(job) = ensure_airflow_group_roles(&ctx, &instance.spec, &owner).await {
+        outcome.components.push(job);
+    }
+    if let Some(dumps) = ensure_pg_dumps(&ctx, &instance.spec, &owner).await {
+        outcome.components.push(dumps);
+    }
+    if let Some(job) = ensure_superset_group_roles(&ctx, &instance.spec, &owner).await {
+        outcome.components.push(job);
+    }
+    let pillar_outcome = apply_plan(
+        &ctx,
+        &instance.spec.namespace,
+        &pillar_plan,
+        &overrides,
+        instance.spec.dry_run,
+        false,
+        previous,
+    )
+    .await;
+    outcome.values_resolved &= pillar_outcome.values_resolved;
+    outcome.components.extend(pillar_outcome.components);
+    if let Some(bus) = ensure_kafka_broker(&ctx, &instance.spec).await {
+        outcome.components.push(bus);
     }
     // The Ingress objects come last: they route to the Services above.
     if let Some(ingress) = ensure_ingress(&ctx, &instance.spec, &owner).await {
