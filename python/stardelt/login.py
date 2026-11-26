@@ -32,6 +32,10 @@ class LoginError(RuntimeError):
     """The sign-in did not work; the message says what to do next."""
 
 
+class _OfflineRefused(Exception):
+    """The provider issued no offline token for this person (`not_allowed` while polling)."""
+
+
 def credentials_path(environ):
     """The credentials file, or ``None`` when the environment names neither XDG_CONFIG_HOME nor HOME."""
     base = environ.get("XDG_CONFIG_HOME") or (environ.get("HOME") and os.path.join(environ["HOME"], ".config"))
@@ -179,19 +183,12 @@ def _device_start(session, endpoint, client_id, challenge, scope):
     )
 
 
-def device_login(session, issuer, client_id, say, sleep=time.sleep, clock=time.time):
-    """Run the device flow and return the credentials dict. ``say`` receives the lines the person must read.
-
-    The sign-in asks for ``offline_access`` (it is not asked again when the provider does not offer
-    it): the refresh token then outlives the provider's SSO session, so a person signs in once and
-    scripts keep working until the sign-in is revoked.
-    """
-    meta = discover(session, issuer)
+def _device_flow(session, meta, issuer, client_id, scope, say, sleep, clock):
     verifier, challenge = pkce()
     status, start = _device_start(
-        session, meta["device_authorization_endpoint"], client_id, challenge, "openid offline_access"
+        session, meta["device_authorization_endpoint"], client_id, challenge, scope
     )
-    if status == 400 and start.get("error") == "invalid_scope":
+    if status == 400 and start.get("error") == "invalid_scope" and "offline_access" in scope:
         say("this identity provider gives no offline sign-in; the sign-in lasts as long as its session")
         status, start = _device_start(session, meta["device_authorization_endpoint"], client_id, challenge, "openid")
     if status != 200 or "device_code" not in start:
@@ -224,8 +221,26 @@ def device_login(session, issuer, client_id, say, sleep=time.sleep, clock=time.t
             raise LoginError("the sign-in was refused in the browser")
         if error == "expired_token":
             break
+        if error == "not_allowed" and "offline_access" in scope:
+            raise _OfflineRefused()
         raise LoginError(f"the identity provider answered {error or f'HTTP {status}'}")
     raise LoginError("the code expired: run `stardelt login` again")
+
+
+def device_login(session, issuer, client_id, say, sleep=time.sleep, clock=time.time):
+    """Run the device flow and return the credentials dict. ``say`` receives the lines the person must read.
+
+    The sign-in asks for ``offline_access`` (it is not asked again when the provider does not offer
+    it): the refresh token then outlives the provider's SSO session, so a person signs in once and
+    scripts keep working until the sign-in is revoked. A provider that refuses offline tokens for the
+    person is asked once more without them, and the person approves a second code.
+    """
+    meta = discover(session, issuer)
+    try:
+        return _device_flow(session, meta, issuer, client_id, "openid offline_access", say, sleep, clock)
+    except _OfflineRefused:
+        say("this account may not hold an offline sign-in; approve the new code for a sign-in that lasts as long as the browser session")
+        return _device_flow(session, meta, issuer, client_id, "openid", say, sleep, clock)
 
 
 def federated_login(session, issuer, client_id, assertion, clock=time.time):
