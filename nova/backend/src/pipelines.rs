@@ -2947,9 +2947,18 @@ pub struct Provenance {
     /// pull request that promotes a commit. Omitted when the bundle's checkout names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// The preview this deploy belongs to (`stardelt bundle deploy --preview ID`).
+    /// Omitted on a normal deploy; set together with `expires_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// When the preview copy is due to be removed, RFC 3339. At most 31 days after the deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
-/// What `view_of` shows of a [`Provenance`], with who deployed and when.
+/// What `view_of` shows of a [`Provenance`], with who deployed and when. A preview deploy also
+/// names its id and the moment the copy is due (`stardelt.io/preview`, `stardelt.io/expires-at`);
+/// the two come together or not at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentView {
@@ -2960,6 +2969,12 @@ pub struct DeploymentView {
     /// The repository the bundle was read from: `https://host/path`, for the compare link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// The preview this deploy belongs to, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// When the preview copy is due to be removed, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployed_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -6187,6 +6202,8 @@ const BUNDLE_LABEL: &str = "stardelt.io/bundle";
 const TARGET_LABEL: &str = "stardelt.io/target";
 const REVISION_NOTE: &str = "stardelt.io/revision";
 const REPOSITORY_NOTE: &str = "stardelt.io/repository";
+const PREVIEW_NOTE: &str = "stardelt.io/preview";
+const EXPIRES_NOTE: &str = "stardelt.io/expires-at";
 const DEPLOYED_BY_NOTE: &str = "stardelt.io/deployed-by";
 const DEPLOYED_AT_NOTE: &str = "stardelt.io/deployed-at";
 pub(crate) const DIGEST_NOTE: &str = "stardelt.io/spec-digest";
@@ -6281,6 +6298,41 @@ pub(crate) fn check_provenance(provenance: &Provenance) -> Result<(), String> {
             );
         }
     }
+    match (&provenance.preview, &provenance.expires_at) {
+        (None, None) => {}
+        (Some(preview), Some(expires_at)) => {
+            let good = (1..=20).contains(&preview.len())
+                && preview
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && preview
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                && preview
+                    .as_bytes()
+                    .last()
+                    .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+            if !good {
+                return Err(
+                    "the preview must be 1 to 20 lower-case letters, digits and dashes".into(),
+                );
+            }
+            let Ok(at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+                return Err("expiresAt must be an RFC 3339 time".into());
+            };
+            let now = now_utc();
+            if at <= now {
+                return Err("expiresAt must be in the future".into());
+            }
+            if at > now + chrono::Duration::days(31) {
+                return Err("expiresAt must be at most 30 days ahead".into());
+            }
+        }
+        _ => {
+            return Err("preview and expiresAt are set together or not at all".into());
+        }
+    }
     Ok(())
 }
 
@@ -6302,6 +6354,22 @@ pub(crate) fn stamp_provenance(resource: &mut Value, provenance: &Provenance, de
         None => {
             if let Some(map) = notes.as_object_mut() {
                 map.remove(REPOSITORY_NOTE);
+            }
+        }
+    }
+    match &provenance.preview {
+        Some(preview) => notes[PREVIEW_NOTE] = json!(preview),
+        None => {
+            if let Some(map) = notes.as_object_mut() {
+                map.remove(PREVIEW_NOTE);
+            }
+        }
+    }
+    match &provenance.expires_at {
+        Some(expires_at) => notes[EXPIRES_NOTE] = json!(expires_at),
+        None => {
+            if let Some(map) = notes.as_object_mut() {
+                map.remove(EXPIRES_NOTE);
             }
         }
     }
@@ -6337,6 +6405,8 @@ pub(crate) fn deployment_of_with(
         target: label(TARGET_LABEL)?,
         revision: note(REVISION_NOTE),
         repository: note(REPOSITORY_NOTE),
+        preview: note(PREVIEW_NOTE),
+        expires_at: note(EXPIRES_NOTE),
         deployed_by: note(DEPLOYED_BY_NOTE),
         deployed_at: note(DEPLOYED_AT_NOTE),
         modified: note(DIGEST_NOTE)
