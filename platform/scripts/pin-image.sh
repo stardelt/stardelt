@@ -464,7 +464,9 @@ def rewrite(path, patterns):
 
 rewrite("helm-values/airflow.yaml", [
     (r"^(\s*digest: )sha256:[0-9a-f]{64}$", lambda m: m.group(1) + digest),
-    (r"demo@sha256:[0-9a-f]{64}", "demo@" + digest),
+    # Only the worker tag's own value line: the dbt task image is also `…/dbt:demo@sha256:…`
+    # and is pinned by its own path (stardelt/stardelt#1914, #1960).
+    (r'^(\s*value: "?)demo@sha256:[0-9a-f]{64}', lambda m: m.group(1) + "demo@" + digest),
 ])
 rewrite("manifests/airflow-group-roles.yaml", [
     (r"ghcr\.io/stardelt/airflow:demo@sha256:[0-9a-f]{64}",
