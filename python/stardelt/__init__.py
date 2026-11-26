@@ -398,7 +398,7 @@ def _sql(query, params=None):
         if client is None:
             raise RuntimeError(
                 "stardelt.sql: not on the platform and not signed in — run "
-                "`stardelt login --host https://<nova>` once, or connect to your workspace."
+                "`stardelt --host https://<nova> login` once, or connect to your workspace."
             )
         if params is not None:
             raise RuntimeError(

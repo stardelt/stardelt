@@ -33,7 +33,7 @@ def nova_host(environ, host=None):
         stored = login.load(environ)
         address = (stored or {}).get("host")
     if not address:
-        raise ValueError("no Nova address: pass --host, or run `stardelt login --host https://<nova>`")
+        raise ValueError("no Nova address: pass --host, or run `stardelt --host https://<nova> login`")
     return address.rstrip("/")
 
 

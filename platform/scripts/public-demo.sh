@@ -286,7 +286,7 @@ if [ "$mode" = check ]; then
   # ships (`description:` on every file, the `dbt` task) and names a bundle file instead of
   # itself. `bundle validate` is offline and read-only, so the check stays read-only.
   check_0b() {
-    local venv="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}" cli out
+    local venv="${STARDELT_CLI_VENV:-$HOME/.local/venvs/stardelt-cli}" cli out ops op
     for cli in "$(command -v stardelt 2>/dev/null || true)" "$venv/bin/stardelt"; do
       if [ -z "$cli" ] || [ ! -x "$cli" ] || ! "$cli" --help >/dev/null 2>&1; then
         continue
@@ -296,6 +296,17 @@ if [ "$mode" = check ]; then
         check_fix="install the CLI from this repository: python3 -m venv $venv && $venv/bin/pip install -e $(git rev-parse --show-toplevel)/python"
         return 1
       }
+      # Validating the bundle does not prove the CLI knows the API operations demo-shop
+      # calls: a release older than this checkout's API reads the bundle and fails
+      # half-way at `api destinations_create` (#1593).
+      ops="$("$cli" api --list 2>/dev/null || true)"
+      for op in destinations_list destinations_create; do
+        printf '%s\n' "$ops" | grep -q "^$op " || {
+          check_msg="the stardelt CLI at $cli does not know $op"
+          check_fix="install the CLI from this repository: python3 -m venv $venv && $venv/bin/pip install -e $(git rev-parse --show-toplevel)/python"
+          return 1
+        }
+      done
       check_msg="the stardelt CLI answers and validates this repository's shop bundle ($cli)"
       return 0
     done
