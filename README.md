@@ -20,14 +20,15 @@ Permissive licences only. No phone-home. No licence server.
 
 ## Why stardelt
 
-- **Yours.** It runs in your cluster, on your storage, with your sign-in. Your data never leaves.
+- **Yours.** It runs in your cluster, on your storage, with your sign-in. Your data goes nowhere you did not configure.
 - **Open.** Every component carries a permissive licence: Apache Iceberg, Trino, Lakekeeper, Airflow, JupyterHub, Superset.
 - **One platform.** A catalog with table permissions by group, a SQL editor, notebooks, pipelines, lineage and a query log, in one interface with one API.
 
 ## Try it
 
 - **In the browser:** [the public demo](https://stardelt.io/demo/), sign in with `demo` / `demo`.
-- **On your cluster:** the [quickstart](https://stardelt.io/docs/getting-started/quickstart) installs the core, loads a file and queries it.
+- **From the latest release:** `kubectl apply --server-side --force-conflicts -f https://github.com/stardelt/stardelt/releases/latest/download/install.yaml` installs the operator; then apply the release's `platform-minimal.yaml` with your domain in it. The [release notes](https://github.com/stardelt/stardelt/releases/latest) show both steps and the matching command line.
+- **The core only, from a checkout:** the [quickstart](https://stardelt.io/docs/getting-started/quickstart) installs storage, the catalog, SQL and Nova, loads a file and queries it.
 
 ## Follow the project
 
@@ -55,7 +56,7 @@ Not sure where something belongs? [Open an issue here](https://github.com/starde
 
 ## Status
 
-stardelt runs end to end, but there is no tagged release yet: resources and APIs can still change.
+stardelt is alpha (`0.0.x`). The [latest release](https://github.com/stardelt/stardelt/releases/latest) is proven on a fresh single-node cluster before it is published. Resources and APIs can still change before `0.1.0`.
 
 ## Licence
 
