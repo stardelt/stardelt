@@ -142,7 +142,6 @@ singleuser:
     limit: 1
   defaultUrl: /lab
   extraEnv:
-    SPARK_REMOTE: sc://spark-connect.__NAMESPACE__.svc.cluster.local:15002
     STARDELT_SECRET_STORE_URL: http://openbao.__NAMESPACE__.svc.cluster.local:8200
     STARDELT_NOVA_URL:
       valueFrom:

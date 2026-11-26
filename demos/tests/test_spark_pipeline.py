@@ -15,6 +15,7 @@ from stardelt_pipelines.spark_pipeline import (  # noqa: E402
     SPEC_PATH,
     checkpoint_uri,
     config_map_name,
+    connect_remote,
     key_paths,
     pod_env,
     steps,
@@ -37,6 +38,22 @@ def test_checkpoint_uri_lives_under_the_groups_bucket():
         checkpoint_uri("lakehouse", "demo", "shop", "build")
         == "s3a://lakehouse/pipelines/demo/shop/build/checkpoints"
     )
+
+
+def test_the_pod_speaks_to_the_owner_groups_cluster_by_default(monkeypatch):
+    # #493 point 6: the shared server is no longer the default; the group's SparkCluster is.
+    monkeypatch.delenv(spark_pipeline.REMOTE_ENV, raising=False)
+    variables = env(monkeypatch, remote=connect_remote("demo"))
+    assert (
+        variables["SPARK_REMOTE"].value
+        == "sc://spc-demo-server.stardelt.svc.cluster.local:15002"
+    )
+
+
+def test_pipeline_spark_remote_still_overrides_the_group_cluster(monkeypatch):
+    monkeypatch.setenv(spark_pipeline.REMOTE_ENV, "sc://elsewhere:15002")
+    variables = env(monkeypatch, remote=connect_remote("demo"))
+    assert variables["SPARK_REMOTE"].value == "sc://elsewhere:15002"
 
 
 def test_the_runner_is_valid_python():

@@ -76,12 +76,6 @@ MAX_WRITE_ROWS = 200_000
 
 DEFAULT_BATCH_ROWS = 1_000
 
-# Where spark() connects when the spawn did not say otherwise. Matches the
-# ClusterIP-only Spark Connect Service (manifests/spark.yaml): reachable from
-# a user pod through the egress rule in helm-values/jupyterhub.yaml, and from
-# nowhere else, because Spark Connect has no authentication of its own.
-SPARK_REMOTE_DEFAULT = "sc://spark-connect.stardelt.svc.cluster.local:15002"
-
 # A WAP run's audit branch (#114): the loader sets this on the notebook pod, and the
 # session sets `spark.wap.branch` from it. Writes then go to the branch only when the
 # table carries `write.wap.enabled=true` — the loader owns that property (measured, #820).
@@ -849,7 +843,7 @@ def _check_client_server_versions(session):
 
 
 def _remote_for_cluster(cluster):
-    """The Connect endpoint for `cluster`, or the shared one when `None`.
+    """The Connect endpoint for `cluster`; `None` reads `SPARK_REMOTE` and refuses without one.
 
     Never starts anything: a Stopped/Failed cluster raises `ClusterStopped`; a
     Starting/Stopping one raises `RuntimeError` (call `stardelt.compute.start` and
@@ -860,9 +854,13 @@ def _remote_for_cluster(cluster):
     changes the endpoint string and ``_cached_spark_session`` opens a new channel.
     """
     if cluster is None:
-        remote = os.environ.get("SPARK_REMOTE", SPARK_REMOTE_DEFAULT).strip()
+        remote = os.environ.get("SPARK_REMOTE", "").strip()
         if not remote:
-            raise RuntimeError("SPARK_REMOTE is not set — point it at the Spark Connect endpoint.")
+            raise RuntimeError(
+                "SPARK_REMOTE is not set — stardelt.compute.default() names your group's "
+                "cluster and stardelt.compute.ensure('<group>') creates it; set SPARK_REMOTE "
+                "to use another server"
+            )
         if "__TOKEN__" in remote:
             remote = remote.replace("__TOKEN__", _token())
         return remote
@@ -943,9 +941,10 @@ def _session(app_name="stardelt-notebook", cluster=None):
 
     If the Spark server restarted, the next call opens a new session; DataFrames and temp views of the old one are gone, and a running job is not retried.
 
-    ``SPARK_REMOTE`` selects the endpoint (default the in-cluster Connect service);
-    ``cluster`` selects a named Spark cluster instead (default ``None`` = the shared
-    one), which must be Running: nothing starts it implicitly.
+    ``SPARK_REMOTE`` names the endpoint when no cluster is given (unset, it refuses and
+    names the two ways to get a group cluster); ``cluster`` selects a named Spark
+    cluster instead (default ``None`` = no cluster), which must be Running: nothing
+    starts it implicitly.
     Limitations, stated rather than implied: Spark Connect has no authentication of
     its own and is ClusterIP-only, row/column masks are Trino-only (design
     ``multitenant-catalogs.md`` §5.8), and tables written through Spark use the

@@ -19,11 +19,11 @@ def _nova_configured():
 def _cluster_name():
     """`STARDELT_CLUSTER`, else the one Spark cluster the person's group owns (#493 point 4).
 
-    With neither, the session falls back to the shared server — the behaviour of every kernel
-    until 0.0.5. A person in several groups is told which clusters there are (once) and gets the
-    shared server rather than a guess; `None` is never a silent choice. A kernel with no Nova URL,
-    or one whose Nova does not answer, is "no cluster of mine" rather than an error: the kernel
-    still gets its session (#1398).
+    With neither there is no cluster: the session refuses and says how to get one, and never
+    starts one (a person presses Start). A person in several groups is told which clusters
+    there are (once) and names one with `STARDELT_CLUSTER` rather than a guess. A kernel with
+    no Nova URL, or one whose Nova does not answer, is "no cluster of mine" rather than an
+    error (#1398).
     """
     global _CLUSTER_RESOLVED, _CLUSTER_NAME
     if _CLUSTER_RESOLVED:
@@ -44,6 +44,11 @@ def _cluster_name():
         text = str(err)
         if text.startswith("you may act on"):
             print(f"stardelt.spark: {text}", file=sys.stderr)
+        print(
+            "stardelt.spark: create your group's cluster with "
+            "stardelt.compute.ensure('<your group>') (or in Nova → Compute)",
+            file=sys.stderr,
+        )
         _CLUSTER_NAME = None
     except requests.RequestException:
         _CLUSTER_NAME = None

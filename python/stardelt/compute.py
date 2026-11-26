@@ -52,9 +52,10 @@ def default(client=None):
     names = ", ".join(sorted(cluster["name"] for cluster in clusters))
     if not clusters:
         raise LookupError(
-            "you have no Spark cluster of your own: no group you are in owns one — "
-            "use the shared Spark server (or %sql), ask an administrator for a cluster, "
-            'or create your group\'s with stardelt.compute.ensure("<your group>")'
+            'stardelt.compute.ensure("<your group>") creates your group\'s Spark cluster '
+            "(you have no Spark cluster of your own: no group you are in owns one); or ask "
+            "an administrator for a cluster — a group whose name is not a valid cluster name "
+            "is named by them with PUT /api/admin/compute/{name}. %sql needs no Spark at all"
         )
     raise LookupError(
         f"you may act on {len(clusters)} Spark clusters ({names}): name one with "

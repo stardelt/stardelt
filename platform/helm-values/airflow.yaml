@@ -452,13 +452,13 @@ extraEnv: |
   # spark-pipeline tasks (#80 S2c-2): the graph runs in a pod of the pinned Spark image as a
   # thin Spark Connect client (#957 measured the shape: 6.6 s, two flows, no S3 key). The
   # image must equal manifests/spark.yaml's — `scripts/check-spark-image-pin.sh` (make lint)
-  # fails when the two drift, as with the notebook image. The remote is the shared Connect
-  # server; a per-group SparkCluster is #493. Checkpoints live under the lakehouse bucket,
-  # `pipelines/<group>/<pipeline>/<task>/checkpoints`.
+  # fails when the two drift, as with the notebook image. The remote is the owner group's
+  # SparkCluster unless an operator sets PIPELINE_SPARK_REMOTE (#493 point 6). Checkpoints live
+  # under the lakehouse bucket, `pipelines/<group>/<pipeline>/<task>/checkpoints`.
   - name: PIPELINE_SPARK_IMAGE
     value: ghcr.io/stardelt/spark:dev@sha256:cc30d180d44d61ae4d8763afb8f9cb06b715d8d21d259807cced97e368c50075
   - name: PIPELINE_SPARK_REMOTE
-    value: sc://spark-connect.stardelt.svc.cluster.local:15002
+    # no value: the loader defaults to `sc://spc-<group>-server:15002`; set a URL to override it.
   - name: PIPELINE_SPARK_BUCKET
     value: lakehouse
   - name: PIPELINE_SPARK_PULL_SECRET
