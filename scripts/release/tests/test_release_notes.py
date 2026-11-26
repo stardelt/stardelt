@@ -54,6 +54,11 @@ class SectionTest(unittest.TestCase):
         self.assertIn("--force-reinstall", text)
         self.assertEqual(text.count("## Client"), 1)
 
+    def test_the_install_block_names_the_pillars_and_the_node(self) -> None:
+        text = release_notes.notes("0.0.9", "")
+        self.assertIn("set `notebooks: true`", text)
+        self.assertIn("8 vCPU and 16 GB", text)
+
     def test_the_notes_tell_how_to_verify(self) -> None:
         text = release_notes.notes("0.0.9", "")
         self.assertIn("cosign verify ghcr.io/stardelt/nova:v0.0.9", text)

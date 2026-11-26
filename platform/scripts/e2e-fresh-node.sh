@@ -74,8 +74,8 @@ usage() {
 usage: e2e-fresh-node.sh [up|down]
 
   up    create one throwaway Hetzner server, install the operator, apply
-        operator/examples/platform-minimal.yaml with the pipelines and dashboards pillars
-        on, verify it, delete it again (default)
+        operator/examples/platform-minimal.yaml as shipped, verify it, delete it
+        again (default)
   down  delete every stardelt-fresh-* run this checkout started, then list what
         is left in Hetzner
 EOF
@@ -113,7 +113,7 @@ preflight() {
     exit 1
   fi
   if [ "$DRY_RUN" = 1 ]; then
-    echo "would create ${FRESH_NAME} (${FRESH_NODE_TYPE} @ ${LOCATION}), install the operator, apply platform-minimal.yaml (+ pipelines, dashboards pillars) for ${FRESH_DOMAIN:-<domain>}, verify, delete"
+    echo "would create ${FRESH_NAME} (${FRESH_NODE_TYPE} @ ${LOCATION}), install the operator, apply platform-minimal.yaml for ${FRESH_DOMAIN:-<domain>}, verify, delete"
     exit 0
   fi
 }
@@ -317,10 +317,9 @@ phase_up() {
     instance_source="$RELEASE_DIR/platform-minimal.yaml"
   fi
   sed -e "s/data\.example\.com/${FRESH_DOMAIN}/g" \
-    -e '/^  profile: demo$/a\  pillars:\n    pipelines: true\n    dashboards: true' \
     "$instance_source" >"$RUN_DIR/platform-instance.yaml"
-  grep -q '^    pipelines: true$' "$RUN_DIR/platform-instance.yaml" || {
-    echo "e2e-fresh-node: could not turn on the pipelines and dashboards pillars in $instance_source (no '  profile: demo' line)" >&2
+  { grep -qE '^    pipelines: true( |$)' "$RUN_DIR/platform-instance.yaml" && grep -qE '^    dashboards: true( |$)' "$RUN_DIR/platform-instance.yaml"; } || {
+    echo "e2e-fresh-node: $instance_source does not turn on the pipelines and dashboards pillars, which the product phase checks — the release example must (#1810)" >&2
     # FINAL_RC is only set by run_phase, and cmd_up calls `phase_up || true`: without these two
     # lines the run would report PASS having applied nothing (#1729).
     FINAL_RC=1
@@ -333,8 +332,8 @@ phase_up() {
     wait_for_resources || return 1
   # `product` is the ticket's assertion list (#48 scope 2): readiness first, then Airflow,
   # Superset, Lakekeeper's token rule and Nova's sign-in page. Readiness alone would leave
-  # four of the six assertions unmade. The run turns on the `pipelines` and `dashboards`
-  # pillars in its copy of the example, because the example leaves them off.
+  # four of the six assertions unmade. The example turns on the `pipelines` and `dashboards`
+  # pillars itself, and the run applies it as shipped (#1810).
   run_phase "verify" "$RUN_DIR/04-verify.log" -- \
     bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" product || return 1
   run_phase "inventory" "$RUN_DIR/05-inventory.log" -- collect_inventory || return 1
