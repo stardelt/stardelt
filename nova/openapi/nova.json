@@ -2392,7 +2392,7 @@
         "tags": [
           "public"
         ],
-        "description": "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise.",
+        "description": "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured).",
         "operationId": "table_freshness_get",
         "parameters": [
           {
@@ -14186,6 +14186,33 @@
           }
         }
       },
+      "FailingCheck": {
+        "type": "object",
+        "description": "One verified query whose last check failed.",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "lastCheckAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When its last check ran, RFC 3339, or `null` when it never ran."
+          },
+          "lastCheckMessage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the last check found, in one sentence."
+          },
+          "question": {
+            "type": "string",
+            "description": "The question the query answers, in words."
+          }
+        }
+      },
       "Freshness": {
         "type": "object",
         "description": "The freshness promise stored as JSON text in [`FRESHNESS_PROPERTY`].",
@@ -18433,6 +18460,41 @@
           }
         }
       },
+      "TableChecks": {
+        "type": "object",
+        "description": "The verified-query checks of one table, as they last ran (`#402` point 2).",
+        "required": [
+          "total",
+          "failed",
+          "failing"
+        ],
+        "properties": {
+          "failed": {
+            "type": "integer",
+            "description": "How many of them failed their last check.",
+            "minimum": 0
+          },
+          "failing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FailingCheck"
+            },
+            "description": "At most five, newest check first."
+          },
+          "lastCheckedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest check time, RFC 3339, or absent when no query ever ran a check."
+          },
+          "total": {
+            "type": "integer",
+            "description": "How many verified queries the table has.",
+            "minimum": 0
+          }
+        }
+      },
       "TableDocumentation": {
         "type": "object",
         "description": "The documentation of one table, plus what the caller may do with it.",
@@ -18517,6 +18579,17 @@
           "canEdit": {
             "type": "boolean",
             "description": "Whether the interim rule lets this caller set the promise."
+          },
+          "checks": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TableChecks",
+                "description": "The verified-query checks of this table; `null` without a state store (`#402`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "detail": {
             "type": "string",

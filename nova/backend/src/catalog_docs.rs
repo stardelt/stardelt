@@ -171,6 +171,9 @@ pub struct TableFreshness {
     pub detail: String,
     /// Whether the interim rule lets this caller set the promise.
     pub can_edit: bool,
+    /// The verified-query checks of this table; `null` without a state store (`#402`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks: Option<crate::verified_queries::TableChecks>,
 }
 
 /// One promised table in `GET /api/catalog/health`.
@@ -739,6 +742,7 @@ fn health_of(loaded: &Loaded, who: &Identity) -> TableFreshness {
             next_due_at: None,
             detail: NO_PROMISE.into(),
             can_edit,
+            checks: None,
         };
     };
     let (status, due, next, detail) = freshness_health(&promise, last_write, now());
@@ -750,6 +754,7 @@ fn health_of(loaded: &Loaded, who: &Identity) -> TableFreshness {
         next_due_at: next.map(rfc3339),
         detail,
         can_edit,
+        checks: None,
     }
 }
 
@@ -1192,14 +1197,22 @@ async fn write_documentation(
 
 /// `GET /api/catalog/tables/{ns}/{tbl}/health`: the table's freshness, evaluated at the read.
 async fn freshness_for(
-    _state: &Arc<AppState>,
+    state: &Arc<AppState>,
     catalog: &Catalog<'_>,
     who: &Identity,
     ns: &str,
     tbl: &str,
 ) -> Result<TableFreshness, DocError> {
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    Ok(health_of(&loaded, who))
+    let mut view = health_of(&loaded, who);
+    // A state-store hiccup must not turn a health read into an error: `null` already means
+    // "no check information".
+    if let Some(pool) = state.db.as_ref() {
+        view.checks = crate::verified_queries::checks_for(pool, catalog.name, ns, tbl)
+            .await
+            .ok();
+    }
+    Ok(view)
 }
 
 /// Most tables `GET /api/catalog/health` reads in one call.
@@ -1653,7 +1666,7 @@ pub async fn update(
     operation_id = "table_freshness_get",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise.",
+    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured).",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
