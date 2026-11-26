@@ -59,11 +59,27 @@ fi
 # bundle file instead of itself. `bundle validate` is offline and read-only.
 valid="$("$CLI" bundle validate "$BUNDLE" 2>&1)" || fail "the CLI at $CLI cannot read this repository's bundle: $(printf '%s' "$valid" | head -n 1) — install it from this repository (python3 -m venv <venv> && <venv>/bin/pip install -e $PWD/../python) and set STARDELT_CLI_VENV=<venv>"
 
+# The operations below must be known to this CLI; a release older than the repository's API
+# validates the bundle but fails half-way at `api destinations_create` (#1593).
+ops="$("$CLI" api --list 2>/dev/null || true)"
+for op in destinations_list destinations_create; do
+  printf '%s\n' "$ops" | grep -q "^$op " \
+    || fail "the CLI at $CLI does not know the operation $op (an older release) — install it from this repository (python3 -m venv <venv> && <venv>/bin/pip install -e $PWD/../python) and set STARDELT_CLI_VENV=<venv>"
+done
+
 principal="$(kubectl -n "$NAMESPACE" get serviceprincipals.stardelt.io pipeline-demo \
   -o jsonpath='{.status.ready}' 2>/dev/null || true)"
 [ "$principal" = true ] \
   || fail "ServicePrincipal pipeline-demo is not ready (${principal:-absent}) — run make demo-access YES=1 first"
 echo "› ServicePrincipal pipeline-demo: ready"
+
+# `--host` is a global option of the CLI: it comes before the subcommand.
+plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
+  || { case "$plan" in
+         *"sign-in"*|*"not signed in"*|*"401"*) fail "the stardelt CLI is not signed in to $NOVA — run: stardelt --host $NOVA login" ;;
+         *) fail "stardelt bundle plan $BUNDLE -t prod failed: $(printf '%s' "$plan" | tail -1)" ;;
+       esac; }
+echo "› stardelt CLI: signed in to $NOVA; the plan reads"
 
 # 0b. The run feed (#79): an ntfy webhook on a random topic, made once and then kept.
 feed="$("$CLI" --host "$NOVA" api destinations_list 2>/dev/null \
@@ -80,14 +96,6 @@ elif [ "$YES" = 1 ]; then
 else
   echo "would: create the destination demo/run-feed (webhook https://ntfy.sh/stardelt-demo-<random>, viewers=[visitors])"
 fi
-
-# `--host` is a global option of the CLI: it comes before the subcommand.
-plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
-  || { case "$plan" in
-         *"sign-in"*|*"not signed in"*|*"401"*) fail "the stardelt CLI is not signed in to $NOVA — run: stardelt login --host $NOVA" ;;
-         *) fail "stardelt bundle plan $BUNDLE -t prod failed: $(printf '%s' "$plan" | tail -1)" ;;
-       esac; }
-echo "› stardelt CLI: signed in to $NOVA; the plan reads"
 
 # 1. The bundle: three scheduled pipelines instead of twelve On demand ones.
 planned=()

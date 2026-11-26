@@ -45,7 +45,7 @@ def test_it_takes_the_host_from_the_stored_sign_in(tmp_path):
 def test_an_unknown_host_is_a_value_error_naming_both_ways(tmp_path):
     with pytest.raises(ValueError) as caught:
         vscode_setup.install(env(tmp_path))
-    assert "--host" in str(caught.value) and "stardelt login" in str(caught.value)
+    assert "--host https://<nova> login" in str(caught.value)
 
 
 def test_the_spark_host_can_be_overridden(tmp_path):
