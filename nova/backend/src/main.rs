@@ -558,6 +558,9 @@ async fn security_headers(req: axum::extract::Request, next: axum::middleware::N
         .or_insert(HeaderValue::from_static("frame-ancestors 'self'"));
     h.entry("referrer-policy")
         .or_insert(HeaderValue::from_static("same-origin"));
+    if let Ok(value) = HeaderValue::from_str(&version::header_value()) {
+        h.entry("x-stardelt-version").or_insert(value);
+    }
     if is_api {
         h.entry("cache-control")
             .or_insert(HeaderValue::from_static("no-store"));
@@ -2455,6 +2458,10 @@ mod router_tests {
             Some("frame-ancestors 'self'")
         );
         assert_eq!(header(&response, "referrer-policy"), Some("same-origin"));
+        assert_eq!(
+            header(&response, "x-stardelt-version"),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
         // `/api/me` carries the signed-in person's sub, email and groups.
         assert_eq!(header(&response, "cache-control"), Some("no-store"));
     }
@@ -2470,6 +2477,10 @@ mod router_tests {
             Some("frame-ancestors 'self'")
         );
         assert_eq!(header(&response, "referrer-policy"), Some("same-origin"));
+        assert_eq!(
+            header(&response, "x-stardelt-version"),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
         // Static assets are cacheable; only the API is `no-store`.
         assert_eq!(header(&response, "cache-control"), None);
     }

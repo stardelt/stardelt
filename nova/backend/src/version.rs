@@ -26,6 +26,13 @@ pub fn current(version: Option<String>, commit: Option<String>) -> Version {
     }
 }
 
+/// The running version for a response header (`main.rs::security_headers`): the value
+/// `/api/version` answers, read per request so a restarted process or a replaced image is
+/// reflected without another cache.
+pub fn header_value() -> String {
+    current(std::env::var("NOVA_VERSION").ok(), None).version
+}
+
 #[utoipa::path(
     get,
     operation_id = "nova_version",
