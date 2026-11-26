@@ -800,3 +800,42 @@ def test_a_production_target_may_name_a_production_catalog(tmp_path):
     )
     assert code == 0
     assert ("GET", "/api/catalog/catalogs") not in calls(session)
+
+
+def test_a_smoke_run_that_succeeds_records_the_deploy_as_applied(tmp_path, monkeypatch):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    ran = [{"action": "ran", "name": "dev-alice-nightly", "runId": "r1", "state": "success"}]
+    monkeypatch.setattr(bundle, "run", lambda *a, **k: ([], ran))
+    session = FakeSession(
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    problems, done = bundle.deploy(nova, tmp_path, "prod", smoke="nightly")
+    assert problems == []
+    assert ran[0] in done
+    body = next(call[2]["json"] for call in session.calls if call[1].endswith("/api/deployments"))
+    assert body["status"] == "applied"
+
+
+def test_a_failed_smoke_run_records_failed_and_is_a_problem(tmp_path, monkeypatch):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    ran = [{"action": "ran", "name": "dev-alice-nightly", "runId": "r1", "state": "failed", "failedTasks": ["run"]}]
+    monkeypatch.setattr(bundle, "run", lambda *a, **k: ([], ran))
+    session = FakeSession(
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 8, "bundle": "sales-etl", "target": "prod", "status": "failed"}),
+    )
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    problems, done = bundle.deploy(nova, tmp_path, "prod", smoke="nightly")
+    assert problems == [("prod", "smoke gate: dev-alice-nightly ended failed (failed tasks: run)")]
+    body = next(call[2]["json"] for call in session.calls if call[1].endswith("/api/deployments"))
+    assert body["status"] == "failed" and body["resources"] == []

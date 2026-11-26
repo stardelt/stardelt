@@ -568,6 +568,20 @@
               ],
               "help": "also run migration statements that are not additive (a changed file is always refused)",
               "flag": true
+            },
+            {
+              "flags": [
+                "--smoke"
+              ],
+              "help": "after the deploy, run this pipeline of the bundle and fail unless it succeeds",
+              "metavar": "NAME"
+            },
+            {
+              "flags": [
+                "--smoke-timeout"
+              ],
+              "help": "with --smoke: give up waiting after N seconds (0: no limit); the run is not stopped",
+              "metavar": "SECONDS"
             }
           ],
           "commands": []

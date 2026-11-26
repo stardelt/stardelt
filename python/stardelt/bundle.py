@@ -1225,7 +1225,7 @@ def _touched(nova, specs, done, stale):
     return touched
 
 
-def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False):
+def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None):
     """Plan, then (unless ``dry_run``) deploy ``target``: ``(problems, results)``.
 
     ``nova`` is a ``stardelt.api.Client``. Every pipeline is first checked by Nova (``pipelines_validate``, the
@@ -1250,7 +1250,10 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     after its last deploy (``modified``) unless ``accept_drift``; the default ``warn`` only reports it. With ``diff`` each
     ``would-update`` (and ``updated``) result carries a ``diff`` text: what Nova would change, field by field.
     ``--prune`` removes the pipelines and the stream apps of this bundle and target that the bundle no
-    longer names; a refused delete stops the deploy with its sentence.
+    longer names; a refused delete stops the deploy with its sentence. ``smoke`` names one pipeline of
+    the bundle (with or without the ``dev-<user>-`` prefix); after the writes it is run and waited
+    for, and a run that does not end ``success`` records the deploy as ``failed`` and is a problem.
+    ``smoke_timeout`` (seconds, default no limit) gives up waiting, which does not stop the run.
     """
     user = nova.me().get("user")
     problems, mode, specs = render(directory, target, user)
@@ -1489,7 +1492,23 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         except api.StardeltApiError as err:
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
-    done.append(_record(nova, stamp, directory, target, "applied", _touched(nova, specs, done, stale), rendered, plan_id=plan_id))
+    touched = _touched(nova, specs, done, stale)
+    if smoke:
+        smoke_problems, smoke_rows = run(
+            nova, directory, target, only=smoke, timeout=smoke_timeout or None
+        )
+        done.extend(smoke_rows)
+        if smoke_problems:
+            done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
+            return [(target, f"smoke gate: {smoke_problems[0][1]}")], done
+        if not smoke_rows or smoke_rows[0]["state"] != "success":
+            ended = smoke_rows[0] if smoke_rows else {"name": smoke, "state": "not started"}
+            reason = f"{ended['name']} ended {ended['state']}"
+            if ended.get("failedTasks"):
+                reason += f" (failed tasks: {', '.join(ended['failedTasks'])})"
+            done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
+            return [(target, f"smoke gate: {reason}")], done
+    done.append(_record(nova, stamp, directory, target, "applied", touched, rendered, plan_id=plan_id))
     return [], done
 
 
