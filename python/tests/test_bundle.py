@@ -879,9 +879,9 @@ def test_source_of_outside_a_repository_is_none(tmp_path):
 
 def test_a_notebook_pipeline_keeps_its_connection_when_the_version_is_pinned():
     spec = {"name": "load", "notebook": {"file": "notebooks/explore.ipynb", "connection": "rnacentral", "params": '{"a": "1"}'}}
-    pinned = bundle._pinned(spec, {"objectVersion": "0f1e2d3c"})
+    pinned = bundle._pinned(spec, None, spec["notebook"], {"objectVersion": "0f1e2d3c"})
     assert pinned["notebook"] == {"name": "explore.ipynb", "objectVersion": "0f1e2d3c", "params": '{"a": "1"}', "connection": "rnacentral"}
-    assert bundle._pinned({"name": "load", "notebook": {"file": "notebooks/explore.ipynb"}}, {"objectVersion": "0f1e2d3c"})["notebook"] == {
+    assert bundle._pinned({"name": "load", "notebook": {"file": "notebooks/explore.ipynb"}}, None, {"file": "notebooks/explore.ipynb"}, {"objectVersion": "0f1e2d3c"})["notebook"] == {
         "name": "explore.ipynb",
         "objectVersion": "0f1e2d3c",
     }
