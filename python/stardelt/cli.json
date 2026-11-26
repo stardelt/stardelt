@@ -612,6 +612,12 @@
               ],
               "help": "deploy a preview: every name is prefixed with ID and its schedule is removed (a development target only)",
               "metavar": "ID"
+            },
+            {
+              "flags": [
+                "--ttl"
+              ],
+              "help": "with --preview: how many days the copy lives (1 to 30; default 7)"
             }
           ],
           "commands": []

@@ -3660,6 +3660,8 @@ async fn run_now_carries_the_deploy_provenance_in_its_note() {
             target: "prod".into(),
             revision: Some("9f3c2a1".into()),
             repository: None,
+            preview: None,
+            expires_at: None,
         },
         "alex",
     );
@@ -7385,6 +7387,8 @@ fn provenance(bundle: &str, target: &str, revision: Option<&str>) -> Provenance 
         target: target.into(),
         revision: revision.map(str::to_string),
         repository: None,
+        preview: None,
+        expires_at: None,
     }
 }
 
@@ -7439,6 +7443,124 @@ async fn a_deploy_stamps_where_the_pipeline_came_from_and_the_view_shows_it() {
         plain.deployment, None,
         "a pipeline made by hand says nothing"
     );
+}
+
+#[tokio::test]
+async fn a_preview_stamp_names_its_expiry() {
+    let resources = analytics_ready();
+    let ada = who("sub-ada", &["analytics"], false);
+    let namespace = crate::cluster::namespace();
+    let expires = (now_utc() + chrono::Duration::days(7))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    let mut body = create_body("daily-trips", "analytics", "select 1");
+    body.provenance = Some(Provenance {
+        preview: Some("pr-123".into()),
+        expires_at: Some(expires.clone()),
+        ..provenance("shop-etl", "dev", None)
+    });
+    let view = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+        .await
+        .expect("created");
+    let deployment = view.deployment.expect("the view shows it");
+    assert_eq!(deployment.preview.as_deref(), Some("pr-123"));
+    assert_eq!(deployment.expires_at.as_deref(), Some(expires.as_str()));
+
+    let stored = stored_pipeline(&resources, "daily-trips").await.unwrap();
+    assert_eq!(
+        stored["metadata"]["annotations"]["stardelt.io/preview"],
+        "pr-123"
+    );
+    assert_eq!(
+        stored["metadata"]["annotations"]["stardelt.io/expires-at"],
+        expires.as_str()
+    );
+
+    // A later stamp without the pair removes both: the copy is not a preview any more.
+    let mut update = update_body("select 2");
+    update.provenance = Some(provenance("shop-etl", "dev", None));
+    let view = update_pipeline(
+        Some(&resources),
+        None,
+        None,
+        None,
+        &ada,
+        &namespace,
+        "daily-trips",
+        update,
+    )
+    .await
+    .expect("updated");
+    let deployment = view.deployment.expect("the view shows it");
+    assert_eq!(
+        (deployment.preview, deployment.expires_at),
+        (None, None),
+        "the redeploy is not a preview"
+    );
+    let stored = stored_pipeline(&resources, "daily-trips").await.unwrap();
+    assert!(
+        stored["metadata"]["annotations"]["stardelt.io/preview"].is_null(),
+        "the preview annotation is gone: {}",
+        stored["metadata"]["annotations"]
+    );
+    assert!(
+        stored["metadata"]["annotations"]["stardelt.io/expires-at"].is_null(),
+        "the expiry annotation is gone: {}",
+        stored["metadata"]["annotations"]
+    );
+}
+
+#[tokio::test]
+async fn a_bad_preview_stamp_is_refused() {
+    let resources = analytics_ready();
+    let ada = who("sub-ada", &["analytics"], false);
+    let past = (now_utc() - chrono::Duration::days(1))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let future = (now_utc() + chrono::Duration::days(7))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    for (preview, expires_at, sentence) in [
+        (
+            Some("pr-123".to_string()),
+            Some(past),
+            "expiresAt must be in the future",
+        ),
+        (
+            Some("pr-123".to_string()),
+            Some("tomorrow".to_string()),
+            "expiresAt must be an RFC 3339 time",
+        ),
+        (
+            Some("PR_123".to_string()),
+            Some(future.clone()),
+            "the preview must be 1 to 20 lower-case letters, digits and dashes",
+        ),
+        (
+            Some("pr-123".to_string()),
+            None,
+            "preview and expiresAt are set together or not at all",
+        ),
+        (
+            None,
+            Some(future.clone()),
+            "preview and expiresAt are set together or not at all",
+        ),
+    ] {
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(Provenance {
+            preview,
+            expires_at,
+            ..provenance("shop-etl", "dev", None)
+        });
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("refused");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), sentence);
+    }
+    assert!(resources.list().await.unwrap().is_empty());
 }
 
 #[tokio::test]

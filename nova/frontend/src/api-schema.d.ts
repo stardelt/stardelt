@@ -3311,11 +3311,17 @@ export interface components {
             name: string;
             namespace: string;
         };
-        /** @description What `view_of` shows of a [`Provenance`], with who deployed and when. */
+        /**
+         * @description What `view_of` shows of a [`Provenance`], with who deployed and when. A preview deploy also
+         *     names its id and the moment the copy is due (`stardelt.io/preview`, `stardelt.io/expires-at`);
+         *     the two come together or not at all.
+         */
         DeploymentView: {
             bundle: string;
             deployedAt?: string | null;
             deployedBy?: string | null;
+            /** @description When the preview copy is due to be removed, when it is one. */
+            expiresAt?: string | null;
             /**
              * @description `true` when what the deploy decides differs from what it wrote: a pipeline's run,
              *     schedule, parameters and options, or a stream's source, sink, engine and restart policy.
@@ -3323,6 +3329,8 @@ export interface components {
              *     for a resource stamped before the digest existed.
              */
             modified?: boolean | null;
+            /** @description The preview this deploy belongs to, when it is one. */
+            preview?: string | null;
             /** @description The repository the bundle was read from: `https://host/path`, for the compare link. */
             repository?: string | null;
             revision?: string | null;
@@ -4350,6 +4358,13 @@ export interface components {
         Provenance: {
             /** @description The bundle's name: 3 to 40 lower-case letters, digits and dashes. */
             bundle: string;
+            /** @description When the preview copy is due to be removed, RFC 3339. At most 31 days after the deploy. */
+            expiresAt?: string | null;
+            /**
+             * @description The preview this deploy belongs to (`stardelt bundle deploy --preview ID`).
+             *     Omitted on a normal deploy; set together with `expires_at`.
+             */
+            preview?: string | null;
             /**
              * @description The bundle's repository as an `https://host/path` address, so a later stage can link the
              *     pull request that promotes a commit. Omitted when the bundle's checkout names none.

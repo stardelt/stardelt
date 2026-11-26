@@ -678,6 +678,10 @@ export type DeploymentView = {
   repository?: string
   deployedBy?: string
   deployedAt?: string
+  /** The preview this deploy belongs to (`stardelt bundle deploy --preview ID`), when it is one. */
+  preview?: string
+  /** When the preview copy is due to be removed, RFC 3339, when it is one. */
+  expiresAt?: string
   /** True when the pipeline was changed after its last deploy (stardelt-nova drift check). */
   modified?: boolean
 }
