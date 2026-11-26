@@ -2,7 +2,7 @@
 | module | area | production lines | test lines | routes | talks to |
 |---|---|---:|---:|---:|---|
 | `pipelines.rs` ⚠ | Pipelines & delivery | 8109 | 11331 | 23 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store, S3 (SeaweedFS), Trino |
-| `auth.rs` ⚠ | Core & identity | 2300 | 2033 | 4 | OIDC provider, PostgreSQL state store |
+| `auth.rs` ⚠ | Core & identity | 2327 | 2092 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `catalog_docs.rs` ⚠ | Catalog | 1875 | 1429 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -69,4 +69,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (68 files)** | | **47736** | **42704** | **157** | |
+| **total (68 files)** | | **47763** | **42763** | **157** | |
