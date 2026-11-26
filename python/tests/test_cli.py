@@ -365,3 +365,17 @@ def test_bundle_validate_text_is_unchanged(tmp_path):
     bundle.init(tmp_path, "shop-etl", "shop")
     code, out, err, _ = run(["bundle", "validate", str(tmp_path)])
     assert (code, out, err) == (0, "dev (development): daily\nprod (production): daily\n", "")
+
+
+def test_samples_load_prints_what_it_loaded():
+    code, out, err, session = run(
+        ["samples", "load", "trips", "--catalog", "playground"],
+        FakeResponse(
+            201,
+            {"created": True, "catalog": "playground", "namespace": "samples", "table": "trips", "rows": 10000},
+        ),
+    )
+    assert (code, err) == (0, "")
+    assert out == "loaded 10,000 rows into playground.samples.trips\n"
+    assert session.calls[0][1] == "https://nova.example/api/samples/trips"
+    assert session.calls[0][2]["params"] == {"catalog": "playground"}
