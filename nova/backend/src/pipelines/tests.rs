@@ -4823,8 +4823,9 @@ fn nova_pipeline(name: &str, group: &str) -> Value {
 /// test, so a typo in the code cannot hide behind the test.
 fn missing_principal_sentence(group: &str) -> String {
     format!(
-        "No principal for this group yet: an administrator creates one with \
-             make sync-principal NAME=pipeline-{group} GROUP={group}"
+        "No principal for this group yet: apply a ServicePrincipal named pipeline-{group} with \
+         ownerGroup {group} (the operator creates its client), or run \
+         make sync-principal NAME=pipeline-{group} GROUP={group}"
     )
 }
 
