@@ -90,7 +90,10 @@ def test_a_missing_path_value_names_what_is_needed():
 
 def test_the_help_lists_every_resource():
     text = shortcuts.summary(OPS)
-    assert "  pipelines: check, create" in text and "  me" in text.splitlines()
+    assert (
+        "  pipelines: backfill-cancel, backfill-start, backfill-state, check, create" in text
+    )
+    assert "  me" in text.splitlines()
     assert len(text.splitlines()) == len(shortcuts.resources(OPS))
 
 
