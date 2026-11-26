@@ -156,6 +156,20 @@ class E2EFreshNode(unittest.TestCase):
         self.assertFalse((self.home / "hetzner-k3s.called").exists(), "a server was created")
         self.assertFalse((self.home / ".cache").exists(), "the run directory was created")
 
+    def test_a_base_domain_gives_the_run_its_own_name(self):
+        done = self.run_script("up", DRY_RUN="1", YES="1", FRESH_BASE_DOMAIN="dev.example.test")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("for fresh-testid.dev.example.test,", done.stdout)
+
+    def test_an_explicit_domain_wins_over_the_base(self):
+        done = self.run_script(
+            "up", DRY_RUN="1", YES="1",
+            FRESH_BASE_DOMAIN="dev.example.test", FRESH_DOMAIN="explicit.example.test",
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("for explicit.example.test,", done.stdout)
+        self.assertNotIn("fresh-testid.", done.stdout)
+
     def test_without_yes_it_refuses_before_creating_a_server(self):
         done = self.run_script("up", YES="", DRY_RUN="")
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)

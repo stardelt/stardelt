@@ -11,6 +11,8 @@
 # Environment:
 #   FRESH_DOMAIN     the base domain the run points at Nova (the run upserts its A record);
 #                    required unless DRY_RUN=1
+#   FRESH_BASE_DOMAIN  the domain a run derives its own name from: fresh-<E2E_RUN_ID>.<base>
+#                    (e.g. dev.stardelt.io); FRESH_DOMAIN, when set, wins
 #   RELEASE_DIR      a release folder (install.yaml, platform-minimal.yaml) to install instead of the checkout (#1625)
 #   E2E_RUN_ID       the run's name in $HOME/.cache/stardelt-e2e/<id> (default: UTC timestamp)
 #   FRESH_NODE_TYPE  the Hetzner server type (default cpx42, 16 GB: the demo profile needs it)
@@ -44,6 +46,13 @@ KEEP_ON_FAILURE="${KEEP_ON_FAILURE:-0}"
 FRESH_NODE_TYPE="${FRESH_NODE_TYPE:-cpx42}"
 LOCATION="${LOCATION:-nbg1}"
 E2E_RUN_ID="${E2E_RUN_ID:-$(date -u +%Y%m%d%H%M%S)}"
+# The run owns its own name set: Let's Encrypt issues five certificates per exact set of names per
+# week, so a shared FRESH_DOMAIN spends every other run's budget (#1739). `FRESH_DOMAIN` still wins
+# when a person sets it (a rerun under an old name, or a domain that must not change).
+FRESH_BASE_DOMAIN="${FRESH_BASE_DOMAIN:-}"
+if [ -z "${FRESH_DOMAIN:-}" ] && [ -n "$FRESH_BASE_DOMAIN" ]; then
+  FRESH_DOMAIN="fresh-${E2E_RUN_ID}.${FRESH_BASE_DOMAIN}"
+fi
 # The three paths stay in the run directory: a `down` run finds them from the same name.
 FRESH_NAME="stardelt-fresh-e2e-${E2E_RUN_ID}"
 RUN_DIR="$HOME/.cache/stardelt-e2e/${E2E_RUN_ID}"
@@ -80,7 +89,7 @@ preflight() {
     missing=1
   fi
   if [ -z "${FRESH_DOMAIN:-}" ] && [ "$DRY_RUN" != 1 ]; then
-    echo "set FRESH_DOMAIN to a domain whose A record the run may create (cloudflare-dns.sh upserts it)" >&2
+    echo "set FRESH_BASE_DOMAIN (e.g. dev.stardelt.io; the run becomes fresh-<run id>.<base>) or FRESH_DOMAIN" >&2
     missing=1
   fi
   if [ -n "$RELEASE_DIR" ]; then
