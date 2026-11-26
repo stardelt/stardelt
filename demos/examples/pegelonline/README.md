@@ -7,6 +7,8 @@ Tables:
 - `shared.silver.pegelonline_measurements` (deduplicated by `(station_uuid, timeseries, measured_at)`, keep newest `ingested_at`)
 - `shared.gold.pegelonline_station_latest` (latest measurement per `(station_uuid, timeseries)`)
 - `shared.gold.pegelonline_station_hourly` (hourly averages/min/max per gauge/timeseries)
+- `shared.gold.pegelonline_levels_v1` (a view over `pegelonline_station_latest`; the stable
+  name of the data product — readers are granted this, not the tables behind it)
 
 ## Setup
 
