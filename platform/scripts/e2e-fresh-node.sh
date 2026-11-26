@@ -14,6 +14,7 @@
 #   FRESH_BASE_DOMAIN  the domain a run derives its own name from: fresh-<E2E_RUN_ID>.<base>
 #                    (e.g. dev.stardelt.io); FRESH_DOMAIN, when set, wins
 #   RELEASE_DIR      a release folder (install.yaml, platform-minimal.yaml) to install instead of the checkout (#1625)
+#   UPGRADE_FROM     a previous release folder (install.yaml): install it first, then upgrade to RELEASE_DIR in place (#1817)
 #   E2E_RUN_ID       the run's name in $HOME/.cache/stardelt-e2e/<id> (default: UTC timestamp)
 #   FRESH_NODE_TYPE  the Hetzner server type (default cpx42, 16 GB: the demo profile needs it)
 #   KEEP_ON_FAILURE  1 keeps the server after a failed phase for a look (default 0)
@@ -40,6 +41,7 @@ OPERATOR_DEPLOY="stardelt-operator"
 # A release folder to install instead of the checkout: the files `release / Cut` writes, so the
 # gate proves the artifact people install (#1625).
 RELEASE_DIR="${RELEASE_DIR:-}"
+UPGRADE_FROM="${UPGRADE_FROM:-}"
 
 DRY_RUN="${DRY_RUN:-0}"
 KEEP_ON_FAILURE="${KEEP_ON_FAILURE:-0}"
@@ -101,6 +103,15 @@ preflight() {
       fi
     done
   fi
+  if [ -n "$UPGRADE_FROM" ]; then
+    if [ -z "$RELEASE_DIR" ]; then
+      echo "UPGRADE_FROM needs RELEASE_DIR: the release to upgrade to" >&2
+      missing=1
+    elif [ ! -f "$UPGRADE_FROM/install.yaml" ]; then
+      echo "UPGRADE_FROM=$UPGRADE_FROM has no install.yaml" >&2
+      missing=1
+    fi
+  fi
   if [ "$DRY_RUN" != 1 ]; then
     for tool in hetzner-k3s hcloud helm kubectl; do
       if ! command -v "$tool" >/dev/null 2>&1; then
@@ -113,7 +124,7 @@ preflight() {
     exit 1
   fi
   if [ "$DRY_RUN" = 1 ]; then
-    echo "would create ${FRESH_NAME} (${FRESH_NODE_TYPE} @ ${LOCATION}), install the operator, apply platform-minimal.yaml for ${FRESH_DOMAIN:-<domain>}, verify, delete"
+    echo "would create ${FRESH_NAME} (${FRESH_NODE_TYPE} @ ${LOCATION}), ${UPGRADE_FROM:+install $(basename "$UPGRADE_FROM") first, }install the operator, apply platform-minimal.yaml for ${FRESH_DOMAIN:-<domain>}, verify, delete"
     exit 0
   fi
 }
@@ -272,9 +283,29 @@ wait_for_resources() {
 # install_from_release applies the release folder's install.yaml (the namespace plus the rendered
 # operator chart) and waits for the Deployment the checkout's helm release would also leave
 # behind (#1625). A function, not `bash -c`, so the paths stay quoted once.
-install_from_release() {
-  kubectl apply --server-side -f "$RELEASE_DIR/install.yaml" &&
+install_from_dir() { # <release folder>
+  kubectl apply --server-side -f "${1}/install.yaml" &&
     kubectl -n "$NAMESPACE" rollout status "deploy/${OPERATOR_DEPLOY}" --timeout=300s
+}
+
+install_from_release() {
+  install_from_dir "$RELEASE_DIR"
+}
+
+# The upgrade a user makes: the new install.yaml over the running one, as the release notes say.
+# The PlatformInstance is not touched. The new operator reconciles it on start; the settle time
+# lets components that changed begin to roll before readiness is polled again.
+upgrade_to_release() {
+  local want image
+  kubectl apply --server-side --force-conflicts -f "$RELEASE_DIR/install.yaml" &&
+    kubectl -n "$NAMESPACE" rollout status "deploy/${OPERATOR_DEPLOY}" --timeout=300s || return 1
+  want="$(sed -n 's/^  stardelt-operator: {digest: "\(sha256:[0-9a-f]*\)".*/\1/p' "$RELEASE_DIR/versions.yaml" 2>/dev/null || true)"
+  image="$(kubectl -n "$NAMESPACE" get deploy "$OPERATOR_DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  if [ -n "$want" ] && [ "${image#*@}" != "$want" ]; then
+    echo "e2e-fresh-node: the operator runs ${image:-nothing}, not the release's ${want}" >&2
+    return 1
+  fi
+  sleep "${UPGRADE_SETTLE_SECONDS:-120}"
 }
 
 # CoreDNS logs every query from here on, so the run can list what the platform resolves
@@ -305,7 +336,9 @@ phase_up() {
 
   run_phase "dns log" "$RUN_DIR/01-fresh-node.log" -- enable_dns_log || return 1
 
-  if [ -n "$RELEASE_DIR" ]; then
+  if [ -n "$UPGRADE_FROM" ]; then
+    run_phase "operator $(basename "$UPGRADE_FROM")" "$RUN_DIR/02-operator.log" -- install_from_dir "$UPGRADE_FROM" || return 1
+  elif [ -n "$RELEASE_DIR" ]; then
     run_phase "operator" "$RUN_DIR/02-operator.log" -- install_from_release || return 1
   else
     run_phase "operator" "$RUN_DIR/02-operator.log" -- \
@@ -336,6 +369,12 @@ phase_up() {
   # pillars itself, and the run applies it as shipped (#1810).
   run_phase "verify" "$RUN_DIR/04-verify.log" -- \
     bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" product || return 1
+  if [ -n "$UPGRADE_FROM" ]; then
+    run_phase "upgrade to $(basename "$RELEASE_DIR")" "$RUN_DIR/05-upgrade.log" -- upgrade_to_release || return 1
+    run_phase "platform ready after upgrade" "$RUN_DIR/05-upgrade.log" -- wait_for_resources || return 1
+    run_phase "verify after upgrade" "$RUN_DIR/05-upgrade.log" -- \
+      bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" product || return 1
+  fi
   run_phase "inventory" "$RUN_DIR/05-inventory.log" -- collect_inventory || return 1
   local inv_line
   while IFS= read -r inv_line; do
@@ -400,6 +439,7 @@ report() {
   else
     out+="install: checkout"$'\n'
   fi
+  [ -n "$UPGRADE_FROM" ] && out+="upgraded from: ${UPGRADE_FROM}"$'\n'
   out+="base domain: ${FRESH_DOMAIN:-<none>}"$'\n'
   out+="wall time: ${SECONDS}s"$'\n'
   out+="logs: ${RUN_DIR}"$'\n'

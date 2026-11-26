@@ -315,6 +315,56 @@ class E2EFreshNode(unittest.TestCase):
         self.assertFalse((self.home / "hetzner-k3s.called").exists(), "a server was created")
         self.assertFalse((self.home / ".cache").exists(), "the run directory was created")
 
+    def _release(self, name, install="kind: Namespace\nmetadata:\n  name: stardelt\n",
+                 minimal="# from the release folder\nbaseDomain: data.example.com\n  profile: demo\n"):
+        folder = self.tmp / name
+        folder.mkdir()
+        (folder / "install.yaml").write_text(install)
+        (folder / "platform-minimal.yaml").write_text(minimal)
+        return folder
+
+    def test_upgrade_from_needs_a_release_dir(self):
+        old = self._release("old")
+        done = self.run_script("up", YES="1", DRY_RUN="1", UPGRADE_FROM=str(old))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("UPGRADE_FROM needs RELEASE_DIR", done.stderr)
+
+    def test_upgrade_from_without_install_yaml_is_refused(self):
+        new = self._release("new")
+        old = self.tmp / "old-empty"
+        old.mkdir()
+        done = self.run_script(
+            "up", YES="1", DRY_RUN="1", RELEASE_DIR=str(new), UPGRADE_FROM=str(old)
+        )
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("has no install.yaml", done.stderr)
+        self.assertIn(f"UPGRADE_FROM={old}", done.stderr)
+
+    def test_upgrade_from_installs_the_old_release_first(self):
+        new = self._release("new", install="kind: Namespace\nmetadata:\n  name: new\n")
+        old = self._release("old", install="kind: Namespace\nmetadata:\n  name: old\n")
+        self._write(self.bindir / "kubectl", FAKE_KUBECTL_RECORDING)
+        self.run_script(
+            "up", YES="1", FRESH_DOMAIN="example.test",
+            RELEASE_DIR=str(new), UPGRADE_FROM=str(old),
+        )
+        calls = self.home / "kubectl.calls"
+        applied = [
+            line for line in calls.read_text().splitlines() if "apply --server-side -f" in line
+        ] if calls.exists() else []
+        self.assertTrue(applied, "no install.yaml was applied")
+        self.assertIn(f"-f {old}/install.yaml", applied[0], applied[0])
+        self.assertNotIn(f"-f {new}/install.yaml", applied[0], applied[0])
+
+    def test_dry_run_names_the_upgrade(self):
+        new = self._release("new")
+        old = self._release("old")
+        done = self.run_script(
+            "up", YES="1", DRY_RUN="1", RELEASE_DIR=str(new), UPGRADE_FROM=str(old)
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("install old first, install the operator", done.stdout)
+
     def test_down_deletes_every_run_this_checkout_started(self):
         (self.fresh_dir / ".fresh-stardelt-fresh-a.yaml").write_text("cluster_name: stardelt-fresh-a\n")
         (self.fresh_dir / ".fresh-stardelt-fresh-b.yaml").write_text("cluster_name: stardelt-fresh-b\n")
