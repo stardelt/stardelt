@@ -194,7 +194,7 @@ pub fn substitute_namespace(values: &mut Value, namespace: &str) {
 ///
 /// Anything here can be overridden by the CR: this is a default, not a policy.
 pub fn profile_values(component: &str, profile: Profile) -> Value {
-    if !matches!(profile, Profile::Demo) {
+    if !matches!(profile, Profile::Starter | Profile::Demo) {
         return Value::Object(Map::new());
     }
     match component {
@@ -1084,8 +1084,22 @@ mod tests {
         // limit plus the heap headroom leaves at least 400MB of the heap free, and the
         // kubelet limit sits above the heap.
         let expected = [
-            (Profile::Demo, "1500m", "600MB", "450MB", "1800Mi", "2200Mi"),
-            (Profile::Full, "2G", "800MB", "600MB", "2300Mi", "3000Mi"),
+            (
+                Profile::Starter,
+                "1500m",
+                "600MB",
+                "450MB",
+                "1800Mi",
+                "2200Mi",
+            ),
+            (
+                Profile::Enterprise,
+                "2G",
+                "800MB",
+                "600MB",
+                "2300Mi",
+                "3000Mi",
+            ),
             (Profile::Airgap, "2G", "800MB", "600MB", "2300Mi", "3000Mi"),
         ];
         for (profile, heap, per_node, headroom, request, limit) in expected {

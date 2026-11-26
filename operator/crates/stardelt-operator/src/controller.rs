@@ -664,9 +664,8 @@ async fn resolve_component_values(
 /// The profile as it appears in a status message.
 fn profile_name(profile: Profile) -> &'static str {
     match profile {
-        Profile::Demo => "demo",
-        Profile::Full => "full",
-        Profile::Airgap => "airgap",
+        Profile::Starter | Profile::Demo => "starter",
+        Profile::Enterprise | Profile::Full | Profile::Airgap => "enterprise",
     }
 }
 
@@ -2515,6 +2514,21 @@ fn platform_status(
         now,
         waiting_message(core),
     )];
+    if let Some(message) = instance.spec.profile.deprecated_message() {
+        conditions.push(crate::conditions::set_condition(
+            instance
+                .status
+                .as_ref()
+                .map(|s| s.conditions.as_slice())
+                .unwrap_or(&[]),
+            "ProfileDeprecated",
+            "True",
+            "DeprecatedName",
+            Some(message.to_string()),
+            instance.metadata.generation,
+            now,
+        ));
+    }
     let previous_monitoring = instance.status.as_ref().and_then(|s| {
         s.conditions
             .iter()
@@ -3048,7 +3062,7 @@ mod tests {
 
         assert_eq!(
             outcome.components[0].message.as_deref(),
-            Some("planned (dry-run, profile=demo)")
+            Some("planned (dry-run, profile=starter)")
         );
         assert!(!outcome.components[0].ready);
         assert!(outcome.components[0].applied_hash.is_none());

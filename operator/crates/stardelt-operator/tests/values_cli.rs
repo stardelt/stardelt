@@ -22,6 +22,8 @@ fn parse_stdout(output: &Output) -> Value {
 #[test]
 fn prints_the_effective_values_for_every_profile() {
     for (profile, arg) in [
+        (Profile::Starter, "starter"),
+        (Profile::Enterprise, "enterprise"),
         (Profile::Demo, "demo"),
         (Profile::Full, "full"),
         (Profile::Airgap, "airgap"),
@@ -75,7 +77,7 @@ fn an_unknown_profile_is_a_usage_error() {
         "usage errors print nothing to stdout"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("<demo|full|airgap>"),
+        String::from_utf8_lossy(&output.stderr).contains("<starter|enterprise|demo|full|airgap>"),
         "stderr lists the profiles: {}",
         String::from_utf8_lossy(&output.stderr)
     );

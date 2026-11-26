@@ -33,12 +33,12 @@ fn meta(namespace: &str) -> ObjectMeta {
     }
 }
 
-/// `KafkaNodePool` `kafka`: one node that is both controller and broker. The demo profile keeps a
-/// 5Gi claim with `deleteClaim: false` — the same as the platform's `manifests/kafka.yaml`, so a
-/// broker restart does not delete the topics a `StreamApp` reads; `full` keeps 10Gi.
+/// `KafkaNodePool` `kafka`: one node that is both controller and broker. The starter profile keeps
+/// a 5Gi claim with `deleteClaim: false` — the same as the platform's `manifests/kafka.yaml`, so a
+/// broker restart does not delete the topics a `StreamApp` reads; `enterprise` keeps 10Gi.
 pub fn node_pool(namespace: &str, profile: Profile) -> DynamicObject {
     let storage = match profile {
-        Profile::Demo => {
+        Profile::Starter | Profile::Demo => {
             json!({"type": "persistent-claim", "size": "5Gi", "deleteClaim": false})
         }
         _ => json!({"type": "persistent-claim", "size": "10Gi", "deleteClaim": false}),

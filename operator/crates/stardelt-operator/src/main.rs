@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     run_controller()
 }
 
-/// `stardelt-operator values <component> <demo|full|airgap> [--identity <baseDomain>]`.
+/// `stardelt-operator values <component> <starter|enterprise|demo|full|airgap> [--identity <baseDomain>]`.
 ///
 /// With `--identity` the identity overlay is merged last and `__BASE_DOMAIN__` is replaced,
 /// in the controller's order (controller.rs:286-298), so the document can be diffed against
@@ -61,7 +61,7 @@ fn values_command(args: Vec<String>) -> anyhow::Result<()> {
 /// A CLI misuse: print the usage line on stderr and exit 2.
 fn usage() -> ! {
     eprintln!(
-        "usage: stardelt-operator values <component> <demo|full|airgap> [--identity <baseDomain>]"
+        "usage: stardelt-operator values <component> <starter|enterprise|demo|full|airgap> [--identity <baseDomain>]"
     );
     std::process::exit(2)
 }
@@ -114,7 +114,7 @@ fn checklist_usage() -> ! {
 /// `stardelt-operator --help`.
 fn print_usage() {
     println!(
-        "usage: stardelt-operator values <component> <demo|full|airgap> [--identity <baseDomain>]"
+        "usage: stardelt-operator values <component> <starter|enterprise|demo|full|airgap> [--identity <baseDomain>]"
     );
     println!("       stardelt-operator identity-checklist <platforminstance.yaml> [--format json]");
 }
