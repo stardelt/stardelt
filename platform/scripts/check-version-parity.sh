@@ -57,10 +57,11 @@ kc_manifest_ref="$(sed -n 's|^[[:space:]]*image:[[:space:]]*quay.io/keycloak/key
 # The manifest carries `tag@sha256:…` (stardelt-platform#1576): compare the tag, and
 # require the digest separately, like the operator pin below.
 kc_manifest="${kc_manifest_ref%@*}"
-kc_values="$(awk '
+kc_values_ref="$(awk '
   /repository:[[:space:]]*quay.io\/keycloak\/keycloak/ { want = 1; next }
   want && /tag:/ { gsub(/["[:space:]]/, "", $2); print $2; exit }
 ' chart/values.yaml)"
+kc_values="${kc_values_ref%@*}"
 if [[ -z "$kc_make" || "$kc_make" != "$kc_manifest" || "$kc_make" != "$kc_values" ]]; then
   echo "✗ keycloak image: Makefile='${kc_make}', manifests/keycloak.yaml='${kc_manifest_ref}', chart/values.yaml='${kc_values}'" >&2
   status=1
@@ -71,6 +72,24 @@ fi
 if [[ ! "$kc_manifest_ref" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]]; then
   echo "✗ keycloak image: manifests/keycloak.yaml '${kc_manifest_ref}' is not a tag@sha256:<64 hex> pin" >&2
   status=1
+fi
+
+if [[ ! "$kc_values_ref" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+  echo "✗ keycloak image: chart/values.yaml '${kc_values_ref}' is not a tag@sha256:<64 hex> pin" >&2
+  status=1
+fi
+
+# The operator's constant is the copy a release install runs (stardelt/stardelt#1898).
+if [[ ! -f ../operator/crates/stardelt-operator/src/keycloak.rs ]]; then
+  echo "– keycloak image: operator constant not present"
+else
+  kc_operator_ref="$(sed -n 's|^pub const IMAGE: &str = "quay.io/keycloak/keycloak:\([^"]*\)";$|\1|p' ../operator/crates/stardelt-operator/src/keycloak.rs)"
+  if [[ "${kc_operator_ref%@*}" != "$kc_make" || ! "$kc_operator_ref" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "✗ keycloak image: operator keycloak.rs '${kc_operator_ref}' must be ${kc_make}@sha256:<64 hex>" >&2
+    status=1
+  else
+    echo "✓ keycloak image operator ${kc_operator_ref}"
+  fi
 fi
 
 # The operator's image is pinned only in helm-values/operator.yaml (`tag@sha256:…`, #519/#521).

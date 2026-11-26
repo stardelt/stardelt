@@ -45,7 +45,7 @@ pub const REALM_KEY: &str = "stardelt-realm.json";
 pub const REALM_MOUNT: &str = "/opt/keycloak/data/import";
 /// Image of the identity provider. `stardelt-platform` pins the same tag in the Makefile, the
 /// manifest and `chart/values.yaml` (their `check-version-parity.sh` keeps the three equal).
-pub const IMAGE: &str = "quay.io/keycloak/keycloak:26.8.2";
+pub const IMAGE: &str = "quay.io/keycloak/keycloak:26.8.2@sha256:c68e286cacd87b942ac1939a0a1481461109d6acd3a57dc496969a319a76bbf0";
 
 /// The realm template, verbatim from `stardelt-platform` (`chart/files/keycloak-realm.json`).
 /// Hosts are rendered per instance; the client secrets stay `${STARDELT_*_SECRET}` placeholders
@@ -1010,10 +1010,7 @@ mod tests {
         );
 
         assert_eq!(container.name, "keycloak");
-        assert_eq!(
-            container.image.as_deref(),
-            Some("quay.io/keycloak/keycloak:26.8.2")
-        );
+        assert_eq!(container.image.as_deref(), Some(IMAGE));
         assert_eq!(
             container
                 .args
@@ -1529,6 +1526,20 @@ mod tests {
         assert!(
             names.iter().all(|n| !n.starts_with("STARDELT_LDAP_")),
             "a realm without a directory gets no bind variables: {names:?}"
+        );
+    }
+
+    #[test]
+    fn the_keycloak_image_is_pinned_by_digest() {
+        let (tag, digest) = IMAGE
+            .split_once('@')
+            .expect("IMAGE carries @sha256:<64 hex>");
+        assert_eq!(tag, "quay.io/keycloak/keycloak:26.8.2");
+        assert!(
+            digest.len() == 71
+                && digest.starts_with("sha256:")
+                && digest[7..].chars().all(|c| c.is_ascii_hexdigit()),
+            "IMAGE digest is not sha256:<64 hex>: {IMAGE}"
         );
     }
 
