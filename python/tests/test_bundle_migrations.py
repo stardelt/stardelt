@@ -278,7 +278,8 @@ def test_a_preview_refuses_a_target_whose_migrations_are_still_pending(tmp_path)
     build(tmp_path, manifest=DEV_MANIFEST)
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-123"],
-        ME, FakeResponse(payload={"catalogs": [], "default": "gold"}), FakeResponse(payload=PLAN),
+        ME, FakeResponse(payload={"pipelines": []}), FakeResponse(payload={"namespace": "stardelt", "streams": []}),
+        FakeResponse(payload={"catalogs": [], "default": "gold"}), FakeResponse(payload=PLAN),
     )
     assert (code, out) == (2, "")
     assert err == (
@@ -287,6 +288,8 @@ def test_a_preview_refuses_a_target_whose_migrations_are_still_pending(tmp_path)
     )
     assert calls(session) == [
         ("GET", "/api/me"),
+        ("GET", "/api/pipelines"),
+        ("GET", "/api/streams"),
         ("GET", "/api/catalog/catalogs"),
         ("POST", "/api/migrations/plan"),
     ], "nothing is written"
@@ -297,7 +300,8 @@ def test_a_preview_deploys_when_every_migration_is_in_the_ledger(tmp_path):
     applied = {**PLAN, "files": [{**PLAN["files"][0]}, {**PLAN["files"][1], "status": "applied"}]}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-123"],
-        ME, FakeResponse(payload={"catalogs": [], "default": "gold"}), FakeResponse(payload=applied),
+        ME, FakeResponse(payload={"pipelines": []}), FakeResponse(payload={"namespace": "stardelt", "streams": []}),
+        FakeResponse(payload={"catalogs": [], "default": "gold"}), FakeResponse(payload=applied),
         FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), FakeResponse(payload=APPLIED),
         FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "pr-123-load"}),
         FakeResponse(payload={"pipelines": [{"name": "pr-123-load", "namespace": "stardelt"}]}),
