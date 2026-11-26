@@ -16,6 +16,8 @@
 #   names the version (the wheel is then that version's GitHub release asset).
 # J3 write: the run applies `Catalog/journey`, writes three rows through Trino and deletes the
 #   catalog on exit.
+# X1 exit-read: the three rows are read back with plain pyiceberg, straight from the S3 gateway —
+#   no catalog, no stardelt component in the path (#1806 X1).
 #
 # Exit codes: 0 everything passed, 1 a check failed, 3 nothing could be checked (no kubectl,
 # no identity provider, no wheel). Needs: kubectl, curl, python3 (venv).
@@ -42,10 +44,14 @@ unknown() {
 tmp="$(mktemp -d)"
 chmod 700 "$tmp"
 forward_pid=""
+s3_forward_pid=""
 # shellcheck disable=SC2329  # called by the trap below
 cleanup() {
   if [ -n "$forward_pid" ] && kill -0 "$forward_pid" 2>/dev/null; then
     kill "$forward_pid" 2>/dev/null || true
+  fi
+  if [ -n "$s3_forward_pid" ] && kill -0 "$s3_forward_pid" 2>/dev/null; then
+    kill "$s3_forward_pid" 2>/dev/null || true
   fi
   if [ "$KEEP" != 1 ] && command -v kubectl >/dev/null 2>&1; then
     kubectl -n "$NAMESPACE" delete "serviceprincipal/${PRINCIPAL}" --ignore-not-found >/dev/null 2>&1 || true
@@ -289,6 +295,49 @@ EOF
   fi
 }
 
+# --- X1: the way out ----------------------------------------------------------------------
+phase_exit_read() {
+  local venv
+  if ! command -v kubectl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    unknown exit-read '"kubectl and python3 are needed"'
+    return 0
+  fi
+  venv="$tmp/iceberg-venv"
+  if ! python3 -m venv "$venv" >/dev/null 2>&1; then
+    unknown exit-read '"python3 -m venv is not available"'
+    return 0
+  fi
+  if ! "$venv/bin/pip" install --quiet --disable-pip-version-check "pyiceberg[pyarrow]" boto3 >"$tmp/iceberg-pip.log" 2>&1; then
+    bad exit-read "\"pip install pyiceberg[pyarrow] boto3 failed: $(tail -c 200 "$tmp/iceberg-pip.log")\""
+    return 0
+  fi
+  kubectl -n "$NAMESPACE" get secret stardelt-s3-creds -o jsonpath='{.data.access-key}' | base64 -d >"$tmp/s3-access"
+  kubectl -n "$NAMESPACE" get secret stardelt-s3-creds -o jsonpath='{.data.secret-key}' | base64 -d >"$tmp/s3-secret"
+  chmod 600 "$tmp/s3-access" "$tmp/s3-secret"
+  kubectl -n "$NAMESPACE" port-forward svc/seaweedfs-s3 18333:8333 >/dev/null 2>&1 &
+  s3_forward_pid=$!
+  local attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    if curl -sS --max-time 3 -o /dev/null http://127.0.0.1:18333/; then
+      break
+    fi
+    if ! kill -0 "$s3_forward_pid" 2>/dev/null; then
+      bad exit-read '"port-forward to svc/seaweedfs-s3 exited immediately"'
+      return 0
+    fi
+    sleep 0.5
+    attempt=$((attempt + 1))
+  done
+  local line
+  if ! line="$("$venv/bin/python" "$PLATFORM_DIR/scripts/journey_read.py" \
+    --endpoint http://127.0.0.1:18333 --bucket lakehouse --needle /e2e/exit_test/metadata/ \
+    --access-key-file "$tmp/s3-access" --secret-key-file "$tmp/s3-secret" --rows 3)"; then
+    bad exit-read "\"the table could not be read without stardelt: ${line:-no answer}\""
+    return 0
+  fi
+  ok exit-read "$line"
+}
+
 # --- main ---------------------------------------------------------------------------------
 case "${1:-all}" in
   all | identity)
@@ -296,12 +345,14 @@ case "${1:-all}" in
     if [ "${1:-all}" = all ]; then
       phase_client
       phase_write
+      phase_exit_read
     fi
     ;;
   client) phase_client ;;
   write) phase_write ;;
+  exit-read) phase_exit_read ;;
   *)
-    echo "journey-fresh-node: unknown phase '$1' (all, identity, client, write)" >&2
+    echo "journey-fresh-node: unknown phase '$1' (all, identity, client, write, exit-read)" >&2
     exit 2
     ;;
 esac
