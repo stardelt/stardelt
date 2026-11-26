@@ -63,10 +63,10 @@ pub fn golden_values(component: &str) -> Value {
         "airflow" => serde_yaml::from_str(include_str!("../values/airflow.yaml"))
             .expect("values/airflow.yaml is not valid YAML"),
         // The `dashboards` pillar: the platform's helm-values/superset.yaml with short in-cluster
-        // addresses. The analyst-role script is injected from src/ because the chart mounts
-        // `extraConfigs` as a ConfigMap and the init Job runs what is there, exactly like the
-        // platform's `--set-file` in its Makefile. The OIDC/login snippet is injected here
-        // because it is a Python file, like `jupyterhub_oidc.py`.
+        // addresses. The analyst-role and nova-user scripts are injected from src/ because the
+        // chart mounts `extraConfigs` as a ConfigMap and the init Job runs what is there, exactly
+        // like the platform's `--set-file` in its Makefile. The OIDC/login snippet is injected
+        // here because it is a Python file, like `jupyterhub_oidc.py`.
         "superset" => {
             let mut values: Value = serde_yaml::from_str(include_str!("../values/superset.yaml"))
                 .expect("values/superset.yaml is not valid YAML");
@@ -74,6 +74,8 @@ pub fn golden_values(component: &str) -> Value {
                 Value::String(include_str!("superset_oidc.py").into());
             values["extraConfigs"]["superset-analyst-role.py"] =
                 Value::String(include_str!("superset_analyst_role.py").into());
+            values["extraConfigs"]["superset-nova-user.py"] =
+                Value::String(include_str!("superset_nova_user.py").into());
             values
         }
         // The catalog's permission store (O5): the platform's helm-values/openfga.yaml, verbatim —
@@ -1683,6 +1685,34 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(import.contains("trino://superset@trino:8080/shared"));
+    }
+
+    /// Every script the init Job runs is in `extraConfigs` (#1734): the init script runs
+    /// under `set -eu`, so one missing file fails the hook on every retry.
+    #[test]
+    fn every_script_the_superset_init_runs_is_shipped() {
+        let values = golden_values("superset");
+        let init_script = values["extraConfigs"]["superset_init.sh"].as_str().unwrap();
+        let mut ran = 0;
+        for line in init_script.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("python \"") {
+                let name = rest.split('"').next().unwrap();
+                assert!(
+                    values["extraConfigs"][name].is_string(),
+                    "superset_init.sh runs {name}, but extraConfigs has no such file"
+                );
+                ran += 1;
+            }
+        }
+        assert_eq!(
+            ran, 2,
+            "the init script runs the analyst-role and nova-user scripts"
+        );
+        assert_eq!(
+            values["extraConfigs"]["superset-nova-user.py"],
+            include_str!("superset_nova_user.py")
+        );
     }
 
     /// platform#1594 pinned the chart's statsd exporter and the bundled PostgreSQL. The operator
