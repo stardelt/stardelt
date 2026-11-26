@@ -204,7 +204,7 @@ mod fake_airflow {
         Json, Router,
         extract::{OriginalUri, Path, Query, State},
         http::{HeaderMap, StatusCode, Uri, header},
-        routing::{get, patch, post},
+        routing::{get, patch, post, put},
     };
     use serde_json::{Value, json};
 
@@ -248,6 +248,16 @@ mod fake_airflow {
         pub batch_bodies: Vec<Value>,
         /// When set, the batch listing answers `500`.
         pub fail_batch: bool,
+        /// The logical dates `POST /api/v2/backfills/dry_run` plans; its `total_entries` is
+        /// their number.
+        pub dry_dates: Vec<String>,
+        /// Every dry run's JSON body, in order.
+        pub dry_run_bodies: Vec<Value>,
+        /// Every backfill create's JSON body, in order.
+        pub backfill_bodies: Vec<Value>,
+        /// When set, `POST /api/v2/backfills` answers this status and body (the 409 of an open
+        /// backfill).
+        pub fail_backfill: Option<(u16, Value)>,
     }
 
     pub type Shared = Arc<Mutex<Fake>>;
@@ -260,6 +270,7 @@ mod fake_airflow {
                 dag("stardelt__hidden"),
             ],
             log_page: log_page(),
+            dry_dates: vec!["2026-10-09T02:00:00Z".into(), "2026-10-10T02:00:00Z".into()],
             ..Fake::default()
         };
         fake.runs
@@ -607,6 +618,96 @@ mod fake_airflow {
         })))
     }
 
+    /// Airflow's backfill dry run: the dates a range would create (spike #1876 B2).
+    async fn dry_run_backfill(
+        State(state): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, Refusal> {
+        let mut state = state.lock().unwrap();
+        remember(&mut state, "POST", &uri);
+        authorize(&headers)?;
+        state.dry_run_bodies.push(body);
+        let dates: Vec<Value> = state
+            .dry_dates
+            .iter()
+            .map(|date| json!({ "logical_date": date, "partition_key": null }))
+            .collect();
+        let total = dates.len();
+        Ok(Json(json!({ "total_entries": total, "backfills": dates })))
+    }
+
+    /// One backfill as Airflow reports it: the object names no runs.
+    fn backfill_doc(completed_at: Value) -> Value {
+        json!({
+            "id": 7,
+            "dag_id": "stardelt__smoke",
+            "from_date": "2026-10-09T00:00:00Z",
+            "to_date": "2026-10-10T23:59:59Z",
+            "is_paused": false,
+            "reprocess_behavior": "none",
+            "created_at": "2026-11-26T10:00:00Z",
+            "completed_at": completed_at
+        })
+    }
+
+    /// `POST /api/v2/backfills`: one open backfill per DAG, so a configured failure answers the
+    /// 409 of a second create (spike #1876 B4).
+    async fn create_backfill(
+        State(state): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<(StatusCode, Json<Value>), Refusal> {
+        let mut state = state.lock().unwrap();
+        remember(&mut state, "POST", &uri);
+        authorize(&headers)?;
+        if let Some((status, body)) = state.fail_backfill.clone() {
+            let status = StatusCode::from_u16(status).expect("a real status code");
+            return Err((status, Json(body)));
+        }
+        state.backfill_bodies.push(body);
+        Ok((StatusCode::CREATED, Json(backfill_doc(Value::Null))))
+    }
+
+    async fn one_backfill(
+        State(state): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        Path(id): Path<i64>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, Refusal> {
+        let mut state = state.lock().unwrap();
+        remember(&mut state, "GET", &uri);
+        authorize(&headers)?;
+        if id != 7 {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "detail": "Backfill not found" })),
+            ));
+        }
+        Ok(Json(backfill_doc(Value::Null)))
+    }
+
+    /// `PUT /api/v2/backfills/{id}/cancel`: sets `completed_at` (spike #1876 B4).
+    async fn cancel_backfill(
+        State(state): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        Path(id): Path<i64>,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, Refusal> {
+        let mut state = state.lock().unwrap();
+        remember(&mut state, "PUT", &uri);
+        authorize(&headers)?;
+        if id != 7 {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "detail": "Backfill not found" })),
+            ));
+        }
+        Ok(Json(backfill_doc(json!("2026-11-26T10:05:00Z"))))
+    }
+
     pub async fn start() -> (AirflowClient, Shared) {
         let shared: Shared = Arc::new(Mutex::new(seeded()));
         let app = Router::new()
@@ -616,6 +717,10 @@ mod fake_airflow {
             .route("/api/v2/dags/{dag_id}/dagRuns", get(runs).post(trigger))
             .route("/api/v2/dags/{dag_id}/dagRuns/list", post(runs_batch))
             .route("/api/v2/dags/{dag_id}/dagRuns/{run_id}", patch(patch_run))
+            .route("/api/v2/backfills/dry_run", post(dry_run_backfill))
+            .route("/api/v2/backfills", post(create_backfill))
+            .route("/api/v2/backfills/{id}", get(one_backfill))
+            .route("/api/v2/backfills/{id}/cancel", put(cancel_backfill))
             .route(
                 "/api/v2/dags/{dag_id}/dagRuns/{run_id}/clear",
                 post(clear_run),
@@ -11379,4 +11484,254 @@ async fn apply_document_creates_and_then_updates() {
         1,
         "one pipeline, not two"
     );
+}
+
+// -----------------------------------------------------------------------
+// Backfills: a range of dates through Airflow's own backfill API (#1930)
+// -----------------------------------------------------------------------
+
+/// A `POST …/backfills` body as the browser sends it.
+async fn post_backfill(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn pipelines_backfill_starts_the_dates_of_the_dry_run() {
+    let (airflow, fake) = fake_airflow::start().await;
+    let app = run_route(airflow).await;
+    let uri = format!("/pipelines/{}/smoke/backfills", crate::cluster::namespace());
+
+    let (status, value) = post_backfill(
+        &app,
+        &uri,
+        json!({ "fromDate": "2026-10-09", "toDate": "2026-10-10" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    assert_eq!(value["id"], 7);
+    assert_eq!(value["fromDate"], "2026-10-09T00:00:00Z");
+    assert_eq!(value["toDate"], "2026-10-10T23:59:59Z");
+    let dates: Vec<&str> = value["dates"]
+        .as_array()
+        .expect("dates")
+        .iter()
+        .map(|date| date["date"].as_str().expect("a date"))
+        .collect();
+    assert_eq!(dates, vec!["2026-10-09T02:00:00Z", "2026-10-10T02:00:00Z"]);
+
+    let fake = fake.lock().unwrap();
+    let posts: Vec<String> = fake
+        .calls
+        .iter()
+        .filter(|call| call.starts_with("POST /api/v2/backfills"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        posts,
+        vec!["POST /api/v2/backfills/dry_run", "POST /api/v2/backfills"],
+        "the dry run runs before anything is created"
+    );
+    assert_eq!(fake.backfill_bodies.len(), 1);
+    assert_eq!(fake.backfill_bodies[0]["reprocess_behavior"], "none");
+    assert_eq!(fake.backfill_bodies[0]["dag_id"], "stardelt__smoke");
+    assert_eq!(
+        fake.dry_run_bodies[0]["from_date"], "2026-10-09T00:00:00Z",
+        "the range is the UTC days, inclusive"
+    );
+}
+
+#[tokio::test]
+async fn pipelines_backfill_refuses_more_than_31_dates() {
+    let (airflow, fake) = fake_airflow::start().await;
+    fake.lock().unwrap().dry_dates = (1..=32)
+        .map(|day| format!("2026-10-{day:02}T02:00:00Z"))
+        .collect();
+    let app = run_route(airflow).await;
+    let uri = format!("/pipelines/{}/smoke/backfills", crate::cluster::namespace());
+
+    let (status, value) = post_backfill(
+        &app,
+        &uri,
+        json!({ "fromDate": "2026-10-01", "toDate": "2026-11-30" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert!(
+        value["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("a backfill covers at most 31 dates")),
+        "{value}"
+    );
+    assert!(
+        !fake
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|call| call == "POST /api/v2/backfills"),
+        "nothing was created"
+    );
+}
+
+#[tokio::test]
+async fn pipelines_backfill_refuses_a_range_with_nothing_to_run() {
+    let (airflow, fake) = fake_airflow::start().await;
+    fake.lock().unwrap().dry_dates.clear();
+    let app = run_route(airflow).await;
+    let uri = format!("/pipelines/{}/smoke/backfills", crate::cluster::namespace());
+
+    let (status, value) = post_backfill(
+        &app,
+        &uri,
+        json!({ "fromDate": "2026-10-09", "toDate": "2026-10-10" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{value}");
+    assert_eq!(
+        value["error"],
+        "no date in this range would run (dates that already ran are skipped; ask to re-run them)"
+    );
+    assert!(
+        !fake
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|call| call == "POST /api/v2/backfills"),
+        "nothing was created"
+    );
+}
+
+#[tokio::test]
+async fn pipelines_backfill_refuses_a_paused_pipeline() {
+    let (airflow, fake) = fake_airflow::start().await;
+    set_dag_paused(&fake, "stardelt__smoke", true);
+    let app = run_route(airflow).await;
+    let uri = format!("/pipelines/{}/smoke/backfills", crate::cluster::namespace());
+
+    let (status, value) = post_backfill(
+        &app,
+        &uri,
+        json!({ "fromDate": "2026-10-09", "toDate": "2026-10-10" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{value}");
+    assert_eq!(value["error"], "the pipeline is paused: resume it first");
+    let fake = fake.lock().unwrap();
+    assert!(
+        !fake
+            .calls
+            .iter()
+            .any(|call| call == "POST /api/v2/backfills"),
+        "nothing was created"
+    );
+    assert!(
+        fake.dry_run_bodies.is_empty(),
+        "the dried range is not even asked for"
+    );
+}
+
+/// One open backfill per DAG: Airflow's 409 and its sentence are the caller's answer.
+#[tokio::test]
+async fn pipelines_backfill_passes_airflows_open_backfill_refusal_on() {
+    let (airflow, fake) = fake_airflow::start().await;
+    fake.lock().unwrap().fail_backfill = Some((
+        409,
+        json!({ "detail": "There is already a running backfill for dag stardelt__smoke" }),
+    ));
+    let app = run_route(airflow).await;
+    let uri = format!("/pipelines/{}/smoke/backfills", crate::cluster::namespace());
+
+    let (status, value) = post_backfill(
+        &app,
+        &uri,
+        json!({ "fromDate": "2026-10-09", "toDate": "2026-10-10" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{value}");
+    assert_eq!(
+        value["error"],
+        "There is already a running backfill for dag stardelt__smoke"
+    );
+}
+
+#[tokio::test]
+async fn pipelines_backfill_cancel_calls_airflows_cancel() {
+    let (airflow, fake) = fake_airflow::start().await;
+    let mut backfill_run = run("backfill__2026-10-09T02:00:00+00:00", "success");
+    backfill_run["run_type"] = json!("backfill");
+    backfill_run["logical_date"] = json!("2026-10-09T02:00:00Z");
+    fake.lock()
+        .unwrap()
+        .runs
+        .get_mut("stardelt__smoke")
+        .expect("smoke was seeded")
+        .push(backfill_run);
+    let app = run_route(airflow).await;
+    let uri = format!(
+        "/pipelines/{}/smoke/backfills/7",
+        crate::cluster::namespace()
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["id"], 7);
+    assert_eq!(value["completedAt"], "2026-11-26T10:05:00Z");
+    assert_eq!(value["dates"], json!([]));
+    assert!(
+        fake.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|call| call == "PUT /api/v2/backfills/7/cancel"),
+        "Airflow was asked to cancel"
+    );
+
+    let response = app
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        value["runs"][0]["runId"],
+        "backfill__2026-10-09T02:00:00+00:00"
+    );
+    assert_eq!(value["runs"][0]["date"], "2026-10-09T02:00:00Z");
 }
