@@ -52,8 +52,6 @@ impl Theme {
 pub struct Pillars {
     #[serde(default = "yes")]
     pub lakehouse: bool,
-    #[serde(default)]
-    pub batch: bool,
     /// Multi-user notebooks (JupyterHub). Off by default: a notebook stack is
     /// heavy, and a cluster that only serves queries should not carry it.
     #[serde(default)]
@@ -70,8 +68,6 @@ pub struct Pillars {
     pub dashboards: bool,
     #[serde(default)]
     pub streaming: bool,
-    #[serde(default)]
-    pub ml: bool,
 }
 
 fn yes() -> bool {
@@ -82,12 +78,10 @@ impl Default for Pillars {
     fn default() -> Self {
         Self {
             lakehouse: true,
-            batch: false,
             notebooks: false,
             pipelines: false,
             dashboards: false,
             streaming: false,
-            ml: false,
         }
     }
 }
@@ -4302,7 +4296,6 @@ mod tests {
         .expect("deserialize PlatformInstance");
         assert_eq!(pi.spec.profile, Profile::Demo);
         assert!(pi.spec.pillars.lakehouse);
-        assert!(!pi.spec.pillars.batch);
         assert!(pi.spec.dry_run, "a new PlatformInstance must plan only");
     }
 
