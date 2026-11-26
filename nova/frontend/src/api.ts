@@ -601,12 +601,7 @@ export type PublishedNotebook = {
 
 /** Where a published version came from, as the publisher reported it (#819). A claim: Nova
  * stores it and does not check it against a Git server. */
-export type NotebookSource = {
-  repository: string
-  commit: string
-  path: string
-  clean: boolean
-}
+export type NotebookSource = Schema<'NotebookSource'>
 
 /** One immutable published version of a notebook (`GET …/versions`), newest first. */
 export type NotebookVersion = {
@@ -620,27 +615,14 @@ export type NotebookVersion = {
 }
 
 /** One parameter of a notebook's tagged `parameters` cell: the name and its default as text. */
-export type NotebookParameter = { name: string; default: string }
+export type NotebookParameter = Schema<'NotebookParameter'>
 
 /** `GET …/parameters?version=` — the parameters of one pinned version (stardelt-nova#237). */
-export type NotebookParameters = {
-  parameters: NotebookParameter[]
-  /** The version the answer describes; a schedule pins this id. */
-  objectVersion: string
-}
+export type NotebookParameters = Schema<'NotebookParameters'>
 
 /** One pipeline that runs a published notebook (`GET /api/notebooks/{group}/{name}/usage`). */
-export type NotebookScheduleRow = {
-  namespace: string
-  name: string
-  ownerGroup: string
-  /** The pinned object version the schedule runs. */
-  objectVersion: string
-  cron: string | null
-  timezone: string | null
-  runAs: string | null
-}
-export type NotebookUsageResponse = { schedules: NotebookScheduleRow[] }
+export type NotebookScheduleRow = Schema<'NotebookScheduleRow'>
+export type NotebookUsageResponse = Schema<'NotebookUsageResponse'>
 
 /** A cron and its IANA zone, as `POST`/`PUT /api/pipelines` carries them. */
 export type ScheduleSpec = { cron: string; timezone: string }
@@ -651,27 +633,13 @@ export type ScheduleSpec = { cron: string; timezone: string }
  * limit, one run at a time). `Replace` is deliberately not offered — the loader runs it as
  * `Forbid`.
  */
-export type PipelineOptions = {
-  retries?: number
-  backoffMinutes?: number
-  timeoutMinutes?: number
-  concurrency?: 'Allow' | 'Forbid'
-}
+export type PipelineOptions = Schema<'PipelineOptions'>
 
 /** Who is told when a run ends (`spec.notify`, nova#815). Names of the group's destinations. */
-export type PipelineNotify = {
-  onFailure?: string[]
-  onSuccess?: string[]
-  onRecovered?: string[]
-}
+export type PipelineNotify = Schema<'PipelineNotify'>
 
 /** The options as the pipeline detail carries them, defaults filled in — what edit mode prefills. */
-export type PipelineOptionsView = {
-  retries: number
-  backoffMinutes: number
-  timeoutMinutes: number
-  concurrency: string
-}
+export type PipelineOptionsView = Schema<'PipelineOptionsView'>
 
 /** One of the caller's groups and the pipeline principal that would run its schedules. */
 export type PipelinePrincipal = {
@@ -697,56 +665,16 @@ export type ServicePrincipal = {
 }
 
 /** A `dbt` run instead of a statement or a notebook (`#112`): exactly one of the three. */
-export type DbtRequest = {
-  /** A directory name under `/opt/dbt/projects` in the tool image. */
-  project: string
-  /** One selector, run as it is. */
-  select?: string
-  /** 1 to 8 selectors, run in order. */
-  batches?: string[]
-  /** 1 to 16; the server reads 4 when it is absent. */
-  threads?: number
-  vars?: Record<string, string>
-}
+export type DbtRequest = Schema<'DbtRequest'>
 
 /**
  * One task of a task-list pipeline (`#905`): the name the engine uses, exactly one of a
  * statement, a notebook and a dbt run, and the tasks that must succeed first.
  */
-export type PipelineTaskRequest = {
-  /** Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}`. */
-  name: string
-  sql?: string
-  notebook?: NotebookRequest
-  dbt?: DbtRequest
-  /** Names of the tasks that must succeed first; at most 8, each a task of the list. */
-  dependsOn?: string[]
-}
+export type PipelineTaskRequest = Schema<'PipelineTaskRequest'>
 
 /** `POST /api/pipelines` (`Schedule`, stardelt-nova#210, options stardelt-nova#223). */
-export type CreatePipelineRequest = {
-  name: string
-  ownerGroup: string
-  /** A statement; exactly one of this, `notebook` and `tasks` (stardelt-nova#237, #905). */
-  sql?: string
-  /** A published notebook version to run instead of a statement. */
-  notebook?: NotebookRequest
-  /**
-   * The whole task list of a task-list pipeline; exactly one of `sql`, `notebook` and this.
-   * An update replaces the list whole.
-   */
-  tasks?: PipelineTaskRequest[]
-  schedule: ScheduleSpec | null
-  /** Values for `${params.<name>}` in the statement; at most 16. */
-  params?: Record<string, string>
-  /** Retries, the wait between them, the time limit and the run mode. */
-  options?: PipelineOptions
-  /**
-   * Who is told when a run ends. Absent keeps the stored value on an update; a present object
-   * with every list empty removes it. The dialog always sends `onFailure`.
-   */
-  notify?: PipelineNotify
-}
+export type CreatePipelineRequest = Schema<'CreatePipelineRequest'>
 
 /**
  * `PUT /api/pipelines/{namespace}/{name}`: the statement, the notebook or the task list, the
@@ -755,48 +683,13 @@ export type CreatePipelineRequest = {
  * all four. A pipeline never changes kind: exactly one of `sql`, `notebook` and `tasks` is given
  * (#237, #905).
  */
-export type UpdatePipelineRequest = {
-  sql?: string
-  notebook?: NotebookRequest
-  /** The whole task list; an update replaces it whole. */
-  tasks?: PipelineTaskRequest[]
-  schedule: ScheduleSpec | null
-  params?: Record<string, string>
-  options?: PipelineOptions
-  /**
-   * Who is told when a run ends. Absent keeps the stored value on an update; a present object
-   * with every list empty removes it. The dialog always sends `onFailure`.
-   */
-  notify?: PipelineNotify
-  /**
-   * The `resourceVersion` the editor read (`pipelines_spec`): when it is not the stored one the
-   * update answers 409 and writes nothing (stardelt-nova#387).
-   */
-  resourceVersion?: string
-}
+export type UpdatePipelineRequest = Schema<'UpdatePipelineRequest'>
 
 /** The published notebook version a schedule pins (stardelt-nova#237). */
-export type NotebookRequest = {
-  /** The `.ipynb` file name; its group is the pipeline's `ownerGroup`. */
-  name: string
-  /** The S3 object version, never a branch or a tag. */
-  objectVersion: string
-  /** The values papermill binds; names are the tagged cell's, values at most 256 characters. */
-  params: Record<string, string>
-  /**
-   * The `Connection` whose secret fields the task pod receives as `CONN_<NAME>_<KEY>`
-   * (the CRD's `tasks[].connection`, #369). The dialog does not edit it yet; it sends back
-   * the stored value so a save cannot drop it.
-   */
-  connection?: string | null
-}
+export type NotebookRequest = Schema<'NotebookRequest'>
 
 /** `POST /api/pipelines/check`: what the engine says about a statement, without running it. */
-export type CheckStatementRequest = {
-  sql: string
-  /** Values for the statement's `${params.<name>}` placeholders. Only names, never secrets. */
-  params?: Record<string, string>
-}
+export type CheckStatementRequest = Schema<'CheckStatementRequest'>
 
 /**
  * The engine's verdict. `checked: false` means this kind of statement cannot be checked here
@@ -809,7 +702,7 @@ export type CheckStatementView = {
 }
 
 /** `POST /api/pipelines/preview-schedule`: the next fire times of a cron in its zone. */
-export type PreviewScheduleRequest = { cron: string; timezone: string; count?: number }
+export type PreviewScheduleRequest = Schema<'PreviewScheduleRequest'>
 
 /** The next fire times, RFC 3339 with the schedule's offset. */
 export type PreviewScheduleView = { runs: string[] }
@@ -1064,19 +957,10 @@ export type PipelineDetail = PipelineView & {
 }
 
 /** The body of `POST …/runs`: a date and parameter values for this run only (nova#817). */
-export type RunStart = { runDate?: string; params?: Record<string, string> }
+export type RunStart = Schema<'RunStart'>
 
 /** `POST /api/pipelines/validate`: what a create or an update of this document would do, without doing it. */
-export type ValidatePipelineResponse = {
-  ok: boolean
-  /** `create` for a free name, `update` for a pipeline the caller may change; absent when `ok` is false. */
-  action?: 'create' | 'update'
-  errors: { message: string }[]
-  /** What an update would change: `statement` or `notebook`, `schedule`, `params`, `options`. */
-  changes: string[]
-  /** The next five fire times (RFC 3339) of an accepted document with a schedule. */
-  nextRuns: string[]
-}
+export type ValidatePipelineResponse = Schema<'ValidatePipelineResponse'>
 
 /**
  * `GET /api/pipelines/{namespace}/{name}/spec`: the editable document of one pipeline, in the shape
@@ -1110,31 +994,13 @@ export type PipelineSpec = {
 }
 
 /** One task instance of a run. */
-export type TaskView = {
-  taskId: string
-  state: string
-  tryNumber: number
-  startedAt: string | null
-  endedAt: string | null
-  durationSeconds: number | null
-  operator: string | null
-}
+export type TaskView = Schema<'TaskView'>
 
 /** `GET …/runs/{runId}`: one run and its task instances. */
 export type RunResponse = { run: RunView; tasks: TaskView[] }
 
 /** One statement a run's task sent to the engine (stardelt-nova#788 S5). */
-export type RunQueryView = {
-  id: string
-  state: string
-  taskId: string | null
-  startedAt: number | null
-  wallMs: number | null
-  executionMs: number | null
-  inputBytes: number | null
-  inputRows: number | null
-  sql: string
-}
+export type RunQueryView = Schema<'RunQueryView'>
 
 /** One check a run's `quality` task declares, with its verdict (stardelt#829). */
 export type RunCheckView = {
