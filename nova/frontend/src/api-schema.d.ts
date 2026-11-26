@@ -1495,7 +1495,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command that creates one. A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`. */
+        /** @description The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `ServicePrincipal` to apply (on a `make install` platform, the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command). A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`. */
         get: operations["pipelines_principals"];
         put?: never;
         post?: never;
