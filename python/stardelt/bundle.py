@@ -1725,7 +1725,11 @@ schedule:
   cron: "0 3 * * *"
   timezone: UTC
 """
-STATEMENT = "-- Replace this with your statement. ${params.catalog} is filled in from the pipeline's params.\nselect count(*) as trips from ${params.catalog}.demo.trips\n"
+STATEMENT = (
+    "-- A first statement that runs on any install: it reads no table.\n"
+    "-- Replace it with your own. ${params.catalog} is filled in by the pipeline's params.\n"
+    "select current_date as today, '${params.catalog}' as catalog\n"
+)
 
 
 def init(directory, name, group):

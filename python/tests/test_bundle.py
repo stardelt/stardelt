@@ -176,6 +176,9 @@ def test_init_writes_a_bundle_that_validates(tmp_path):
     assert resolved == {"dev": ("development", ["daily"]), "prod": ("production", ["daily"])}
     assert "runAs: pipeline-shop" in (tmp_path / "shop" / "bundle.yaml").read_text()
     assert "timezone: UTC" in (tmp_path / "shop" / "resources" / "daily.yaml").read_text(), "Nova needs both fields"
+    statement = (tmp_path / "shop" / "sql" / "daily.sql").read_text()
+    assert " from " not in statement.lower(), "the starter's first run must not depend on a table"
+    assert "${params.catalog}" in statement
 
 
 def test_an_unknown_target_key_is_refused(tmp_path):
