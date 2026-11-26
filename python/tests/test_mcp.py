@@ -104,6 +104,18 @@ def test_one_recorded_deploy_is_offered_by_default():
     assert one["annotations"]["readOnlyHint"] is True
 
 
+def test_a_tables_freshness_is_offered_by_default():
+    # The set test derives from DEFAULT_TOOLS, so it cannot notice an omission; "can I trust this table today?"
+    # is a read an assistant needs before it answers (#402), and the hosted server offers it as table_health.
+    srv, _ = server()
+    tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
+    fresh = tools["table_freshness_get"]
+    assert fresh["description"] == "GET /api/catalog/tables/{ns}/{tbl}/health: the Stardelt API operation table_freshness_get"
+    assert fresh["inputSchema"]["required"] == ["ns", "tbl"]
+    assert set(fresh["inputSchema"]["properties"]) == {"ns", "tbl", "catalog"}
+    assert fresh["annotations"]["readOnlyHint"] is True
+
+
 def test_allow_adds_one_operation_and_a_write_is_marked_destructive():
     srv, _ = server(allowed=list(mcp.DEFAULT_TOOLS) + ["query_run"])
     tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
