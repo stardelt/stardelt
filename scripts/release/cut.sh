@@ -18,8 +18,8 @@ if [[ "${NO_STAMP_CHECK:-0}" != 1 ]]; then
   python3 scripts/release/stamp-version.py --check "$version"
 fi
 
-echo "› every pin equals what its tag resolves to; the operator's goldens agree"
-(cd platform && python3 scripts/check_pin_freshness.py --rev "$(git rev-parse HEAD)")
+echo "› every pin is the build of a commit at or before this one (#1703); the operator's goldens agree"
+(cd platform && python3 scripts/check_pins_at_rev.py --rev "$(git rev-parse HEAD)" --gate)
 (cd platform && OPERATOR_DIR=../operator bash scripts/check-operator-pins.sh)
 (cd platform && OPERATOR_DIR=../operator python3 scripts/check_golden_image.py)
 (cd operator && bash scripts/check-cli-image.sh)
