@@ -27,7 +27,8 @@ class SecurityManagerSurfaceTest(unittest.TestCase):
         used = {}
         paths = [SCRIPTS / n for n in ("superset-analyst-role.py", "superset-nova-user.py",
                                        "superset-group-roles.py")]
-        paths += [OPERATOR_SRC / n for n in ("superset_analyst_role.py", "superset_group_roles.py")]
+        paths += [OPERATOR_SRC / n for n in ("superset_analyst_role.py", "superset_group_roles.py",
+                                             "superset_nova_user.py")]
         for path in paths:
             self.assertTrue(path.is_file(), path)
             text = path.read_text()
