@@ -349,8 +349,10 @@ def test_spark_reads_remote_from_env(fake_spark, monkeypatch):
 
     stardelt._SPARK_SESSION = None
     monkeypatch.delenv("SPARK_REMOTE")
-    stardelt.spark()
-    assert fake_spark.sessions[-1].configs["spark.remote"] == stardelt.SPARK_REMOTE_DEFAULT
+    sessions = len(fake_spark.sessions)
+    with pytest.raises(RuntimeError, match="stardelt.compute.ensure"):
+        stardelt.spark()
+    assert len(fake_spark.sessions) == sessions  # no session is opened without an endpoint
 
 
 def test_a_wap_branch_is_set_on_the_session(fake_spark, monkeypatch):
@@ -380,11 +382,13 @@ def _view(phase, endpoint="sc://trial.stardelt.svc.cluster.local:15002"):
     return {"name": "trial", "phase": phase, "endpoint": endpoint}
 
 
-def test_remote_for_none_honours_spark_remote_and_the_default(monkeypatch):
+def test_remote_for_none_honours_spark_remote_and_refuses_without_one(monkeypatch):
     monkeypatch.setenv("SPARK_REMOTE", "sc://other:15002")
     assert stardelt._remote_for_cluster(None) == "sc://other:15002"
     monkeypatch.delenv("SPARK_REMOTE")
-    assert stardelt._remote_for_cluster(None) == stardelt.SPARK_REMOTE_DEFAULT
+    with pytest.raises(RuntimeError, match="stardelt.compute.ensure") as caught:
+        stardelt._remote_for_cluster(None)
+    assert "SPARK_REMOTE is not set" in str(caught.value)
 
 
 def test_remote_for_a_cluster_is_the_endpoint_nova_reports(monkeypatch):

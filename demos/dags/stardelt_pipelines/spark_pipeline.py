@@ -9,9 +9,10 @@ graph to /tmp, sets the three keys stardelt owns (`catalog` and `database` from 
 shape #957 measured (6.6 s, two flows, no S3 key).
 
 The pod runs as the principal's ServiceAccount (`sp-<name>`), holds no storage credential and
-creates no Spark of its own: the graph runs on the shared Connect server, in the principal's
-session. The catalog token is the kubelet's projected file, a mount of its own; it is copied only
-into the spec under /tmp, never into the pod spec, the env, the log or the ConfigMap.
+creates no Spark of its own: the graph runs on the owner group's SparkCluster (or the Connect
+server `PIPELINE_SPARK_REMOTE` names), in the principal's session. The catalog token is the
+kubelet's projected file, a mount of its own; it is copied only into the spec under /tmp, never
+into the pod spec, the env, the log or the ConfigMap.
 """
 from __future__ import annotations
 
@@ -109,6 +110,17 @@ def key_paths(files: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
 def checkpoint_uri(bucket: str, owner_group: str, pipeline: str, task: str) -> str:
     """Where the graph's streaming checkpoints live: the group's bucket, under `pipelines/`."""
     return f"s3a://{bucket}/pipelines/{owner_group}/{pipeline}/{task}/checkpoints"
+
+
+def connect_remote(owner_group: str) -> str:
+    """The owner group's SparkCluster Service (`spc-<name>-server`), or `PIPELINE_SPARK_REMOTE`.
+
+    The group cluster is the default since #493 point 6: the shared server is no longer where a
+    pipeline lands unless an operator names it with `PIPELINE_SPARK_REMOTE`.
+    """
+    return os.environ.get(REMOTE_ENV) or (
+        f"sc://spc-{owner_group}-server.stardelt.svc.cluster.local:15002"
+    )
 
 
 SPEC_PATH = "/tmp/spark-project/graph/spark-pipeline.yml"
@@ -257,8 +269,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         wap_branch = wap_module.branch_name(run_id) if self.wap else None
         self.env_vars = pod_env(
             paths=paths,
-            remote=os.environ.get(REMOTE_ENV)
-            or "sc://spark-connect.stardelt.svc.cluster.local:15002",
+            remote=connect_remote(self.owner_group),
             catalog=self.catalog,
             database=self.database,
             storage=checkpoint_uri(

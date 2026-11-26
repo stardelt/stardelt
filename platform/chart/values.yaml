@@ -1633,9 +1633,6 @@ jupyterhub:
       # (`stardelt.publish()`, `stardelt.api.Client`): a visitor's pod has no public
       # egress (platform#1101). Keep in step with helm-values/jupyterhub.yaml.
       STARDELT_NOVA_API_URL: http://nova.stardelt.svc.cluster.local:8080
-      # Spark Connect's ClusterIP endpoint for `stardelt.spark()`. Same value
-      # as the standalone helm-values/jupyterhub.yaml above: keep them in sync.
-      SPARK_REMOTE: sc://spark-connect.stardelt.svc.cluster.local:15002
     # Seed the quickstart into the home directory on every spawn, never overwriting a
     # user's edited copy (`cp -n`). A demo spawn (`DEMO_MODE=1`, `27-demo-mode`) is
     # thrown away first: one shared person must not inherit another visitor's files.

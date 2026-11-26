@@ -2212,9 +2212,12 @@ mod tests {
         let mut values = effective_values("jupyterhub", Profile::Full, None, None);
         substitute_namespace(&mut values, "data");
         let single = &values["singleuser"];
-        assert_eq!(
-            single["extraEnv"]["SPARK_REMOTE"],
-            serde_json::json!("sc://spark-connect.data.svc.cluster.local:15002")
+        assert!(
+            single["extraEnv"].get("SPARK_REMOTE").is_none(),
+            "the notebook names its group's cluster, not the shared server: {:?}",
+            single["extraEnv"]
+                .as_object()
+                .and_then(|env| env.get("SPARK_REMOTE"))
         );
         assert_eq!(
             single["extraEnv"]["STARDELT_SECRET_STORE_URL"],

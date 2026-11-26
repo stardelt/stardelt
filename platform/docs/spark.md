@@ -14,20 +14,24 @@ Lakekeeper decides, so Spark sees the same catalogs and the same grants as the
 person's Trino session — and a catalog they may not see is refused by the catalog,
 not by a list in Spark.
 
-```sh
-make install-spark     # manifests/spark.yaml: Deployment + Service + ConfigMap + RBAC
-```
-
-Endpoint (ClusterIP only — there is deliberately no Ingress):
+Each group gets its **own** Spark cluster: a `SparkCluster` the operator runs, started from
+Nova's Compute page or with `stardelt.compute.start("<name>")` (a person presses Start; nothing
+starts it implicitly). Its Connect endpoint is the ClusterIP Service `spc-<name>-server` in the
+namespace — there is deliberately no Ingress:
 
 ```text
-sc://spark-connect.stardelt.svc.cluster.local:15002
+sc://spc-<name>-server.stardelt.svc.cluster.local:15002
 ```
+
+`STARDELT_CLUSTER` names the cluster a kernel uses when the person's group owns more than one.
+The install's own Connect server (`make install-spark`, `manifests/spark.yaml`) is not a default:
+a client that should use it, or a proxy in front of a cluster, sets `SPARK_REMOTE` explicitly.
+Without one, `spark` refuses and names `stardelt.compute.ensure("<your group>")` rather than
+picking a server for the person.
 
 From a notebook, `spark` is already there: the single-user image installs `python/` (the
 `stardelt` library, from its own commit) into every kernel, and its `spark` opens the session on
-first use with every catalog Trino lists for you and your token (a named cluster: set
-`STARDELT_CLUSTER`):
+first use with every catalog Trino lists for you and your token:
 
 ```python
 spark.sql("SHOW CATALOGS").show()
@@ -35,14 +39,15 @@ spark.sql("SELECT current_user()").show()   # the person, not the platform
 ```
 
 A scheduled job (PySpark Connect client, `pip install pyspark-client==4.1.4`) has no
-hub token, so it builds the same session itself and passes its own token:
+hub token, so it builds the same session itself, reads the endpoint from `SPARK_REMOTE`
+(the group cluster or a server an operator names), and passes its own token:
 
 ```python
+import os
+
 from pyspark.sql import SparkSession
 
-builder = SparkSession.builder.remote(
-    "sc://spark-connect.stardelt.svc.cluster.local:15002"
-).appName("nightly-load")
+builder = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).appName("nightly-load")
 builder = builder.config("spark.sql.catalog.warehouse", "org.apache.iceberg.spark.SparkCatalog")
 for key, value in {
     "type": "rest",
@@ -59,10 +64,11 @@ for key, value in {
 spark = builder.create()          # create(), not getOrCreate(): a fresh session per token
 ```
 
-The quickstart notebook's Spark cell uses that `spark` and reads back the
+The quickstart notebook's Spark cell asks `stardelt.compute.default()` for the endpoint, uses
+that `spark` and reads back the
 `<catalog>.<schema>.quickstart_smoke` table the Trino cells above wrote, so one run in
-Nova's Notebooks page proves the second engine as well as the first. Members' notebooks reach
-the endpoint; the public demo's visitor pod is refused on 15002 by `manifests/spark.yaml`
+Nova's Notebooks page proves the second engine as well as the first. A member's notebook reaches
+their group cluster; the public demo's visitor pod is refused on 15002 by `manifests/spark.yaml`
 (platform#1097), and the cell reports that instead of failing.
 
 Notebook pods reach the endpoint because the JupyterHub chart's singleuser NetworkPolicy carries

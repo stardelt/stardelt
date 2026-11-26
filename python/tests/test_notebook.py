@@ -43,7 +43,7 @@ def test_lazy_spark_opens_one_session_on_first_use(monkeypatch):
         return StubSession()
 
     monkeypatch.setattr(stardelt, "_session", fake_session)
-    # No group owns a cluster here: the kernel uses the shared server, as before #1390.
+    # No group owns a cluster here: the kernel names none and leaves the endpoint to SPARK_REMOTE.
     monkeypatch.setattr(notebook, "_CLUSTER_RESOLVED", False)
     monkeypatch.setattr(notebook, "_CLUSTER_NAME", None)
     monkeypatch.delenv("STARDELT_CLUSTER", raising=False)
@@ -77,7 +77,7 @@ def _stub_session(monkeypatch, opened):
 
 
 def test_lazy_spark_does_not_ask_nova_without_a_url(monkeypatch, capsys):
-    """A kernel with no Nova URL opens the shared server without a round trip (#1398)."""
+    """A kernel with no Nova URL names no cluster and asks Nova nothing (#1398)."""
     opened = []
     _stub_session(monkeypatch, opened)
     monkeypatch.delenv("STARDELT_NOVA_URL", raising=False)
@@ -200,7 +200,7 @@ def test_lazy_spark_opens_the_group_cluster_when_the_environment_names_none(monk
     assert opened == ["team"]
 
 
-def test_lazy_spark_keeps_the_shared_server_and_prints_the_notice(monkeypatch, capsys):
+def test_lazy_spark_prints_the_notice_when_several_clusters_exist(monkeypatch, capsys):
     import stardelt.compute as compute
 
     opened = []
@@ -223,12 +223,12 @@ def test_lazy_spark_keeps_the_shared_server_and_prints_the_notice(monkeypatch, c
     assert capsys.readouterr().err.startswith("stardelt.spark: you may act on 2 Spark clusters")
 
 
-def test_lazy_spark_is_silent_when_no_group_owns_a_cluster(monkeypatch, capsys):
+def test_lazy_spark_says_how_to_get_a_cluster_when_none_owns_one(monkeypatch, capsys):
     import stardelt.compute as compute
 
     def none_of_my_own(client=None):
-        raise LookupError("you have no Spark cluster of your own: no group you are in owns one — "
-                          "use the shared Spark server (or %sql), or ask an administrator for a cluster")
+        raise LookupError('stardelt.compute.ensure("<your group>") creates your group\'s '
+                          "Spark cluster (you have no Spark cluster of your own)")
 
     monkeypatch.setattr(notebook, "_CLUSTER_RESOLVED", False, raising=False)
     monkeypatch.setattr(notebook, "_CLUSTER_NAME", None, raising=False)
@@ -236,8 +236,11 @@ def test_lazy_spark_is_silent_when_no_group_owns_a_cluster(monkeypatch, capsys):
     # A URL is set, so the lookup happens: this test is about the answer, not about #1398.
     monkeypatch.setenv("STARDELT_NOVA_URL", "https://nova.example")
     monkeypatch.setattr(compute, "default", none_of_my_own)
-    monkeypatch.setattr(stardelt, "_session", lambda cluster=None: None)
+    opened = []
+    monkeypatch.setattr(stardelt, "_session", lambda cluster=None: opened.append(cluster))
 
     notebook._LazySpark()._get()
 
-    assert capsys.readouterr().err == ""
+    assert "stardelt.compute.ensure('<your group>')" in capsys.readouterr().err
+    # Nothing is created or started implicitly: the session still gets no cluster name.
+    assert opened == [None]

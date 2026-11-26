@@ -456,10 +456,6 @@ singleuser:
     # (platform#1229). The public origin stays as it is — it is also the hub's
     # `frame-ancestors` origin (`15-framing` below), which a browser compares.
     STARDELT_NOVA_API_URL: http://nova.stardelt.svc.cluster.local:8080
-    # Spark Connect's ClusterIP endpoint for `stardelt.spark()` (default when
-    # the pod does not override it). Reachable through the egress rule below;
-    # Spark has no authentication of its own, so this stays cluster-internal.
-    SPARK_REMOTE: sc://spark-connect.stardelt.svc.cluster.local:15002
     # The secret store for `stardelt.connection()` (decisions D23 and D27). Opt-in like the store itself
     # (`make openbao`): without it installed the helper answers "not reachable" in one line. A person
     # signs in with their own token; the store decides what they may read.
