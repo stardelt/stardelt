@@ -61,6 +61,15 @@
       "query_params": [],
       "body": false
     },
+    "catalog_health_list": {
+      "method": "GET",
+      "path": "/api/catalog/health",
+      "path_params": [],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
     "catalog_metrics_get": {
       "method": "GET",
       "path": "/api/catalog/metrics",
