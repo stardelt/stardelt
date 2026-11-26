@@ -94,6 +94,11 @@ def _parser():
     trigger.add_argument("--wait", action="store_true", help="wait until the run ends; exit 0 only when it succeeded")
     trigger.add_argument("--timeout", type=int, default=0, help="with --wait: give up after N seconds (0: no limit); the run is not stopped")
     trigger.add_argument("--interval", type=int, default=5, help="with --wait: seconds between two looks (default 5)")
+    samples = commands.add_parser("samples", help="load one sample table every guide's example can use")
+    samples_commands = samples.add_subparsers(dest="samples_command", required=True)
+    sample_load = samples_commands.add_parser("load", help="load a sample as you, into <catalog>.samples.<name>")
+    sample_load.add_argument("name", choices=["trips"])
+    sample_load.add_argument("--catalog", help="the catalog to load into (default: the catalog Nova uses for you)")
     call = commands.add_parser("api", help="call any public operation by its operationId")
     call.add_argument("operation", nargs="?", help="an operationId (see --list)")
     call.add_argument("--list", action="store_true", dest="list_operations", help="list the operations")
@@ -596,6 +601,21 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
     try:
         if args.command == "whoami":
             stdout.write(json.dumps(nova.me(), indent=2, ensure_ascii=False) + "\n")
+            return OK
+        if args.command == "samples":
+            from stardelt import samples
+
+            answer = samples.load(args.name, catalog=args.catalog, client=nova)
+            if answer["created"]:
+                stdout.write(
+                    f"loaded {answer['rows']:,} rows into "
+                    f"{answer['catalog']}.{answer['namespace']}.{answer['table']}\n"
+                )
+            else:
+                stdout.write(
+                    f"already there: {answer['rows']:,} rows in "
+                    f"{answer['catalog']}.{answer['namespace']}.{answer['table']}\n"
+                )
             return OK
         if args.command == "lineage":
             if args.depth < 1 or args.depth > 5 or args.days < 1 or args.days > 365:
