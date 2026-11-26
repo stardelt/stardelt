@@ -55,11 +55,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rev", default="origin/main", help="the commit M to report (default: origin/main)")
     parser.add_argument("--limit", type=int, default=20, help="how many builds back to look for the pin's source")
+    parser.add_argument("--gate", action="store_true", help="exit 1 when a pin is not the build of a commit at or before --rev (D1, #1703)")
     args = parser.parse_args(argv)
 
     if _git("status", "--porcelain").strip():
         print("! the working tree is not clean; the manifests judged are the rev's", file=sys.stderr)
 
+    unproven: list[str] = []
     for app, manifest, kind, tag in APPS:
         pinned = parse_pins(pin_text(REPO, manifest, args.rev)[0], kind)
         commits = builds(app, args.rev, args.limit)
@@ -81,6 +83,24 @@ def main(argv: list[str] | None = None) -> int:
             f"{app}\tpin={pin}\tnewest={newest}\tnewest_match={newest_match}"
             f"\tsource={source or 'none'}\ttags={tags}"
         )
+
+        # D1 is the gate: every pin must be the build of *some* commit <= rev. An app keeps
+        # its place in `unproven` until a row of it finds a source; `jupyter` has three rows.
+        if not source:
+            if app not in unproven:
+                unproven.append(app)
+        elif app in unproven:
+            unproven.remove(app)
+
+        # D2 is advisory: the pin is provable but not the newest build at or before rev.
+        if newest_match == "no" and source:
+            print(f"note: {app} is pinned to the build of {source}; the newest build at or before {args.rev} is {newest} (D2, advisory)", file=sys.stderr)
+
+    if args.gate:
+        if unproven:
+            print(f"check_pins_at_rev: FAIL — no build at or before {args.rev} is pinned for: {', '.join(unproven)}", file=sys.stderr)
+            return 1
+        print(f"check_pins_at_rev: PASS — every pin is the build of a commit at or before {args.rev}")
     return 0
 
 
