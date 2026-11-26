@@ -133,6 +133,8 @@ def apply(nova, spec, dry_run=False):
             result["changes"] = verdict["changes"]
         if verdict.get("modified"):
             result["modified"] = True
+        if verdict.get("adopt"):
+            result["adopt"] = True
         if verdict["nextRuns"]:
             result["nextRuns"] = verdict["nextRuns"]
         return result

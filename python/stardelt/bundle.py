@@ -1241,7 +1241,7 @@ def _touched(nova, specs, done, stale):
     return touched
 
 
-def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None, preview=None):
+def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None, preview=None, adopt=()):
     """Plan, then (unless ``dry_run``) deploy ``target``: ``(problems, results)``.
 
     ``nova`` is a ``stardelt.api.Client``. Every pipeline is first checked by Nova (``pipelines_validate``, the
@@ -1271,7 +1271,9 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     for, and a run that does not end ``success`` records the deploy as ``failed`` and is a problem.
     ``smoke_timeout`` (seconds, default no limit) gives up waiting, which does not stop the run.
     ``preview`` prefixes every rendered name with ``<preview>-`` instead of ``dev-<user>-`` and
-    removes its schedule; only a development target accepts it.
+    removes its schedule; only a development target accepts it. A pipeline an earlier Nova or
+    ``stardelt apply`` created is refused unless ``--adopt <name>`` names it; the row then says ``adopted`` and
+    the deploy stamps it.
     """
     user = nova.me().get("user")
     problems, mode, specs = render(directory, target, user, preview)
@@ -1337,6 +1339,13 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         else:
             if results[-1].get("modified"):
                 changed_by_hand.add(spec["name"])
+            if results[-1].get("adopt") and spec["name"] in adopt:
+                results[-1]["adopted"] = True
+    adoptable = {row["name"] for row in results if row.get("adopt")}
+    unknown = sorted(set(adopt) - adoptable)
+    refused += [(target, f"--adopt {name}: nothing in this bundle would adopt that pipeline") for name in unknown]
+    missing = sorted(adoptable - set(adopt))
+    refused += [(target, f"{name} was made in Nova, not by a bundle; pass --adopt {name} to take it over") for name in missing]
     stream_rows = []
     namespace, listed = _listed(nova) if (stream_specs or prune) else ("", [])
     existing = {stream["name"]: stream for stream in listed}
@@ -1400,6 +1409,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             return [(target, str(err))], done
         if verdict.get("modified"):
             changed_by_hand.add(spec["name"])
+        if verdict.get("adopt") and spec["name"] not in adopt:
+            return [(target, f"{spec['name']} was made in Nova, not by a bundle; pass --adopt {spec['name']} to take it over")], done
     if changed_by_hand and not accept_drift and _drift_mode(directory, target) == "block":
         return _blocked(target, changed_by_hand), done
     owner = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["ownerGroup"]
@@ -1555,6 +1566,8 @@ def plan_markdown(target, results, files=()):
             notes.append(f"notebook: {result['notebook']}")
         if result.get("modified"):
             notes.append("changed since deploy")
+        if result.get("adopted"):
+            notes.append("adopted")
         if result.get("reason"):
             notes.append(str(result["reason"]))
         lines.append(f"| {cell(result['action'])} | {cell(result.get('kind', '—'))} | {cell(result['name'])} | {cell('; '.join(notes) or '—')} |")

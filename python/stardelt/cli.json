@@ -489,6 +489,14 @@
             },
             {
               "flags": [
+                "--adopt"
+              ],
+              "help": "take over a pipeline made in Nova (repeatable); without it such a pipeline is refused",
+              "metavar": "NAME",
+              "repeatable": true
+            },
+            {
+              "flags": [
                 "--diff"
               ],
               "help": "also show, on standard error, what each update would change (the deployed value against the bundle's)",
@@ -554,6 +562,14 @@
               ],
               "help": "overwrite a pipeline changed after its last deploy even when the target says drift: block",
               "flag": true
+            },
+            {
+              "flags": [
+                "--adopt"
+              ],
+              "help": "take over a pipeline made in Nova (repeatable); without it such a pipeline is refused",
+              "metavar": "NAME",
+              "repeatable": true
             },
             {
               "flags": [

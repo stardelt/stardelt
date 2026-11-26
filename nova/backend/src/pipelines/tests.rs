@@ -7680,6 +7680,56 @@ async fn the_check_says_when_an_update_would_overwrite_a_change_made_after_the_d
 }
 
 #[tokio::test]
+async fn a_validate_marks_a_pipeline_made_in_nova_as_adoptable() {
+    let resources = analytics_ready();
+    let ada = who("sub-ada", &["analytics"], false);
+    let namespace = crate::cluster::namespace();
+    let check = |body: CreatePipelineRequest| {
+        let resources = &resources;
+        let ada = &ada;
+        async move {
+            validate_pipeline(Some(resources), None, None, ada, body)
+                .await
+                .expect("an answer")
+        }
+    };
+
+    // Made in the interface: no bundle deploy stamped it, so an apply would take it over.
+    let body = create_body("daily-trips", "analytics", "select 1");
+    create_pipeline(
+        Some(&resources),
+        None,
+        None,
+        &create_limiter(),
+        &ada,
+        body.clone(),
+    )
+    .await
+    .expect("created");
+    let made_in_nova = check(body.clone()).await;
+    assert!(made_in_nova.ok);
+    assert_eq!(made_in_nova.action.as_deref(), Some("update"));
+    assert_eq!(made_in_nova.adopt, Some(true));
+
+    // A bundle deploy stamps it: from then on it is the bundle's own.
+    let mut stamp = update_body("select 1");
+    stamp.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+    update_pipeline(
+        Some(&resources),
+        None,
+        None,
+        None,
+        &ada,
+        &namespace,
+        "daily-trips",
+        stamp,
+    )
+    .await
+    .expect("updated");
+    assert_eq!(check(body).await.adopt, None);
+}
+
+#[tokio::test]
 async fn an_update_replaces_the_stamp_when_it_names_one_and_keeps_it_when_it_does_not() {
     let mut stored = nova_pipeline("daily-trips", "analytics");
     stamp_provenance(

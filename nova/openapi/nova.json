@@ -19262,6 +19262,13 @@
             ],
             "description": "`create` when the name is free, `update` when it names a pipeline Nova wrote and the caller\nmay change; absent when `ok` is false."
           },
+          "adopt": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` for an `update` of a pipeline that no bundle deploy stamped yet (`deployment` is\nabsent on the pipeline view): applying this document from a bundle would take it over.\nAbsent for a `create`, a refusal, and a pipeline a bundle already owns."
+          },
           "changes": {
             "type": "array",
             "items": {
