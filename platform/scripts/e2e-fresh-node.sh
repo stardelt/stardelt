@@ -277,6 +277,23 @@ install_from_release() {
     kubectl -n "$NAMESPACE" rollout status "deploy/${OPERATOR_DEPLOY}" --timeout=300s
 }
 
+# CoreDNS logs every query from here on, so the run can list what the platform resolves
+# outside the cluster (k3s imports coredns-custom *.override into the main server block).
+enable_dns_log() {
+  kubectl -n kube-system create configmap coredns-custom --from-literal=log.override=log \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n kube-system rollout restart deploy/coredns
+  kubectl -n kube-system rollout status deploy/coredns --timeout=120s
+}
+
+# The run's inventory: egress.txt and images.txt next to report.txt (Sovereignty page).
+collect_inventory() {
+  kubectl -n kube-system logs deploy/coredns --tail=-1 >"$RUN_DIR/coredns.log"
+  kubectl get pods -A -o json >"$RUN_DIR/pods.json"
+  python3 "$PLATFORM_DIR/scripts/fresh_node_inventory.py" --coredns-log "$RUN_DIR/coredns.log" \
+    --pods-json "$RUN_DIR/pods.json" --own-domain "${FRESH_DOMAIN:-}" --out-dir "$RUN_DIR"
+}
+
 phase_up() {
   run_phase "fresh node" "$RUN_DIR/01-fresh-node.log" -- \
     env FRESH_NAME="$FRESH_NAME" FRESH_CONFIG="$FRESH_CONFIG" FRESH_KUBECONFIG="$FRESH_KUBECONFIG" \
@@ -285,6 +302,8 @@ phase_up() {
 
   # Everything after this point talks to the throwaway cluster, never to the current context.
   export KUBECONFIG="$FRESH_KUBECONFIG"
+
+  run_phase "dns log" "$RUN_DIR/01-fresh-node.log" -- enable_dns_log || return 1
 
   if [ -n "$RELEASE_DIR" ]; then
     run_phase "operator" "$RUN_DIR/02-operator.log" -- install_from_release || return 1
@@ -318,6 +337,11 @@ phase_up() {
   # pillars in its copy of the example, because the example leaves them off.
   run_phase "verify" "$RUN_DIR/04-verify.log" -- \
     bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" product || return 1
+  run_phase "inventory" "$RUN_DIR/05-inventory.log" -- collect_inventory || return 1
+  local inv_line
+  while IFS= read -r inv_line; do
+    report_lines+=("  ${inv_line}")
+  done <"$RUN_DIR/inventory-summary.txt"
   return 0
 }
 
