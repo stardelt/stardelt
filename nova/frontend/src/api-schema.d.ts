@@ -971,7 +971,7 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/destinations` — `201` with the stored row.
-         * @description Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything.
+         * @description Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything. A webhook must be a public address; Nova never follows a redirect.
          */
         post: operations["destinations_create"];
         delete?: never;
