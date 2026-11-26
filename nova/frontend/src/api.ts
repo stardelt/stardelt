@@ -18,7 +18,7 @@ export type SavedQuery = Schema<'SavedQuery'>
 
 export type Destination = Schema<'Destination'>
 
-export type DestinationTest = { ok: boolean; status?: number | null; detail: string }
+export type DestinationTest = Schema<'DestinationTest'>
 
 export type Warehouse = { name: string; id: string }
 
@@ -69,10 +69,10 @@ export type Catalog = {
 export type CatalogList = { catalogs: Catalog[]; default: string }
 
 /** One table the catalog search found (`GET /api/catalog/search`). */
-export type SearchMatch = { catalog: string; namespace: string; table: string }
+export type SearchMatch = Schema<'SearchMatch'>
 
 /** `GET /api/catalog/search`: tables whose `namespace.table` contains every word of `q`. */
-export type SearchResult = { query: string; matches: SearchMatch[]; truncated: boolean }
+export type SearchResult = Schema<'SearchResult'>
 
 /**
  * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249, #263), read from
@@ -193,86 +193,23 @@ export type TableDocsUpdate = {
 }
 
 /** The freshness promise and the status it yields (#402 slice 2). */
-export type TableFreshness = {
-  promise: { by: string; timezone: string; graceMinutes: number; setAt: string } | null
-  status: 'grey' | 'green' | 'amber' | 'red'
-  lastWrite: string | null
-  dueAt: string | null
-  nextDueAt: string | null
-  detail: string
-  canEdit: boolean
-}
+export type TableFreshness = Schema<'TableFreshness'>
 /** `by: null` removes the promise; an absent field changes nothing. */
-export type FreshnessUpdate = { by?: string | null; timezone?: string; graceMinutes?: number }
+export type FreshnessUpdate = Schema<'FreshnessUpdate'>
 
 /** One verified query: a question about a table that its owners answered (#1018, #912). */
-export type VerifiedQuery = {
-  id: number
-  question: string
-  sql: string
-  verifiedBy: string
-  verifiedAt: string
-  /** The known answer: one array of values per row, or `null` (nova#912). */
-  expected?: unknown[] | null
-  /** When the query was last checked, RFC 3339, or `null` when it never was (#912). */
-  lastCheckAt?: string | null
-  /** Whether the last check passed, or `null` when it never ran (#912). */
-  lastCheckPassed?: boolean | null
-  /** What the last check found, in one sentence, or `null` when it never ran (#912). */
-  lastCheckMessage?: string | null
-}
+export type VerifiedQuery = Schema<'VerifiedQuery'>
 
 export type QueryColumn = { name: string; type: string }
-export type QueryResult = {
-  columns: QueryColumn[]
-  rows: unknown[][]
-  row_count: number
-  query_id?: string
-  stats?: unknown
-  /** True when the backend cut the result at its 50,000-row cap. */
-  truncated?: boolean
-}
+export type QueryResult = Schema<'QueryResult'>
 
-export type Job = {
-  id: string
-  kind: string
-  title: string
-  status: string
-  started_at: number
-  detail?: string | null
-  rows?: number | null
-  user?: string
-}
+export type Job = Schema<'Job'>
 
-export type UploadRequest = {
-  catalog?: string
-  namespace: string
-  table: string
-  format: 'csv' | 'json' | string
-  content: string
-}
-export type UploadResult = {
-  catalog?: string
-  namespace: string
-  table: string
-  rows_loaded: number
-  job_id: string
-}
+export type UploadRequest = Schema<'UploadRequest'>
+export type UploadResult = Schema<'UploadResult'>
 
-export type TransferRequest = {
-  catalog?: string
-  source: string
-  target: string
-  mode: 'overwrite' | 'append' | string
-}
-export type TransferResult = {
-  source_catalog?: string
-  target_catalog?: string
-  source: string
-  target: string
-  rows: number
-  job_id: string
-}
+export type TransferRequest = Schema<'TransferRequest'>
+export type TransferResult = Schema<'TransferResult'>
 
 export type TableRef = { ns: string; name: string }
 
@@ -534,16 +471,7 @@ export type ModelUsage = { month: string; groups: ModelUsageRow[]; calls: ModelU
  * `spec.owner`, `spec.managedAccess` and `spec.grants` of one `Catalog`, plus the
  * `resourceVersion` the page read. A concurrent change answers 409 and never overwrites.
  */
-export type CatalogAccessUpdate = {
-  /** `metadata.resourceVersion` from the row the page holds. */
-  resourceVersion: string
-  /** Exactly one group name. */
-  owner: string
-  /** The owner cannot grant on this catalog; only administrators can. */
-  managedAccess: boolean
-  /** One `{group, verb}` per group and verb, in the order the dialog shows them. */
-  grants: AdminCatalogGrant[]
-}
+export type CatalogAccessUpdate = Schema<'CatalogAccessUpdate'>
 
 /**
  * The body of `POST /api/admin/teams` (stardelt-nova#596): one new team space. The group
@@ -563,11 +491,7 @@ export type NewTeamRequest = {
  * What a created team space answers: `<team>`, `<team>lab` and `<team>ref` in that order,
  * and the pipeline principal `pipeline-<group>` (kept when it already existed).
  */
-export type NewTeamResponse = {
-  catalogs: string[]
-  principal: string
-  principalCreated: boolean
-}
+export type NewTeamResponse = Schema<'NewTeamResponse'>
 
 /**
  * One row of `GET /api/connections` (stardelt-nova#171). A connection is a credential
