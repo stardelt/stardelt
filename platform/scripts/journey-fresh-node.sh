@@ -14,6 +14,8 @@
 # J2 client: the release's own wheel installs into a throwaway venv and `stardelt --version`
 #   equals the release. Needs a wheel: `JOURNEY_WHEEL`, or `RELEASE_DIR` whose `versions.yaml`
 #   names the version (the wheel is then that version's GitHub release asset).
+# J3 write: the run applies `Catalog/journey`, writes three rows through Trino and deletes the
+#   catalog on exit.
 #
 # Exit codes: 0 everything passed, 1 a check failed, 3 nothing could be checked (no kubectl,
 # no identity provider, no wheel). Needs: kubectl, curl, python3 (venv).
@@ -47,11 +49,51 @@ cleanup() {
   fi
   if [ "$KEEP" != 1 ] && command -v kubectl >/dev/null 2>&1; then
     kubectl -n "$NAMESPACE" delete "serviceprincipal/${PRINCIPAL}" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n "$NAMESPACE" delete catalog/journey --ignore-not-found >/dev/null 2>&1 || true
     make -C "$PLATFORM_DIR" delete-principal NAME="$PRINCIPAL" YES=1 >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+
+# trino_sql <sql>: run one statement with the J1 token and print the first column of the
+# first row. Needs phase_identity's port-forward and $tmp/access-token. Non-zero on an error.
+trino_sql() {
+  python3 - "$tmp/access-token" "$1" <<'PY'
+import json, ssl, sys, time, urllib.request
+
+token = open(sys.argv[1]).read().strip()
+context = ssl.create_default_context()
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+
+
+def call(url, body=None):
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Authorization": "Bearer " + token, "Content-Type": "text/plain"},
+    )
+    with urllib.request.urlopen(request, context=context, timeout=20) as answer:
+        return json.load(answer)
+
+
+state = call("https://127.0.0.1:18443/v1/statement", sys.argv[2].encode())
+for _ in range(60):
+    if state.get("data"):
+        print(state["data"][0][0])
+        break
+    if state.get("error"):
+        raise SystemExit("the engine refused: %s" % state["error"].get("message"))
+    next_uri = state.get("nextUri")
+    if not next_uri:
+        raise SystemExit("no rows and no nextUri")
+    time.sleep(0.3)
+    state = call(next_uri)
+else:
+    raise SystemExit("the statement did not finish")
+PY
+}
 
 # --- J1: a machine identity ---------------------------------------------------------------
 phase_identity() {
@@ -132,41 +174,7 @@ PY
     attempt=$((attempt + 1))
   done
 
-  if ! rows="$(python3 - "$tmp/access-token" <<'PY'
-import json, ssl, sys, time, urllib.request
-
-token = open(sys.argv[1]).read().strip()
-context = ssl.create_default_context()
-context.check_hostname = False
-context.verify_mode = ssl.CERT_NONE
-
-
-def call(url, body=None):
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Authorization": "Bearer " + token, "Content-Type": "text/plain"},
-    )
-    with urllib.request.urlopen(request, context=context, timeout=20) as answer:
-        return json.load(answer)
-
-
-state = call("https://127.0.0.1:18443/v1/statement", b"select current_user")
-for _ in range(60):
-    if state.get("data"):
-        print(state["data"][0][0])
-        break
-    if state.get("error"):
-        raise SystemExit("the engine refused: %s" % state["error"].get("message"))
-    next_uri = state.get("nextUri")
-    if not next_uri:
-        raise SystemExit("no rows and no nextUri")
-    time.sleep(0.3)
-    state = call(next_uri)
-else:
-    raise SystemExit("the statement did not finish")
-PY
-  )"; then
+  if ! rows="$(trino_sql 'select current_user')"; then
     bad identity '"the Trino statement did not answer"'
     return 0
   fi
@@ -216,15 +224,82 @@ phase_client() {
   fi
 }
 
+# --- J3: a write --------------------------------------------------------------------------
+phase_write() {
+  local schema table rows
+  if ! command -v kubectl >/dev/null 2>&1 || [ ! -s "$tmp/access-token" ]; then
+    unknown write '"the write needs J1 (kubectl and the principal token)"'
+    return 0
+  fi
+  if ! kubectl -n "$NAMESPACE" apply -f - >/dev/null 2>"$tmp/catalog.err" <<EOF
+apiVersion: stardelt.io/v1alpha1
+kind: Catalog
+metadata:
+  name: journey
+spec:
+  displayName: Journey
+  description: The fresh-node run's write proof; the run deletes it again.
+  lakehouseRef: {name: main}
+  owner: stardelt-users
+  grants:
+    - {group: stardelt-users, verb: browse}
+    - {group: stardelt-users, verb: select}
+    - {group: stardelt-users, verb: write}
+    - {group: stardelt-users, verb: create}
+EOF
+  then
+    bad write "\"the Catalog was refused: $(head -c 200 "$tmp/catalog.err")\""
+    return 0
+  fi
+  if ! kubectl -n "$NAMESPACE" wait --for=condition=CatalogReady catalog/journey --timeout=180s >/dev/null 2>&1; then
+    bad write "\"catalog/journey is not CatalogReady: $(kubectl -n "$NAMESPACE" get catalog/journey -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}' 2>/dev/null)\""
+    return 0
+  fi
+  if ! kubectl -n "$NAMESPACE" wait --for=condition=GrantsReady catalog/journey --timeout=180s >/dev/null 2>&1; then
+    bad write "\"catalog/journey is not GrantsReady: $(kubectl -n "$NAMESPACE" get catalog/journey -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}' 2>/dev/null)\""
+    return 0
+  fi
+  schema='create schema if not exists journey.e2e'
+  table='create table if not exists journey.e2e.exit_test (id bigint)'
+  if ! trino_sql "$schema" >/dev/null; then
+    bad write '"create schema journey.e2e did not answer"'
+    return 0
+  fi
+  if ! trino_sql "$table" >/dev/null; then
+    bad write '"create table journey.e2e.exit_test did not answer"'
+    return 0
+  fi
+  if ! trino_sql 'delete from journey.e2e.exit_test' >/dev/null; then
+    bad write '"delete from journey.e2e.exit_test did not answer"'
+    return 0
+  fi
+  if ! trino_sql 'insert into journey.e2e.exit_test (id) values (1), (2), (3)' >/dev/null; then
+    bad write '"insert into journey.e2e.exit_test did not answer"'
+    return 0
+  fi
+  if ! rows="$(trino_sql 'select count(*) from journey.e2e.exit_test')"; then
+    rows=""
+  fi
+  if [ "$rows" = 3 ]; then
+    ok write "three rows in journey.e2e.exit_test"
+  else
+    bad write "\"count(*) answered ${rows:-nothing}, not 3\""
+  fi
+}
+
 # --- main ---------------------------------------------------------------------------------
 case "${1:-all}" in
   all | identity)
     phase_identity
-    [ "${1:-all}" = identity ] || phase_client
+    if [ "${1:-all}" = all ]; then
+      phase_client
+      phase_write
+    fi
     ;;
   client) phase_client ;;
+  write) phase_write ;;
   *)
-    echo "journey-fresh-node: unknown phase '$1' (all, identity, client)" >&2
+    echo "journey-fresh-node: unknown phase '$1' (all, identity, client, write)" >&2
     exit 2
     ;;
 esac
