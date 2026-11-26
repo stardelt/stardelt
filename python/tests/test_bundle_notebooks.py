@@ -15,10 +15,33 @@ SAME = FakeResponse(payload={"name": "explore.ipynb", "group": "sales", "objectV
 NEW = FakeResponse(payload={"name": "explore.ipynb", "group": "sales", "objectVersion": "", "unchanged": False})
 STORED = FakeResponse(payload={"name": "explore.ipynb", "group": "sales", "objectVersion": "v8", "unchanged": False})
 PINNED = {"name": "explore.ipynb", "objectVersion": "v8", "params": {"rows": "5"}}
+NB, SQL = list(FILES)   # the module's notebook file and SQL file, in that order
+TASKS = (f"name: explore\ntasks:\n  - {{name: schema, sqlFile: {SQL}}}\n"
+         f"  - name: run\n    notebook: {{file: {NB}, connection: rnacentral}}\n    dependsOn: [schema]\n")
 
 
 def urls(session):
     return [(method, url.removeprefix("https://nova.example")) for method, url, _ in session.calls]
+
+
+def test_plan_pins_a_notebook_inside_a_task(tmp_path):
+    make(tmp_path, resources={"explore.yaml": TASKS}, files=FILES)
+    code, out, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], ME, SAME, FakeResponse(payload=update("tasks")))
+    assert code == 0
+    assert urls(session)[1] == ("PUT", "/api/notebooks/sales/explore.ipynb")
+    _, _, check = session.calls[1]
+    assert check["params"] == {"dryRun": "true"} and check["json"] == NOTEBOOK
+    _, _, validate = session.calls[2]
+    assert validate["json"]["tasks"][1]["notebook"] == {"name": "explore.ipynb", "objectVersion": "v7", "connection": "rnacentral"}
+    assert validate["json"]["tasks"][0] == {"name": "schema", "sql": FILES[SQL]}
+
+
+def test_plan_of_a_changed_task_notebook_says_would_publish(tmp_path):
+    make(tmp_path, resources={"explore.yaml": TASKS}, files=FILES)
+    code, out, _, session = run(["bundle", "plan", str(tmp_path), "-t", "prod"], ME, NEW)
+    assert code == 0
+    assert [json.loads(line) for line in out.splitlines()] == [{"action": "would-publish", "name": "explore", "notebook": "sales/explore.ipynb", "kind": "Pipeline"}]
+    assert len(session.calls) == 2
 
 
 def test_plan_of_an_unchanged_notebook_checks_the_pipeline_against_the_version_it_has(tmp_path):
@@ -138,7 +161,7 @@ def test_validate_checks_the_file_name_and_refuses_a_file_beside_a_version(tmp_p
 
 def test_a_pinned_notebook_without_parameters_has_none():
     spec = {"name": "x", "notebook": {"file": "notebooks/a b.ipynb"}}
-    assert bundle._pinned(spec, {"objectVersion": "v1"})["notebook"] == {"name": "a b.ipynb", "objectVersion": "v1"}
+    assert bundle._pinned(spec, None, spec["notebook"], {"objectVersion": "v1"})["notebook"] == {"name": "a b.ipynb", "objectVersion": "v1"}
 
 
 def test_a_drift_block_found_after_the_publish_refuses_the_deploy_and_keeps_the_published_line(tmp_path):

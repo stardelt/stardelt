@@ -1059,16 +1059,24 @@ def _impact(nova, catalog, sql):
     return {"table": table, "downstream": downstream, "downstreamJobs": impact.get("downstreamJobs", 0)}
 
 
-def _notebook(spec):
-    """The notebook of a pipeline spec when it is a file of the bundle (``notebook: {file: ...}``), else ``None``."""
-    notebook = spec.get("notebook")
-    return notebook if isinstance(notebook, dict) and "file" in notebook else None
+def _notebook_slots(spec):
+    """Every notebook of ``spec`` that is a file of the bundle, as ``(slot, notebook)``: ``slot`` is ``None`` for
+    the pipeline's own ``notebook:`` and the task's index for ``tasks[i].notebook`` (#1740)."""
+    slots = []
+    top = spec.get("notebook")
+    if isinstance(top, dict) and "file" in top:
+        slots.append((None, top))
+    for index, task in enumerate(spec.get("tasks") or []):
+        notebook = task.get("notebook") if isinstance(task, dict) else None
+        if isinstance(notebook, dict) and "file" in notebook:
+            slots.append((index, notebook))
+    return slots
 
 
-def _publish(nova, directory, spec, dry_run):
+def _publish(nova, directory, spec, notebook, dry_run):
     """The answer of ``notebooks_publish`` for the notebook file of ``spec``; with ``dry_run`` Nova only says what a
     publish would do (``unchanged``) and stores nothing. Nova's own sentence is the ``ApplyError`` when it refuses."""
-    file = spec["notebook"]["file"]
+    file = notebook["file"]
     try:
         document = json.loads((Path(directory) / file).read_text(encoding="utf-8"))
     except ValueError as err:
@@ -1090,15 +1098,21 @@ def _publish(nova, directory, spec, dry_run):
         raise apply.ApplyError(f"{spec['name']}: {file}: {err}") from err
 
 
-def _pinned(spec, answer):
-    """``spec`` with its notebook file replaced by the version ``answer`` names: ``{name, objectVersion[, params]}``."""
-    notebook = spec["notebook"]
+def _pinned(spec, slot, notebook, answer):
+    """``spec`` with the notebook file ``notebook`` replaced by the version ``answer`` names: ``{name, objectVersion[, params]}``.
+
+    ``slot`` is ``None`` for the pipeline's own ``notebook:``, else the index of ``tasks[slot]`` (#1740).
+    """
     pinned = {"name": PurePosixPath(notebook["file"]).name, "objectVersion": answer["objectVersion"]}
     if notebook.get("params"):
         pinned["params"] = notebook["params"]
     if notebook.get("connection"):
         pinned["connection"] = notebook["connection"]
-    return {**spec, "notebook": pinned}
+    if slot is None:
+        return {**spec, "notebook": pinned}
+    tasks = list(spec["tasks"])
+    tasks[slot] = {**tasks[slot], "notebook": pinned}
+    return {**spec, "tasks": tasks}
 
 
 def _blocked(target, names):
@@ -1271,18 +1285,25 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         return migration_problems, []
     results, refused, changed_by_hand, unpublished = list(migration_rows), [], set(), []
     for position, spec in enumerate(specs):
-        if _notebook(spec):
+        slots = _notebook_slots(spec)
+        if slots:
+            answers = []
             try:
-                answer = _publish(nova, directory, spec, dry_run=True)
+                for slot, notebook in slots:
+                    answers.append((slot, notebook, _publish(nova, directory, spec, notebook, dry_run=True)))
             except apply.ApplyError as err:
                 refused.append((target, str(err)))
                 continue
-            if not answer["unchanged"]:
+            if any(not answer["unchanged"] for _, _, answer in answers):
                 # There is no version to pin yet, so Nova cannot check this pipeline: a deploy publishes first.
                 unpublished.append(position)
-                results.append({"action": "would-publish", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{PurePosixPath(spec['notebook']['file']).name}", "kind": "Pipeline"})
+                for slot, notebook, answer in answers:
+                    if answer["unchanged"]:
+                        continue
+                    results.append({"action": "would-publish", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{PurePosixPath(notebook['file']).name}", "kind": "Pipeline"})
                 continue
-            specs[position] = spec = _pinned(spec, answer)
+            for slot, notebook, answer in answers:
+                specs[position] = spec = _pinned(spec, slot, notebook, answer)
         try:
             results.append({**apply.apply(nova, spec, dry_run=True), "kind": "Pipeline"})
         except apply.ApplyError as err:
@@ -1328,7 +1349,10 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     for position in unpublished:
         spec = specs[position]
         try:
-            answer = _publish(nova, directory, spec, dry_run=False)
+            for slot, notebook in _notebook_slots(spec):
+                answer = _publish(nova, directory, spec, notebook, dry_run=False)
+                spec = _pinned(spec, slot, notebook, answer)
+                done.append({"action": "published", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{PurePosixPath(notebook['file']).name}", "objectVersion": answer["objectVersion"], "kind": "Pipeline"})
         except apply.ApplyError as err:
             try:
                 touched = _touched(nova, specs, done, [])
@@ -1337,8 +1361,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             else:
                 done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
             return [(target, str(err))], done
-        specs[position] = spec = _pinned(spec, answer)
-        done.append({"action": "published", "name": spec["name"], "notebook": f"{spec['ownerGroup']}/{spec['notebook']['name']}", "objectVersion": answer["objectVersion"], "kind": "Pipeline"})
+        specs[position] = spec
         try:
             verdict = apply.apply(nova, spec, dry_run=True)
         except apply.ApplyError as err:
