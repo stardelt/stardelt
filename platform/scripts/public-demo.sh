@@ -809,7 +809,8 @@ PY
   }
 
   # 23. The demo's public-database pipeline reads RNAcentral through its Connection (#79 point 2):
-  # the notebook task names `rnacentral`, the group may use it, and visitors may see the pipeline.
+  # the notebook task (the second, after the `schema` task since #1636) names `rnacentral`, the group may
+  # use it, and visitors may see the pipeline.
   check_23() {
     local document connection viewers
     document="$(kubectl -n "$NAMESPACE" get pipelines.stardelt.io public-db-load -o json 2>/dev/null || true)"
@@ -818,7 +819,7 @@ PY
       check_fix="make demo-public-db YES=1"
       return 1
     fi
-    connection="$(jq -r '.spec.tasks[0].connection // ""' <<<"$document")"
+    connection="$(jq -r '[.spec.tasks[]? | select(.kind == "notebook") | .connection // empty][0] // ""' <<<"$document")"
     viewers="$(jq -r --arg g "$GROUP" '(.spec.viewers // []) | index($g) != null' <<<"$document")"
     if [ "$connection" = rnacentral ] && [ "$viewers" = true ]; then
       check_msg="public-db-load reads RNAcentral through its Connection and $GROUP may see it"

@@ -6,6 +6,7 @@ exists anywhere in the test. The Keycloak half (the person, its memberships, rol
 steps (grants, apply, configmap, access sync) are proved on a cluster by running `make public-demo YES=1`; what
 can be decided offline is decided here: the checks, the plan, the kill switch and the manifest it applies.
 """
+import json
 import os
 import shutil
 import stat
@@ -42,6 +43,12 @@ if [ "${args[0]-}" = get ] && [ "${args[1]-}" = catalogs.stardelt.io ]; then
 fi
 if [ "${args[0]-}" = get ] && [ "${args[1]-}" = serviceprincipals.stardelt.io ]; then
   printf 'true'
+fi
+# The demo's public-database pipeline: `get pipelines.stardelt.io public-db-load -o json` answers
+# FAKE_PUBLIC_DB (empty when unset, which row 23 reads as "does not exist").
+if [ "${args[0]-}" = get ] && [ "${args[1]-}" = pipelines.stardelt.io ] && [ "${args[2]-}" = public-db-load ]; then
+  printf '%s' "${FAKE_PUBLIC_DB:-}"
+  exit 0
 fi
 if [ "${args[0]-}" = get ] && [ "${args[1]-}" = configmap ] && [ "${args[2]-}" = keycloak-env ]; then
   exit 1
@@ -145,6 +152,22 @@ class PublicDemo(unittest.TestCase):
         self.assertIn("|| return 1", body, "user_id must tell a refused lookup apart from an absent person")
         self.assertIn("check_kc_at=$SECONDS", text, "the admin token is renewed before it expires")
         self.assertIn("the Keycloak admin API refused the lookup of", text)
+
+    def test_row_23_finds_the_connection_on_the_notebook_task_after_the_schema_task(self):
+        pipeline = json.dumps({"spec": {"viewers": ["visitors"], "tasks": [
+            {"kind": "sql", "name": "schema", "sql": "create schema if not exists bronze.public_db"},
+            {"kind": "notebook", "name": "run", "connection": "rnacentral", "dependsOn": ["schema"]},
+        ]}})
+        done = self.run_script("--check", FAKE_PUBLIC_DB=pipeline)
+        self.assertIn("PASS     23  public-db-load reads RNAcentral through its Connection and visitors may see it", done.stdout)
+
+    def test_row_23_names_a_notebook_task_without_the_connection(self):
+        pipeline = json.dumps({"spec": {"viewers": ["visitors"], "tasks": [
+            {"kind": "sql", "name": "schema", "sql": "select 1"},
+            {"kind": "notebook", "name": "run"},
+        ]}})
+        done = self.run_script("--check", FAKE_PUBLIC_DB=pipeline)
+        self.assertIn("MISSING  23  public-db-load names connection 'none' and visitors may see it: true", done.stdout)
 
 
 if __name__ == "__main__":
