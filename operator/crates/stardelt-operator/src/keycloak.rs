@@ -1010,10 +1010,7 @@ mod tests {
         );
 
         assert_eq!(container.name, "keycloak");
-        assert_eq!(
-            container.image.as_deref(),
-            Some("quay.io/keycloak/keycloak:26.8.2")
-        );
+        assert_eq!(container.image.as_deref(), Some(IMAGE));
         assert_eq!(
             container
                 .args

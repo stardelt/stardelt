@@ -4452,7 +4452,7 @@ mod tests {
         assert_eq!(body["kind"], "Deployment");
         assert_eq!(
             body["spec"]["template"]["spec"]["containers"][0]["image"],
-            "quay.io/keycloak/keycloak:26.8.2"
+            crate::keycloak::IMAGE
         );
     }
 
