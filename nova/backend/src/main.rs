@@ -134,6 +134,7 @@ mod openapi;
 mod people;
 mod pipeline_notice;
 mod pipelines;
+mod previews;
 mod token_exchange;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
 #[allow(dead_code)]
@@ -1394,6 +1395,9 @@ async fn main() -> anyhow::Result<()> {
     // minutes, with Nova's own service token, one round at a time (stardelt-nova#263).
     // Not without a catalog.
     catalog_metrics::spawn_refresher(Arc::clone(&state));
+    // A preview copy removed when its recorded expiry has passed (#106 slice 2b): every ten
+    // minutes, at most a hundred at once. Off without a cluster.
+    previews::spawn(Arc::clone(&state));
     // The ModelEndpoint probe (stardelt-operator#609 slice c2): one round after a minute, then
     // every NOVA_MODEL_PROBE_SECONDS (a day by default); a new endpoint is probed at the first round.
     model_probe::spawn_loop(Arc::clone(&state));
