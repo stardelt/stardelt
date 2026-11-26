@@ -172,6 +172,10 @@ pub struct PlanChange {
     /// What an `update` would change, the sentences `pipelines_validate` answers.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diff: Vec<String>,
+    /// `true` when the object was changed outside the bundle after its last deploy
+    /// (`deployment.modified`): applying this document overwrites that change. `false` for a
+    /// `create`, a delete row, and an object whose stamp carries no digest yet.
+    pub modified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

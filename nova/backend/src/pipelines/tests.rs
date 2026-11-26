@@ -7505,6 +7505,99 @@ async fn a_change_after_the_deploy_shows_as_modified_and_the_next_deploy_clears_
 }
 
 #[tokio::test]
+async fn a_plan_marks_a_pipeline_changed_after_its_deploy() {
+    let resources = analytics_ready();
+    let ada = who("sub-ada", &["analytics"], false);
+    let namespace = crate::cluster::namespace();
+    let document = plan_document("daily-trips", "analytics", "select 1", "0 3 * * *");
+
+    // The deploy stamps the pipeline, so a change after it can be told apart from the bundle.
+    let mut body: CreatePipelineRequest =
+        serde_json::from_value(document.clone()).expect("a create body");
+    body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+    create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+        .await
+        .expect("created");
+
+    // Someone changes the schedule outside the bundle; the stamp and its digest stay.
+    let mut edited = update_body("select 1");
+    edited.schedule = Some(ScheduleRequest {
+        cron: "5 4 * * *".into(),
+        timezone: "Europe/Berlin".into(),
+    });
+    update_pipeline(
+        Some(&resources),
+        None,
+        None,
+        None,
+        &ada,
+        &namespace,
+        "daily-trips",
+        edited,
+    )
+    .await
+    .expect("updated");
+
+    let plan = plan_bundle(
+        Some(&resources),
+        None,
+        None,
+        &ada,
+        None,
+        &[],
+        plan_request(vec![document.clone()]),
+    )
+    .await
+    .expect("an answer");
+    assert!(plan.ok, "{:?}", plan.errors);
+    assert_eq!(plan.changes.len(), 1, "{:?}", plan.changes);
+    let change = &plan.changes[0];
+    assert_eq!(change.action, "update");
+    assert!(
+        change.modified,
+        "the plan says the deploy would overwrite the change"
+    );
+    assert_eq!(change.diff, vec!["schedule"], "{:?}", change.diff);
+
+    // The deploy itself writes a new digest; the same document is then no change at all.
+    let mut applied = update_body("select 1");
+    applied.schedule = Some(ScheduleRequest {
+        cron: "0 3 * * *".into(),
+        timezone: "Europe/Berlin".into(),
+    });
+    applied.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
+    update_pipeline(
+        Some(&resources),
+        None,
+        None,
+        None,
+        &ada,
+        &namespace,
+        "daily-trips",
+        applied,
+    )
+    .await
+    .expect("updated");
+
+    let again = plan_bundle(
+        Some(&resources),
+        None,
+        None,
+        &ada,
+        None,
+        &[],
+        plan_request(vec![document]),
+    )
+    .await
+    .expect("an answer");
+    assert!(again.ok, "{:?}", again.errors);
+    assert_eq!(again.changes.len(), 1, "{:?}", again.changes);
+    assert_eq!(again.changes[0].action, "unchanged");
+    assert!(!again.changes[0].modified, "the deploy cleared the change");
+    assert!(again.changes[0].diff.is_empty());
+}
+
+#[tokio::test]
 async fn the_check_says_when_an_update_would_overwrite_a_change_made_after_the_deploy() {
     let resources = analytics_ready();
     let ada = who("sub-ada", &["analytics"], false);
