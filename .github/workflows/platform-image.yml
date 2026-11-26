@@ -11,7 +11,7 @@ name: "platform / Image"
 # (printed in the job summary) when rolling the cluster.
 #
 # Only the job whose directory changed runs (`scripts/changed-images.sh`); a change to this
-# workflow itself, a tag push or a workflow dispatch builds all three.
+# workflow itself or a workflow dispatch builds all three.
 #
 # Pull requests build without pushing.
 
