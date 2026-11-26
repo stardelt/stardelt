@@ -3031,6 +3031,11 @@ pub struct ValidatePipelineResponse {
     /// change. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<bool>,
+    /// `true` for an `update` of a pipeline that no bundle deploy stamped yet (`deployment` is
+    /// absent on the pipeline view): applying this document from a bundle would take it over.
+    /// Absent for a `create`, a refusal, and a pipeline a bundle already owns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopt: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -6100,6 +6105,7 @@ fn not_ok(message: &str) -> ValidatePipelineResponse {
         changes: Vec::new(),
         next_runs: Vec::new(),
         modified: None,
+        adopt: None,
     }
 }
 
@@ -6191,6 +6197,7 @@ pub(crate) async fn validate_pipeline(
         Err(e) => return Err(e.fail),
     };
     let mut modified = None;
+    let mut adopt = None;
     let (action, changes) = match resources.get(&body.name).await.map_err(resource_fail)? {
         None => ("create", Vec::new()),
         Some(existing) => {
@@ -6202,6 +6209,9 @@ pub(crate) async fn validate_pipeline(
             }
             if spec_of(&existing)["ownerGroup"].as_str() != Some(body.owner_group.as_str()) {
                 return Ok(not_ok("the group of an existing pipeline cannot change"));
+            }
+            if deployment_of(&existing).is_none() {
+                adopt = Some(true);
             }
             // What an update has, for three shapes (#905 decision 3).
             match (stored_shape(&existing), &planned.statement) {
@@ -6250,6 +6260,7 @@ pub(crate) async fn validate_pipeline(
         changes,
         next_runs,
         modified,
+        adopt,
     })
 }
 

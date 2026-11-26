@@ -148,6 +148,8 @@ def _parser():
     plan.add_argument("-t", "--target", required=True, help="the target to plan (a name under targets in bundle.yaml)")
     plan.add_argument("--prune", action="store_true", help="also list the pipelines and stream apps of this bundle target that the bundle no longer names")
     plan.add_argument("--accept-drift", action="store_true", help="overwrite a pipeline changed after its last deploy even when the target says drift: block")
+    plan.add_argument("--adopt", action="append", default=[], metavar="NAME",
+                      help="take over a pipeline made in Nova (repeatable); without it such a pipeline is refused")
     plan.add_argument("--diff", action="store_true", help="also show, on standard error, what each update would change (the deployed value against the bundle's)")
     plan.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
     plan.add_argument(
@@ -160,6 +162,8 @@ def _parser():
     ship.add_argument("--dry-run", action="store_true", help="the same as `bundle plan`")
     ship.add_argument("--prune", action="store_true", help="also remove the pipelines and stream apps of this bundle target that the bundle no longer names")
     ship.add_argument("--accept-drift", action="store_true", help="overwrite a pipeline changed after its last deploy even when the target says drift: block")
+    ship.add_argument("--adopt", action="append", default=[], metavar="NAME",
+                      help="take over a pipeline made in Nova (repeatable); without it such a pipeline is refused")
     ship.add_argument("--diff", action="store_true", help="also show, on standard error, what each update changes (the deployed value against the bundle's)")
     ship.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
     ship.add_argument("--smoke", metavar="NAME", help="after the deploy, run this pipeline of the bundle and fail unless it succeeds")
@@ -780,7 +784,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 nova, args.directory, args.target, dry_run=args.bundle_command == "plan" or args.dry_run, prune=args.prune,
                 accept_drift=args.accept_drift, diff=args.diff, allow_breaking=args.allow_breaking,
                 smoke=getattr(args, "smoke", None), smoke_timeout=getattr(args, "smoke_timeout", 0) or None,
-                preview=getattr(args, "preview", None),
+                preview=getattr(args, "preview", None), adopt=args.adopt,
             )
             shown = []
             plan_rows = []

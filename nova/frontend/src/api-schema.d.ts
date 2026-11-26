@@ -5186,6 +5186,12 @@ export interface components {
              */
             action?: string | null;
             /**
+             * @description `true` for an `update` of a pipeline that no bundle deploy stamped yet (`deployment` is
+             *     absent on the pipeline view): applying this document from a bundle would take it over.
+             *     Absent for a `create`, a refusal, and a pipeline a bundle already owns.
+             */
+            adopt?: boolean | null;
+            /**
              * @description What an `update` would change, from `statement` (or `notebook`), `schedule`,
              *     `description`, `params` and `options`; empty for a `create`, for a refusal and for an
              *     update that changes nothing.
