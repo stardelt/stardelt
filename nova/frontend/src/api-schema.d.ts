@@ -1541,6 +1541,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/pipelines/{namespace}/{name}/backfills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Start a backfill: run the pipeline once for every scheduled date between `fromDate` and `toDate`, inclusive, through Airflow's own backfill API. This is a change, not a run: a viewer (`spec.viewers`) answers 403, a paused pipeline 409 (Airflow would create the backfill and leave every run `queued`), and a pipeline the scheduler has not loaded yet 409. A dry run decides first: a range with no date to run answers 409 (dates that already ran are skipped unless `reprocess` asks for them: `none` (the default), `failed` or `completed`), more than 31 dates answers 400. Airflow's own refusal (409 when a backfill is already open for this pipeline) is passed on with its sentence. `params` are this backfill's values of the schedule's `${params.<name>}` placeholders, and travel as Airflow's `dag_run_conf` into every run. Answers 201 with the backfill and the dates it will run. The attempt is audited, including a refusal. Answers `Cache-Control: no-store`. */
+        post: operations["pipelines_backfill_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/pipelines/{namespace}/{name}/backfills/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The state of a backfill: `isPaused`, `completedAt` (its only completion signal) and the runs it created (`backfill__…`, with their date and state). Like starting one, this is the owner group's and administrators' verb: a viewer answers 403, and a backfill that does not exist answers 404. Answers `Cache-Control: no-store`. */
+        get: operations["pipelines_backfill_state"];
+        put?: never;
+        post?: never;
+        /** @description Cancel a backfill: Airflow sets its `completedAt` and fails every run that is still `queued`; a run already running keeps running (its side effects can still commit). This is the owner group's and administrators' verb: a viewer answers 403, and a backfill that does not exist answers 404. Answers the backfill and `Cache-Control: no-store`. The attempt is audited, including a refusal. */
+        delete: operations["pipelines_backfill_cancel"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pipelines/{namespace}/{name}/pause": {
         parameters: {
             query?: never;
@@ -2588,6 +2623,46 @@ export interface components {
             issuer?: string | null;
             /** @description `oidc` (sign-in is required) or `dev` (Nova answers without one). */
             mode: string;
+        };
+        /** @description One date of the dry run. */
+        BackfillDateView: {
+            date: string;
+        };
+        /** @description One run of a backfill. */
+        BackfillRunView: {
+            date: string;
+            runId: string;
+            state: string;
+        };
+        /**
+         * @description The body of `POST …/backfills`: an inclusive range of UTC days and how to treat dates that
+         *     already ran. The days are `YYYY-MM-DD`.
+         */
+        BackfillStart: {
+            fromDate: string;
+            params?: {
+                [key: string]: string;
+            } | null;
+            reprocess?: string | null;
+            toDate: string;
+        };
+        /** @description The answer of `GET …/backfills/{id}`: the backfill and the runs it created. */
+        BackfillStateView: {
+            completedAt?: string | null;
+            /** Format: int64 */
+            id: number;
+            isPaused: boolean;
+            runs: components["schemas"]["BackfillRunView"][];
+        };
+        /** @description The answer of a start and of a cancel. */
+        BackfillView: {
+            completedAt?: string | null;
+            dates: components["schemas"]["BackfillDateView"][];
+            fromDate: string;
+            /** Format: int64 */
+            id: number;
+            reprocess: string;
+            toDate: string;
         };
         /**
          * @description `GET /api/connections/break-glass-log`: the last 200 reads and refusals, newest first. It has
@@ -11576,6 +11651,242 @@ export interface operations {
                 };
             };
             /** @description No cluster connection */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    pipelines_backfill_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The Pipeline's namespace (Nova's own) */
+                namespace: string;
+                /** @description Pipeline name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackfillStart"];
+            };
+        };
+        responses: {
+            /** @description The backfill, started */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillView"];
+                };
+            };
+            /** @description The body is not JSON, a date is not `YYYY-MM-DD`, `fromDate` is after `toDate`, or the range has more than 31 dates */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No token to sign in with */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may see but not change this pipeline */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such pipeline for this caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The pipeline is paused or not loaded, no date in the range would run, or a backfill is already open */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The scheduler or the cluster did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No cluster connection, or the scheduler is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    pipelines_backfill_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The Pipeline's namespace (Nova's own) */
+                namespace: string;
+                /** @description Pipeline name */
+                name: string;
+                /** @description Airflow's backfill id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The backfill and its runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillStateView"];
+                };
+            };
+            /** @description No token to sign in with */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may see but not change this pipeline */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such pipeline for this caller, or no such backfill */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The scheduler or the cluster did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No cluster connection, or the scheduler is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    pipelines_backfill_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The Pipeline's namespace (Nova's own) */
+                namespace: string;
+                /** @description Pipeline name */
+                name: string;
+                /** @description Airflow's backfill id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The backfill, now cancelled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillView"];
+                };
+            };
+            /** @description No token to sign in with */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may see but not change this pipeline */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such pipeline for this caller, or no such backfill */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The scheduler or the cluster did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No cluster connection, or the scheduler is not configured */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -153,6 +153,41 @@ pub struct DagSummary {
     pub tags: Vec<Tag>,
 }
 
+/// A backfill as Airflow reports it (`POST /api/v2/backfills`, `GET /api/v2/backfills/{id}`).
+/// It names no runs: read them from the DAG's run list and filter `run_type == "backfill"`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Backfill {
+    pub id: i64,
+    pub dag_id: String,
+    #[serde(default)]
+    pub from_date: Option<String>,
+    #[serde(default)]
+    pub to_date: Option<String>,
+    #[serde(default)]
+    pub is_paused: Option<bool>,
+    #[serde(default)]
+    pub reprocess_behavior: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+/// The dates a backfill would create, from `POST /api/v2/backfills/dry_run`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BackfillPlan {
+    #[serde(default)]
+    pub total_entries: i64,
+    #[serde(default)]
+    pub backfills: Vec<BackfillDate>,
+}
+
+/// One date of a [`BackfillPlan`]; `partition_key` is null for a cron DAG.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BackfillDate {
+    pub logical_date: String,
+}
+
 /// A DAG tag (`stardelt`, `pipeline`). Airflow also sends the owning `dag_id`; it is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Tag {
@@ -346,6 +381,26 @@ fn detail_text(body: &Value) -> Option<String> {
         }
         other => Some(other.to_string()),
     }
+}
+
+/// The body of a dry run and of a create: the same shape Airflow takes for both.
+fn backfill_body(
+    dag_id: &str,
+    from_date: &str,
+    to_date: &str,
+    conf: Option<&Value>,
+    reprocess: &str,
+) -> Value {
+    let mut payload = json!({
+        "dag_id": dag_id,
+        "from_date": from_date,
+        "to_date": to_date,
+        "reprocess_behavior": reprocess,
+    });
+    if let Some(conf) = conf {
+        payload["dag_run_conf"] = conf.clone();
+    }
+    payload
 }
 
 impl AirflowClient {
@@ -662,6 +717,68 @@ impl AirflowClient {
         let payload = Value::Object(payload);
         let body = self
             .send(|token| self.http.post(&url).bearer_auth(token).json(&payload))
+            .await?;
+        Self::parse(body)
+    }
+
+    /// The dates a range would create, without creating anything. A range that already has runs
+    /// answers 0 under `none` and `failed`; `completed` replays them (spike #1876 B2).
+    pub async fn backfill_dry_run(
+        &self,
+        dag_id: &str,
+        from_date: &str,
+        to_date: &str,
+        conf: Option<&Value>,
+        reprocess: &str,
+    ) -> Result<BackfillPlan, AirflowError> {
+        let url = self.url(&format!("{API}/backfills/dry_run"));
+        let body = self
+            .send(|token| {
+                self.http
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(&backfill_body(dag_id, from_date, to_date, conf, reprocess))
+            })
+            .await?;
+        Self::parse(body)
+    }
+
+    /// Start a backfill. One open backfill per DAG: a second answers 409 with Airflow's `detail`.
+    pub async fn create_backfill(
+        &self,
+        dag_id: &str,
+        from_date: &str,
+        to_date: &str,
+        conf: Option<&Value>,
+        reprocess: &str,
+    ) -> Result<Backfill, AirflowError> {
+        let url = self.url(&format!("{API}/backfills"));
+        let body = self
+            .send(|token| {
+                self.http
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(&backfill_body(dag_id, from_date, to_date, conf, reprocess))
+            })
+            .await?;
+        Self::parse(body)
+    }
+
+    /// One backfill by id. `completed_at` is the only completion signal; the object names no runs.
+    pub async fn backfill(&self, id: i64) -> Result<Backfill, AirflowError> {
+        let url = self.url(&format!("{API}/backfills/{id}"));
+        let body = self
+            .send(|token| self.http.get(&url).bearer_auth(token))
+            .await?;
+        Self::parse(body)
+    }
+
+    /// Cancel a backfill: Airflow sets `completed_at` and fails every **queued** run; a running one
+    /// keeps running (spike #1876 B4).
+    pub async fn cancel_backfill(&self, id: i64) -> Result<Backfill, AirflowError> {
+        let url = self.url(&format!("{API}/backfills/{id}/cancel"));
+        let body = self
+            .send(|token| self.http.put(&url).bearer_auth(token))
             .await?;
         Self::parse(body)
     }

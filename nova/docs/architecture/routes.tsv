@@ -7,6 +7,7 @@ DELETE	/api/connections/personal/{name}	connection_routes	main	signed-in
 DELETE	/api/destinations/{id}	destinations	main	signed-in
 DELETE	/api/notebooks/{group}/{name}	notebooks	notebooks	signed-in
 DELETE	/api/pipelines/{namespace}/{name}	pipelines	pipelines	signed-in
+DELETE	/api/pipelines/{namespace}/{name}/backfills/{id}	pipelines	pipelines	signed-in
 DELETE	/api/saved-queries/{id}	saved_queries	main	signed-in
 DELETE	/api/saved-queries/{id}/share/{group}	saved_queries	main	signed-in
 DELETE	/api/settings/{key}	user_settings	main	signed-in
@@ -64,6 +65,7 @@ GET	/api/openapi.json	openapi	main	public
 GET	/api/pipelines	pipelines	pipelines	signed-in
 GET	/api/pipelines/principals	pipelines	pipelines	signed-in
 GET	/api/pipelines/{namespace}/{name}	pipelines	pipelines	signed-in
+GET	/api/pipelines/{namespace}/{name}/backfills/{id}	pipelines	pipelines	signed-in
 GET	/api/pipelines/{namespace}/{name}/runs/{run_id}	pipelines	pipelines	signed-in
 GET	/api/pipelines/{namespace}/{name}/runs/{run_id}/checks	pipelines	pipelines	signed-in
 GET	/api/pipelines/{namespace}/{name}/runs/{run_id}/queries	pipelines	pipelines	signed-in
@@ -124,6 +126,7 @@ POST	/api/pipelines	pipelines	pipelines	signed-in
 POST	/api/pipelines/check	pipelines	pipelines	signed-in
 POST	/api/pipelines/preview-schedule	pipelines	pipelines	signed-in
 POST	/api/pipelines/validate	pipelines	pipelines	signed-in
+POST	/api/pipelines/{namespace}/{name}/backfills	pipelines	pipelines	signed-in
 POST	/api/pipelines/{namespace}/{name}/pause	pipelines	pipelines	signed-in
 POST	/api/pipelines/{namespace}/{name}/resume	pipelines	pipelines	signed-in
 POST	/api/pipelines/{namespace}/{name}/runs	pipelines	pipelines	signed-in

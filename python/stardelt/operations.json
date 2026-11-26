@@ -526,6 +526,38 @@
       "query_params": [],
       "body": false
     },
+    "pipelines_backfill_cancel": {
+      "method": "DELETE",
+      "path": "/api/pipelines/{namespace}/{name}/backfills/{id}",
+      "path_params": [
+        "namespace",
+        "name",
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "pipelines_backfill_start": {
+      "method": "POST",
+      "path": "/api/pipelines/{namespace}/{name}/backfills",
+      "path_params": [
+        "namespace",
+        "name"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "pipelines_backfill_state": {
+      "method": "GET",
+      "path": "/api/pipelines/{namespace}/{name}/backfills/{id}",
+      "path_params": [
+        "namespace",
+        "name",
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "pipelines_check": {
       "method": "POST",
       "path": "/api/pipelines/check",

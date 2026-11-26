@@ -103,7 +103,8 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::airflow::{
-    AirflowClient, AirflowError, DagRun, DagSummary, LogEvent, LogPage, TaskInstance, dag_id_for,
+    AirflowClient, AirflowError, Backfill, BackfillPlan, DagRun, DagSummary, LogEvent, LogPage,
+    TaskInstance, dag_id_for,
 };
 use crate::api_json::ApiJson;
 use crate::audit::{self, PipelineWrite};
@@ -3271,6 +3272,57 @@ pub struct RunStart {
     pub params: Option<BTreeMap<String, String>>,
 }
 
+/// The body of `POST …/backfills`: an inclusive range of UTC days and how to treat dates that
+/// already ran. The days are `YYYY-MM-DD`.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackfillStart {
+    pub from_date: String,
+    pub to_date: String,
+    pub reprocess: Option<String>,
+    pub params: Option<BTreeMap<String, String>>,
+}
+
+/// One date of the dry run.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackfillDateView {
+    pub date: String,
+}
+
+/// The answer of a start and of a cancel.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackfillView {
+    pub id: i64,
+    pub from_date: String,
+    pub to_date: String,
+    pub reprocess: String,
+    pub dates: Vec<BackfillDateView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+/// The answer of `GET …/backfills/{id}`: the backfill and the runs it created.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackfillStateView {
+    pub id: i64,
+    pub is_paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub runs: Vec<BackfillRunView>,
+}
+
+/// One run of a backfill.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackfillRunView {
+    pub run_id: String,
+    pub date: String,
+    pub state: String,
+}
+
 /// One task instance of a run.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -5223,6 +5275,286 @@ async fn run_now_inner(
     }
 }
 
+/// The bytes of a date range as Airflow takes them: `YYYY-MM-DD` → the UTC day.
+fn backfill_range(start: &BackfillStart) -> Result<(String, String), Fail> {
+    let day = |value: &str, which: &str| -> Result<String, Fail> {
+        if !is_a_day(value) {
+            return Err(Fail::new(
+                StatusCode::BAD_REQUEST,
+                format!("{which} must be YYYY-MM-DD"),
+            ));
+        }
+        Ok(value.to_string())
+    };
+    let from = day(&start.from_date, "fromDate")?;
+    let to = day(&start.to_date, "toDate")?;
+    if from > to {
+        return Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "fromDate must not be after toDate",
+        ));
+    }
+    Ok((format!("{from}T00:00:00Z"), format!("{to}T23:59:59Z")))
+}
+
+/// `true` for a real calendar day in `YYYY-MM-DD` (the same check `run_start` uses).
+fn is_a_day(value: &str) -> bool {
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
+}
+
+/// `POST …/backfills`: start a backfill over a range of days. Unlike a run this is a change
+/// (`canEdit`), so it refuses a paused pipeline — Airflow would accept it and leave every run
+/// `queued` (spike #1876 B4). The dry run decides what the range means before anything is
+/// created: no date at all is a 409 (nothing would run), more than 31 dates a 400.
+async fn start_backfill_action(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    start: &BackfillStart,
+    range: (&str, &str),
+) -> Result<BackfillView, Fail> {
+    let result = start_backfill_inner(resources, airflow, who, namespace, name, start, range).await;
+    match &result {
+        Ok(_) => audit::pipeline_event("backfill", who, namespace, name, None, "ok", None),
+        Err(e) => audit::pipeline_event("backfill", who, namespace, name, None, &e.outcome, None),
+    }
+    result.map_err(|e| e.fail)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_backfill_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    start: &BackfillStart,
+    range: (&str, &str),
+) -> Result<BackfillView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, _resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    let dag = match airflow.dag(&dag_id).await {
+        Ok(dag) => dag,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    if dag.is_paused == Some(true) {
+        return Err(ActionError::refused("paused", pipeline_paused()));
+    }
+
+    let (from, to) = range;
+    let conf = start
+        .params
+        .as_ref()
+        .map(|params| json!({ "params": params }));
+    let reprocess = start.reprocess.as_deref().unwrap_or("none");
+    let plan = match airflow
+        .backfill_dry_run(&dag_id, from, to, conf.as_ref(), reprocess)
+        .await
+    {
+        Ok(plan) => plan,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(backfill_fail(e))),
+    };
+    if plan.total_entries == 0 {
+        return Err(ActionError::refused(
+            "nothing-to-run",
+            Fail::new(
+                StatusCode::CONFLICT,
+                "no date in this range would run (dates that already ran are skipped; ask to re-run them)",
+            ),
+        ));
+    }
+    if plan.total_entries > 31 {
+        return Err(ActionError::refused(
+            "too-many-dates",
+            Fail::new(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a backfill covers at most 31 dates; this range has {}",
+                    plan.total_entries
+                ),
+            ),
+        ));
+    }
+
+    let backfill = match airflow
+        .create_backfill(&dag_id, from, to, conf.as_ref(), reprocess)
+        .await
+    {
+        Ok(backfill) => backfill,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(backfill_fail(e))),
+    };
+    Ok(backfill_view(&backfill, reprocess, plan))
+}
+
+/// `GET …/backfills/{id}`: the backfill and the `backfill__…` runs it created.
+async fn backfill_state_action(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    id: i64,
+) -> Result<BackfillStateView, Fail> {
+    let result = backfill_state_inner(resources, airflow, who, namespace, name, id).await;
+    match &result {
+        Ok(_) => audit::pipeline_event("backfill", who, namespace, name, None, "ok", None),
+        Err(e) => audit::pipeline_event("backfill", who, namespace, name, None, &e.outcome, None),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn backfill_state_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    id: i64,
+) -> Result<BackfillStateView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, _resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    let backfill = match airflow.backfill(id).await {
+        Ok(backfill) => backfill,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_backfill()));
+        }
+        Err(e) => return Err(ActionError::error(backfill_fail(e))),
+    };
+    let runs = match airflow.runs(&dag_id, 100).await {
+        Ok(runs) => runs,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    let runs = runs
+        .into_iter()
+        .filter(|run| run.run_type.as_deref() == Some("backfill"))
+        .map(|run| BackfillRunView {
+            run_id: run.dag_run_id,
+            date: run.logical_date.unwrap_or_default(),
+            state: run.state.unwrap_or_else(|| "unknown".into()),
+        })
+        .collect();
+    Ok(BackfillStateView {
+        id: backfill.id,
+        is_paused: backfill.is_paused.unwrap_or(false),
+        completed_at: backfill.completed_at,
+        runs,
+    })
+}
+
+/// `DELETE …/backfills/{id}`: cancel a backfill. Airflow fails every queued run and lets a
+/// running one finish (spike #1876 B4).
+async fn cancel_backfill_action(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    id: i64,
+) -> Result<BackfillView, Fail> {
+    let result = cancel_backfill_inner(resources, airflow, who, namespace, name, id).await;
+    match &result {
+        Ok(_) => audit::pipeline_event("backfill", who, namespace, name, None, "ok", None),
+        Err(e) => audit::pipeline_event("backfill", who, namespace, name, None, &e.outcome, None),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn cancel_backfill_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    id: i64,
+) -> Result<BackfillView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (_, _resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    let backfill = match airflow.cancel_backfill(id).await {
+        Ok(backfill) => backfill,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_backfill()));
+        }
+        Err(e) => return Err(ActionError::error(backfill_fail(e))),
+    };
+    let reprocess = backfill.reprocess_behavior.as_deref().unwrap_or("none");
+    Ok(BackfillView {
+        id: backfill.id,
+        from_date: backfill.from_date.unwrap_or_default(),
+        to_date: backfill.to_date.unwrap_or_default(),
+        reprocess: reprocess.to_string(),
+        dates: Vec::new(),
+        completed_at: backfill.completed_at,
+    })
+}
+
+/// The answer of a start: the backfill Airflow created and the dates the dry run named.
+fn backfill_view(backfill: &Backfill, reprocess: &str, plan: BackfillPlan) -> BackfillView {
+    BackfillView {
+        id: backfill.id,
+        from_date: backfill.from_date.clone().unwrap_or_default(),
+        to_date: backfill.to_date.clone().unwrap_or_default(),
+        reprocess: backfill
+            .reprocess_behavior
+            .clone()
+            .unwrap_or_else(|| reprocess.to_string()),
+        dates: plan
+            .backfills
+            .into_iter()
+            .map(|date| BackfillDateView {
+                date: date.logical_date,
+            })
+            .collect(),
+        completed_at: backfill.completed_at.clone(),
+    }
+}
+
+/// Airflow's own refusal of a backfill (a 409 when one is already open, a 400/422 for a range it
+/// will not take, e.g. an unknown `reprocess_behavior`) is the caller's answer, not a scheduler
+/// fault: the detail says which. `NotFound` here is a DAG Airflow has not loaded yet.
+fn backfill_fail(e: AirflowError) -> Fail {
+    match e {
+        AirflowError::Rejected(detail) => Fail::new(StatusCode::CONFLICT, detail),
+        AirflowError::NotFound => pipeline_not_loaded(),
+        other => scheduler_fail(other),
+    }
+}
+
+fn no_such_backfill() -> Fail {
+    Fail::new(StatusCode::NOT_FOUND, "no such backfill")
+}
+
 /// The `conf` of a triggered run: only the keys the caller gave, `None` when there were none
 /// (so an empty body sends exactly what Nova sent before #817).
 fn run_conf(start: &RunStart) -> Option<Value> {
@@ -6982,6 +7314,14 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         .route("/pipelines/{namespace}/{name}/runs", post(trigger_run))
         .route("/pipelines/{namespace}/{name}/pause", post(pause))
         .route("/pipelines/{namespace}/{name}/resume", post(resume))
+        .route(
+            "/pipelines/{namespace}/{name}/backfills",
+            post(start_backfill),
+        )
+        .route(
+            "/pipelines/{namespace}/{name}/backfills/{id}",
+            get(backfill_state).delete(cancel_backfill),
+        )
         .route("/pipelines/{namespace}/{name}/runs/{run_id}", get(run))
         .route(
             "/pipelines/{namespace}/{name}/runs/{run_id}/queries",
@@ -7910,6 +8250,136 @@ pub(crate) async fn trigger_run(
             &namespace,
             &name,
             &start,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_backfill_start",
+    path = "/api/pipelines/{namespace}/{name}/backfills",
+    tag = "public",
+    description = "Start a backfill: run the pipeline once for every scheduled date between `fromDate` and `toDate`, inclusive, through Airflow's own backfill API. This is a change, not a run: a viewer (`spec.viewers`) answers 403, a paused pipeline 409 (Airflow would create the backfill and leave every run `queued`), and a pipeline the scheduler has not loaded yet 409. A dry run decides first: a range with no date to run answers 409 (dates that already ran are skipped unless `reprocess` asks for them: `none` (the default), `failed` or `completed`), more than 31 dates answers 400. Airflow's own refusal (409 when a backfill is already open for this pipeline) is passed on with its sentence. `params` are this backfill's values of the schedule's `${params.<name>}` placeholders, and travel as Airflow's `dag_run_conf` into every run. Answers 201 with the backfill and the dates it will run. The attempt is audited, including a refusal. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    request_body = BackfillStart,
+    responses(
+        (status = 201, description = "The backfill, started", body = BackfillView),
+        (status = 400, description = "The body is not JSON, a date is not `YYYY-MM-DD`, `fromDate` is after `toDate`, or the range has more than 31 dates", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The pipeline is paused or not loaded, no date in the range would run, or a backfill is already open", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn start_backfill(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let start: BackfillStart = match serde_json::from_slice(&body) {
+        Ok(start) => start,
+        Err(_) => {
+            return Fail::new(
+                StatusCode::BAD_REQUEST,
+                "the backfill body is not valid JSON",
+            )
+            .into_response();
+        }
+    };
+    let range = match backfill_range(&start) {
+        Ok(range) => range,
+        Err(fail) => return fail.into_response(),
+    };
+    answer_with(
+        StatusCode::CREATED,
+        start_backfill_action(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &start,
+            (range.0.as_str(), range.1.as_str()),
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_backfill_state",
+    path = "/api/pipelines/{namespace}/{name}/backfills/{id}",
+    tag = "public",
+    description = "The state of a backfill: `isPaused`, `completedAt` (its only completion signal) and the runs it created (`backfill__…`, with their date and state). Like starting one, this is the owner group's and administrators' verb: a viewer answers 403, and a backfill that does not exist answers 404. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("id" = i64, Path, description = "Airflow's backfill id"),
+    ),
+    responses(
+        (status = 200, description = "The backfill and its runs", body = BackfillStateView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such backfill", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn backfill_state(
+    signed: SignedIn,
+    Path((namespace, name, id)): Path<(String, String, i64)>,
+) -> Response {
+    answer(
+        backfill_state_action(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            id,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    delete,
+    operation_id = "pipelines_backfill_cancel",
+    path = "/api/pipelines/{namespace}/{name}/backfills/{id}",
+    tag = "public",
+    description = "Cancel a backfill: Airflow sets its `completedAt` and fails every run that is still `queued`; a run already running keeps running (its side effects can still commit). This is the owner group's and administrators' verb: a viewer answers 403, and a backfill that does not exist answers 404. Answers the backfill and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("id" = i64, Path, description = "Airflow's backfill id"),
+    ),
+    responses(
+        (status = 200, description = "The backfill, now cancelled", body = BackfillView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such backfill", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn cancel_backfill(
+    signed: SignedIn,
+    Path((namespace, name, id)): Path<(String, String, i64)>,
+) -> Response {
+    answer(
+        cancel_backfill_action(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            id,
         )
         .await,
     )
