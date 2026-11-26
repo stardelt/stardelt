@@ -305,7 +305,10 @@ class PinImageTest(unittest.TestCase):
             "  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_REPOSITORY\n"
             "    value: ghcr.io/stardelt/airflow\n"
             "  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG\n"
-            '    value: "demo@sha256:' + zero + '"\n',
+            '    value: "demo@sha256:' + zero + '"\n'
+            # The dbt task image has the same `:demo@sha256:` shape; an airflow pin must not move it.
+            "  - name: PIPELINE_DBT_IMAGE\n"
+            "    value: ghcr.io/stardelt/dbt:demo@sha256:" + "cd" * 32 + "\n",
         )
         roles = self.fixture(
             "manifests/airflow-group-roles.yaml",
@@ -346,6 +349,7 @@ class PinImageTest(unittest.TestCase):
         for name in ("airflow-scheduler", "airflow-dag-processor", "airflow-triggerer"):
             self.assertGreater(calls.index("set image deploy/" + name), api_server)
         self.assertIn(DIGEST, values.read_text())
+        self.assertIn("ghcr.io/stardelt/dbt:demo@" + OTHER_DIGEST, values.read_text())
         self.assertIn(DIGEST, roles.read_text())
 
     def test_airflow_moves_the_task_pod_image_too(self):
