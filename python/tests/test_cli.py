@@ -117,6 +117,18 @@ def test_run_starts_a_pipeline_and_prints_the_queued_run():
     assert [(m, u.rsplit("/api", 1)[1]) for m, u, _ in session.calls] == [("POST", "/pipelines/etl/daily/runs")]
 
 
+def test_run_for_another_date_sends_the_date_and_the_params():
+    code, out, err, session = run(["run", "etl", "daily", "--date", "2026-11-20", "--param", "region=eu", "--param", "limit=10"], QUEUED)
+    assert (code, err) == (0, "")
+    assert session.calls[0][2]["json"] == {"runDate": "2026-11-20", "params": {"region": "eu", "limit": "10"}}
+
+
+def test_run_with_a_param_that_is_not_name_value_starts_nothing():
+    code, out, err, session = run(["run", "etl", "daily", "--param", "region"])
+    assert (code, out, err) == (2, "", "stardelt: 'region' is not NAME=VALUE\n")
+    assert session.calls == []
+
+
 def test_run_says_which_deploy_it_came_from_on_stderr():
     answer = FakeResponse(
         201,

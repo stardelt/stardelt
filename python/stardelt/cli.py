@@ -94,6 +94,12 @@ def _parser():
     trigger.add_argument("--wait", action="store_true", help="wait until the run ends; exit 0 only when it succeeded")
     trigger.add_argument("--timeout", type=int, default=0, help="with --wait: give up after N seconds (0: no limit); the run is not stopped")
     trigger.add_argument("--interval", type=int, default=5, help="with --wait: seconds between two looks (default 5)")
+    trigger.add_argument(
+        "--date", metavar="YYYY-MM-DD", help="run it for this date instead of today; the schedule does not change"
+    )
+    trigger.add_argument(
+        "--param", action="append", default=[], metavar="NAME=VALUE", help="this run's value of the schedule parameter NAME; repeat for more"
+    )
     samples = commands.add_parser("samples", help="load one sample table every guide's example can use")
     samples_commands = samples.add_subparsers(dest="samples_command", required=True)
     sample_load = samples_commands.add_parser("load", help="load a sample as you, into <catalog>.samples.<name>")
@@ -793,7 +799,10 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 stderr.write(f"stardelt: note: {note}\n")
             return OK
         if args.command == "run":
-            run, tasks = runs.start(nova, args.namespace, args.name, args.wait, args.timeout or None, args.interval)
+            run, tasks = runs.start(
+                nova, args.namespace, args.name, args.wait, args.timeout or None, args.interval,
+                run_date=args.date, params=_pairs(args.param),
+            )
             if run.get("bundle"):
                 revision = run.get("revision") or "no commit"
                 stderr.write(f"stardelt: deployed from {run['bundle']} {run.get('target', '')} at {revision}\n")

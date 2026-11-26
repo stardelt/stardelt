@@ -35,6 +35,14 @@ def test_without_wait_it_starts_one_run_and_looks_no_further():
     assert sent(session) == [("POST", "/pipelines/etl/daily/runs")]
 
 
+def test_a_date_and_params_go_in_the_body_and_without_them_no_body_is_sent():
+    client, session = nova(started(), started())
+    runs.start(client, "etl", "daily", run_date="2026-11-20", params={"region": "eu"})
+    runs.start(client, "etl", "daily")
+    assert session.calls[0][2]["json"] == {"runDate": "2026-11-20", "params": {"region": "eu"}}
+    assert "json" not in session.calls[1][2]
+
+
 def test_wait_looks_again_until_the_run_is_no_longer_queued_or_running():
     client, session = nova(started(), looked_at("running", ("load", "running")), looked_at("success", ("load", "success")))
     pauses = []
