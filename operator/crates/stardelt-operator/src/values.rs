@@ -1516,7 +1516,7 @@ mod tests {
         assert_eq!(
             values["image"]["tag"],
             serde_json::json!(
-                "dev@sha256:9afec469472501b6af3458b1cfd6ba52a02ebbfc77fa30f257539234e97e750b"
+                "dev@sha256:d5f9be63233612fb78b9dcfdb774244fa40be4397c4f09eae3cda509f15ef18a"
             )
         );
         let config_overrides = values["configOverrides"].as_object().unwrap();
@@ -1743,7 +1743,7 @@ mod tests {
             .as_str()
             .expect("a digest");
         assert_eq!(
-            digest, "sha256:f6b92669da27e44c32b161dc44437a43fb5955d0f4b580fa9b651db584ff922e",
+            digest, "sha256:41f1fee580a3d6f9a01334861f2cc44e4a1620e77dd0b1180057fb623bc47ce3",
             "the golden Airflow image must be the Airflow 3.2.2 build (demos#77) with the loader's access_control (platform#493) and the PEGELONLINE demo DAGs (demos#46); and a notebook task's CONN_ variables (demos#64); and the refusal of a connection without a synced Secret (demos#65)"
         );
         let worker = values["env"]
