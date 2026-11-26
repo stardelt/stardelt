@@ -102,6 +102,38 @@ class CheckTwinsTest(unittest.TestCase):
             self.assertIn("new copy", out)
             self.assertIn(SCRIPT, out)
 
+    def test_a_new_script_copy_without_a_header_is_found_by_its_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "platform/twins.tsv", HEADER)
+            write(root, "platform/scripts/access-sync-job.py", BODY)
+            write(root, OPERATOR_SRC + "/access_sync_job.py", BODY)
+
+            code, out = run(root)
+
+            self.assertEqual(code, 1, out)
+            self.assertIn("new copy", out)
+            self.assertIn("platform/scripts/access-sync-job.py", out)
+
+    def test_a_header_less_copy_with_its_row_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            row = "\t".join(
+                [
+                    "exact",
+                    OPERATOR_SRC + "/access_sync_job.py",
+                    "platform/scripts/access-sync-job.py",
+                ]
+            )
+            write(root, "platform/twins.tsv", HEADER + row + "\n")
+            write(root, "platform/scripts/access-sync-job.py", BODY)
+            write(root, OPERATOR_SRC + "/access_sync_job.py", BODY)
+
+            code, out = run(root)
+
+            self.assertEqual(code, 0, out)
+            self.assertIn("✓ twins: 1 exact, 0 drift, no new copy", out)
+
     def test_a_row_whose_file_is_gone_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
