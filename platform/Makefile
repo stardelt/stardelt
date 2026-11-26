@@ -32,8 +32,9 @@ STRIMZI_VERSION    := 1.3.1
 SPARK_OPERATOR_VERSION := 2.5.2
 
 # Pinned image versions (no chart: plain manifests in manifests/keycloak.yaml).
-# Mirrored in manifests/keycloak.yaml and chart/values.yaml
-# (identity.keycloak.image.tag); scripts/check-version-parity.sh checks all three.
+# Mirrored in manifests/keycloak.yaml, chart/values.yaml
+# (identity.keycloak.image.tag) and operator/crates/stardelt-operator/src/keycloak.rs (IMAGE);
+# scripts/check-version-parity.sh checks all four.
 KEYCLOAK_VERSION   := 26.8.2
 
 # `--atomic`: a timed-out upgrade rolls back to its previous revision instead of leaving the

@@ -92,13 +92,14 @@
       "registryUrlTemplate": "https://apache.github.io/superset"
     },
     {
-      "description": "Keycloak image pin (no chart: manifests/keycloak.yaml + chart/templates/keycloak.yaml). datasource=docker against quay.io because the official image is the thing that moves. The same tag lives in three places that scripts/check-version-parity.sh keeps equal (Makefile `KEYCLOAK_VERSION`, the manifest `image:` line, `identity.keycloak.image.tag` in chart/values.yaml), so all three are matched here and move in one PR.",
+      "description": "Keycloak image pin (no chart: manifests/keycloak.yaml + chart/templates/keycloak.yaml). datasource=docker against quay.io because the official image is the thing that moves. The same tag lives in four places that scripts/check-version-parity.sh keeps equal (Makefile `KEYCLOAK_VERSION`, the manifest `image:` line, `identity.keycloak.image.tag` in chart/values.yaml, and `operator/crates/stardelt-operator/src/keycloak.rs`'s `IMAGE`), so all four are matched here and move in one PR.",
       "customType": "regex",
-      "fileMatch": ["/(^|/)Makefile$/", "/(^|/)manifests/keycloak\\.yaml$/", "/(^|/)chart/values\\.yaml$/"],
+      "fileMatch": ["/(^|/)Makefile$/", "/(^|/)manifests/keycloak\\.yaml$/", "/(^|/)chart/values\\.yaml$/", "/(^|/)crates/stardelt-operator/src/keycloak\\.rs$/"],
       "matchStrings": [
         "KEYCLOAK_VERSION\\s*:=\\s*(?<currentValue>[^\\s#]+)",
         "image:\\s*quay\\.io/keycloak/keycloak:(?<currentValue>[^\\s\"]+)",
-        "repository:\\s*quay\\.io/keycloak/keycloak\\s+tag:\\s*\"?(?<currentValue>[^\\s\"]+)\"?"
+        "repository:\\s*quay\\.io/keycloak/keycloak\\s+tag:\\s*\"?(?<currentValue>[^\\s\"]+)\"?",
+        "pub const IMAGE: &str = \"quay\\.io/keycloak/keycloak:(?<currentValue>[^\\s\"]+)\""
       ],
       "depNameTemplate": "quay.io/keycloak/keycloak",
       "datasourceTemplate": "docker"

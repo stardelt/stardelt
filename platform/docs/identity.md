@@ -968,9 +968,10 @@ add the narrowest prefix path — never `/admin`.
 
 Sizing (single node): Keycloak 100m / 512Mi request, 1 CPU / 1Gi limit, one replica,
 `KC_CACHE=local`; its Postgres 50m / 128Mi request, 256Mi limit, 1Gi volume. The Keycloak image is
-pinned as `KEYCLOAK_VERSION` in the Makefile and mirrored in `manifests/keycloak.yaml` and
-`identity.keycloak.image.tag`; `scripts/check-version-parity.sh` checks all three and Renovate
-updates them together. Behind ingress-nginx, raise `proxy-buffer-size` for the `id.` host (the
+pinned as `KEYCLOAK_VERSION` in the Makefile and mirrored in `manifests/keycloak.yaml`,
+`identity.keycloak.image.tag` and the operator's `keycloak::IMAGE`;
+`scripts/check-version-parity.sh` checks all four and Renovate updates them together. Behind
+ingress-nginx, raise `proxy-buffer-size` for the `id.` host (the
 playground Ingress sets `16k`; for the chart pass it through `ingress.annotations`), since Keycloak's
 login responses outgrow nginx's default 4k header buffer.
 

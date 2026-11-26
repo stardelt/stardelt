@@ -44,7 +44,7 @@ pub const REALM_KEY: &str = "stardelt-realm.json";
 /// Where Keycloak reads realm imports from.
 pub const REALM_MOUNT: &str = "/opt/keycloak/data/import";
 /// Image of the identity provider. `stardelt-platform` pins the same tag in the Makefile, the
-/// manifest and `chart/values.yaml` (their `check-version-parity.sh` keeps the three equal).
+/// manifest, `chart/values.yaml` and here; their `check-version-parity.sh` keeps the four equal.
 pub const IMAGE: &str = "quay.io/keycloak/keycloak:26.8.2@sha256:c68e286cacd87b942ac1939a0a1481461109d6acd3a57dc496969a319a76bbf0";
 
 /// The realm template, verbatim from `stardelt-platform` (`chart/files/keycloak-realm.json`).

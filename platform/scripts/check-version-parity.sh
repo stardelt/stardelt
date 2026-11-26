@@ -50,8 +50,10 @@ while IFS= read -r prefix; do
 done < <(printf '%s\n' "${!CHART_OF[@]}" | sort)
 
 # Image pins without a chart: the Makefile pin must equal the tag in the plain
-# manifest and in chart/values.yaml (Renovate updates all three together).
-#   Keycloak: KEYCLOAK_VERSION / manifests/keycloak.yaml / identity.keycloak.image.tag
+# manifest, in chart/values.yaml and in the operator's keycloak.rs const (Renovate
+# updates all four together), and the manifest and chart carry tag@sha256:….
+#   Keycloak: KEYCLOAK_VERSION / manifests/keycloak.yaml / identity.keycloak.image.tag /
+#             operator/crates/stardelt-operator/src/keycloak.rs (IMAGE)
 kc_make="$(sed -n 's/^KEYCLOAK_VERSION[[:space:]]*:=[[:space:]]*\([^[:space:]#]*\).*/\1/p' Makefile)"
 kc_manifest_ref="$(sed -n 's|^[[:space:]]*image:[[:space:]]*quay.io/keycloak/keycloak:\([^[:space:]\"]*\).*|\1|p' manifests/keycloak.yaml)"
 # The manifest carries `tag@sha256:…` (stardelt-platform#1576): compare the tag, and
