@@ -369,6 +369,9 @@ phase_up() {
   # pillars itself, and the run applies it as shipped (#1810).
   run_phase "verify" "$RUN_DIR/04-verify.log" -- \
     bash "$PLATFORM_DIR/scripts/verify-fresh-node.sh" product || return 1
+  run_phase "journey" "$RUN_DIR/04-verify.log" -- \
+    env NAMESPACE="$NAMESPACE" PLATFORM_DIR="$PLATFORM_DIR" RELEASE_DIR="$RELEASE_DIR" \
+      bash "$PLATFORM_DIR/scripts/journey-fresh-node.sh" || return 1
   if [ -n "$UPGRADE_FROM" ]; then
     run_phase "upgrade to $(basename "$RELEASE_DIR")" "$RUN_DIR/05-upgrade.log" -- upgrade_to_release || return 1
     run_phase "platform ready after upgrade" "$RUN_DIR/05-upgrade.log" -- wait_for_resources || return 1
