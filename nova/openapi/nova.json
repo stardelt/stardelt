@@ -14688,6 +14688,13 @@
             "description": "How long after the deadline the table is still `amber`.",
             "minimum": 0
           },
+          "notify": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The destinations told when this table turns red, and when it is green again (#402).\nNames of `destination` rows of the table's owner group."
+          },
           "setAt": {
             "type": "string",
             "description": "When Nova wrote the promise (RFC 3339); the baseline of a table with no snapshot."
@@ -14717,6 +14724,16 @@
             "format": "int32",
             "description": "How long after the deadline the table is still `amber` (0 to 1440, default 60).",
             "minimum": 0
+          },
+          "notify": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The alert destinations; absent or empty means no alert. Replaces the stored list."
           },
           "timezone": {
             "type": [
