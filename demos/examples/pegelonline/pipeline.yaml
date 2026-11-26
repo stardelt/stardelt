@@ -59,6 +59,19 @@ spec:
                count(*) AS samples
         FROM shared.silver.pegelonline_measurements
         GROUP BY 1, 2, 3, 4, 5
+    - name: view
+      kind: sql
+      dependsOn: [gold-latest]
+      sql: |
+        CREATE OR REPLACE VIEW shared.gold.pegelonline_levels_v1 AS
+        SELECT station_uuid, station_name, water, timeseries, unit, measured_at,
+               measurement_value, state_mnw_mhw, state_nsw_hsw
+        FROM shared.gold.pegelonline_station_latest
+    - name: view-comment
+      kind: sql
+      dependsOn: [view]
+      sql: |
+        COMMENT ON VIEW shared.gold.pegelonline_levels_v1 IS 'Latest PEGELONLINE measurement per station and time series - the stable name of this data product. Owner: stardelt-users. Source: PEGELONLINE (public data).'
     - name: checks
       kind: quality
       dependsOn: [silver, gold-latest]
