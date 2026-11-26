@@ -110,7 +110,24 @@ def _list_resources(
     )
 
 
-def _run_task(task: dict, params: dict, **context) -> None:
+def _provenance(resource: dict) -> dict[str, str]:
+    """The deployment a Pipeline was written by: its two labels and the revision annotation."""
+    meta = resource.get("metadata") or {}
+    labels = meta.get("labels") or {}
+    annotations = meta.get("annotations") or {}
+    found = {}
+    if isinstance(labels.get("stardelt.io/bundle"), str):
+        found["bundle"] = labels["stardelt.io/bundle"]
+    if isinstance(labels.get("stardelt.io/target"), str):
+        found["target"] = labels["stardelt.io/target"]
+    if isinstance(annotations.get("stardelt.io/revision"), str):
+        found["revision"] = annotations["stardelt.io/revision"]
+    return found
+
+
+def _run_task(
+    task: dict, params: dict, provenance: dict[str, str] | None = None, **context
+) -> None:
     """Executes inside the task pod. `sql` tasks run as the service principal, never logging it."""
     if task["kind"] != "sql":
         # A silent no-op for a kind that has no runtime yet would hide that nothing ran.
@@ -124,7 +141,9 @@ def _run_task(task: dict, params: dict, **context) -> None:
         run_id=dag_run.run_id,
         params={**params, **overrides},
     )
-    tags = trino.lineage_tags(context["dag"].dag_id, context["ti"].task_id, dag_run.run_id)
+    tags = trino.lineage_tags(
+        context["dag"].dag_id, context["ti"].task_id, dag_run.run_id, provenance
+    )
 
     ca_file = os.environ.get("PIPELINE_TRINO_CA_FILE")
     with trino.identity_client() as identity, httpx.Client(
@@ -178,13 +197,15 @@ def _catalog_http(token: str) -> httpx.Client:
 
 def _run_quality(
     checks: list[dict], params: dict, publish: str = "direct", audit_table: str | None = None,
-    **context,
+    provenance: dict[str, str] | None = None, **context,
 ) -> None:
     """Executes inside the task pod. Runs each check as the service principal, never logging it."""
     dag_run = context["dag_run"]
     fallback = (context.get("logical_date") or dag_run.run_after).date().isoformat()
     run_date, overrides = run_values(dag_run.conf, fallback)
-    tags = trino.lineage_tags(context["dag"].dag_id, context["ti"].task_id, dag_run.run_id)
+    tags = trino.lineage_tags(
+        context["dag"].dag_id, context["ti"].task_id, dag_run.run_id, provenance
+    )
 
     ca_file = os.environ.get("PIPELINE_TRINO_CA_FILE")
     with trino.identity_client() as identity:
@@ -283,7 +304,7 @@ def _wap_publish(tables: list[str], **context) -> None:
     log.info("wap: published %s, dropped branch %s", ", ".join(tables), branch)
 
 
-def _build_dag(p) -> DAG:
+def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
     refuse_unrunnable(p)
     access = dag_access(p.owner_group)
     dag = DAG(
@@ -408,6 +429,7 @@ def _build_dag(p) -> DAG:
                     "params": p.params,
                     "publish": p.publish,
                     "audit_table": wap_tables[0] if len(wap_tables) == 1 else None,
+                    "provenance": provenance,
                 },
                 executor_config=executor_config,
                 dag=dag,
@@ -419,6 +441,7 @@ def _build_dag(p) -> DAG:
             op_kwargs={
                 "task": {"name": t.name, "kind": t.kind, "sql": t.sql},
                 "params": p.params,
+                "provenance": provenance,
             },
             executor_config=executor_config,
             dag=dag,
@@ -442,6 +465,6 @@ for resource in pipelines:
     name = resource.get("metadata", {}).get("name", "?")
     try:
         pipeline_plan = plan(resource, namespace, principals, connections)
-        globals()[pipeline_plan.dag_id] = _build_dag(pipeline_plan)
+        globals()[pipeline_plan.dag_id] = _build_dag(pipeline_plan, _provenance(resource))
     except PlanError as problem:
         log.warning("pipeline %s/%s is not loaded: %s", namespace, name, problem)

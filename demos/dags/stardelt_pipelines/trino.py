@@ -6,12 +6,13 @@ client library and the tests need no network. Nothing here logs a token or a sec
 from __future__ import annotations
 
 import logging
+import re
 import signal
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import FrameType
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping
 
 import certifi
 import httpx
@@ -41,15 +42,34 @@ def statement_headers(
     }
 
 
-def lineage_tags(dag_id: str, task_id: str, run_id: str) -> tuple[str, ...]:
-    """`pipeline=<ns>/<name>`, `task=<id>`, `run=<id>`; commas removed (Trino splits tags on commas)."""
+_PROVENANCE = {
+    "bundle": re.compile(r"^[a-z][a-z0-9-]{0,62}$"),
+    "target": re.compile(r"^[a-z][a-z0-9-]{0,62}$"),
+    "revision": re.compile(r"^[0-9a-f]{7,64}(-dirty)?$"),
+}
+
+
+def lineage_tags(
+    dag_id: str,
+    task_id: str,
+    run_id: str,
+    provenance: Mapping[str, object] | None = None,
+) -> tuple[str, ...]:
+    """`pipeline=<ns>/<name>`, `task=<id>`, `run=<id>`, then `bundle=`, `target=` and `revision=`
+    for a deployment that wrote the Pipeline. Commas are removed (Trino splits tags on commas); a
+    provenance value that is absent, not a string or malformed is dropped, never raised."""
     namespace, _, name = dag_id.partition("__")
     pipeline = f"{namespace}/{name}" if name else namespace
-    return (
+    tags = [
         f"pipeline={pipeline.replace(',', '')}",
         f"task={task_id.replace(',', '')}",
         f"run={run_id.replace(',', '')}",
-    )
+    ]
+    for key, pattern in _PROVENANCE.items():
+        value = (provenance or {}).get(key)
+        if isinstance(value, str) and pattern.match(value):
+            tags.append(f"{key}={value}")
+    return tuple(tags)
 
 
 def client_credentials_token(

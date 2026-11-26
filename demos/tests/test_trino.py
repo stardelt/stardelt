@@ -172,6 +172,48 @@ def test_lineage_tags_ride_on_the_submit_and_on_every_poll():
     )
 
 
+def test_lineage_tags_carry_the_deployment_after_the_three_run_tags():
+    assert lineage_tags(
+        "stardelt__shop", "load", "r1", {"bundle": "shop", "target": "prod", "revision": "9f3c2a1"}
+    ) == (
+        "pipeline=stardelt/shop",
+        "task=load",
+        "run=r1",
+        "bundle=shop",
+        "target=prod",
+        "revision=9f3c2a1",
+    )
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"revision": "../../etc"},
+        {"bundle": "x,y"},
+        {"bundle": "Shop"},
+        {"revision": "9f3c2"},
+        {"bundle": 7},
+        {"target": None},
+    ],
+)
+def test_a_malformed_provenance_value_adds_no_tag_and_does_not_raise(provenance):
+    tags = lineage_tags("stardelt__shop", "load", "r1", provenance)
+    assert tags == ("pipeline=stardelt/shop", "task=load", "run=r1")
+
+
+def test_statement_headers_carry_the_provenance_tags_too():
+    headers = statement_headers(
+        "tok",
+        tags=lineage_tags(
+            "stardelt__shop", "load", "r1", {"bundle": "shop", "target": "prod", "revision": "9f3c2a1"}
+        ),
+    )
+    assert headers["X-Trino-Client-Tags"] == (
+        "stardelt-pipeline,pipeline=stardelt/shop,task=load,run=r1,"
+        "bundle=shop,target=prod,revision=9f3c2a1"
+    )
+
+
 def test_lineage_tags_split_the_dag_id_on_the_first_double_underscore_and_drop_commas():
     assert lineage_tags("shop__orders", "load", "a,b") == (
         "pipeline=shop/orders",
