@@ -40,6 +40,7 @@ unknown() {
 tmp="$(mktemp -d)"
 chmod 700 "$tmp"
 forward_pid=""
+# shellcheck disable=SC2329  # called by the trap below
 cleanup() {
   if [ -n "$forward_pid" ] && kill -0 "$forward_pid" 2>/dev/null; then
     kill "$forward_pid" 2>/dev/null || true
@@ -54,13 +55,12 @@ trap cleanup EXIT
 
 # --- J1: a machine identity ---------------------------------------------------------------
 phase_identity() {
-  local endpoint trino_url subject secret client_id_file secret_file token_file rows
+  local endpoint subject secret client_id_file secret_file token_file rows
   if ! command -v kubectl >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
     unknown identity '"kubectl and curl are needed"'
     return 0
   fi
   endpoint="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.tokenEndpoint}' 2>/dev/null || true)"
-  trino_url="$(kubectl -n "$NAMESPACE" get configmap stardelt-identity -o jsonpath='{.data.trinoUrl}' 2>/dev/null || true)"
   if [ -z "$endpoint" ]; then
     unknown identity '"this instance has no identity provider (ConfigMap stardelt-identity has no tokenEndpoint)"'
     return 0
