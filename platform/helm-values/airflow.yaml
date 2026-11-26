@@ -442,11 +442,10 @@ extraEnv: |
     value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:58a023c84a147a4bf4ae5ee1f20e115dc6e3f52e0d51bebfc4c22b2f74efd455
   # dbt tasks (#11): the DAG that runs them (demos/dags/stardelt_pipelines/dbt.py) gives a `dbt`
   # task a pod of its own, because the tool image has no Airflow. The image contains the sample
-  # project (demos/examples/shop) and must be rebuilt by `demos / CI` on main; this is a moving
-  # tag, not a digest pin (the pin lands with the demo install slice, where `verify-pins` checks
-  # it). The Secret is the one the pod mounts for the engine's CA.
+  # project (demos/examples/shop) and is rebuilt by `demos / CI` on main; the digest below is the
+  # release's pin (stardelt/stardelt#1893). The Secret is the one the pod mounts for the engine's CA.
   - name: PIPELINE_DBT_IMAGE
-    value: ghcr.io/stardelt/dbt:demo
+    value: ghcr.io/stardelt/dbt:demo@sha256:23342e30fd4c5da38b5534cd68d1c8b344b839b4b64d9703425105d06d02bd5f
   - name: PIPELINE_DBT_TRINO_CA_SECRET
     value: trino-ca
   # spark-pipeline tasks (#80 S2c-2): the graph runs in a pod of the pinned Spark image as a

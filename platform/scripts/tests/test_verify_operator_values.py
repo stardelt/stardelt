@@ -260,7 +260,7 @@ class TestVerifyOperatorValues(unittest.TestCase):
     def test_a_full_document_passes_every_probe_without_a_retry(self):
         done = self.run_script()
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (48 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (49 probes)", done.stdout)
         self.assertNotIn("re-reading values once", done.stderr)
         self.assertEqual(
             len(self.calls()), 25, "eight plain reads, four with --identity, thirteen digest reads"
@@ -269,14 +269,14 @@ class TestVerifyOperatorValues(unittest.TestCase):
     def test_a_first_read_that_misses_the_tail_is_re_read_and_passes(self):
         done = self.run_script("first")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("verify-operator-values: PASS (48 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (49 probes)", done.stdout)
         self.assertIn("re-reading values once", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
 
     def test_a_second_read_that_also_misses_fails_once(self):
         done = self.run_script("always")
         self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertIn("verify-operator-values: FAIL (2 of 48 probes)", done.stdout)
+        self.assertIn("verify-operator-values: FAIL (2 of 49 probes)", done.stdout)
         self.assertEqual((done.stdout + done.stderr).count("trino identity: password file"), 1)
         self.assertIn("is not in the running operator", done.stderr)
         self.assertEqual(self.calls().count("trino identity"), 2)
@@ -310,7 +310,7 @@ class TestVerifyOperatorValues(unittest.TestCase):
         done = self.run_script()
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn(f"✗ cnpg {absent[7:22]}…: `{absent}` is not in the running operator", done.stderr)
-        self.assertIn("verify-operator-values: FAIL (1 of 48 probes)", done.stdout)
+        self.assertIn("verify-operator-values: FAIL (1 of 49 probes)", done.stdout)
 
     def test_the_pod_running_the_pinned_digest_is_the_one_probed(self):
         """platform#192: two old pods stay Ready while they terminate; the pinned one answers."""
@@ -323,7 +323,7 @@ class TestVerifyOperatorValues(unittest.TestCase):
         )
         done = self.run_script()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("verify-operator-values: PASS (48 probes)", done.stdout)
+        self.assertIn("verify-operator-values: PASS (49 probes)", done.stdout)
         self.assertIn(
             f"✓ values             probed stardelt-operator-pinned ({pin[:15]}…)", done.stdout
         )
