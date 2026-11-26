@@ -11,8 +11,9 @@
 #   ConfigMap keycloak-env            KC_HOSTNAME (https://id.<baseDomain>)
 #
 # Image: official quay.io/keycloak/keycloak (Apache-2.0). The tag is pinned in
-# three places that scripts/check-version-parity.sh keeps equal: KEYCLOAK_VERSION
-# in the Makefile, this file, and identity.keycloak.image.tag in chart/values.yaml.
+# four places that scripts/check-version-parity.sh keeps equal: KEYCLOAK_VERSION
+# in the Makefile, this file, identity.keycloak.image.tag in chart/values.yaml,
+# and IMAGE in operator/crates/stardelt-operator/src/keycloak.rs.
 ---
 # CloudNative-PG Cluster for Keycloak's own state (realms, users, sessions).
 # The operator generates `keycloak-pg-app` (username/password) itself.
