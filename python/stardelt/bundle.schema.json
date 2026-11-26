@@ -127,6 +127,10 @@
           "drift": {
             "enum": ["warn", "block", "heal"],
             "description": "what to do with a pipeline someone changed after its last deploy (`heal` only in development)"
+          },
+          "onGateFail": {
+            "description": "what a failed smoke gate does: `none` leaves the stage as deployed; `rollback` replays the newest applied deployment of this bundle and target",
+            "enum": ["none", "rollback"]
           }
         }
       }

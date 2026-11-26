@@ -93,6 +93,13 @@ def test_a_production_target_needs_a_run_as_principal_of_the_owner_group(tmp_pat
     assert bundle.validate(make(tmp_path, manifest=manifest))[0] == []
 
 
+def test_the_gate_setting_is_checked_offline_and_defaults_to_none(tmp_path):
+    back = MANIFEST.replace("runAs: pipeline-sales}", "runAs: pipeline-sales, onGateFail: back}")
+    assert said(bundle.validate(make(tmp_path, manifest=back))[0]) == "targets.prod: onGateFail must be one of none, rollback"
+    rollback = MANIFEST.replace("runAs: pipeline-sales}", "runAs: pipeline-sales, onGateFail: rollback}")
+    assert bundle.validate(make(tmp_path, manifest=rollback))[0] == []
+
+
 def test_every_pipeline_file_must_be_a_pipeline_with_one_source_inside_the_bundle(tmp_path):
     resources = {"a.yaml": "sql: select 1\n", "b.yaml": "name: b\nsql: select 1\nsqlFile: sql/load.sql\n", "c.yaml": "name: c\nsqlFile: sql/missing.sql\n",
                  "d.yaml": "name: d\nnotebook: {file: notebooks/none.ipynb}\n", "e.yaml": "name: e\nownerGroup: other\nsql: select 1\n"}

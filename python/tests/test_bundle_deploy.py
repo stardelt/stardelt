@@ -884,3 +884,31 @@ def test_a_failed_smoke_run_records_failed_and_is_a_problem(tmp_path, monkeypatc
     assert problems == [("prod", "smoke gate: dev-alice-nightly ended failed (failed tasks: run)")]
     body = next(call[2]["json"] for call in session.calls if call[1].endswith("/api/deployments"))
     assert body["status"] == "failed" and body["resources"] == []
+
+
+def test_a_failed_smoke_run_rolls_back_when_the_target_says_so(tmp_path, monkeypatch):
+    manifest = MANIFEST.replace(
+        "runAs: pipeline-sales}", "runAs: pipeline-sales, onGateFail: rollback}"
+    )
+    make(tmp_path, manifest=manifest)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    ran = [{"action": "ran", "name": "dev-alice-nightly", "runId": "r1", "state": "failed", "failedTasks": ["run"]}]
+    monkeypatch.setattr(bundle, "run", lambda *a, **k: ([], ran))
+    session = FakeSession(
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 8, "bundle": "sales-etl", "target": "prod", "status": "failed"}),
+        FakeResponse(payload=[{"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}]),
+        FakeResponse(201, {"id": 9, "bundle": "sales-etl", "target": "prod", "status": "applied", "previousDeploymentId": 7}),
+    )
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    problems, done = bundle.deploy(nova, tmp_path, "prod", smoke="nightly")
+    assert problems == [("prod", "smoke gate: dev-alice-nightly ended failed (failed tasks: run); rolled back to deployment 7 as deployment 9")]
+    assert {"action": "rolled-back", "id": 9, "previousDeploymentId": 7} in done
+    assert calls(session)[-2:] == [
+        ("GET", "/api/deployments"),
+        ("POST", "/api/deployments/7/rollback"),
+    ]
+    assert session.calls[-2][2]["params"] == {"bundle": "sales-etl", "target": "prod"}
