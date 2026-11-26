@@ -19,6 +19,7 @@
     {
       "name": "stardelt-admins",
       "path": "/stardelt-admins",
+      "realmRoles": ["default-roles-stardelt"],
       "clientRoles": {
         "realm-management": [
           "view-users",

@@ -935,10 +935,14 @@ issuer, and for the master realm — Nova never links to a console it cannot add
 
 What makes the console usable is a narrow grant. Group `stardelt-admins` holds four
 `realm-management` client roles — `view-users`, `query-users`, `query-groups`, `manage-users` —
-and nothing else: members manage users, non-members get `403` from the admin API. It deliberately
-does **not** hold `realm-admin`, `manage-clients` or `manage-realm`; those are realm ownership,
-not user management. The same grant is in the realm import and applied to a live realm by an
-idempotent script, because `--import-realm` skips an existing realm:
+and the realm's default role `default-roles-stardelt`: members manage users, non-members get `403`
+from the admin API. (The default role is what carries `offline_access`; a realm-admin user is
+created through the admin API, so without it that user has no realm role and a CLI device sign-in
+is refused with `not_allowed`, #1745.) It deliberately does **not** hold `realm-admin`,
+`manage-clients` or `manage-realm`; those are realm ownership, not user management. Both grants are
+in the realm import; on a live realm the four client roles are applied by
+`make sync-realm-user-management` and the default role by `make sync-dev-client`, because
+`--import-realm` skips an existing realm:
 
 ```sh
 make sync-realm-user-management   # roles above + brute-force thresholds; prints what it read back
