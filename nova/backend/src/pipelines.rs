@@ -3990,6 +3990,9 @@ fn take_run_slot(limiter: &RunStartsLimiter, sub: &str) -> bool {
 /// The most last-run calls in flight at once.
 const LAST_RUN_CONCURRENCY: usize = 8;
 
+/// The page of the batch listing `GET /api/pipelines` reads last runs from (Airflow's default).
+const LAST_RUN_BATCH: u32 = 100;
+
 /// The most run-list calls in flight at once (`GET /api/runs`).
 const RUN_LIST_CONCURRENCY: usize = 8;
 
@@ -4109,7 +4112,33 @@ async fn list_pipelines(
         .filter(|(_, dag_id)| dags.contains_key(dag_id))
         .collect();
 
-    let last_runs: Vec<(String, Option<DagRun>)> = stream::iter(loaded)
+    // One batch listing answers the last run of every loaded pipeline it covers: the answer is
+    // newest first, so the first row of a DAG is its last run. A DAG the page does not cover (or
+    // every DAG, when the batch call fails) falls back to one `runs(dag_id, 1)` each (#1630).
+    let dag_ids: Vec<String> = loaded.iter().map(|(_, dag_id)| dag_id.clone()).collect();
+    let mut covered: BTreeMap<String, DagRun> = BTreeMap::new();
+    match airflow.runs_batch(&dag_ids, LAST_RUN_BATCH).await {
+        Ok(rows) => {
+            for (dag_id, run) in rows {
+                covered.entry(dag_id).or_insert(run);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "the batch run listing failed; reading each pipeline's last run");
+        }
+    }
+    let mut last_runs: BTreeMap<String, Option<DagRun>> = BTreeMap::new();
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for (name, dag_id) in loaded {
+        match covered.remove(&dag_id) {
+            Some(run) => {
+                last_runs.insert(name, Some(run));
+            }
+            None => missing.push((name, dag_id)),
+        }
+    }
+
+    let fallback: Vec<(String, Option<DagRun>)> = stream::iter(missing)
         .map(|(name, dag_id)| async move {
             let run = match airflow.runs(&dag_id, 1).await {
                 Ok(runs) => runs.into_iter().next(),
@@ -4123,7 +4152,7 @@ async fn list_pipelines(
         .buffer_unordered(LAST_RUN_CONCURRENCY)
         .collect()
         .await;
-    let last_runs: BTreeMap<String, Option<DagRun>> = last_runs.into_iter().collect();
+    last_runs.extend(fallback);
 
     let pipelines = resources
         .iter()

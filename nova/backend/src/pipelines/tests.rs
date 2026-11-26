@@ -246,6 +246,8 @@ mod fake_airflow {
         pub latency: std::time::Duration,
         /// Every batch listing's JSON body, in order.
         pub batch_bodies: Vec<Value>,
+        /// When set, the batch listing answers `500`.
+        pub fail_batch: bool,
     }
 
     pub type Shared = Arc<Mutex<Fake>>;
@@ -404,6 +406,12 @@ mod fake_airflow {
         let mut state = state.lock().unwrap();
         remember(&mut state, "POST", &uri);
         authorize(&headers)?;
+        if state.fail_batch {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "detail": "boom" })),
+            ));
+        }
         if dag_id != "~" {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1032,11 +1040,17 @@ async fn list_hides_other_groups_pipelines() {
         !calls.iter().any(|call| call.contains("stardelt__hidden")),
         "Airflow heard nothing about the hidden pipeline: {calls:?}"
     );
+    let batch = fake
+        .lock()
+        .unwrap()
+        .batch_bodies
+        .last()
+        .cloned()
+        .expect("one batch listing");
+    let ids = batch["dag_ids"].to_string();
     assert!(
-        calls
-            .iter()
-            .any(|call| call.contains("stardelt__smoke/dagRuns")),
-        "the visible pipeline's last run was read: {calls:?}"
+        ids.contains("stardelt__smoke") && !ids.contains("stardelt__hidden"),
+        "the batch asks for the visible pipeline only: {ids}"
     );
 }
 
@@ -1406,8 +1420,58 @@ async fn list_calls_airflow_once_for_the_dags() {
         "the list asks for pipeline DAGs including stale ones: {dag_list}"
     );
     assert_eq!(
-        last_runs, 2,
-        "one last-run call per loaded pipeline: {calls:?}"
+        last_runs, 0,
+        "the batch covers both pipelines, so no per-pipeline call: {calls:?}"
+    );
+    let batches = calls
+        .iter()
+        .filter(|call| call.starts_with("POST /api/v2/dags/~/dagRuns/list"))
+        .count();
+    assert_eq!(
+        batches, 1,
+        "one batch listing for the whole request: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_reads_a_pipeline_the_batch_does_not_cover_one_by_one() {
+    let resources = memory(&[
+        ("smoke", resource("smoke", Some("analytics"))),
+        ("other", resource("other", Some("analytics"))),
+    ]);
+    let (airflow, fake) = fake_airflow::start().await;
+    fake.lock().unwrap().runs.remove("stardelt__other");
+
+    let answer = list_pipelines(
+        Some(&resources),
+        Some(&airflow),
+        &who("sub-ada", &["analytics"], false),
+    )
+    .await
+    .expect("the list succeeds");
+
+    let calls = fake.lock().unwrap().calls.clone();
+    let one_by_one: Vec<&String> = calls
+        .iter()
+        .filter(|call| call.contains("/dagRuns?") && !call.contains("/logs/"))
+        .collect();
+    assert_eq!(
+        one_by_one.len(),
+        1,
+        "only the uncovered pipeline is read alone: {calls:?}"
+    );
+    assert!(
+        one_by_one[0].contains("stardelt__other/dagRuns?"),
+        "{calls:?}"
+    );
+    let smoke = answer
+        .pipelines
+        .iter()
+        .find(|p| p.name == "smoke")
+        .expect("smoke");
+    assert!(
+        smoke.last_run.is_some(),
+        "the batch answered smoke's last run"
     );
 }
 
@@ -1897,10 +1961,11 @@ async fn a_failing_last_run_call_does_not_fail_the_list() {
         ("other", resource("other", Some("analytics"))),
     ]);
     let (airflow, fake) = fake_airflow::start().await;
-    fake.lock()
-        .unwrap()
-        .fail_runs
-        .insert("stardelt__other".into());
+    {
+        let mut fake = fake.lock().unwrap();
+        fake.fail_batch = true;
+        fake.fail_runs.insert("stardelt__other".into());
+    }
 
     let answer = list_pipelines(
         Some(&resources),
@@ -1908,7 +1973,7 @@ async fn a_failing_last_run_call_does_not_fail_the_list() {
         &who("sub-ada", &["analytics"], false),
     )
     .await
-    .expect("one broken last-run call must not fail the list");
+    .expect("a failing batch and one broken last-run call must not fail the list");
 
     let smoke = answer
         .pipelines
