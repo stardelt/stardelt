@@ -29,7 +29,8 @@ Environment of the dag-processor and the task pods:
   PIPELINE_DBT_IMAGE        the dbt tool image a `dbt` task's own pod runs (default `ghcr.io/stardelt/dbt:demo`)
   PIPELINE_DBT_TRINO_CA_SECRET  the Secret mounted into the dbt pod for the CA (default `trino-ca`)
   PIPELINE_SPARK_IMAGE      the Spark image a `spark-pipeline` task's own pod runs (must equal
-                            manifests/spark.yaml; scripts/check-spark-image-pin.sh checks it)
+                            chart/files/spark-runtimes.json; scripts/check-spark-image-pin.sh
+                            checks it)
   PIPELINE_SPARK_REMOTE     the Connect URL the graph runs on (default: the owner group's Spark
                             cluster, the short name `sc://spc-<group>-server:15002`)
   PIPELINE_SPARK_BUCKET     the bucket under which a graph's checkpoints live (default lakehouse)

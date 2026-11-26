@@ -21,7 +21,7 @@ OPERATOR_DIR="${OPERATOR_DIR:-../operator}"
 images=(
   "nova|manifests/nova-deployment.yaml|crates/stardelt-operator/src/provision.rs"
   "loader|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml"
-  "spark|manifests/spark.yaml|crates/stardelt-operator/values/spark.yaml"
+  "spark|chart/files/spark-runtimes.json|crates/stardelt-operator/values/spark.yaml"
   "spark-auth|manifests/spark-connect-auth.yaml|crates/stardelt-operator/values/spark-connect-auth.yaml"
   "superset|helm-values/superset.yaml|crates/stardelt-operator/values/superset.yaml"
   "notebook|helm-values/jupyterhub.yaml|crates/stardelt-operator/values/jupyterhub.yaml|^[[:space:]]+tag: \"dev@sha256:"

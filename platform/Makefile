@@ -939,8 +939,8 @@ install-spark: deps _context ## Install the Spark Connect endpoint (Iceberg on t
 # ---------------------------------------------------------------------------
 .PHONY: install-spark-demo
 install-spark-demo: _context ## The public demo's Spark sandbox: local mode, no token, no cluster rights (stardelt#201)
-	@img=$$(awk '/^ *image: ghcr.io\/stardelt\/spark:/{print $$2; exit}' manifests/spark.yaml); \
-	if [ -z "$$img" ]; then echo "install-spark-demo: no Spark image line in manifests/spark.yaml" >&2; exit 1; fi; \
+	@img=$$(python3 -c 'import json; print(next(iter(json.load(open("chart/files/spark-runtimes.json")).values()))["image"])'); \
+	if [ -z "$$img" ]; then echo "install-spark-demo: no Spark image in chart/files/spark-runtimes.json" >&2; exit 1; fi; \
 	sed -e "s|__SPARK_IMAGE__|$$img|g" manifests/spark-demo-sandbox.yaml | kubectl apply -f -
 	@kubectl -n stardelt get secret ghcr-creds -o json \
 	  | python3 -c 'import json,sys; s=json.load(sys.stdin); s["metadata"]={"name":"ghcr-creds","namespace":"stardelt-demo-spark"}; print(json.dumps(s))' \

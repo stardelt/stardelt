@@ -299,6 +299,79 @@ case "$APP" in
   *)     manifest="${MANIFEST:-}" ;;
 esac
 
+# The runtime catalogue is the platform's Spark image reference since #1828: the operator's
+# SparkCluster reads it, and `make install-spark-demo`, `verify-spark-pod-guard`,
+# `verify-spark-demo-sandbox`, the digest checks and `check_pin_freshness.py` read it too.
+# Two more copies follow it in this one script, so a manual pin and the rollup cannot move
+# one without the others (platform#998, #1083, #209). The manifest and the executor fixture
+# stay in step until #1829 removes the shared server.
+if [ "${WRITE_MANIFEST:-1}" = "1" ] && [ "$APP" = "spark" ]; then
+  python3 - "$REGISTRY/$REPO" "$digest" <<'PYEOF'
+import re, sys
+
+
+def write(repo, digest):
+  # The runtime catalogue carries the same image for the operator's SparkCluster;
+  # `scripts/check-spark-runtimes.sh` compares the two and fails when they drift. Keep the
+  # writer here so the manual pin and the rollup cannot move one file without the other
+  # (platform#998).
+  catalogue = "chart/files/spark-runtimes.json"
+  ctext = open(catalogue).read()
+  ctext, cn = re.subn(
+      r'("image":\s*"ghcr\.io/stardelt/spark:[^\s@]+)@sha256:[0-9a-f]{64}"',
+      lambda m: f'{m.group(1)}@{digest}"',
+      ctext,
+  )
+  if cn != 1:
+      sys.exit(f"expected exactly one spark image in {catalogue}, found {cn}")
+  open(catalogue, "w").write(ctext)
+  print(f"› {catalogue}: image pinned to {repo}:…@{digest[:19]}…")
+
+  # The measured executor shape in the pod-guard check carries the same image; the check
+  # compares it with the catalogue and refuses when they drift (#209).
+  fixture = "scripts/fixtures/spark-executor-pod.yaml"
+  ftext = open(fixture).read()
+  ftext, fn = re.subn(
+      r'(image:\s*ghcr\.io/stardelt/spark:[^\s@]+)@sha256:[0-9a-f]{64}',
+      lambda m: f'{m.group(1)}@{digest}',
+      ftext,
+  )
+  if fn != 1:
+      sys.exit(f"expected exactly one spark image in {fixture}, found {fn}")
+  open(fixture, "w").write(ftext)
+  print(f"› {fixture}: image pinned to {repo}:…@{digest[:19]}…")
+
+  # A `spark-pipeline` task's own pod runs the same image (`PIPELINE_SPARK_IMAGE` in
+  # helm-values/airflow.yaml). `scripts/check-spark-image-pin.sh` refuses the two when they
+  # differ, and the rollup only sees this copy through this writer, so a spark roll that
+  # skips it fails its own lint (#1083).
+  loader = "helm-values/airflow.yaml"
+  lines = open(loader).read().splitlines(keepends=True)
+  for at, line in enumerate(lines):
+      if re.search(r"name: PIPELINE_SPARK_IMAGE$", line):
+          for below in range(at + 1, len(lines)):
+              if re.match(r"^\s*value:", lines[below]):
+                  lines[below], ln = re.subn(
+                      r"sha256:[0-9a-f]{64}", digest, lines[below]
+                  )
+                  if ln != 1:
+                      sys.exit(
+                          f"expected one digest on {loader}:{below + 1}, found {ln}"
+                      )
+                  open(loader, "w").writelines(lines)
+                  print(f"› {loader}: PIPELINE_SPARK_IMAGE pinned to {repo}:…@{digest[:19]}…")
+                  break
+          else:
+              sys.exit(f"no value line after PIPELINE_SPARK_IMAGE in {loader}")
+          break
+  else:
+      sys.exit(f"no PIPELINE_SPARK_IMAGE marker in {loader}")
+
+
+write(sys.argv[1], sys.argv[2])
+PYEOF
+fi
+
 if [ "${WRITE_MANIFEST:-1}" = "1" ] && [ -n "$manifest" ] && [ -f "$manifest" ] && grep -qE "^\s+image: $REGISTRY/$REPO:" "$manifest"; then
   python3 - "$manifest" "$REGISTRY/$REPO" "$digest" "$APP" <<'PYEOF'
 import re, sys
@@ -324,62 +397,6 @@ if app == "spark":
         flags=re.M,
     )
     replaced += executor
-
-    # The runtime catalogue carries the same image for the operator's
-    # SparkCluster; `scripts/check-spark-runtimes.sh` compares the two and fails
-    # when they drift. Keep the writer here so the manual pin and the rollup
-    # cannot move one file without the other (platform#998).
-    catalogue = "chart/files/spark-runtimes.json"
-    ctext = open(catalogue).read()
-    ctext, cn = re.subn(
-        r'("image":\s*"ghcr\.io/stardelt/spark:[^\s@]+)@sha256:[0-9a-f]{64}"',
-        lambda m: f'{m.group(1)}@{digest}"',
-        ctext,
-    )
-    if cn != 1:
-        sys.exit(f"expected exactly one spark image in {catalogue}, found {cn}")
-    open(catalogue, "w").write(ctext)
-    print(f"› {catalogue}: image pinned to {repo}:…@{digest[:19]}…")
-
-    # The measured executor shape in the pod-guard check carries the same image; the check
-    # compares it with manifests/spark.yaml and refuses when they drift (#209).
-    fixture = "scripts/fixtures/spark-executor-pod.yaml"
-    ftext = open(fixture).read()
-    ftext, fn = re.subn(
-        r'(image:\s*ghcr\.io/stardelt/spark:[^\s@]+)@sha256:[0-9a-f]{64}',
-        lambda m: f'{m.group(1)}@{digest}',
-        ftext,
-    )
-    if fn != 1:
-        sys.exit(f"expected exactly one spark image in {fixture}, found {fn}")
-    open(fixture, "w").write(ftext)
-    print(f"› {fixture}: image pinned to {repo}:…@{digest[:19]}…")
-
-    # A `spark-pipeline` task's own pod runs the same image (`PIPELINE_SPARK_IMAGE` in
-    # helm-values/airflow.yaml). `scripts/check-spark-image-pin.sh` refuses the two when they
-    # differ, and the rollup only sees this copy through this writer, so a spark roll that
-    # skips it fails its own lint (#1083).
-    loader = "helm-values/airflow.yaml"
-    lines = open(loader).read().splitlines(keepends=True)
-    for at, line in enumerate(lines):
-        if re.search(r"name: PIPELINE_SPARK_IMAGE$", line):
-            for below in range(at + 1, len(lines)):
-                if re.match(r"^\s*value:", lines[below]):
-                    lines[below], ln = re.subn(
-                        r"sha256:[0-9a-f]{64}", digest, lines[below]
-                    )
-                    if ln != 1:
-                        sys.exit(
-                            f"expected one digest on {loader}:{below + 1}, found {ln}"
-                        )
-                    open(loader, "w").writelines(lines)
-                    print(f"› {loader}: PIPELINE_SPARK_IMAGE pinned to {repo}:…@{digest[:19]}…")
-                    break
-            else:
-                sys.exit(f"no value line after PIPELINE_SPARK_IMAGE in {loader}")
-            break
-    else:
-        sys.exit(f"no PIPELINE_SPARK_IMAGE marker in {loader}")
 
 if replaced:
     open(path, "w").write(text)

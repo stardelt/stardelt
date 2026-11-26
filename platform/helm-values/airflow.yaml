@@ -451,8 +451,8 @@ extraEnv: |
     value: trino-ca
   # spark-pipeline tasks (#80 S2c-2): the graph runs in a pod of the pinned Spark image as a
   # thin Spark Connect client (#957 measured the shape: 6.6 s, two flows, no S3 key). The
-  # image must equal manifests/spark.yaml's — `scripts/check-spark-image-pin.sh` (make lint)
-  # fails when the two drift, as with the notebook image. The remote is the owner group's
+  # image must equal chart/files/spark-runtimes.json's — `scripts/check-spark-image-pin.sh`
+  # (make lint) fails when the two drift, as with the notebook image. The remote is the owner group's
   # SparkCluster unless an operator sets PIPELINE_SPARK_REMOTE (#493 point 6). Checkpoints live
   # under the lakehouse bucket, `pipelines/<group>/<pipeline>/<task>/checkpoints`.
   - name: PIPELINE_SPARK_IMAGE

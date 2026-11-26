@@ -21,8 +21,8 @@ SA_BATCH="system:serviceaccount:${NS}:spark-batch-driver"
 SA_CLUSTER="system:serviceaccount:${NS}:spark-cluster-driver"
 # The image is the one the platform pins, not a literal: a copy here goes stale unnoticed
 # (#209). `scripts/pin-image.sh spark` moves this file, the fixture and the catalogue.
-IMAGE="$(awk '/spark\.kubernetes\.container\.image/ {print $2; exit}' manifests/spark.yaml)"
-[ -n "$IMAGE" ] || { echo "UNVERIFIED (manifests/spark.yaml names no spark.kubernetes.container.image)"; exit 3; }
+IMAGE="$(grep -oE 'ghcr\.io/stardelt/spark:[^"]+@sha256:[0-9a-f]{64}' chart/files/spark-runtimes.json | head -1)"
+[ -n "$IMAGE" ] || { echo "UNVERIFIED (chart/files/spark-runtimes.json names no full Spark image)"; exit 3; }
 problems=0
 command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
 
@@ -30,7 +30,7 @@ command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; e
 # that a real query would not start.
 fixture_image="$(awk '/image: ghcr\.io\/stardelt\/spark:/ {print $2; exit}' scripts/fixtures/spark-executor-pod.yaml)"
 if [ "$fixture_image" != "$IMAGE" ]; then
-  echo "✗ the executor fixture carries ${fixture_image##*@}, manifests/spark.yaml pins ${IMAGE##*@}" >&2
+  echo "✗ the executor fixture carries ${fixture_image##*@}, the runtime catalogue pins ${IMAGE##*@}" >&2
   echo "  scripts/fixtures/spark-executor-pod.yaml must name the image production runs." >&2
   exit 1
 fi

@@ -29,7 +29,7 @@ short() { sed -n 's/.*sha256:\([0-9a-f]\{12\}\).*/\1/p'; }
 # app | deployment | manifest | the repository the manifest names
 apps=(
   "nova|nova|manifests/nova-deployment.yaml|ghcr.io/stardelt/nova"
-  "spark|spark-connect|manifests/spark.yaml|ghcr.io/stardelt/spark"
+  "spark|spark-connect|chart/files/spark-runtimes.json|ghcr.io/stardelt/spark"
   "stardelt-operator|stardelt-operator||"
 )
 

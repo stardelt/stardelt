@@ -139,7 +139,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. The Deployment runs the image manifests/spark.yaml pins. `make install-spark-demo` renders
+# 7. The Deployment runs the image the runtime catalogue pins. `make install-spark-demo` renders
 #    the manifest from that line, and nothing compares the live pod with it afterwards: a
 #    roll that does not re-apply the manifest leaves the sandbox on an older digest (the
 #    stardelt/stardelt#224 class, one level down). Compared by digest, not by tag.
@@ -150,7 +150,7 @@ fi
 #    sandbox to the pinned digest, this probe failed on the terminating `Failed` pod
 #    (`1caae00f…`) beside the Running one (`71635e76…`).
 # ---------------------------------------------------------------------------
-pin="$(sed -nE 's/^[[:space:]]*spark\.kubernetes\.container\.image[[:space:]]+(ghcr\.io\/stardelt\/spark[^[:space:]]+)[[:space:]]*$/\1/p' manifests/spark.yaml)"
+pin="$(grep -oE 'ghcr\.io/stardelt/spark:[^"]+@sha256:[0-9a-f]{64}' chart/files/spark-runtimes.json | head -1)"
 live="$(kubectl -n "$DEMO_NS" get pod -l app.kubernetes.io/name=spark-demo --field-selector=status.phase=Running -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null || true)"
 pin_digest="${pin##*@}"
 live_digest="${live##*@}"

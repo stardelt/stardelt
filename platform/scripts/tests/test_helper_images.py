@@ -7,6 +7,7 @@ the same manifest run different bytes (platform#1563). The two helper tests are 
 `test_every_applied_image_is_pinned` covers every `image:` line in `manifests/` and `dev/`.
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -65,20 +66,17 @@ def helm_values_files():
 
 
 # manifests/spark-demo-sandbox.yaml carries no digest: `make install-spark-demo` renders
-# `__SPARK_IMAGE__` from manifests/spark.yaml's image line at install time, so the public demo's
-# sandbox follows the pin without a second copy of it (stardelt/stardelt#246). The placeholder is
-# judged where it is resolved — the pin it renders must itself carry a digest — so nothing here
-# floats by tag.
+# `__SPARK_IMAGE__` from the runtime catalogue chart/files/spark-runtimes.json at install time,
+# so the public demo's sandbox follows the pin without a second copy of it (stardelt/stardelt#246).
+# The placeholder is judged where it is resolved — the pin it renders must itself carry a digest —
+# so nothing here floats by tag.
 SPARK_IMAGE_PLACEHOLDER = "__SPARK_IMAGE__"
 
 
 def spark_pin():
-    """manifests/spark.yaml's image line, the value `make install-spark-demo` renders."""
-    for _, line in code_lines(REPO / "manifests" / "spark.yaml"):
-        match = IMAGE_LINE.match(line)
-        if match and match.group(1).startswith("ghcr.io/stardelt/spark"):
-            return match.group(1)
-    return None
+    """The runtime catalogue's image, the value `make install-spark-demo` renders."""
+    catalogue = json.loads((REPO / "chart" / "files" / "spark-runtimes.json").read_text())
+    return next(iter(catalogue.values()))["image"]
 
 
 def resolved_image(reference):
