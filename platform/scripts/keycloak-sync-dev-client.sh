@@ -14,7 +14,9 @@
 # when missing, brings drifted settings back (enabled, flows, redirect addresses, PKCE, device
 # grant), restores missing mappers, and proves the result against the realm's own endpoints:
 # the device endpoint answers (or refuses when disabled), a loopback redirect with any port is
-# accepted and a redirect to a foreign host is refused. Idempotent. Reaches Keycloak through
+# accepted and a redirect to a foreign host is refused; and the realm group `stardelt-admins`
+# holds the realm default role, so a CLI sign-in as `admin` can hold an offline token (#1745).
+# Idempotent. Reaches Keycloak through
 # svc/keycloak (port-forward) because the public `/admin` API is closed; secrets travel only
 # through files under a mode-0700 temp dir and `--data @file` bodies.
 set -euo pipefail
@@ -192,6 +194,28 @@ print(next((s["id"] for s in json.load(sys.stdin) if s.get("name") == "offline_a
     || fail "Keycloak refused to make offline_access an optional scope of $DEV_CLIENT"
 fi
 echo "› client $DEV_CLIENT: offline_access optional"
+
+# 5c. The realm admins may hold an offline token (#1745): `offline_access` is in the realm's
+#    default role, but a user created through the admin API has no roles unless the template asks
+#    for them, and a realm imported before the fix keeps the gap. The group is the durable place.
+admins_id="$("${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/groups?search=stardelt-admins" \
+  | python3 -c 'import sys,json
+groups = [g for g in json.load(sys.stdin) if g.get("name") == "stardelt-admins"]
+print(groups[0]["id"] if groups else "")')"
+[ -n "$admins_id" ] || fail "realm $REALM has no group stardelt-admins"
+if "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/groups/$admins_id/role-mappings/realm" \
+  | python3 -c 'import sys,json; sys.exit(0 if any(r.get("name") == "default-roles-stardelt" for r in json.load(sys.stdin)) else 1)'; then
+  echo "› group stardelt-admins: default-roles-stardelt present"
+else
+  default_role_id="$("${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/roles/default-roles-stardelt" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id") or "")')"
+  [ -n "$default_role_id" ] || fail "realm $REALM has no role default-roles-stardelt"
+  printf '[{"id":"%s","name":"default-roles-stardelt"}]' "$default_role_id" > "$tmp/default-role.json"
+  "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" -H 'Content-Type: application/json' -X POST \
+    --data @"$tmp/default-role.json" "$API/groups/$admins_id/role-mappings/realm" >/dev/null \
+    || fail "Keycloak refused to give group stardelt-admins the role default-roles-stardelt"
+  echo "› group stardelt-admins: default-roles-stardelt granted"
+fi
 
 # 5b. Mappers, by name; a missing one is added.
 "${CURL[@]}" "${HEAD[@]}" "${AUTH[@]}" "$API/clients/$client_uuid" > "$tmp/current.json"
