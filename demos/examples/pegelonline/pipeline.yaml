@@ -59,3 +59,24 @@ spec:
                count(*) AS samples
         FROM shared.silver.pegelonline_measurements
         GROUP BY 1, 2, 3, 4, 5
+    - name: checks
+      kind: quality
+      dependsOn: [silver, gold-latest]
+      checks:
+        - name: station_uuid_present
+          sql: |
+            SELECT station_uuid
+            FROM shared.silver.pegelonline_measurements
+            WHERE station_uuid IS NULL
+        - name: one_row_per_measurement
+          sql: |
+            SELECT station_uuid, timeseries, measured_at
+            FROM shared.silver.pegelonline_measurements
+            GROUP BY 1, 2, 3
+            HAVING count(*) > 1
+        - name: value_in_range
+          sql: |
+            SELECT station_uuid, timeseries, measurement_value
+            FROM shared.gold.pegelonline_station_latest
+            WHERE measurement_value IS NOT NULL
+              AND (measurement_value < -1000 OR measurement_value > 10000)
