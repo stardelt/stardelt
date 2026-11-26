@@ -59,6 +59,7 @@ CHANGE = re.compile(
 )
 MODES = ("development", "production")
 DRIFT = ("warn", "block", "heal")
+GATE_FAIL = ("none", "rollback")
 MAX_FILES = 100
 MAX_BYTES = 5 * 1024 * 1024
 
@@ -617,13 +618,15 @@ def validate(directory, target=None):
             continue
         where = f"targets.{tname}"
         spec = spec if isinstance(spec, dict) else {}
-        for key in sorted(set(spec) - {"mode", "variables", "runAs", "drift"}):
-            problems.append((where, f"unknown key {key!r} (known: drift, mode, runAs, variables)"))
+        for key in sorted(set(spec) - {"mode", "variables", "runAs", "drift", "onGateFail"}):
+            problems.append((where, f"unknown key {key!r} (known: drift, mode, onGateFail, runAs, variables)"))
         mode = spec.get("mode")
         if mode not in MODES:
             problems.append((where, f"mode must be one of {', '.join(MODES)}"))
         if spec.get("drift", "warn") not in DRIFT:
             problems.append((where, f"drift must be one of {', '.join(DRIFT)}"))
+        if spec.get("onGateFail", "none") not in GATE_FAIL:
+            problems.append((where, f"onGateFail must be one of {', '.join(GATE_FAIL)}"))
         if spec.get("drift") == "heal" and mode != "development":
             problems.append((where, "drift: heal is only allowed on a development target"))
         tvars = spec.get("variables") or {}
@@ -989,6 +992,13 @@ def _drift_mode(directory, target):
     return ((manifest.get("targets") or {}).get(target) or {}).get("drift", "warn")
 
 
+def _on_gate_fail(directory, target):
+    """What a failed smoke gate does: ``none`` (default) leaves the stage as deployed, ``rollback``
+    replays the newest applied deployment of the same bundle and target."""
+    manifest = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))
+    return ((manifest.get("targets") or {}).get(target) or {}).get("onGateFail", "none")
+
+
 def target_values(directory, target):
     """The variable values a target deploys with: every default, then the target's overrides."""
     manifest = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))
@@ -1270,6 +1280,8 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     the bundle (with or without the ``dev-<user>-`` prefix); after the writes it is run and waited
     for, and a run that does not end ``success`` records the deploy as ``failed`` and is a problem.
     ``smoke_timeout`` (seconds, default no limit) gives up waiting, which does not stop the run.
+    A target with ``onGateFail: rollback`` replays its newest applied deployment when the gate
+    fails, through Nova's rollback route, and the problem names both deployment ids.
     ``preview`` prefixes every rendered name with ``<preview>-`` instead of ``dev-<user>-`` and
     removes its schedule; only a development target accepts it. A pipeline an earlier Nova or
     ``stardelt apply`` created is refused unless ``--adopt <name>`` names it; the row then says ``adopted`` and
@@ -1279,6 +1291,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     problems, mode, specs = render(directory, target, user, preview)
     if problems:
         return problems, []
+    gate_fail = _on_gate_fail(directory, target)
     if preview and mode != "development":
         return [(target, "a preview is only allowed on a development target")], []
     migration_problems, migration_catalog, migration_files = _migration_files(directory, target)
@@ -1529,16 +1542,31 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             nova, directory, target, only=smoke, timeout=smoke_timeout or None
         )
         done.extend(smoke_rows)
+        reason = None
         if smoke_problems:
-            done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
-            return [(target, f"smoke gate: {smoke_problems[0][1]}")], done
-        if not smoke_rows or smoke_rows[0]["state"] != "success":
+            reason = smoke_problems[0][1]
+        elif not smoke_rows or smoke_rows[0]["state"] != "success":
             ended = smoke_rows[0] if smoke_rows else {"name": smoke, "state": "not started"}
             reason = f"{ended['name']} ended {ended['state']}"
             if ended.get("failedTasks"):
                 reason += f" (failed tasks: {', '.join(ended['failedTasks'])})"
+        if reason is not None:
             done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
-            return [(target, f"smoke gate: {reason}")], done
+            if gate_fail != "rollback":
+                return [(target, f"smoke gate: {reason}")], done
+            try:
+                rows = nova.call("deployments_list", query={"bundle": stamp["bundle"], "target": target}) or []
+            except api.StardeltApiError as err:
+                return [(target, f"smoke gate: {reason}; no rollback: the deployment record could not be read: {err}")], done
+            previous = next((row for row in rows if row.get("status") == "applied"), None)
+            if previous is None:
+                return [(target, f"smoke gate: {reason}; no rollback: this bundle has no applied deployment to roll back to")], done
+            try:
+                rolled = nova.call("deployments_rollback", path={"id": previous["id"]})
+            except api.StardeltApiError as err:
+                return [(target, f"smoke gate: {reason}; the rollback to deployment {previous['id']} failed: {err}")], done
+            done.append({"action": "rolled-back", "id": rolled["id"], "previousDeploymentId": previous["id"]})
+            return [(target, f"smoke gate: {reason}; rolled back to deployment {previous['id']} as deployment {rolled['id']}")], done
     done.append(_record(nova, stamp, directory, target, "applied", touched, rendered, plan_id=plan_id))
     return [], done
 

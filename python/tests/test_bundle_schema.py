@@ -27,6 +27,7 @@ def test_the_schema_matches_the_code():
     target = doc["properties"]["targets"]["additionalProperties"]["properties"]
     assert target["mode"]["enum"] == list(bundle.MODES)
     assert target["drift"]["enum"] == list(bundle.DRIFT)
+    assert target["onGateFail"]["enum"] == list(bundle.GATE_FAIL)
     assert doc["properties"]["files"]["maxItems"] == bundle.MAX_FILES
     placed = [
         (bundle.NAME.pattern, doc["properties"]["bundle"]["properties"]["name"]["pattern"]),
