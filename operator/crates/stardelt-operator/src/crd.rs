@@ -5359,6 +5359,11 @@ mod tests {
             "the example is the switch that changes the cluster"
         );
         assert!(spec.pillars.lakehouse, "Nova needs the lakehouse pillar");
+        assert!(
+            spec.pillars.pipelines && spec.pillars.dashboards,
+            "the release example turns on what the fresh-node run proves (pipelines, dashboards)"
+        );
+        assert!(!spec.pillars.notebooks, "notebooks stay off and visible in the example");
         assert_eq!(spec.identity.mode, IdentityMode::Platform);
         // The two rules the CRD enforces on the API server, checked here as well.
         assert!(

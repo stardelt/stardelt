@@ -195,7 +195,7 @@ class E2EFreshNode(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(
             "would create stardelt-fresh-e2e-testid (cpx42 @ nbg1), install the operator, "
-            "apply platform-minimal.yaml (+ pipelines, dashboards pillars) for <domain>, "
+            "apply platform-minimal.yaml for <domain>, "
             "verify, delete",
             done.stdout,
         )
@@ -261,6 +261,7 @@ class E2EFreshNode(unittest.TestCase):
         (release / "install.yaml").write_text("kind: Namespace\nmetadata:\n  name: stardelt\n")
         (release / "platform-minimal.yaml").write_text(
             "# from the release folder\nbaseDomain: data.example.com\n  profile: demo\n"
+            "  pillars:\n    pipelines: true\n    dashboards: true\n"
         )
         self._write(self.bindir / "kubectl", FAKE_KUBECTL_RECORDING)
         done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", RELEASE_DIR=str(release))
@@ -273,17 +274,19 @@ class E2EFreshNode(unittest.TestCase):
         self.assertTrue(instance.exists(), done.stdout + done.stderr)
         self.assertIn("# from the release folder", instance.read_text(), done.stdout)
         self.assertIn("baseDomain: example.test", instance.read_text(), done.stdout)
-        # #1729: the run turns on the two pillars that the product phase checks.
-        self.assertIn(
-            "  profile: demo\n  pillars:\n    pipelines: true\n    dashboards: true\n",
-            instance.read_text(),
+        # #1810: the run applies the example as shipped and checks the two pillars are on.
+        self.assertEqual(
+            instance.read_text().count(
+                "  pillars:\n    pipelines: true\n    dashboards: true\n"
+            ),
+            1,
             done.stdout,
         )
         self.assertIn(f"install: release {release}", done.stdout)
 
-    def test_an_instance_without_the_profile_line_stops_before_apply(self):
-        # #1729: the pillars are inserted after `  profile: demo`; a release file without that
-        # line must stop the run with a message instead of applying a pillar-less instance.
+    def test_an_example_without_the_two_pillars_stops_before_apply(self):
+        # #1810: the run applies the example as shipped; an example without the two pillars the
+        # product phase checks must stop the run with a message instead of applying it.
         release = self.tmp / "release-no-profile"
         release.mkdir()
         (release / "install.yaml").write_text("kind: Namespace\nmetadata:\n  name: stardelt\n")
@@ -294,7 +297,7 @@ class E2EFreshNode(unittest.TestCase):
         done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", RELEASE_DIR=str(release))
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn(
-            "could not turn on the pipelines and dashboards pillars", done.stderr, done.stdout
+            "does not turn on the pipelines and dashboards pillars", done.stderr, done.stdout
         )
         self.assertIn("e2e-fresh-node: FAIL", done.stdout, done.stdout)
         calls = self.home / "kubectl.calls"

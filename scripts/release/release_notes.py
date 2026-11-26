@@ -21,6 +21,8 @@ $ kubectl apply --server-side --force-conflicts -f https://github.com/stardelt/s
 $ curl -fsSLO https://github.com/stardelt/stardelt/releases/download/v{version}/platform-minimal.yaml
 $ kubectl apply -f platform-minimal.yaml      # after you set your domain in it
 ```
+`platform-minimal.yaml` turns on the lakehouse, pipelines and dashboards; set `notebooks: true` under
+`spec.pillars` for notebooks. This release was proven on one node with 8 vCPU and 16 GB of memory.
 An upgrade applies the new `install.yaml` the same way; a release upgrades the one before it (N−1).
 stardelt is `0.0.x`: there is no API stability promise before `0.1.0`.
 """
