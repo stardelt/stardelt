@@ -1389,6 +1389,16 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     )
     if migration_problems:
         return migration_problems, []
+    if preview:
+        pending = [row["name"] for row in migration_rows if row.get("action") == "would-apply-migration"]
+        if pending:
+            return [
+                (
+                    target,
+                    f"a preview cannot apply this target's migrations ({', '.join(pending)}): "
+                    "they change tables outside the preview; deploy the target without --preview first",
+                )
+            ], []
     results, refused, changed_by_hand, unpublished = list(migration_rows), [], set(), []
     for position, spec in enumerate(specs):
         slots = _notebook_slots(spec)
