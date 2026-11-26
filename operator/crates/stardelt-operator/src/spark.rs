@@ -2359,5 +2359,8 @@ mod tests {
         // The pods rule above exists for this line of the script (platform#1585): the cheapest
         // drift signal until a cross-repo byte test exists.
         assert!(CONFMAP_JANITOR_SCRIPT.contains("referenced by a pod"));
+        // Rule 3 keeps the shared Connect server's map (stardelt#215): the operator's copy was
+        // missing it, and the janitor deleted the map while every query hung.
+        assert!(CONFMAP_JANITOR_SCRIPT.contains("created by a live spark driver"));
     }
 }

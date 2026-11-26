@@ -18,6 +18,7 @@ ROWS_PATH = "platform/twins.tsv"
 OPERATOR_SRC = "operator/crates/stardelt-operator/src"
 OPERATOR_VALUES = "operator/crates/stardelt-operator/values"
 PLATFORM_VALUES = "platform/helm-values"
+PLATFORM_SCRIPTS = "platform/scripts"
 KINDS = ("exact", "drift")
 # The copy header a copied file carries instead of the platform file's first lines.
 COPY_HEADER = ("# Copy of", "# embedded by", "# injected", "# Edit the platform")
@@ -103,6 +104,23 @@ def found_copies(root: Path) -> list[tuple[str, str]]:
     return copies
 
 
+def name_copies(root: Path) -> list[tuple[str, str]]:
+    """`(operator path, platform path)` of every copy whose name alone names the platform file:
+    `access_sync_job.py` ↔ `scripts/access-sync-job.py` (#1800). A copy that carries no copy
+    header is still a copy; without this rule the guard cannot see it."""
+    copies: list[tuple[str, str]] = []
+    src = root / OPERATOR_SRC
+    if not src.is_dir():
+        return copies
+    for path in sorted(src.iterdir()):
+        if not path.is_file():
+            continue
+        platform_path = "%s/%s" % (PLATFORM_SCRIPTS, path.name.replace("_", "-"))
+        if (root / platform_path).is_file():
+            copies.append(("%s/%s" % (OPERATOR_SRC, path.name), platform_path))
+    return copies
+
+
 def check(root: Path) -> tuple[list[str], int]:
     """One report line per problem, or the `✓` summary line; plus the exit code."""
     rows, lines = read_rows(root)
@@ -125,7 +143,9 @@ def check(root: Path) -> tuple[list[str], int]:
                 "✗ drifted: %s differs from %s in %d line(s) — re-copy the platform file"
                 % (operator_path, platform_path, differing_lines(left, right))
             )
-    for operator_path, platform_path in found_copies(root):
+    for operator_path, platform_path in dict.fromkeys(
+        found_copies(root) + name_copies(root)
+    ):
         if (operator_path, platform_path) not in listed:
             lines.append(
                 "✗ new copy: %s ↔ %s — embed the platform file instead, or add a row (internal#545 M1)"

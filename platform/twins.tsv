@@ -8,6 +8,8 @@ exact	operator/crates/stardelt-operator/src/airflow_group_roles.py	platform/scri
 exact	operator/crates/stardelt-operator/src/superset_group_roles.py	platform/scripts/superset-group-roles.py
 exact	operator/crates/stardelt-operator/src/superset_nova_user.py	platform/scripts/superset-nova-user.py
 exact	operator/crates/stardelt-operator/src/superset_analyst_role.py	platform/scripts/superset-analyst-role.py
+exact	operator/crates/stardelt-operator/src/access_sync_job.py	platform/scripts/access-sync-job.py
+exact	operator/crates/stardelt-operator/src/spark_confmap_janitor.sh	platform/scripts/spark-confmap-janitor.sh
 drift	operator/crates/stardelt-operator/src/superset_oidc.py	platform/helm-values/superset.yaml
 drift	operator/crates/stardelt-operator/values/airflow.yaml	platform/helm-values/airflow.yaml
 drift	operator/crates/stardelt-operator/values/barman-cloud.yaml	platform/helm-values/barman-cloud.yaml
