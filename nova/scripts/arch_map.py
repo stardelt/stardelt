@@ -49,6 +49,7 @@ AREAS: dict[str, list[str]] = {
     ],
     "Catalog": [
         "catalog", "catalog_docs", "catalog_doc_store", "catalog_metrics", "catalog_search",
+        "samples",
         "access_requests", "verified_queries", "admin_catalogs",
     ],
     "SQL & query log": [

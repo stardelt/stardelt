@@ -129,6 +129,7 @@ POST	/api/pipelines/{namespace}/{name}/runs	pipelines	pipelines	signed-in
 POST	/api/pipelines/{namespace}/{name}/runs/{run_id}/retry	pipelines	pipelines	signed-in
 POST	/api/pipelines/{namespace}/{name}/runs/{run_id}/stop	pipelines	pipelines	signed-in
 POST	/api/query	trino	main	signed-in
+POST	/api/samples/{name}	samples	main	signed-in
 POST	/api/saved-queries	saved_queries	main	signed-in
 POST	/api/saved-queries/{id}/share	saved_queries	main	signed-in
 POST	/api/statements	statements	statements	signed-in

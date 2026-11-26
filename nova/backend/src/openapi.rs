@@ -81,6 +81,7 @@ pub struct ErrorResponse {
         crate::catalog_metrics::refresh,
         crate::catalog::list_namespaces,
         crate::catalog::create_namespace,
+        crate::samples::load,
         crate::catalog::list_tables,
         crate::catalog_search::search,
         crate::catalog::table_metadata,

@@ -6,7 +6,7 @@
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `catalog_docs.rs` ⚠ | Catalog | 1683 | 1292 | 5 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
-| `main.rs` | Core & identity | 1476 | 1617 | 3 | - |
+| `main.rs` | Core & identity | 1479 | 1617 | 3 | - |
 | `mcp.rs` | AI (Ask, MCP, models) | 1401 | 1269 | 4 | Airflow REST, Trino |
 | `query_log_api.rs` | SQL & query log | 1353 | 298 | 5 | Kubernetes API (CRDs), PostgreSQL state store |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
@@ -34,7 +34,7 @@
 | `destinations.rs` | Pipelines & delivery | 523 | 330 | 4 | PostgreSQL state store |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 461 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
-| `openapi.rs` | Core & identity | 454 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 455 | 688 | 1 | - |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
@@ -47,6 +47,7 @@
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
 | `query_log_store.rs` | SQL & query log | 189 | 182 | 0 | PostgreSQL state store |
+| `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
 | `catalog_doc_store.rs` | Catalog | 177 | 207 | 0 | PostgreSQL state store |
 | `mcp_audit.rs` | AI (Ask, MCP, models) | 176 | 68 | 1 | PostgreSQL state store |
@@ -68,4 +69,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (67 files)** | | **47092** | **42313** | **155** | |
+| **total (68 files)** | | **47282** | **42362** | **156** | |
