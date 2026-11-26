@@ -21,7 +21,7 @@ spec:
   containers:
     # The digest is the one in `manifests/spark.yaml`; `scripts/pin-image.sh spark` moves both.
     - name: spark-kubernetes-executor
-      image: ghcr.io/stardelt/spark:dev@sha256:f1f21f2eef2885bc3138d00a79060375d66a6a05a3f86e0ebb95edad462ac4e2
+      image: ghcr.io/stardelt/spark:dev@sha256:cc30d180d44d61ae4d8763afb8f9cb06b715d8d21d259807cced97e368c50075
       securityContext:
         allowPrivilegeEscalation: false
         capabilities: { drop: ["ALL"] }
