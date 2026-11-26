@@ -383,7 +383,10 @@ if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
     # already clean ("Pull request is in clean status", run 44337019887). Both mean
     # nobody else will merge this roll: wait for the checks this push started, then
     # merge it here.
-    if auto_out="$(gh pr merge "$pr_number" --auto --squash 2>&1)"; then
+    # A merge commit, never a squash (#1771): when an embedded pin moved, the operator image is
+    # built from this branch's head, and D1 (#1703) proves a pin only with a commit that is an
+    # ancestor of main. A squash drops that commit, so the cut could never prove the pin.
+    if auto_out="$(gh pr merge "$pr_number" --auto --merge 2>&1)"; then
       echo "auto-merge armed on PR #$pr_number: it merges when the required checks pass"
     else
       echo "auto-merge is not available; waiting for PR #$pr_number's checks (${auto_out//$'\n'/ })"
@@ -398,7 +401,7 @@ if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
         exit 1
       fi
       gh pr checks "$pr_number" --watch --fail-fast --interval 15
-      gh pr merge "$pr_number" --squash --delete-branch
+      gh pr merge "$pr_number" --merge --delete-branch
       echo "merged PR #$pr_number: the roll is on main"
     fi
   fi
