@@ -2136,7 +2136,8 @@ fn validate_schedule(
 /// `principals` route's message and the create/update refusal, word for word.
 fn no_principal_message(group: &str) -> String {
     format!(
-        "No principal for this group yet: an administrator creates one with \
+        "No principal for this group yet: apply a ServicePrincipal named pipeline-{group} with \
+         ownerGroup {group} (the operator creates its client), or run \
          make sync-principal NAME=pipeline-{group} GROUP={group}"
     )
 }
@@ -7270,7 +7271,7 @@ pub(crate) async fn notebook_usage(
     operation_id = "pipelines_principals",
     path = "/api/pipelines/principals",
     tag = "public",
-    description = "The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command that creates one. A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`.",
+    description = "The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `ServicePrincipal` to apply (on a `make install` platform, the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command). A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One entry per group of the caller, sorted by group", body = PrincipalsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
