@@ -43,6 +43,16 @@ class SectionTest(unittest.TestCase):
         self.assertIn("## Install", text)
         self.assertIn("kubectl apply --server-side --force-conflicts", text)
         self.assertIn("releases/download/v0.0.9/platform-minimal.yaml", text)
+        self.assertIn("## Client", text)
+        self.assertIn("releases/download/v0.0.9/stardelt-0.0.9-py3-none-any.whl", text)
+
+    def test_the_client_block_names_the_release_wheel_and_the_rule(self) -> None:
+        text = release_notes.notes("0.0.9", TWO_SECTIONS)
+        self.assertIn("## Client", text)
+        self.assertIn("Use the client of the same release as your Nova (`v0.0.9`)", text)
+        self.assertIn("warns\nonce per command", text)
+        self.assertIn("--force-reinstall", text)
+        self.assertEqual(text.count("## Client"), 1)
 
 
 class RepositoryChangelogTest(unittest.TestCase):
