@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print one release's notes: its CHANGELOG section and the fixed install and client blocks (#428, #1773).
+"""Print one release's notes: its CHANGELOG section and the fixed install, client and verify blocks (#428, #1773, #1804).
 
   python3 scripts/release/release_notes.py 0.0.4 CHANGELOG.md > notes.md
 
@@ -37,6 +37,21 @@ serve. An install of the retired `0.4.x` line sorts above `0.0.x` for pip: upgra
 `pip install --force-reinstall` and the line above.
 """
 
+VERIFY = """\
+## Verify
+Every image of this release is signed by the release workflow of `stardelt/stardelt`:
+```console
+$ cosign verify ghcr.io/stardelt/nova:v{version} \\
+    --certificate-identity-regexp '^https://github.com/stardelt/stardelt/\\.github/workflows/release-publish\\.yml@' \\
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+The same works for `stardelt-operator`, `spark`, `superset`, `airflow`, `jupyter-singleuser` and
+`stardelt-cli`. Each image carries its software bill of materials (SPDX):
+```console
+$ docker buildx imagetools inspect ghcr.io/stardelt/nova:v{version} --format '{{{{ json .SBOM }}}}'
+```
+"""
+
 
 def section(changelog: str, version: str) -> str:
     """The `## v<version>` section of `changelog`, heading included, or "".
@@ -65,7 +80,7 @@ def notes(version: str, changelog: str) -> str:
     version = version.removeprefix("v")
     found = section(changelog, version)
     head = found if found else FALLBACK
-    return f"{head}\n\n{INSTALL.format(version=version)}\n{CLIENT.format(version=version)}"
+    return f"{head}\n\n{INSTALL.format(version=version)}\n{CLIENT.format(version=version)}\n{VERIFY.format(version=version)}"
 
 
 def main(argv: list[str] | None = None) -> int:

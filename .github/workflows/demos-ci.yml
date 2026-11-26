@@ -103,6 +103,7 @@ jobs:
           context: demos
           file: demos/images/airflow/Dockerfile
           push: true
+          sbom: true
           tags: |
             ghcr.io/stardelt/airflow:demo
             ghcr.io/stardelt/airflow:sha-${{ steps.short.outputs.sha }}
@@ -160,6 +161,7 @@ jobs:
           context: demos
           file: demos/images/dbt/Dockerfile
           push: true
+          sbom: true
           tags: ghcr.io/stardelt/dbt:demo
           cache-from: type=gha
           cache-to: type=gha,mode=max

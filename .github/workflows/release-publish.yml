@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 concurrency:
   group: release
@@ -72,6 +73,21 @@ jobs:
             got="$(docker buildx imagetools inspect "ghcr.io/stardelt/$image:$V" | sed -n 's/^Digest: *//p' | head -n 1)"
             [ "$got" = "$digest" ] || { echo "✗ $image:$V is $got, want $digest"; exit 1; }
             echo "✓ ghcr.io/stardelt/$image:$V = $digest"
+          done < "$RUNNER_TEMP/images.txt"
+
+      - uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
+
+      - name: Sign every release image by digest (keyless) and check its SBOM
+        run: |
+          set -euo pipefail
+          while read -r image digest; do
+            cosign sign --yes "ghcr.io/stardelt/$image@$digest"
+            echo "✓ signed ghcr.io/stardelt/$image@$digest"
+            sbom="$(docker buildx imagetools inspect "ghcr.io/stardelt/$image@$digest" --format '{{ json .SBOM }}' 2>/dev/null || true)"
+            case "$sbom" in
+              ""|"null"|"{}") echo "::warning::ghcr.io/stardelt/$image@$digest carries no SBOM (built before #1804)" ;;
+              *) echo "✓ SBOM in ghcr.io/stardelt/$image@$digest" ;;
+            esac
           done < "$RUNNER_TEMP/images.txt"
 
       - name: Build the wheels at the tested commit
