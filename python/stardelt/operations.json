@@ -790,6 +790,17 @@
       ],
       "body": false
     },
+    "samples_load": {
+      "method": "POST",
+      "path": "/api/samples/{name}",
+      "path_params": [
+        "name"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
     "saved_queries_create": {
       "method": "POST",
       "path": "/api/saved-queries",

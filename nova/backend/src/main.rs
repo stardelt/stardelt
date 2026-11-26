@@ -147,6 +147,7 @@ mod query_log_collector;
 mod query_log_event;
 mod query_log_store;
 mod rfc3339;
+mod samples;
 mod saved_queries;
 mod seal;
 mod secret_store;
@@ -794,6 +795,8 @@ fn api_router() -> Router<Arc<AppState>> {
             "/catalog/namespaces",
             get(catalog::list_namespaces).post(catalog::create_namespace),
         )
+        // The one sample every install can have (#1816), generated and loaded as the caller.
+        .route("/samples/{name}", post(samples::load))
         .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
         .route("/catalog/search", get(catalog_search::search))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
