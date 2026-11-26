@@ -43,7 +43,27 @@ def test_the_drift_setting_is_checked_offline_and_defaults_to_warn(tmp_path):
     assert bundle.validate(bundle_in(tmp_path, "block", BLOCK))[0] == []
     assert bundle.validate(bundle_in(tmp_path, "default", MANIFEST))[0] == []
     strict = MANIFEST.replace("runAs: pipeline-sales}", "runAs: pipeline-sales, drift: strict}")
-    assert bundle.validate(bundle_in(tmp_path, "strict", strict))[0] == [("targets.prod", "drift must be one of warn, block")]
+    assert bundle.validate(bundle_in(tmp_path, "strict", strict))[0] == [("targets.prod", "drift must be one of warn, block, heal")]
+
+
+def test_heal_is_allowed_on_development_and_refused_on_production(tmp_path):
+    heal = BLOCK.replace("drift: block", "drift: heal")
+    assert bundle.validate(bundle_in(tmp_path, "heal-dev", MANIFEST.replace("mode: development", "mode: development, drift: heal")))[0] == []
+    assert bundle.validate(bundle_in(tmp_path, "heal-prod", heal))[0] == [("targets.prod", "drift: heal is only allowed on a development target")]
+
+
+def test_a_heal_target_deploys_over_a_changed_pipeline_without_accept_drift(tmp_path):
+    make(tmp_path, manifest=MANIFEST.replace("mode: development", "mode: development, drift: heal"))
+    code, _, err, _ = run(
+        ["bundle", "plan", str(tmp_path), "-t", "dev"],
+        ME,
+        FakeResponse(payload={"catalogs": [], "default": "gold"}),
+        FakeResponse(payload=UPDATE),
+        FakeResponse(payload=BY_HAND),
+    )
+    assert code == 0, err
+    assert "drift: block" not in err
+    assert "dev-alice-nightly was changed after its last deploy; deploying overwrites that change" in err
 
 
 def test_plan_of_a_blocking_target_lists_everything_and_fails_for_the_pipeline_changed_by_hand(tmp_path):
