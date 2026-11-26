@@ -190,6 +190,9 @@ pub(crate) fn webhook_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // An HTTP proxy would send the request to the proxy instead of the resolved
+            // address, so the public-address rule would never see the real target.
+            .no_proxy()
             .dns_resolver(Arc::new(PublicOnly {
                 allow: allowed_hosts(),
             }))
