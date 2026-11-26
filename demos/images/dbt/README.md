@@ -45,7 +45,7 @@ A missing one prints its name to stderr and exits 2. The other two are optional 
 Then it runs `dbt` with the caller's arguments and prints the result in words (#112): the node
 counts (`dbt: 5 nodes — 1 model, 1 seed, 3 tests`), the status counts
 (`dbt: 3 passed, 1 failed, 1 warning`), then one `✗` line per failed node and one `!` line per
-warned one, each with dbt's one-line message. A run that failed before its first node has no
+warned one, each with dbt's one-line message, and, when the run's `manifest.json` is beside `run_results.json`, the table each failed or warned test guards in parentheses after its id. A run that failed before its first node has no
 `run_results.json` and prints `dbt: no run_results.json at <path>`. The exit code is always
 dbt's own; a summary that fails never fails a good run. A task runs e.g.
 
