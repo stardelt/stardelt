@@ -173,6 +173,40 @@ print("\n".join(broken + restarted))
   # The bootstrap Jobs that never finish never appear as a reason in a pod row (#48 run #3).
   kubectl -n "$NAMESPACE" get jobs -o wide >"$RUN_DIR/jobs.txt" 2>&1 || true
   kubectl -n "$NAMESPACE" describe jobs >"$RUN_DIR/jobs.describe.txt" 2>&1 || true
+  collect_failed_job_logs
+}
+
+collect_failed_job_logs() {
+  # Keep the logs of the pods of every Job that has failed at least once (#1736): a hook that
+  # retries replaces its failed pod within minutes, so the log must be read while the pod exists.
+  # One file per pod, so a retry adds an attempt instead of overwriting the earlier one.
+  local dir="$RUN_DIR/pod-logs/jobs" job pod
+  mkdir -p "$dir"
+  for job in $(kubectl -n "$NAMESPACE" get jobs -o json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items", [])
+except Exception:
+    raise SystemExit(0)
+for job in items:
+    status = job.get("status") or {}
+    if status.get("failed", 0) > 0:
+        print(job["metadata"]["name"])
+' 2>/dev/null); do
+    for pod in $(kubectl -n "$NAMESPACE" get pods -l "job-name=$job" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+      if [ -s "$dir/$job-$pod.log" ]; then
+        continue
+      fi
+      {
+        echo "=== job $job pod $pod"
+        kubectl -n "$NAMESPACE" logs "$pod" --all-containers --prefix --tail=500 2>&1 || true
+        echo "=== previous"
+        kubectl -n "$NAMESPACE" logs "$pod" --all-containers --prefix --tail=500 --previous 2>&1 || true
+        echo "=== status"
+        kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{range .status.initContainerStatuses[*]}{"init "}{.name}{" "}{.state}{" restarts="}{.restartCount}{"\n"}{end}{range .status.containerStatuses[*]}{.name}{" "}{.state}{" last="}{.lastState}{" restarts="}{.restartCount}{"\n"}{end}' 2>&1 || true
+      } >"$dir/$job-$pod.log"
+    done
+  done
 }
 
 # run_phase <name> <logfile> -- <command...>: one line in the report per phase, the command's
@@ -206,8 +240,33 @@ run_phase() {
 }
 
 wait_for_resources() {
-  kubectl -n "$NAMESPACE" wait --for=condition=Ready platforminstance/cluster --timeout=25m || return 1
-  kubectl -n "$NAMESPACE" wait --for=condition=Ready lakehouse/main --timeout=25m || return 1
+  # Poll instead of one 25-minute `kubectl wait`: a retrying hook Job replaces its failed pod
+  # within minutes, so its log is only readable while the wait runs (#1736). Collection is every
+  # 60 s, the readiness check every 15 s.
+  local deadline=$((SECONDS + 1500)) next_collect=0 platform_ready=0 lakehouse_ready=0
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ "$SECONDS" -ge "$next_collect" ]; then
+      collect_failed_job_logs
+      next_collect=$((SECONDS + 60))
+    fi
+    if kubectl -n "$NAMESPACE" wait --for=condition=Ready platforminstance/cluster --timeout=15s >/dev/null 2>&1; then
+      platform_ready=1
+    fi
+    if kubectl -n "$NAMESPACE" wait --for=condition=Ready lakehouse/main --timeout=15s >/dev/null 2>&1; then
+      lakehouse_ready=1
+    fi
+    if [ "$platform_ready" = 1 ] && [ "$lakehouse_ready" = 1 ]; then
+      return 0
+    fi
+    sleep 15
+  done
+  if [ "$platform_ready" != 1 ]; then
+    echo "e2e-fresh-node: platforminstance/cluster was not Ready after 25m" >&2
+  fi
+  if [ "$lakehouse_ready" != 1 ]; then
+    echo "e2e-fresh-node: lakehouse/main was not Ready after 25m" >&2
+  fi
+  return 1
 }
 
 # install_from_release applies the release folder's install.yaml (the namespace plus the rendered
