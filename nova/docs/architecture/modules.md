@@ -22,7 +22,7 @@
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
 | `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
-| `ask.rs` | AI (Ask, MCP, models) | 739 | 452 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
+| `ask.rs` | AI (Ask, MCP, models) | 767 | 452 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
 | `secret_store.rs` | Connections | 699 | 363 | 0 | Secret store (OpenBao) |
 | `destinations.rs` | Pipelines & delivery | 647 | 354 | 4 | PostgreSQL state store |
@@ -38,9 +38,9 @@
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
+| `catalog_search.rs` | Catalog | 351 | 415 | 1 | Lakekeeper (Iceberg REST) |
 | `superset_archive.rs` | Pipelines & delivery | 350 | 213 | 0 | - |
 | `token_exchange.rs` | Core & identity | 305 | 189 | 0 | OIDC provider |
-| `catalog_search.rs` | Catalog | 297 | 362 | 1 | Lakekeeper (Iceberg REST) |
 | `stages.rs` | Pipelines & delivery | 296 | 54 | 1 | - |
 | `catalog_token.rs` | Core & identity | 287 | 502 | 0 | OIDC provider |
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
@@ -70,4 +70,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (69 files)** | | **49617** | **43984** | **160** | |
+| **total (69 files)** | | **49699** | **44037** | **160** | |

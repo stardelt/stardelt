@@ -52,7 +52,7 @@ pub struct SearchParams {
     pub domain: Option<String>,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SearchMatch {
     pub catalog: String,
     pub namespace: String,
@@ -154,6 +154,15 @@ fn tables_of(answer: &Value) -> Vec<String> {
 fn matches_words(namespace: &str, table: &str, words: &[String]) -> bool {
     let name = format!("{namespace}.{table}").to_lowercase();
     words.iter().all(|word| name.contains(word.as_str()))
+}
+
+/// How many of `words` a table's `namespace.table` contains, in any case.
+fn match_score(namespace: &str, table: &str, words: &[String]) -> usize {
+    let name = format!("{namespace}.{table}").to_lowercase();
+    words
+        .iter()
+        .filter(|word| name.contains(word.as_str()))
+        .count()
 }
 
 #[utoipa::path(
@@ -293,6 +302,51 @@ pub async fn search(
         }),
     )
         .into_response()
+}
+
+/// Ask's fallback: the tables of the default catalog that share at least one word with
+/// `words`, best first — most words matched, then `namespace`, then `table`; at most `limit`.
+pub(crate) async fn search_any_word(
+    s: &Arc<AppState>,
+    caller: Option<&auth::Principal>,
+    words: &[String],
+    limit: usize,
+) -> Result<Vec<SearchMatch>, String> {
+    let (catalog, id) = catalog_scope(s, caller, None)
+        .await
+        .map_err(|_| "the catalog did not answer".to_string())?;
+    let namespaces = get_json(s, &format!("/catalog/v1/{id}/namespaces"))
+        .await
+        .map_err(|_| "the catalog did not answer".to_string())?;
+    let namespaces = namespaces_of(&namespaces);
+    let mut scored: Vec<(usize, SearchMatch)> = Vec::new();
+    for namespace in namespaces.iter().take(MAX_NAMESPACES) {
+        let Some(segment) = path_segment(namespace) else {
+            continue;
+        };
+        let answer = get_json(s, &format!("/catalog/v1/{id}/namespaces/{segment}/tables"))
+            .await
+            .map_err(|_| "the catalog did not answer".to_string())?;
+        for table in tables_of(&answer) {
+            let score = match_score(namespace, &table, words);
+            if score > 0 {
+                scored.push((
+                    score,
+                    SearchMatch {
+                        catalog: catalog.clone(),
+                        namespace: namespace.clone(),
+                        table,
+                    },
+                ));
+            }
+        }
+    }
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.namespace.cmp(&b.1.namespace))
+            .then_with(|| a.1.table.cmp(&b.1.table))
+    });
+    Ok(scored.into_iter().take(limit).map(|(_, m)| m).collect())
 }
 
 #[cfg(test)]
@@ -574,6 +628,59 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert!(fake.asked.lock().unwrap().is_empty());
+    }
+
+    fn state(lakekeeper: &str) -> Arc<AppState> {
+        let state = crate::router_tests::test_state_with_lakekeeper(lakekeeper);
+        {
+            let mut ids = state.catalog_ids.write().unwrap();
+            ids.insert("warehouse".into(), "w1".into());
+            ids.insert("finance".into(), "w2".into());
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn a_sentence_finds_its_tables_by_any_word() {
+        let (base, _) = serve(LAYOUT, false).await;
+        let words: Vec<String> = "How many trips were in the demo zone?"
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let found = search_any_word(&state(&base), None, &words, 5)
+            .await
+            .expect("the catalog answers");
+        let names: Vec<String> = found
+            .iter()
+            .map(|m| format!("{}.{}", m.namespace, m.table))
+            .collect();
+        assert!(names.contains(&"demo.trips".to_string()), "{names:?}");
+        assert!(names.contains(&"demo.zones".to_string()), "{names:?}");
+        assert!(found.len() <= 5);
+    }
+
+    #[tokio::test]
+    async fn the_best_word_matches_come_first() {
+        let (base, _) = serve(LAYOUT, false).await;
+        let words: Vec<String> = "trips by month"
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let found = search_any_word(&state(&base), None, &words, 5)
+            .await
+            .expect("the catalog answers");
+        assert_eq!(found[0].namespace, "finance_raw");
+        assert_eq!(found[0].table, "Trips_by_Month");
+    }
+
+    #[tokio::test]
+    async fn a_question_with_no_shared_word_finds_nothing() {
+        let (base, _) = serve(LAYOUT, false).await;
+        let words = vec!["how".to_string(), "many".to_string()];
+        let found = search_any_word(&state(&base), None, &words, 5)
+            .await
+            .expect("the catalog answers");
+        assert!(found.is_empty(), "{found:?}");
     }
 
     fn documentation(
