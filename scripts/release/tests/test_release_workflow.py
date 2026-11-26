@@ -87,5 +87,49 @@ class ReleaseArchitectureMapTest(unittest.TestCase):
         self.assertIn('releases/$V/architecture/request-flow.svg', self.publish)
 
 
+class ReleaseSigningTest(unittest.TestCase):
+    """Every release image is signed keylessly and carries an SBOM (#1804)."""
+
+    IMAGE_WORKFLOWS = {
+        "nova-image.yml": 1,
+        "operator-image.yml": 1,
+        "platform-image.yml": 3,
+        "demos-ci.yml": 2,
+        "python-ci.yml": 1,
+    }
+
+    def setUp(self) -> None:
+        self.text = PUBLISH.read_text(encoding="utf-8")
+
+    def test_the_publish_job_may_request_an_identity_token(self) -> None:
+        self.assertIn("  id-token: write", self.text)
+
+    def test_every_release_digest_is_signed(self) -> None:
+        self.assertIn('cosign sign --yes "ghcr.io/stardelt/$image@$digest"', self.text)
+        self.assertIn(
+            "sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab", self.text,
+            "the installer is pinned to a digest, like every other action in the workflow",
+        )
+
+    def test_signing_follows_the_retag(self) -> None:
+        self.assertGreater(
+            self.text.index("Sign every release image"),
+            self.text.index("Tag every image v0.0.N on its digest"),
+            "an image is signed only after its release tag points at the digest",
+        )
+
+    def test_every_pushed_image_carries_an_sbom(self) -> None:
+        workflows = ROOT / ".github" / "workflows"
+        for name, pushes in self.IMAGE_WORKFLOWS.items():
+            with self.subTest(workflow=name):
+                text = (workflows / name).read_text(encoding="utf-8")
+                pushed = sum(
+                    1 for line in text.splitlines()
+                    if line == "          push: true" or line.startswith("          push: ${{")
+                )
+                self.assertEqual(pushed, pushes)
+                self.assertEqual(text.count("sbom: true"), pushed)
+
+
 if __name__ == "__main__":
     unittest.main()

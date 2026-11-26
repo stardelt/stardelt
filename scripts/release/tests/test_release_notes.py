@@ -54,6 +54,12 @@ class SectionTest(unittest.TestCase):
         self.assertIn("--force-reinstall", text)
         self.assertEqual(text.count("## Client"), 1)
 
+    def test_the_notes_tell_how_to_verify(self) -> None:
+        text = release_notes.notes("0.0.9", "")
+        self.assertIn("cosign verify ghcr.io/stardelt/nova:v0.0.9", text)
+        self.assertIn("--format '{{ json .SBOM }}'", text)
+        self.assertIn("## Verify", text)
+
 
 class RepositoryChangelogTest(unittest.TestCase):
     def test_the_root_changelog_carries_the_0_0_4_section(self) -> None:

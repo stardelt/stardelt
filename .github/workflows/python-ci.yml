@@ -102,6 +102,7 @@ jobs:
           file: python/image/Dockerfile
           build-args: REVISION=${{ steps.image.outputs.sha }}
           push: true
+          sbom: true
           tags: ghcr.io/stardelt/stardelt-cli:${{ steps.image.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

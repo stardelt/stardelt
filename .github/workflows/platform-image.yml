@@ -99,6 +99,7 @@ jobs:
           context: platform/images/superset
           file: platform/images/superset/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -168,6 +169,7 @@ jobs:
             stardelt-python=python
             stardelt-demos=demos
           push: ${{ github.event_name != 'pull_request' }}
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=jupyter
@@ -223,6 +225,7 @@ jobs:
           context: platform/images/spark
           file: platform/images/spark/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
