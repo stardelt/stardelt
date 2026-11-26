@@ -40,6 +40,14 @@ class ParsePinsTest(unittest.TestCase):
         digest = "sha256:" + "a" * 64
         self.assertEqual(parse_pins("  tag: dev@{}\n".format(digest), "tag"), [digest])
 
+    def test_parse_the_spark_catalogue_pin(self):
+        text = (REPO / "chart/files/spark-runtimes.json").read_text()
+        pins = parse_pins(text, "catalogue")
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(len(pins[0]), len("sha256:") + 64)
+        # A second image in the catalogue is not a pin this script can judge; say so.
+        self.assertEqual(parse_pins(text + text, "catalogue"), [])
+
     def test_parse_two_spark_pins(self):
         digest = "sha256:" + "a" * 64
         text = (

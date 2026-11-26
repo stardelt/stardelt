@@ -126,7 +126,7 @@ class SparkDemoSandboxTest(unittest.TestCase):
     def test_the_image_is_a_placeholder_the_installer_renders(self):
         self.assertIn("__SPARK_IMAGE__", self.text)
         self.assertNotIn("sha256:", self.text,
-                         "the digest comes from manifests/spark.yaml at install time")
+                         "the digest comes from chart/files/spark-runtimes.json at install time")
 
 
 if __name__ == "__main__":

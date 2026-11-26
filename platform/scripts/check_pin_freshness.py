@@ -22,7 +22,7 @@ PIN_IMAGE = REPO / "scripts" / "pin-image.sh"
 # (app, manifest, kind, tag): the registry tag whose digest the manifest must pin.
 APPS = [
     ("nova", "manifests/nova-deployment.yaml", "image", "dev"),
-    ("spark", "manifests/spark.yaml", "image", "dev"),
+    ("spark", "chart/files/spark-runtimes.json", "catalogue", "dev"),
     ("stardelt-operator", "helm-values/operator.yaml", "tag", "dev"),
     ("superset", "helm-values/superset.yaml", "tag", "dev"),
     ("airflow", "helm-values/airflow.yaml", "digest", "demo"),
@@ -68,6 +68,14 @@ def parse_pins(text: str, kind: str) -> list[str]:
         pattern = re.compile(r'^\s*tag:\s*"?dev@(sha256:[0-9a-f]{64})"?\s*$', re.M)
     elif kind == "digest":
         pattern = re.compile(r"^\s*digest: (sha256:[0-9a-f]{64})\s*$", re.M)
+        found = pattern.findall(text)
+        return found if len(found) == 1 else []
+    elif kind == "catalogue":
+        # The single `"image": "ghcr.io/stardelt/spark:dev@sha256:<digest>"` of the Spark runtime
+        # catalogue — the platform's Spark image reference since #1828. Exactly one, like `digest`.
+        pattern = re.compile(
+            r'^\s*"image":\s*"ghcr\.io/stardelt/spark:dev@(sha256:[0-9a-f]{64})"\s*,?\s*$', re.M
+        )
         found = pattern.findall(text)
         return found if len(found) == 1 else []
     elif kind == "notebook":
