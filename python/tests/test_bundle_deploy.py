@@ -1,5 +1,6 @@
 """``stardelt bundle plan`` and ``deploy`` (stardelt.bundle.render and deploy). No network: a fake session stands in."""
 
+import datetime
 import hashlib
 import io
 import json
@@ -107,6 +108,37 @@ def test_a_preview_deploy_prefixes_names_and_drops_the_schedule(tmp_path):
     ]
     assert written[0][2]["name"] == "pr-123-load", "the preview prefix, not dev-alice-"
     assert all("schedule" not in body for _, _, body in written), "nothing may fire"
+    for _, _, body in written:
+        stamp = body["provenance"]
+        assert stamp["preview"] == "pr-123"
+        expires = datetime.datetime.strptime(stamp["expiresAt"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+        ahead = expires - datetime.datetime.now(datetime.timezone.utc)
+        assert datetime.timedelta(days=6) < ahead < datetime.timedelta(days=8), (
+            f"the default ttl is 7 days, the stamp says {stamp['expiresAt']}"
+        )
+
+
+def test_a_ttl_is_only_for_a_preview(tmp_path):
+    make(tmp_path)
+    session = FakeSession(ME)
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    assert bundle.deploy(nova, tmp_path, "dev", ttl=3) == (
+        [("dev", "a ttl is only meaningful with --preview")], []
+    )
+    assert calls(session) == [], "refused before anything is asked or written"
+
+
+def test_a_preview_ttl_is_one_to_thirty(tmp_path):
+    make(tmp_path)
+    for ttl in (0, 31):
+        session = FakeSession(ME)
+        nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+        assert bundle.deploy(nova, tmp_path, "dev", preview="pr-1", ttl=ttl) == (
+            [("dev", "a preview's --ttl is 1 to 30 days")], []
+        )
+        assert calls(session) == [], "refused before anything is written"
 
 
 def test_a_preview_is_refused_on_a_production_target(tmp_path):

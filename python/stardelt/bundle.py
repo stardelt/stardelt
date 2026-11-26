@@ -11,6 +11,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -890,13 +891,21 @@ def _repository(root):
     return f"https://{match.group(1)}/{match.group(2)}" if match else None
 
 
-def provenance(directory, target):
-    """What a deploy tells Nova about where its pipelines came from: ``{bundle, target[, revision][, repository]}``."""
+def provenance(directory, target, preview=None, expires_at=None):
+    """What a deploy tells Nova about where its pipelines came from: ``{bundle, target[, revision][, repository][, preview, expiresAt]}``."""
     root = Path(directory)
     name = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))["bundle"]["name"]
     revision = _revision(root)
     repository = _repository(root)
-    return {"bundle": name, "target": target, **({"revision": revision} if revision else {}), **({"repository": repository} if repository else {})}
+    stamp = {"bundle": name, "target": target}
+    if revision:
+        stamp["revision"] = revision
+    if repository:
+        stamp["repository"] = repository
+    if preview:
+        stamp["preview"] = preview
+        stamp["expiresAt"] = expires_at
+    return stamp
 
 
 def _deployed(nova, bundle_name, target, mode, user, preview=None):
@@ -1251,7 +1260,7 @@ def _touched(nova, specs, done, stale):
     return touched
 
 
-def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None, preview=None, adopt=()):
+def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None, preview=None, ttl=None, adopt=()):
     """Plan, then (unless ``dry_run``) deploy ``target``: ``(problems, results)``.
 
     ``nova`` is a ``stardelt.api.Client``. Every pipeline is first checked by Nova (``pipelines_validate``, the
@@ -1285,8 +1294,14 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     ``preview`` prefixes every rendered name with ``<preview>-`` instead of ``dev-<user>-`` and
     removes its schedule; only a development target accepts it. A pipeline an earlier Nova or
     ``stardelt apply`` created is refused unless ``--adopt <name>`` names it; the row then says ``adopted`` and
-    the deploy stamps it.
+    the deploy stamps it. With ``preview`` the stamp also names the preview and the moment it is due
+    (``ttl`` days, default 7, at most 30).
     """
+    if ttl is not None and preview is None:
+        return [(target, "a ttl is only meaningful with --preview")], []
+    ttl = 7 if ttl is None else ttl
+    if preview is not None and not 1 <= ttl <= 30:
+        return [(target, "a preview's --ttl is 1 to 30 days")], []
     user = nova.me().get("user")
     problems, mode, specs = render(directory, target, user, preview)
     if problems:
@@ -1297,7 +1312,12 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     migration_problems, migration_catalog, migration_files = _migration_files(directory, target)
     if migration_problems:
         return migration_problems, []
-    stamp = provenance(directory, target)
+    expires_at = None
+    if preview:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=ttl)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    stamp = provenance(directory, target, preview, expires_at)
     if mode == "production" and str(stamp.get("revision") or "").endswith("-dirty"):
         return [(target, f"a production target cannot deploy from a tree with uncommitted changes (the revision would read {stamp['revision']}): commit or stash them, or deploy a development target")], []
     if mode == "development":

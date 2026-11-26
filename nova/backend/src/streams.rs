@@ -1285,6 +1285,8 @@ mod tests {
             target: target.to_string(),
             revision: None,
             repository: None,
+            preview: None,
+            expires_at: None,
         }
     }
 

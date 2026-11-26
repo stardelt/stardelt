@@ -241,6 +241,14 @@ export default function PipelineDetail() {
                   .join(' · ')}
               </p>
             )}
+            {(pipeline.deployment.preview || pipeline.deployment.expiresAt) && (
+              <p className="mt-0.5 text-xs text-text-mute break-words">
+                {pipeline.deployment.preview ? `preview ${pipeline.deployment.preview}` : 'preview'}
+                {pipeline.deployment.expiresAt
+                  ? ` · expires ${formatWhen(pipeline.deployment.expiresAt).text}`
+                  : ''}
+              </p>
+            )}
             {pipeline.deployment.modified && (
               <p className="mt-0.5 text-xs text-warn break-words">
                 {'Changed since the last deploy. The next deploy overwrites the change.'}
