@@ -1,10 +1,10 @@
 name: Something does not work
-description: Tell us what went wrong; a maintainer moves it to the right repository.
+description: Tell us what went wrong, and which release you run.
 labels: [bug, community]
 body:
   - type: markdown
     attributes:
-      value: Thank you. A maintainer moves this to the right repository if it belongs somewhere else.
+      value: Thank you. The release you run and the output of `stardelt doctor` let us reproduce it.
   - type: textarea
     id: what
     attributes:
@@ -38,8 +38,17 @@ body:
   - type: input
     id: version
     attributes:
-      label: Version or commit
-      placeholder: the commit you installed, or 'demo'
+      label: Release
+      description: The release you installed, a commit if you built from a checkout, or 'demo'.
+      placeholder: v0.0.4
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `stardelt doctor`
+      description: Run it on the machine where the problem shows. It prints no token; remove anything you do not want to share.
+      render: shell
   - type: textarea
     id: logs
     attributes:
