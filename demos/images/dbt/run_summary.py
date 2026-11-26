@@ -7,6 +7,7 @@ code: the entrypoint prints it and exits with dbt's own status.
 """
 
 import json
+import os
 import sys
 
 # Kinds of node, in the order a reader cares about; any other kind follows alphabetically.
@@ -72,21 +73,54 @@ def _message(result: dict) -> str:
     return message[0] if message else "no message"
 
 
-def summarize(document: dict) -> list[str]:
+def _tables(manifest: dict | None) -> dict[str, str]:
+    """`{unique_id: table}` for every node the manifest gives a relation, quotes stripped."""
+    tables: dict[str, str] = {}
+    for unique_id, node in ((manifest or {}).get("nodes") or {}).items():
+        relation = node.get("relation_name")
+        if relation:
+            tables[unique_id] = str(relation).replace('"', "")
+    return tables
+
+
+def _named(result: dict, nodes: dict, tables: dict[str, str]) -> str:
+    """A test's unique_id, and the tables it guards when the manifest names them."""
+    unique_id = str(result.get("unique_id", ""))
+    node = nodes.get(unique_id) or {}
+    guarded = [
+        tables[name]
+        for name in (node.get("depends_on") or {}).get("nodes") or []
+        if name in tables
+    ]
+    return f"{unique_id} ({', '.join(guarded)})" if guarded else unique_id
+
+
+def summarize(document: dict, manifest: dict | None = None) -> list[str]:
     """The lines a `dbt` task's log shows for one run_results.json document."""
     results = document.get("results") or []
     if not results:
         return ["dbt: ran 0 nodes"]
     lines = [_kinds(results), _statuses(results)]
+    nodes = (manifest or {}).get("nodes") or {}
+    tables = _tables(manifest)
     # Failures first, then warnings, each group in `results` order: a reader stops at the reason
     # the task failed and only then looks at what merely warned.
     for result in results:
         if str(result.get("status", "")) in ("fail", "error"):
-            lines.append(f"dbt: ✗ {result.get('unique_id', '')} — {_message(result)}")
+            lines.append(f"dbt: ✗ {_named(result, nodes, tables)} — {_message(result)}")
     for result in results:
         if str(result.get("status", "")) in ("warn", "warning"):
-            lines.append(f"dbt: ! {result.get('unique_id', '')} — {_message(result)}")
+            lines.append(f"dbt: ! {_named(result, nodes, tables)} — {_message(result)}")
     return lines
+
+
+def _sibling(path: str, name: str) -> dict | None:
+    """The JSON file next to `path`, or None when it is missing or unreadable."""
+    try:
+        with open(os.path.join(os.path.dirname(path), name), encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
 
 
 def main(argv: list[str]) -> int:
@@ -104,7 +138,7 @@ def main(argv: list[str]) -> int:
         # exit code already says so, and the summary must not turn it into a different one.
         print(f"dbt: no run_results.json at {path}")
         return 0
-    for line in summarize(document):
+    for line in summarize(document, _sibling(path, "manifest.json")):
         print(line)
     return 0
 
