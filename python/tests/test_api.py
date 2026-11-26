@@ -1,6 +1,7 @@
 """Tests for stardelt.api (the Nova API client). No network: a fake session stands in."""
 
 import pytest
+import requests
 
 import stardelt.api as api
 
@@ -8,10 +9,11 @@ CANARY = "canary-token-DO-NOT-LEAK"
 
 
 class FakeResponse:
-    def __init__(self, status=200, payload=None, text=""):
+    def __init__(self, status=200, payload=None, text="", headers=None):
         self.status_code = status
         self._payload = payload
         self.text = text
+        self.headers = requests.structures.CaseInsensitiveDict(headers or {})
 
     def json(self):
         if self._payload is None:
@@ -39,9 +41,9 @@ RESULT = {
 }
 
 
-def client(*responses, token=CANARY):
+def client(*responses, token=CANARY, on_version=None):
     session = FakeSession(*responses)
-    return api.Client(base_url="https://nova.example/", token=token, session=session), session
+    return api.Client(base_url="https://nova.example/", token=token, session=session, on_version=on_version), session
 
 
 def test_query_posts_sql_with_bearer():
@@ -73,6 +75,26 @@ def test_query_result_to_pandas():
     frame = c.query("select 1").to_pandas()
     assert list(frame.columns) == ["x", "y"]
     assert frame.to_dict("records") == [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}]
+
+
+def test_the_server_release_is_read_once_and_handed_to_the_callback():
+    seen = []
+    c, _ = client(
+        FakeResponse(payload={"user": "analyst"}, headers={"X-Stardelt-Version": "0.0.9"}),
+        FakeResponse(payload={"user": "analyst"}, headers={"X-Stardelt-Version": "0.0.9"}),
+        on_version=seen.append,
+    )
+    c.me()
+    c.me()
+    assert seen == ["0.0.9"]
+    assert c.server_version == "0.0.9"
+
+
+def test_no_version_header_leaves_the_callback_alone():
+    seen = []
+    c, _ = client(FakeResponse(payload={"user": "analyst"}), on_version=seen.append)
+    c.me()
+    assert seen == [] and c.server_version is None
 
 
 def test_me_gets_api_me():
