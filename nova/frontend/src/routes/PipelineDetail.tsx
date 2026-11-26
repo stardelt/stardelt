@@ -1,9 +1,17 @@
 import { Fragment, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ApiError, api, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
+import {
+  ApiError,
+  api,
+  errorMessage,
+  type BackfillView,
+  type PipelineDetail as PipelineDetailView,
+  type RunView,
+} from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
+import BackfillDialog from '../components/BackfillDialog'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import DefinitionEditor from '../components/DefinitionEditor'
 import StopRunDialog from '../components/StopRunDialog'
@@ -43,6 +51,8 @@ export default function PipelineDetail() {
   const [deleting, setDeleting] = useState(false)
   const [showDefinition, setShowDefinition] = useState(false)
   const [editingDefinition, setEditingDefinition] = useState(false)
+  const [backfillOpen, setBackfillOpen] = useState(false)
+  const [backfill, setBackfill] = useState<BackfillView | null>(null)
 
   const detail = useQuery({
     queryKey: ['pipeline', namespace, name],
@@ -162,6 +172,11 @@ export default function PipelineDetail() {
             onRun={(start) => void actions.act(pipeline, 'run', start)}
             error={actions.error}
           />
+          {pipeline.canEdit && pipeline.schedule && (
+            <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setBackfillOpen(true)}>
+              Run for a range
+            </button>
+          )}
           {pipeline.canEdit && (
             <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
               Edit schedule
@@ -186,6 +201,15 @@ export default function PipelineDetail() {
       </header>
 
       <PipelineFeedback notice={actions.notice} error={actions.error} />
+
+      {backfill && (
+        <BackfillBanner
+          namespace={namespace}
+          name={name}
+          view={backfill}
+          onDone={() => setBackfill(null)}
+        />
+      )}
 
       <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
         <Fact label="State">
@@ -465,6 +489,17 @@ export default function PipelineDetail() {
         />
       )}
 
+      {backfillOpen && (
+        <BackfillDialog
+          pipeline={pipeline}
+          onClose={() => setBackfillOpen(false)}
+          onStarted={(view) => {
+            setBackfill(view)
+            setBackfillOpen(false)
+          }}
+        />
+      )}
+
       {editing && (
         <ScheduleDialog
           mode="edit"
@@ -505,6 +540,57 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
     <div className="min-w-0">
       <dt className="label">{label}</dt>
       <dd className="mt-0.5">{children}</dd>
+    </div>
+  )
+}
+
+/**
+ * What the backfill a person just started is doing (#117): its range, its dates and whether it is
+ * still running. Read again every 5 s until it has a `completedAt`; cancel asks the API and shows
+ * its refusal sentence here.
+ */
+function BackfillBanner({
+  namespace,
+  name,
+  view,
+  onDone,
+}: {
+  namespace: string
+  name: string
+  view: BackfillView
+  onDone: () => void
+}) {
+  const state = useQuery({
+    queryKey: ['backfill', namespace, name, view.id],
+    queryFn: () => api.backfillState(namespace, name, view.id),
+    refetchInterval: (query) => (query.state.data?.completedAt ? false : 5_000),
+    retry: false,
+  })
+  const cancel = useMutation({
+    mutationFn: () => api.cancelBackfill(namespace, name, view.id),
+    onSuccess: onDone,
+  })
+  const done = state.data?.completedAt != null
+  return (
+    <div role="status" className="card p-3 flex flex-wrap items-center gap-3 text-sm">
+      <span className="break-words">
+        Backfill #{view.id} · {view.dates.length} {view.dates.length === 1 ? 'date' : 'dates'} ·{' '}
+        {view.fromDate} to {view.toDate} · {done ? 'finished' : 'running'}
+      </span>
+      {!done && (
+        <button
+          type="button"
+          className="btn-ghost px-2.5 py-1 text-xs text-bad"
+          disabled={cancel.isPending}
+          onClick={() => cancel.mutate()}
+        >
+          Cancel backfill
+        </button>
+      )}
+      <button type="button" className="btn-ghost px-2.5 py-1 text-xs" onClick={onDone}>
+        Dismiss
+      </button>
+      {cancel.error && <span className="text-xs text-bad break-words">{errorMessage(cancel.error)}</span>}
     </div>
   )
 }

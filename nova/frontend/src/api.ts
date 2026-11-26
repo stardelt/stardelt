@@ -800,6 +800,13 @@ export type PipelineDetail = PipelineView & {
 /** The body of `POST …/runs`: a date and parameter values for this run only (nova#817). */
 export type RunStart = Schema<'RunStart'>
 
+/** The body of `POST …/backfills`: an inclusive range of days and how to treat dates that already ran (#117). */
+export type BackfillStart = Schema<'BackfillStart'>
+/** The answer of a start and of a cancel. */
+export type BackfillView = Schema<'BackfillView'>
+/** The answer of `GET …/backfills/{id}`: the backfill and the runs it created. */
+export type BackfillStateView = Schema<'BackfillStateView'>
+
 /** `POST /api/pipelines/validate`: what a create or an update of this document would do, without doing it. */
 export type ValidatePipelineResponse = Schema<'ValidatePipelineResponse'>
 
@@ -1021,6 +1028,17 @@ async function jdel(path: string): Promise<void> {
     console.debug('api', path, r.status)
     throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
   }
+}
+
+/** A DELETE whose answer carries a body (a cancelled backfill answers `BackfillView`). */
+async function jdelete<T>(path: string): Promise<T> {
+  const r = await send(path, { method: 'DELETE' })
+  checkAuth(path, r)
+  if (!r.ok) {
+    console.debug('api', path, r.status)
+    throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
+  }
+  return readJson<T>(path, r)
 }
 
 /** A POST whose success is a `204` with no body (`jpost` reads JSON and would throw). */
@@ -1479,6 +1497,12 @@ export const api = {
   pipelineSpec: (ns: string, name: string)    => jget<PipelineSpec>(`/api/pipelines/${seg(ns)}/${seg(name)}/spec`),
   startPipelineRun: (ns: string, name: string, start: RunStart = {}) =>
     jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, start),
+  startBackfill: (ns: string, name: string, body: BackfillStart) =>
+    jpost<BackfillView>(`/api/pipelines/${seg(ns)}/${seg(name)}/backfills`, body),
+  backfillState: (ns: string, name: string, id: number) =>
+    jget<BackfillStateView>(`/api/pipelines/${seg(ns)}/${seg(name)}/backfills/${id}`),
+  cancelBackfill: (ns: string, name: string, id: number) =>
+    jdelete<BackfillView>(`/api/pipelines/${seg(ns)}/${seg(name)}/backfills/${id}`),
   pausePipeline: (ns: string, name: string)   => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/pause`, {}),
   resumePipeline: (ns: string, name: string)  => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/resume`, {}),
   pipelineRun:  (ns: string, name: string, runId: string) =>
