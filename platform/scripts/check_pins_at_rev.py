@@ -13,9 +13,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from check_pin_freshness import APPS, parse_pins, pin_text, resolve_digest  # noqa: E402
+try:
+    # Imported as `scripts.check_pins_at_rev` (tests, discovery): keep `sys.path` clean, a
+    # discovery run that finds another top-level `test_*` module mis-resolves.
+    from .check_pin_freshness import APPS, parse_pins, pin_text, resolve_digest  # noqa: E402
+except ImportError:  # `python3 scripts/check_pins_at_rev.py`: the folder is not a package then
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from check_pin_freshness import APPS, parse_pins, pin_text, resolve_digest  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 ROOT = REPO.parent
