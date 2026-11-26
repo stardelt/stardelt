@@ -213,37 +213,10 @@ export type TransferResult = Schema<'TransferResult'>
 
 export type TableRef = { ns: string; name: string }
 
-export type PlatformApp = {
-  id: string
-  name: string
-  description: string
-  category: string
-  external_url: string
-  /**
-   * False for API-only services such as Lakekeeper: `external_url` is then only the
-   * service's address, not a page a browser can open. Optional because the backend
-   * field (issue #69, `apps.rs`) is landing separately; see `isBrowsable()`.
-   */
-  browsable?: boolean
-  /**
-   * `up` | `unreachable` | `unknown` | `not-installed`. The last one means the cluster
-   * was read and holds no workload for this app: an optional component that was never
-   * installed is a fact, not an outage, so it is shown as "not installed" and left out
-   * of the "x / y up" counts.
-   */
-  status: 'up' | 'unreachable' | 'unknown' | 'not-installed'
-  /** Images the app's workloads actually run, read from the cluster (may be empty). */
-  images: string[]
-}
+export type PlatformApp = Schema<'PlatformApp'>
 
 /** A workload in Nova's namespace, as the cluster reports it. */
-export type Workload = {
-  name: string
-  kind: 'Deployment' | 'StatefulSet' | string
-  image: string
-  ready: number
-  desired: number
-}
+export type Workload = Schema<'Workload'>
 
 /**
  * `GET /api/workloads` — the namespace as Nova last managed to read it.
@@ -321,18 +294,10 @@ export type AdminCatalogGrant = { group: string; verb: string }
 export type AdminCatalogCondition = Schema<'CatalogCondition'>
 
 /** One recorded `/mcp` tool call (`GET /api/admin/mcp-audit`, stardelt-nova#970): never an argument, never a result. */
-export type McpCall = {
-  atMs: number
-  sub: string
-  client?: string | null
-  tool: string
-  status: string
-  durationMs: number
-  argumentsSha256: string
-}
+export type McpCall = Schema<'McpCall'>
 
 /** The answer of `GET /api/admin/mcp-audit`: the calls, newest first. */
-export type McpCalls = { calls: McpCall[] }
+export type McpCalls = Schema<'McpCalls'>
 
 /** A model endpoint an administrator connected (operator#609). No URL, no keyRef — by design. */
 export type ModelEndpoint = {
@@ -355,7 +320,7 @@ export type ModelEndpoint = {
 }
 
 /** One table an Ask answer was written for. */
-export type AskTable = { catalog: string; namespace: string; table: string }
+export type AskTable = Schema<'AskTable'>
 
 /** The answer of `POST /api/ask` (design #891 slice a). No rows ever, and the SQL is not run. */
 export type AskAnswer = {
@@ -794,82 +759,17 @@ export type StreamView = {
 }
 
 /** One `SparkCluster`: Spark compute for a team, one person, or everyone (`shared`). */
-export type ComputeCluster = {
-  name: string
-  displayName: string | null
-  owner: { group: string | null; user: string | null }
-  size: 'small' | 'medium' | 'large' | string
-  driver?: { cores?: number | null; memory?: string | null } | null
-  executor?: { cores?: number | null; memory?: string | null } | null
-  maxExecutors?: number | null
-  image?: string | null
-  env?: { name: string; value: string }[]
-  sparkConf?: Record<string, string>
-  runtime: string
-  phase: 'Starting' | 'Running' | 'Stopping' | 'Stopped' | 'Failed' | string
-  /** The operator's reason while the phase is `Failed` or `Starting`; absent when it has none. */
-  message?: string | null
-  /** The Connect endpoint; `null` for a caller who sees the cluster only as a viewer. */
-  endpoint: string | null
-  startedAt: string | null
-  lastActivityAt: string | null
-  /** The ServiceAccount the driver runs as: `spark-cluster-driver-<group>` for a group's cluster (#1100, #1102). */
-  driverServiceAccount?: string | null
-  /** The catalog principal the driver's token becomes, `kubernetes~<uid>` (#1102, #493). */
-  workloadIdentity?: string | null
-  idleStopMinutes: number
-  /** The caller's group owns the cluster (or it is `shared`); a viewer sees `false`. */
-  canUse: boolean
-  /**
-   * Whether the caller may start, stop or edit the cluster: an administrator, the owner
-   * group of a `SparkCluster`, its `owner.user`, or an administrator on `shared` (#706).
-   */
-  canAct: boolean
-  /** The groups that may see the cluster without being its owner (`spec.viewers`). */
-  viewers: string[]
-  shared: boolean
-  /** `cluster` for a `SparkCluster`; `platform` for a Spark server the platform's manifests install. */
-  kind?: 'cluster' | 'platform'
-  /** `kubernetes` (executors are pods) or `local` (the demo sandbox: two threads, none). */
-  mode?: string | null
-  /** The container's resource limits, on a platform server. */
-  limits?: { cores?: number | null; memory?: string | null } | null
-  /** Who shares a platform server. */
-  audience?: 'members' | 'visitors' | null
-  /** When a platform server is restarted on a schedule (`daily 03:00 UTC` on the sandbox). */
-  resetsAt?: string | null
-  /** Whether this is the Spark the caller's own notebook uses. */
-  yours?: boolean
-}
+export type ComputeCluster = Schema<'ComputeCluster'>
 
 /**
  * The caller's own JupyterHub workspace (`GET /api/workspace`, stardelt-nova#653). `unavailable`
  * is a state, not an error: Nova has no hub credentials here or the hub does not answer, and the
  * page still renders. The times are RFC 3339 in UTC, or `null` while the hub reports none.
  */
-export type WorkspaceView = {
-  state: 'stopped' | 'starting' | 'running' | 'stopping' | 'unavailable'
-  startedAt: string | null
-  lastActivity: string | null
-  /** `lastActivity` plus the platform's idle limit: when the hub culls an idle server. */
-  idleStopAt: string | null
-}
+export type WorkspaceView = Schema<'WorkspaceView'>
 
 /** The body of PUT /api/admin/compute/{name}: everything an administrator may set. */
-export type ComputeSpecBody = {
-  displayName?: string
-  owner: { group: string | null; user: string | null }
-  viewers?: string[]
-  size: 'small' | 'medium' | 'large'
-  driver?: { cores: number; memory: string } | null
-  executor?: { cores: number; memory: string } | null
-  maxExecutors?: number | null
-  runtime: string
-  image?: string | null
-  env: { name: string; value: string }[]
-  sparkConf: Record<string, string>
-  idleStopMinutes: number
-}
+export type ComputeSpecBody = Schema<'ComputeSpecBody'>
 
 /** `GET /api/pipelines/{namespace}/{name}`: the view plus the latest 20 runs. */
 export type PipelineDetail = PipelineView & {
@@ -1152,23 +1052,7 @@ function catalogPath(path: string, catalog?: string): string {
 }
 
 /** One row of the query log list (`GET /api/query-log`). Times are epoch milliseconds. */
-export type QueryLogItem = {
-  id: string
-  /** QUEUED (in progress), FINISHED, FAILED or CANCELED. */
-  state: string
-  user: string
-  /** The person's display name; absent when Nova does not know the engine user. */
-  userName?: string | null
-  source: string | null
-  warehouse: string
-  queryType: string | null
-  /** The first 300 characters of the statement. */
-  sql: string
-  createdAt: number
-  wallMs: number | null
-  outputRows: number | null
-  errorCode: string | null
-}
+export type QueryLogItem = Schema<'QueryLogItem'>
 
 export type QueryLogPage = { items: QueryLogItem[]; nextCursor: string | null }
 
@@ -1186,15 +1070,7 @@ export type UsageRow = {
 }
 
 /** `GET /api/query-log/usage` — the rows of the window and their total (its `key` is `total`). */
-export type UsagePage = {
-  by: 'principal' | 'warehouse' | 'day' | 'group'
-  from: number
-  to: number
-  items: UsageRow[]
-  total: UsageRow
-  /** The rate `estimatedCost` uses; `null` when showback is off. */
-  price: { cpuHourPrice: number; currency: string } | null
-}
+export type UsagePage = Schema<'UsagePage'>
 
 /** Everything stored about one query (`GET /api/query-log/{id}`). */
 export type QueryLogDetail = {
@@ -1292,7 +1168,7 @@ export type QueryHistoryRun = {
 }
 
 /** `GET /api/query-log/{id}/history` */
-export type QueryHistory = { runs: QueryHistoryRun[]; medianWallMs: number | null; slower: boolean }
+export type QueryHistory = Schema<'QueryHistory'>
 
 export type QueryLogParams = {
   scope: 'mine' | 'team' | 'all'
@@ -1357,19 +1233,10 @@ export type LineageEdgeView = {
 }
 
 /** One table the caller read most, with its newest write (`GET /api/lineage/read-tables`). */
-export type ReadTable = {
-  /** `<catalog>.<schema>`; demo data may carry the schema alone. */
-  namespace: string
-  name: string
-  /** Read-only queries against it in the window. */
-  queries: number
-  lastRead: string
-  /** Absent when nothing wrote the table in the window. */
-  lastWrite?: string
-}
+export type ReadTable = Schema<'ReadTable'>
 
 /** `GET /api/lineage/read-tables`: the person's most-read tables, newest read first. */
-export type ReadTables = { tables: ReadTable[] }
+export type ReadTables = Schema<'ReadTables'>
 
 export type LineageGraphView = {
   nodes: LineageNodeView[]
@@ -1380,23 +1247,11 @@ export type LineageGraphView = {
 }
 
 /** One source column; a source the caller may not read carries only `hidden`. */
-export type ColumnSource = {
-  catalog?: string
-  schema?: string
-  table?: string
-  column?: string
-  hidden?: boolean
-}
+export type ColumnSource = Schema<'ColumnSource'>
 
-export type ColumnLineageEntry = {
-  column: string
-  sources: ColumnSource[]
-  lastSeen: string
-}
+export type ColumnLineageEntry = Schema<'ColumnLineageEntry'>
 
-export type ColumnLineage = {
-  columns: ColumnLineageEntry[]
-}
+export type ColumnLineage = Schema<'ColumnLineage'>
 
 function pipelineLogUrl(
   namespace: string,
