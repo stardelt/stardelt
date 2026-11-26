@@ -263,14 +263,7 @@ export type WorkloadSnapshot = {
 }
 
 /** One observed fact about an app, with where Nova read it. */
-export type AppFact = {
-  label: string
-  value: string
-  /** e.g. `Trino /v1/info`; absent for facts Nova knows from its own config. */
-  source?: string
-  /** `ok` | `bad` when the value is a health judgement. */
-  tone?: 'ok' | 'bad'
-}
+export type AppFact = Schema<'Fact'>
 
 export type AppLink = { label: string; url: string }
 
@@ -311,17 +304,7 @@ export type EmbedApp = {
 }
 
 /** `GET /api/apps/:id` — the detail view of one platform app. */
-export type AppDetail = {
-  app: PlatformApp
-  /** In-cluster URL the backend probes for liveness. */
-  probe: string
-  replicas: { ready: number; desired: number }
-  workloads: Workload[]
-  facts: AppFact[]
-  links: AppLink[]
-  /** Present only for apps Nova frames in its own UI. */
-  embed?: AppEmbed
-}
+export type AppDetail = Schema<'AppDetail'>
 
 /**
  * One catalog as an administrator sees it (`GET /api/admin/catalogs`, stardelt-nova#251):
@@ -329,46 +312,13 @@ export type AppDetail = {
  * what the access-sync job last wrote. Administrator-only — everyone else gets 403.
  * The credential reference and the bucket never leave the cluster, so they are not here.
  */
-export type AdminCatalog = {
-  /** `metadata.name`, also the name the SQL addresses and the warehouse name. */
-  name: string
-  /** The medallion layer (stardelt-nova#109), from the label or the name; absent otherwise. */
-  layer?: string | null
-  /** `production` when the Catalog carries stardelt.io/environment: production (#103). */
-  environment?: string | null
-  displayName: string | null
-  description: string | null
-  /** The one owning group; ownership means `manage`, not `select`. */
-  owner: string | null
-  /** The owner cannot grant on this catalog. */
-  managedAccess: boolean
-  keyPrefix: string | null
-  /** `Ready` | `Invalid`, or `Unknown` when the access-sync job has not observed it. */
-  phase: string
-  warehouseId: string | null
-  generation: number | null
-  observedGeneration: number | null
-  resourceVersion: string | null
-  /**
-   * The GitOps tool that owns this resource (`Argo CD`, `Flux`), or null. A Nova edit would
-   * be reverted by it, so the page sends the person to Git instead (stardelt-nova#604).
-   */
-  managedBy?: string | null
-  /** `spec.grants`, in the order the resource declares them: one verb per entry. */
-  grants: AdminCatalogGrant[]
-  conditions: AdminCatalogCondition[]
-}
+export type AdminCatalog = Schema<'AdminCatalog'>
 
 /** One declared grant: a group and one verb (`browse`, `select`, `write`, `create`, `manage`). */
 export type AdminCatalogGrant = { group: string; verb: string }
 
 /** One condition of a catalog's status, reduced to the four fields the page shows. */
-export type AdminCatalogCondition = {
-  type: 'CatalogReady' | 'GrantsReady' | 'Drift' | string
-  status: 'True' | 'False' | string
-  reason: string | null
-  message: string | null
-}
+export type AdminCatalogCondition = Schema<'CatalogCondition'>
 
 /** One recorded `/mcp` tool call (`GET /api/admin/mcp-audit`, stardelt-nova#970): never an argument, never a result. */
 export type McpCall = {
@@ -438,33 +388,13 @@ export type AskConversation = {
 }
 
 /** The month's tokens for one group and endpoint (`GET /api/admin/model-usage`). */
-export type ModelUsageRow = {
-  group: string
-  endpoint: string
-  tokensIn: number
-  tokensOut: number
-  calls: number
-  /** Calls whose tokens were estimated from bytes (`ceil(bytes / 4)`). */
-  estimatedCalls: number
-}
+export type ModelUsageRow = Schema<'UsageRow'>
 
 /** One recorded model call: sizes, durations and hashes, never the conversation. */
-export type ModelUsageCall = {
-  atMs: number
-  sub: string
-  group?: string
-  feature: string
-  endpoint: string
-  model: string
-  tokensIn: number
-  tokensOut: number
-  tokensEstimated: boolean
-  latencyMs: number
-  outcome: string
-}
+export type ModelUsageCall = Schema<'UsageCall'>
 
 /** The answer of `GET /api/admin/model-usage`: the month's totals and the last calls. */
-export type ModelUsage = { month: string; groups: ModelUsageRow[]; calls: ModelUsageCall[] }
+export type ModelUsage = Schema<'ModelUsage'>
 
 /**
  * The body of `PUT /api/admin/catalogs/{name}/access` (stardelt-nova#253): the whole
