@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print one release's notes: its CHANGELOG section and the fixed install block (#428).
+"""Print one release's notes: its CHANGELOG section and the fixed install and client blocks (#428, #1773).
 
   python3 scripts/release/release_notes.py 0.0.4 CHANGELOG.md > notes.md
 
@@ -23,6 +23,18 @@ $ kubectl apply -f platform-minimal.yaml      # after you set your domain in it
 ```
 An upgrade applies the new `install.yaml` the same way; a release upgrades the one before it (N−1).
 stardelt is `0.0.x`: there is no API stability promise before `0.1.0`.
+"""
+
+CLIENT = """\
+## Client
+The command and the notebook library come from this release:
+```console
+$ pip install "stardelt[jupyter] @ https://github.com/stardelt/stardelt/releases/download/v{version}/stardelt-{version}-py3-none-any.whl"
+```
+Use the client of the same release as your Nova (`v{version}`). A client of another release warns
+once per command and names the line to install; it fails only on an operation your release does not
+serve. An install of the retired `0.4.x` line sorts above `0.0.x` for pip: upgrade it with
+`pip install --force-reinstall` and the line above.
 """
 
 
@@ -53,7 +65,7 @@ def notes(version: str, changelog: str) -> str:
     version = version.removeprefix("v")
     found = section(changelog, version)
     head = found if found else FALLBACK
-    return f"{head}\n\n{INSTALL.format(version=version)}"
+    return f"{head}\n\n{INSTALL.format(version=version)}\n{CLIENT.format(version=version)}"
 
 
 def main(argv: list[str] | None = None) -> int:
