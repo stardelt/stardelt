@@ -4186,7 +4186,7 @@ async fn list_pipelines(
         .collect();
 
     // One batch listing answers the last run of every loaded pipeline it covers: the answer is
-    // newest first, so the first row of a DAG is its last run. A DAG the page does not cover (or
+    // newest `run_after` first, so the first row of a DAG is its last run. A DAG the page does not cover (or
     // every DAG, when the batch call fails) falls back to one `runs(dag_id, 1)` each (#1630).
     let dag_ids: Vec<String> = loaded.iter().map(|(_, dag_id)| dag_id.clone()).collect();
     let mut covered: BTreeMap<String, DagRun> = BTreeMap::new();

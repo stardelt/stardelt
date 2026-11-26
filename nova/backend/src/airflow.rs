@@ -604,7 +604,7 @@ impl AirflowClient {
         Self::parse(body)
     }
 
-    /// The newest `limit` runs of a DAG.
+    /// The newest `limit` runs of a DAG, by `run_after`.
     pub async fn runs(&self, dag_id: &str, limit: u32) -> Result<Vec<DagRun>, AirflowError> {
         let url = self.url(&format!("{API}/dags/{}/dagRuns", encode_segment(dag_id)));
         let limit = limit.to_string();
@@ -613,7 +613,7 @@ impl AirflowClient {
                 self.http
                     .get(&url)
                     .bearer_auth(token)
-                    .query(&[("order_by", "-start_date"), ("limit", limit.as_str())])
+                    .query(&[("order_by", "-run_after"), ("limit", limit.as_str())])
             })
             .await?;
         let page: RunsPage = Self::parse(body)?;
@@ -621,7 +621,7 @@ impl AirflowClient {
     }
 
     /// The newest runs of several DAGs in one call (`POST /api/v2/dags/~/dagRuns/list`,
-    /// Airflow 3.x), newest `start_date` first, at most `limit` **in total**, not per DAG.
+    /// Airflow 3.x), newest `run_after` first, at most `limit` **in total**, not per DAG.
     pub async fn runs_batch(
         &self,
         dag_ids: &[String],
@@ -630,7 +630,7 @@ impl AirflowClient {
         let url = self.url(&format!("{API}/dags/~/dagRuns/list"));
         let payload = json!({
             "dag_ids": dag_ids,
-            "order_by": "-start_date",
+            "order_by": "-run_after",
             "page_limit": limit
         });
         let body = self
