@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { formatCount, relativeTime } from '../format'
@@ -31,13 +31,24 @@ export default function FreshnessCard() {
   })
   const rows = tables.data?.tables ?? []
   const now = Date.now()
+  const health = useQueries({
+    queries: rows.map((t) => {
+      const { catalog, schema } = splitNamespace(t.namespace)
+      return {
+        queryKey: ['table-freshness', catalog, schema, t.name],
+        queryFn: () => api.tableFreshness(schema, t.name, catalog || undefined),
+        staleTime: 60_000,
+        retry: false,
+      }
+    }),
+  })
   // 306 px = the empty state at 1280×720 (#860, measured 2026-11-12); the loading state is
   // 162 px and must not be shorter, or the cards below move when the answer lands.
   return (
     <section className="card p-5 min-w-0 min-h-[306px]" aria-labelledby="freshness-title">
       <div className="flex items-baseline justify-between gap-2">
         <h2 id="freshness-title" className="text-sm font-semibold">Freshness</h2>
-        <span className="text-xs text-text-mute">The five tables you read most · 30 days</span>
+        <span className="text-xs text-text-mute">The five tables you read most · 30 days · promise when set</span>
       </div>
       {tables.isError && (
         <div className="mt-3">
@@ -54,14 +65,24 @@ export default function FreshnessCard() {
       )}
       {rows.length > 0 && (
         <ul className="mt-3 divide-y divide-border">
-          {rows.map((t) => {
+          {rows.map((t, index) => {
             const { catalog, schema } = splitNamespace(t.namespace)
             const qs = new URLSearchParams()
             if (catalog !== '') qs.set('catalog', catalog)
             qs.set('ns', schema)
             qs.set('tbl', t.name)
             const wrote = Date.parse(t.lastWrite ?? '')
-            const stale = Number.isFinite(wrote) && now - wrote > STALE_MS
+            const h = health[index]?.data
+            // An answer without a known status is no promise: the card must never turn an
+            // unreadable or stubbed health answer into a red "Late" line.
+            const promised = h != null && (h.status === 'green' || h.status === 'amber' || h.status === 'red')
+            const stale = !promised && Number.isFinite(wrote) && now - wrote > STALE_MS
+            const statusClass = !promised
+              ? (stale ? 'text-warn' : 'text-text-mute')
+              : h!.status === 'green' ? 'text-ok' : 'text-warn'
+            const statusText = !promised
+              ? null
+              : h!.status === 'green' ? 'Fresh' : h!.status === 'amber' ? 'Late (grace)' : 'Late'
             return (
               <li key={`${t.namespace}.${t.name}`}>
                 <Link to={`/catalog?${qs.toString()}`} className="flex items-center justify-between gap-3 py-2 hover:text-text">
@@ -69,8 +90,14 @@ export default function FreshnessCard() {
                   <span className="text-xs shrink-0">
                     {formatCount(t.queries)} {t.queries === 1 ? 'query' : 'queries'}
                     {' · '}
+                    {statusText !== null && (
+                      <>
+                        <span className={statusClass}>{statusText}</span>
+                        {' · '}
+                      </>
+                    )}
                     {Number.isFinite(wrote) ? (
-                      <span className={stale ? 'text-warn' : 'text-text-mute'}>
+                      <span className={promised ? 'text-text-mute' : statusClass}>
                         changed {relativeTime(wrote, now)}
                       </span>
                     ) : (
