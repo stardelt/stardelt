@@ -7515,16 +7515,9 @@ async fn a_plan_marks_a_pipeline_changed_after_its_deploy() {
     let mut body: CreatePipelineRequest =
         serde_json::from_value(document.clone()).expect("a create body");
     body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
-    create_pipeline(
-        Some(&resources),
-        None,
-        None,
-        &create_limiter(),
-        &ada,
-        body,
-    )
-    .await
-    .expect("created");
+    create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+        .await
+        .expect("created");
 
     // Someone changes the schedule outside the bundle; the stamp and its digest stay.
     let mut edited = update_body("select 1");
