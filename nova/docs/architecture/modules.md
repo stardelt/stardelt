@@ -5,12 +5,12 @@
 | `auth.rs` ⚠ | Core & identity | 2300 | 2033 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
-| `catalog_docs.rs` ⚠ | Catalog | 1683 | 1292 | 5 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
-| `main.rs` | Core & identity | 1479 | 1617 | 3 | - |
-| `mcp.rs` | AI (Ask, MCP, models) | 1401 | 1269 | 4 | Airflow REST, Trino |
+| `catalog_docs.rs` ⚠ | Catalog | 1862 | 1429 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
+| `main.rs` | Core & identity | 1482 | 1617 | 3 | - |
+| `mcp.rs` | AI (Ask, MCP, models) | 1428 | 1270 | 4 | Airflow REST, Trino |
 | `query_log_api.rs` | SQL & query log | 1353 | 298 | 5 | Kubernetes API (CRDs), PostgreSQL state store |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
-| `catalog.rs` | Catalog | 1348 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
+| `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `lineage_api.rs` | Lineage | 1175 | 443 | 4 | PostgreSQL state store |
 | `deployments.rs` | Pipelines & delivery | 1108 | 828 | 5 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `admin_catalogs.rs` | Catalog | 976 | 1350 | 3 | Kubernetes API (CRDs) |
@@ -34,7 +34,7 @@
 | `query_log_event.rs` | SQL & query log | 535 | 280 | 0 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
-| `openapi.rs` | Core & identity | 455 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 458 | 688 | 1 | - |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
@@ -69,4 +69,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (68 files)** | | **47407** | **42386** | **156** | |
+| **total (68 files)** | | **47622** | **42524** | **157** | |
