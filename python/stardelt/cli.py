@@ -50,6 +50,7 @@ def _parser():
     parser.add_argument("--host", help="Nova's base URL (default: $STARDELT_NOVA_URL)")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("whoami", help="who Nova thinks you are (JSON)")
+    commands.add_parser("doctor", help="check the host, Nova, the sign-in and who you are; each failure names its fix")
     signin = commands.add_parser("login", help="sign in once with a code approved in a browser (device flow)")
     signin.add_argument(
         "--issuer", help="your identity provider's realm address (default: $STARDELT_ISSUER, else asked from Nova's address)"
@@ -518,6 +519,13 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             return USAGE
         stdout.write(f"{path}\n")
         return OK
+
+    if args.command == "doctor":
+        from stardelt import doctor
+
+        stored = login.load(environ)
+        host = (args.host or environ.get("STARDELT_NOVA_URL", "") or (stored or {}).get("host") or "").strip()
+        return doctor.run(host, environ, session or requests.Session(), stdout)
 
     body = None
     if args.command == "api" and args.body is not None:
