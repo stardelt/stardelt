@@ -1,0 +1,24 @@
+# Copies of platform files that live in the operator, checked by scripts/check_twins.py.
+# kind	operator path	platform path
+#
+# `exact`: equal after the operator file's copy header (the leading comment lines).
+# `drift`: a known difference tracked by internal#545 M1; not compared.
+# A copy that is not listed here fails the check: embed the platform file instead, or add a row.
+exact	operator/crates/stardelt-operator/src/airflow_group_roles.py	platform/scripts/airflow-group-roles.py
+exact	operator/crates/stardelt-operator/src/superset_group_roles.py	platform/scripts/superset-group-roles.py
+exact	operator/crates/stardelt-operator/src/superset_nova_user.py	platform/scripts/superset-nova-user.py
+exact	operator/crates/stardelt-operator/src/superset_analyst_role.py	platform/scripts/superset-analyst-role.py
+drift	operator/crates/stardelt-operator/src/superset_oidc.py	platform/helm-values/superset.yaml
+drift	operator/crates/stardelt-operator/values/airflow.yaml	platform/helm-values/airflow.yaml
+drift	operator/crates/stardelt-operator/values/barman-cloud.yaml	platform/helm-values/barman-cloud.yaml
+drift	operator/crates/stardelt-operator/values/cnpg.yaml	platform/helm-values/cnpg.yaml
+drift	operator/crates/stardelt-operator/values/external-secrets.yaml	platform/helm-values/external-secrets.yaml
+drift	operator/crates/stardelt-operator/values/jupyterhub.yaml	platform/helm-values/jupyterhub.yaml
+drift	operator/crates/stardelt-operator/values/lakekeeper.yaml	platform/helm-values/lakekeeper.yaml
+drift	operator/crates/stardelt-operator/values/openbao.yaml	platform/helm-values/openbao.yaml
+drift	operator/crates/stardelt-operator/values/openfga.yaml	platform/helm-values/openfga.yaml
+drift	operator/crates/stardelt-operator/values/seaweedfs.yaml	platform/helm-values/seaweedfs.yaml
+drift	operator/crates/stardelt-operator/values/spark-operator.yaml	platform/helm-values/spark-operator.yaml
+drift	operator/crates/stardelt-operator/values/superset.yaml	platform/helm-values/superset.yaml
+drift	operator/crates/stardelt-operator/values/trino-identity.yaml	platform/helm-values/trino-identity.yaml
+drift	operator/crates/stardelt-operator/values/trino.yaml	platform/helm-values/trino.yaml
