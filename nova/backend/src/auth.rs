@@ -877,6 +877,115 @@ impl Provider {
 }
 
 // ---------------------------------------------------------------------------
+// CI tokens: GitHub Actions' own OIDC token as a deploy credential (#1845)
+// ---------------------------------------------------------------------------
+
+/// GitHub Actions' token issuer (#1868); a `DeployStage` opts in by its `spec.subject`.
+pub const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// The payload of a JWT without checking it: only `iss` and `jti` are read from this,
+/// and both are checked against a verified token afterwards.
+fn unverified_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Verifies GitHub Actions' OIDC tokens for a `DeployStage` (#1845 slice 1).
+pub struct CiTokens {
+    provider: Provider,
+    issuer: String,
+    /// `jti` -> first seen. A token lives 5 minutes; a process-local set is enough for
+    /// one Nova replica and must move to the state store when Nova runs more.
+    seen: tokio::sync::Mutex<std::collections::HashMap<String, Instant>>,
+}
+
+impl CiTokens {
+    pub fn new(http: reqwest::Client) -> Self {
+        Self::with_issuer(http, GITHUB_ACTIONS_ISSUER.to_string())
+    }
+
+    pub fn with_issuer(http: reqwest::Client, issuer: String) -> Self {
+        Self {
+            provider: Provider::new(http, issuer.clone()),
+            issuer,
+            seen: Default::default(),
+        }
+    }
+
+    /// The stage a verified token deploys to, or the reason it is not one.
+    pub async fn stage_for(&self, token: &str, stages: &[Value]) -> Result<String, AuthError> {
+        let claims = unverified_claims(token).ok_or(AuthError::Unauthenticated)?;
+        if claims.get("iss").and_then(Value::as_str) != Some(self.issuer.as_str()) {
+            return Err(AuthError::Unauthenticated);
+        }
+        let audiences: Vec<String> = stages
+            .iter()
+            .map(|s| {
+                s.pointer("/spec/audience")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stardelt-deploy")
+                    .to_string()
+            })
+            .collect();
+        if audiences.is_empty() {
+            return Err(AuthError::Unauthenticated);
+        }
+        // A token that names none of the stages' audiences cannot match one: refuse it
+        // before the discovery request, and check the verified `aud` below either way.
+        let claimed_aud = claims.get("aud").map(audiences_of).unwrap_or_default();
+        if !claimed_aud.iter().any(|a| audiences.contains(a)) {
+            return Err(AuthError::Unauthenticated);
+        }
+        let verified = self.provider.verify(token, &audiences, "").await?;
+        let jti = verified
+            .get("jti")
+            .and_then(Value::as_str)
+            .ok_or(AuthError::Unauthenticated)?;
+        let subject = verified
+            .get("sub")
+            .and_then(Value::as_str)
+            .ok_or(AuthError::Unauthenticated)?;
+        let aud = verified.get("aud").map(audiences_of).unwrap_or_default();
+        let stage = stages
+            .iter()
+            .find_map(|stage| {
+                let spec = stage.get("spec")?;
+                let name = stage.pointer("/metadata/name")?.as_str()?;
+                let stage_aud = spec
+                    .get("audience")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stardelt-deploy");
+                let stage_sub = spec.get("subject").and_then(Value::as_str)?;
+                (stage_sub == subject && aud.iter().any(|a| a == stage_aud))
+                    .then(|| name.to_string())
+            })
+            .ok_or(AuthError::Unauthenticated)?;
+        let mut seen = self.seen.lock().await;
+        let now = Instant::now();
+        seen.retain(|_, at| now.duration_since(*at) < Duration::from_secs(600));
+        if seen.contains_key(jti) {
+            return Err(AuthError::Unauthenticated);
+        }
+        seen.insert(jti.to_string(), now);
+        Ok(stage)
+    }
+}
+
+/// A JWT's `aud` in either form the standard allows (a string, or a list).
+fn audiences_of(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bearer validation (a trait so the middleware can be tested without an IdP)
 // ---------------------------------------------------------------------------
 
@@ -1415,6 +1524,8 @@ pub struct AuthState {
     pub config: OidcConfig,
     pub provider: Arc<Provider>,
     bearer: Arc<dyn BearerValidator>,
+    /// GitHub Actions' tokens, verified for a `DeployStage` (#1845).
+    ci: CiTokens,
     sessions: SessionStore,
     pending: PendingStore,
     key: Key,
@@ -1426,6 +1537,7 @@ pub struct AuthState {
 
 impl AuthState {
     pub fn new(config: OidcConfig, http: reqwest::Client, db: Option<sqlx::PgPool>) -> Arc<Self> {
+        let ci = CiTokens::new(http.clone());
         let provider = Arc::new(Provider::new(http, config.issuer.clone()));
         let bearer = Arc::new(OidcBearer {
             provider: provider.clone(),
@@ -1434,13 +1546,24 @@ impl AuthState {
             client_id: config.client_id.clone(),
             claims: config.claims.clone(),
         });
-        Self::with_validator(config, provider, bearer, db)
+        Self::with_validator_and_ci(config, provider, bearer, ci, db)
     }
 
     pub fn with_validator(
         config: OidcConfig,
         provider: Arc<Provider>,
         bearer: Arc<dyn BearerValidator>,
+        db: Option<sqlx::PgPool>,
+    ) -> Arc<Self> {
+        let ci = CiTokens::with_issuer(provider.http.clone(), GITHUB_ACTIONS_ISSUER.to_string());
+        Self::with_validator_and_ci(config, provider, bearer, ci, db)
+    }
+
+    fn with_validator_and_ci(
+        config: OidcConfig,
+        provider: Arc<Provider>,
+        bearer: Arc<dyn BearerValidator>,
+        ci: CiTokens,
         db: Option<sqlx::PgPool>,
     ) -> Arc<Self> {
         // `from_lookup` guarantees >= 32 bytes, which `derive_from` requires.
@@ -1450,6 +1573,7 @@ impl AuthState {
             config,
             provider,
             bearer,
+            ci,
             sessions: SessionStore::default(),
             pending: PendingStore::default(),
             key,
@@ -1540,6 +1664,36 @@ impl AuthState {
                 via: "session",
                 access_token,
                 client_id: None,
+            },
+            facts,
+        ))
+    }
+
+    /// A GitHub Actions token as the `DeployStage` it deploys: `client_id` carries
+    /// `stardelt-deploy-<stage>`, so `require_auth` applies the existing deploy rules (#1845).
+    pub async fn authenticate_ci(
+        &self,
+        token: &str,
+        stages: &[Value],
+    ) -> Result<(Principal, MeFacts), AuthError> {
+        let stage = self.ci.stage_for(token, stages).await?;
+        let identity = Identity {
+            sub: format!("ci:{stage}"),
+            display_name: format!("CI deploy principal ({stage})"),
+            email: None,
+            name: None,
+            groups: Vec::new(),
+            roles: Vec::new(),
+            groups_overage: false,
+            is_admin: false,
+        };
+        let facts = self.me_facts(&identity, None);
+        Ok((
+            Principal {
+                identity,
+                via: "ci",
+                access_token: Some(Secret(token.to_string())),
+                client_id: Some(format!("stardelt-deploy-{stage}")),
             },
             facts,
         ))
@@ -1780,12 +1934,26 @@ fn with_deploy_group(mut identity: Identity, group: Option<String>) -> Identity 
     identity
 }
 
+/// The bearer token a request carries, when it carries one (`Authorization: Bearer`).
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
+/// The request's bearer token when its unverified `iss` is the CI issuer (#1845): only
+/// such a token is tried against the `DeployStage`s; any other one keeps the plain 401.
+/// The issuer is the verifier's (`GITHUB_ACTIONS_ISSUER` in production), so the peek and
+/// the verified check agree.
+fn ci_token<'a>(headers: &'a HeaderMap, issuer: &str) -> Option<&'a str> {
+    let token = bearer_token(headers)?;
+    let claims = unverified_claims(token)?;
+    (claims.get("iss").and_then(Value::as_str) == Some(issuer)).then_some(token)
+}
+
 /// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
-pub async fn require_auth(
-    State(ctx): State<AuthContext>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_auth(State(ctx): State<AuthContext>, req: Request, next: Next) -> Response {
     // A cookie-authenticated write must come from Nova's own origin. `SameSite=Lax` stops
     // cross-*site* requests, but every host under the same registrable domain is one site, and
     // a page on a sibling host (the notebook host, for example) could start a run with the
@@ -1813,56 +1981,33 @@ pub async fn require_auth(
         )
             .into_response();
     }
-    match ctx.auth.authenticate(req.headers()).await {
-        Ok((mut principal, facts)) => {
-            // A deploy principal (#57) holds a token for its stage and nothing else: it may
-            // plan, record and read deployments, and confirm its sign-in, no more.
-            if let Some(stage) = deploy_stage(principal.client_id.as_deref())
-                && !deploy_route(&crate::audit::original_path(&req))
-            {
-                warn!(
-                    target: "audit",
-                    stage = stage,
-                    path = %crate::audit::original_path(&req),
-                    "refused: a deploy principal outside the deployment routes"
-                );
-                let detail = format!(
-                    "a deploy principal may only plan and record deployments (stage `{stage}`)"
-                );
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": "forbidden",
-                        "detail": detail,
-                    })),
-                )
-                    .into_response();
-            }
-            // A deploy principal's token carries no group (#57); its stage names the one it acts for,
-            // and `/api/pipelines/validate` checks the owner group against it.
-            if let Some(stage) = deploy_stage(principal.client_id.as_deref()) {
-                let group = match crate::deployments::stage_owner_group(ctx.app.as_ref(), stage)
-                    .await
-                {
-                    Ok(group) => group,
+    let authenticated = match ctx.auth.authenticate(req.headers()).await {
+        Ok(pair) => Ok(pair),
+        // A GitHub token is not a token of Nova's own IdP (#1845): it is verified against
+        // the `DeployStage`s the cluster holds, never against the session or the cookie.
+        Err(e)
+            if matches!(
+                &e,
+                AuthError::Unauthenticated | AuthError::InvalidToken(_) | AuthError::UnknownKey
+            ) =>
+        {
+            match ci_token(req.headers(), ctx.auth.ci.issuer.as_str()) {
+                Some(token) => match crate::deployments::deploy_stages(ctx.app.as_ref()).await {
+                    Ok(stages) => ctx.auth.authenticate_ci(token, &stages).await,
                     Err(message) => {
-                        warn!(target: "audit", stage, %message, "the deploy stage's group could not be read; the principal acts with the groups the token carries");
-                        None
+                        warn!(target: "audit", %message, "the deploy stages could not be read; refusing the CI token");
+                        Err(e)
                     }
-                };
-                principal.identity = with_deploy_group(principal.identity, group);
+                },
+                None => Err(e),
             }
-            // The directory is best effort and must not add latency to the request: the
-            // token's identity is copied into a task and the request goes on.
-            let identity = principal.identity.clone();
-            req.extensions_mut().insert(principal);
-            req.extensions_mut().insert(facts);
-            let app = ctx.app.clone();
-            tokio::spawn(async move {
-                crate::people::touch(&app, &identity).await;
-            });
-            next.run(req).await
         }
+        // `ProviderUnavailable`, `Misconfigured`, `Internal` and `Forbidden` keep their own
+        // status: a CI token is not tried for them.
+        Err(e) => Err(e),
+    };
+    match authenticated {
+        Ok((principal, facts)) => admission(ctx, req, next, principal, facts).await,
         Err(e) => {
             if matches!(e, AuthError::Unauthenticated) {
                 if !matches!(
@@ -1884,6 +2029,62 @@ pub async fn require_auth(
             e.into_response()
         }
     }
+}
+
+/// The one place an authenticated principal enters a request: the deploy rules, the
+/// stage's group, the extensions and the directory touch are the same whether the token
+/// came from Nova's IdP or from a CI job (#57, #1845).
+async fn admission(
+    ctx: AuthContext,
+    mut req: Request,
+    next: Next,
+    mut principal: Principal,
+    facts: MeFacts,
+) -> Response {
+    // A deploy principal (#57) holds a token for its stage and nothing else: it may
+    // plan, record and read deployments, and confirm its sign-in, no more.
+    if let Some(stage) = deploy_stage(principal.client_id.as_deref())
+        && !deploy_route(&crate::audit::original_path(&req))
+    {
+        warn!(
+            target: "audit",
+            stage = stage,
+            path = %crate::audit::original_path(&req),
+            "refused: a deploy principal outside the deployment routes"
+        );
+        let detail =
+            format!("a deploy principal may only plan and record deployments (stage `{stage}`)");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "detail": detail,
+            })),
+        )
+            .into_response();
+    }
+    // A deploy principal's token carries no group (#57); its stage names the one it acts for,
+    // and `/api/pipelines/validate` checks the owner group against it.
+    if let Some(stage) = deploy_stage(principal.client_id.as_deref()) {
+        let group = match crate::deployments::stage_owner_group(ctx.app.as_ref(), stage).await {
+            Ok(group) => group,
+            Err(message) => {
+                warn!(target: "audit", stage, %message, "the deploy stage's group could not be read; the principal acts with the groups the token carries");
+                None
+            }
+        };
+        principal.identity = with_deploy_group(principal.identity, group);
+    }
+    // The directory is best effort and must not add latency to the request: the
+    // token's identity is copied into a task and the request goes on.
+    let identity = principal.identity.clone();
+    req.extensions_mut().insert(principal);
+    req.extensions_mut().insert(facts);
+    let app = ctx.app.clone();
+    tokio::spawn(async move {
+        crate::people::touch(&app, &identity).await;
+    });
+    next.run(req).await
 }
 
 /// Admin-only routes (`/api/apps`, `/api/workloads`, engine details).
@@ -2922,6 +3123,8 @@ mod tests {
     struct FakeIdp {
         base: String,
         refreshes: AtomicUsize,
+        /// Discovery documents it was asked for.
+        discoveries: AtomicUsize,
         /// Status a refresh answers with (`200` refreshes normally).
         refresh_status: AtomicU16,
         /// Latency before answering a refresh, so two concurrent requests really race.
@@ -2943,6 +3146,7 @@ mod tests {
             let idp = Arc::new(Self {
                 base: format!("http://{}", listener.local_addr().unwrap()),
                 refreshes: AtomicUsize::new(0),
+                discoveries: AtomicUsize::new(0),
                 refresh_status: AtomicU16::new(200),
                 refresh_delay_ms: AtomicU64::new(0),
                 expires_in: AtomicU64::new(300),
@@ -2961,6 +3165,10 @@ mod tests {
 
         fn refusals(&self) -> usize {
             self.refreshes.load(Ordering::SeqCst)
+        }
+
+        fn discoveries(&self) -> usize {
+            self.discoveries.load(Ordering::SeqCst)
         }
 
         fn set_groups(&self, groups: &[&str]) {
@@ -2988,6 +3196,7 @@ mod tests {
     }
 
     async fn disc(State(idp): State<Arc<FakeIdp>>) -> Json<Value> {
+        idp.discoveries.fetch_add(1, Ordering::SeqCst);
         let b = &idp.base;
         Json(json!({
             "issuer": b,
@@ -3521,9 +3730,13 @@ mod tests {
     }
 
     fn app(auth: Arc<AuthState>) -> Router {
+        app_with_state(auth, crate::router_tests::test_state())
+    }
+
+    fn app_with_state(auth: Arc<AuthState>, state: Arc<crate::AppState>) -> Router {
         let context = AuthContext {
             auth: auth.clone(),
-            app: crate::router_tests::test_state(),
+            app: state,
         };
         let protected = Router::new()
             .route(
@@ -4262,6 +4475,210 @@ mod tests {
         assert_eq!(deploy_stage(Some("stardelt-deploy-")), None);
         assert_eq!(deploy_stage(Some("nova")), None);
         assert_eq!(deploy_stage(None), None);
+    }
+
+    // --- CI tokens (#1845 slice 1) --------------------------------------
+
+    /// GitHub's immutable-id `sub` form, as spike #1868 measured it.
+    const CI_MAIN: &str = "repo:stardelt@285991931/stardelt@1453997446:ref:refs/heads/main";
+    const CI_OTHER: &str = "repo:stardelt@285991931/stardelt@1453997446:ref:refs/heads/release";
+
+    /// One `DeployStage` as the API server holds it: only the fields the verifier reads.
+    fn ci_stage(name: &str, subject: &str, audience: &str) -> Value {
+        json!({
+            "metadata": { "name": name, "namespace": "stardelt" },
+            "spec": { "audience": audience, "subject": subject, "group": "analytics" }
+        })
+    }
+
+    /// A GitHub Actions token: RS256 with the test key, `iss` the fake provider's.
+    fn ci_token(idp: &FakeIdp, sub: &str, aud: &str, jti: &str) -> String {
+        sign(
+            &json!({
+                "iss": idp.base, "aud": aud, "sub": sub, "jti": jti,
+                "exp": now() + 300, "iat": now(), "typ": "JWT",
+            }),
+            Some("k1"),
+        )
+    }
+
+    #[tokio::test]
+    async fn ci_tokens_match_a_stage_by_subject_and_audience() {
+        let idp = FakeIdp::start().await;
+        let ci = CiTokens::with_issuer(reqwest::Client::new(), idp.base.clone());
+        let stages = vec![
+            ci_stage("prod", CI_MAIN, "stardelt-deploy"),
+            ci_stage("staging", CI_OTHER, "stardelt-deploy"),
+        ];
+        let token = ci_token(&idp, CI_MAIN, "stardelt-deploy", "j1");
+        assert_eq!(ci.stage_for(&token, &stages).await.unwrap(), "prod");
+        let token = ci_token(&idp, CI_OTHER, "stardelt-deploy", "j2");
+        assert_eq!(ci.stage_for(&token, &stages).await.unwrap(), "staging");
+        // A branch no stage names is refused, whatever else matches.
+        let unknown = "repo:stardelt@285991931/stardelt@1453997446:ref:refs/heads/feature";
+        let token = ci_token(&idp, unknown, "stardelt-deploy", "j3");
+        assert!(matches!(
+            ci.stage_for(&token, &stages).await,
+            Err(AuthError::Unauthenticated)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ci_tokens_refuse_a_replayed_jti() {
+        let idp = FakeIdp::start().await;
+        let ci = CiTokens::with_issuer(reqwest::Client::new(), idp.base.clone());
+        let stages = vec![ci_stage("prod", CI_MAIN, "stardelt-deploy")];
+        let token = ci_token(&idp, CI_MAIN, "stardelt-deploy", "once");
+        assert_eq!(ci.stage_for(&token, &stages).await.unwrap(), "prod");
+        assert!(matches!(
+            ci.stage_for(&token, &stages).await,
+            Err(AuthError::Unauthenticated)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ci_tokens_refuse_a_foreign_issuer_and_a_wrong_audience() {
+        let idp = FakeIdp::start().await;
+        let ci = CiTokens::with_issuer(reqwest::Client::new(), idp.base.clone());
+        let stages = vec![ci_stage("prod", CI_MAIN, "stardelt-deploy")];
+        let foreign = sign(
+            &json!({
+                "iss": "https://evil.example", "aud": "stardelt-deploy",
+                "sub": CI_MAIN, "jti": "x1", "exp": now() + 300,
+            }),
+            Some("k1"),
+        );
+        assert!(matches!(
+            ci.stage_for(&foreign, &stages).await,
+            Err(AuthError::Unauthenticated)
+        ));
+        let wrong_aud = ci_token(&idp, CI_MAIN, "other", "x2");
+        assert!(matches!(
+            ci.stage_for(&wrong_aud, &stages).await,
+            Err(AuthError::Unauthenticated)
+        ));
+        assert_eq!(
+            idp.discoveries(),
+            0,
+            "a token that cannot match must not cost a discovery request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ci_token_is_a_deploy_principal() {
+        let idp = FakeIdp::start().await;
+        let Ok(AuthMode::Oidc(cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        let provider = Arc::new(Provider::new(reqwest::Client::new(), idp.base.clone()));
+        let auth = AuthState::with_validator_and_ci(
+            *cfg,
+            provider,
+            Arc::new(MockValidator),
+            CiTokens::with_issuer(reqwest::Client::new(), idp.base.clone()),
+            None,
+        );
+        let token = ci_token(&idp, CI_MAIN, "stardelt-deploy", "j4");
+        let stages = vec![ci_stage("prod", CI_MAIN, "stardelt-deploy")];
+        let (principal, _) = auth.authenticate_ci(&token, &stages).await.unwrap();
+        assert_eq!(principal.client_id.as_deref(), Some("stardelt-deploy-prod"));
+        assert_eq!(principal.via, "ci");
+        assert!(!principal.identity.is_admin);
+    }
+
+    /// A fake API server holding `DeployStage` objects: `deploy_stages` lists them and
+    /// `stage_owner_group` reads one.
+    async fn fake_stage_api(stages: Vec<Value>) -> kube::Client {
+        async fn list(State(items): State<Arc<Vec<Value>>>) -> Json<Value> {
+            Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "DeployStageList",
+                "metadata": { "resourceVersion": "1" },
+                "items": *items,
+            }))
+        }
+        async fn one(
+            State(items): State<Arc<Vec<Value>>>,
+            axum::extract::Path((_ns, name)): axum::extract::Path<(String, String)>,
+        ) -> Response {
+            match items
+                .iter()
+                .find(|s| s.pointer("/metadata/name").and_then(Value::as_str) == Some(&name))
+            {
+                Some(stage) => Json(stage.clone()).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+        let app = Router::new()
+            .route(
+                "/apis/stardelt.io/v1alpha1/namespaces/{ns}/deploystages",
+                get(list),
+            )
+            .route(
+                "/apis/stardelt.io/v1alpha1/namespaces/{ns}/deploystages/{name}",
+                get(one),
+            )
+            .with_state(Arc::new(stages));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}").parse().unwrap();
+        kube::Client::try_from(kube::Config::new(url)).expect("a client for the fake API")
+    }
+
+    /// The CI verifier's own auth state, with the fake provider as GitHub.
+    fn ci_auth(idp: &FakeIdp) -> Arc<AuthState> {
+        let Ok(AuthMode::Oidc(cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        let provider = Arc::new(Provider::new(reqwest::Client::new(), idp.base.clone()));
+        AuthState::with_validator_and_ci(
+            *cfg,
+            provider,
+            Arc::new(MockValidator),
+            CiTokens::with_issuer(reqwest::Client::new(), idp.base.clone()),
+            None,
+        )
+    }
+
+    /// The whole path, not just `stage_for`: a GitHub token reaches the deployment routes as
+    /// the stage's principal, and every other route refuses it (#1845).
+    #[tokio::test]
+    async fn a_github_token_passes_the_middleware_as_its_stage_only() {
+        let idp = FakeIdp::start().await;
+        let auth = ci_auth(&idp);
+        let kube = fake_stage_api(vec![ci_stage("prod", CI_MAIN, "stardelt-deploy")]).await;
+        let app = app_with_state(auth, crate::router_tests::test_state_with_kube(kube));
+        let bearer = |t: &str| vec![(header::AUTHORIZATION, format!("Bearer {t}"))];
+
+        // A route outside the deployment routes: refused as a deploy principal.
+        let token = ci_token(&idp, CI_MAIN, "stardelt-deploy", "mw-1");
+        let (status, body) = call_post(&app, "/api/write", &bearer(&token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+        assert!(body.contains("plan and record deployments"), "{body}");
+
+        // A deployment read: admitted with the stage's identity (a fresh `jti` — one token
+        // is one request).
+        let token = ci_token(&idp, CI_MAIN, "stardelt-deploy", "mw-2");
+        assert_eq!(
+            call(&app, "/api/me", &bearer(&token)).await,
+            (StatusCode::OK, "ci:prod".into())
+        );
+    }
+
+    /// The fail-closed case: no readable `DeployStage` means no CI principal, never a plain
+    /// unauthenticated bypass.
+    #[tokio::test]
+    async fn a_github_token_without_readable_stages_is_refused() {
+        let idp = FakeIdp::start().await;
+        let app = app(ci_auth(&idp));
+        let token = ci_token(&idp, CI_MAIN, "stardelt-deploy", "mw-3");
+        let bearer = vec![(header::AUTHORIZATION, format!("Bearer {token}"))];
+        let (status, body) = call(&app, "/api/me", &bearer).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("unauthenticated"), "{body}");
     }
 
     /// A deploy principal is admitted by `require_auth` for the deployments routes, the two

@@ -63,10 +63,11 @@ rules:
     # create: the administrator's "New team space" in Nova (internal#106 decision 3).
     verbs: ["get", "list", "create"]
   # A deploy principal's owner group lives on its DeployStage (#57, #1038); Nova reads it on
-  # each plan/record/rollback of a stage token. Read-only.
+  # each plan/record/rollback of a stage token. `list` is the CI sign-in (#1845): a GitHub
+  # Actions token is matched against every stage of the namespace. Read-only.
   - apiGroups: ["stardelt.io"]
     resources: ["deploystages"]
-    verbs: ["get"]
+    verbs: ["get", "list"]
   # Streams (nova#617 slice a): `patch` is the stop/start control (`spec.stopped`);
   # `create` and `delete` are the team's own stream, written through Nova's streams API.
   - apiGroups: ["stardelt.io"]
