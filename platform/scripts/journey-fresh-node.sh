@@ -18,6 +18,8 @@
 #   catalog on exit.
 # X1 exit-read: the three rows are read back with plain pyiceberg, straight from the S3 gateway —
 #   no catalog, no stardelt component in the path (#1806 X1).
+# J4 refusal: a second client (`svc-journey-outsider`, no group) is refused
+#   `journey.e2e.exit_test`; it is deleted on exit.
 #
 # Exit codes: 0 everything passed, 1 a check failed, 3 nothing could be checked (no kubectl,
 # no identity provider, no wheel). Needs: kubectl, curl, python3 (venv).
@@ -57,15 +59,17 @@ cleanup() {
     kubectl -n "$NAMESPACE" delete "serviceprincipal/${PRINCIPAL}" --ignore-not-found >/dev/null 2>&1 || true
     kubectl -n "$NAMESPACE" delete catalog/journey --ignore-not-found >/dev/null 2>&1 || true
     make -C "$PLATFORM_DIR" delete-principal NAME="$PRINCIPAL" YES=1 >/dev/null 2>&1 || true
+    NAMESPACE="$NAMESPACE" KIND=service NAME="journey-outsider" YES=1 \
+      bash "$PLATFORM_DIR/scripts/keycloak-sync-principal.sh" --delete >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
 
-# trino_sql <sql>: run one statement with the J1 token and print the first column of the
-# first row. Needs phase_identity's port-forward and $tmp/access-token. Non-zero on an error.
+# trino_sql <token-file> <sql>: run one statement with that token and print the first column
+# of the first row. Needs phase_identity's port-forward. Non-zero on an error.
 trino_sql() {
-  python3 - "$tmp/access-token" "$1" <<'PY'
+  python3 - "$1" "$2" <<'PY'
 import json, ssl, sys, time, urllib.request
 
 token = open(sys.argv[1]).read().strip()
@@ -182,7 +186,7 @@ PY
     attempt=$((attempt + 1))
   done
 
-  if ! rows="$(trino_sql 'select current_user')"; then
+  if ! rows="$(trino_sql "$tmp/access-token" 'select current_user')"; then
     bad identity '"the Trino statement did not answer"'
     return 0
   fi
@@ -269,23 +273,23 @@ EOF
   fi
   schema='create schema if not exists journey.e2e'
   table='create table if not exists journey.e2e.exit_test (id bigint)'
-  if ! trino_sql "$schema" >/dev/null; then
+  if ! trino_sql "$tmp/access-token" "$schema" >/dev/null; then
     bad write '"create schema journey.e2e did not answer"'
     return 0
   fi
-  if ! trino_sql "$table" >/dev/null; then
+  if ! trino_sql "$tmp/access-token" "$table" >/dev/null; then
     bad write '"create table journey.e2e.exit_test did not answer"'
     return 0
   fi
-  if ! trino_sql 'delete from journey.e2e.exit_test' >/dev/null; then
+  if ! trino_sql "$tmp/access-token" 'delete from journey.e2e.exit_test' >/dev/null; then
     bad write '"delete from journey.e2e.exit_test did not answer"'
     return 0
   fi
-  if ! trino_sql 'insert into journey.e2e.exit_test (id) values (1), (2), (3)' >/dev/null; then
+  if ! trino_sql "$tmp/access-token" 'insert into journey.e2e.exit_test (id) values (1), (2), (3)' >/dev/null; then
     bad write '"insert into journey.e2e.exit_test did not answer"'
     return 0
   fi
-  if ! rows="$(trino_sql 'select count(*) from journey.e2e.exit_test')"; then
+  if ! rows="$(trino_sql "$tmp/access-token" 'select count(*) from journey.e2e.exit_test')"; then
     rows=""
   fi
   if [ "$rows" = 3 ]; then
@@ -338,6 +342,53 @@ phase_exit_read() {
   ok exit-read "$line"
 }
 
+# --- J4: a refusal ------------------------------------------------------------------------
+phase_refusal() {
+  local outsider="journey-outsider" token_file
+  if ! command -v kubectl >/dev/null 2>&1 || [ ! -s "$tmp/access-token" ]; then
+    unknown refuse '"the refusal needs J1 (kubectl and the port-forward)"'
+    return 0
+  fi
+  if ! NAMESPACE="$NAMESPACE" KIND=service NAME="$outsider" AUDIENCES=trino,lakekeeper \
+    bash "$PLATFORM_DIR/scripts/keycloak-sync-principal.sh" >"$tmp/outsider-sync.log" 2>&1; then
+    bad refuse "\"the second client could not be created: $(tail -c 300 "$tmp/outsider-sync.log")\""
+    return 0
+  fi
+  token_file="$tmp/outsider-token"
+  kubectl -n "$NAMESPACE" get secret "svc-${outsider}" -o jsonpath='{.data.client-id}' | base64 -d >"$tmp/outsider-client-id"
+  kubectl -n "$NAMESPACE" get secret "svc-${outsider}" -o jsonpath='{.data.client-secret}' | base64 -d >"$tmp/outsider-client-secret"
+  kubectl -n "$NAMESPACE" get secret "svc-${outsider}" -o jsonpath='{.data.token-url}' | base64 -d >"$tmp/outsider-token-url"
+  chmod 600 "$tmp"/outsider-client-id "$tmp"/outsider-client-secret "$tmp"/outsider-token-url
+  local endpoint
+  endpoint="$(cat "$tmp/outsider-token-url")"
+  if ! curl -sS -o "$tmp/outsider-token.json" --max-time 20 -X POST "$endpoint" \
+    --data-urlencode "grant_type=client_credentials" \
+    --data-urlencode "client_id@$tmp/outsider-client-id" \
+    --data-urlencode "client_secret@$tmp/outsider-client-secret"; then
+    bad refuse '"the token endpoint did not answer for the second client"'
+    return 0
+  fi
+  python3 - "$tmp/outsider-token.json" >"$token_file" <<'PY'
+import json, sys
+answer = json.load(open(sys.argv[1]))
+if "access_token" not in answer:
+    raise SystemExit("no access_token: %s" % answer.get("error", "no answer"))
+sys.stdout.write(answer["access_token"])
+PY
+  local answer rc=0
+  answer="$(trino_sql "$token_file" 'select count(*) from journey.e2e.exit_test' 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    bad refuse "\"the second client read journey.e2e.exit_test (${answer:-no answer}): the grant boundary is open\""
+    return 0
+  fi
+  case "$answer" in
+    *"Access Denied"*|*"Cannot access catalog"*|*"not authorized"*)
+      ok refuse "svc-${outsider} (no group) was refused journey.e2e.exit_test" ;;
+    *)
+      bad refuse "\"the second client failed for another reason: ${answer:-no answer}\"" ;;
+  esac
+}
+
 # --- main ---------------------------------------------------------------------------------
 case "${1:-all}" in
   all | identity)
@@ -346,13 +397,15 @@ case "${1:-all}" in
       phase_client
       phase_write
       phase_exit_read
+      phase_refusal
     fi
     ;;
   client) phase_client ;;
   write) phase_write ;;
   exit-read) phase_exit_read ;;
+  refusal) phase_refusal ;;
   *)
-    echo "journey-fresh-node: unknown phase '$1' (all, identity, client, write, exit-read)" >&2
+    echo "journey-fresh-node: unknown phase '$1' (all, identity, client, write, exit-read, refusal)" >&2
     exit 2
     ;;
 esac
