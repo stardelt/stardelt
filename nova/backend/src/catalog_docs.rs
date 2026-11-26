@@ -152,10 +152,42 @@ pub struct Freshness {
     /// Names of `destination` rows of the table's owner group.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notify: Vec<String>,
+    /// The pipeline whose checks must pass (`<namespace>/<name>`), or `None` (#402).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_pipeline: Option<String>,
 }
 
 fn default_grace_minutes() -> u32 {
     FRESHNESS_DEFAULT_GRACE_MINUTES
+}
+
+/// The verdict of the pipeline a promise requires (#402).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineChecks {
+    /// The pipeline the promise names, `<namespace>/<name>`.
+    pub pipeline: String,
+    /// The run the verdict comes from; absent when the pipeline has no completed run yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// That run's state: `success` or `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The failed checks; empty when every declared check passed.
+    pub failed: Vec<FailedCheck>,
+}
+
+/// One failed check of the required pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedCheck {
+    /// The task that ran the check.
+    pub task: String,
+    /// A quality check's name, or a dbt test's unique id.
+    pub check: String,
+    /// The table a dbt test guards, when its log line names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
 }
 
 /// One table's freshness: the promise, the newest commit and the status both imply.
@@ -179,6 +211,9 @@ pub struct TableFreshness {
     /// The verified-query checks of this table; `null` without a state store (`#402`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<crate::verified_queries::TableChecks>,
+    /// The checks of the pipeline this promise requires; absent when it names none (#402).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_checks: Option<PipelineChecks>,
 }
 
 /// One promised table in `GET /api/catalog/health`.
@@ -229,6 +264,8 @@ pub struct FreshnessUpdate {
     pub grace_minutes: Option<u32>,
     /// The alert destinations; absent or empty means no alert. Replaces the stored list.
     pub notify: Option<Vec<String>>,
+    /// The pipeline whose checks must pass; absent or empty removes it.
+    pub check_pipeline: Option<String>,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.
@@ -635,6 +672,24 @@ fn checked_notify(raw: Vec<String>) -> Result<Vec<String>, String> {
         names.push(text);
     }
     Ok(names)
+}
+
+/// The `checkPipeline` reference: empty means none, otherwise exactly `namespace/name`.
+fn checked_check_pipeline(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.len() > 253 || raw.chars().any(char::is_whitespace) {
+        return Err("checkPipeline is <namespace>/<name>".into());
+    }
+    let mut parts = raw.split('/');
+    let (Some(ns), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err("checkPipeline is <namespace>/<name>".into());
+    };
+    if ns.is_empty() || name.is_empty() {
+        return Err("checkPipeline is <namespace>/<name>".into());
+    }
+    Ok(Some(raw.to_string()))
 }
 
 /// The stored promise, or `None` when the text is not one. A hand-edited property that does
@@ -1069,6 +1124,7 @@ fn health_of(loaded: &Loaded, who: &Identity) -> TableFreshness {
             detail: NO_PROMISE.into(),
             can_edit,
             checks: None,
+            pipeline_checks: None,
         };
     };
     let (status, due, next, detail) = freshness_health(&promise, last_write, now());
@@ -1081,6 +1137,7 @@ fn health_of(loaded: &Loaded, who: &Identity) -> TableFreshness {
         detail,
         can_edit,
         checks: None,
+        pipeline_checks: None,
     }
 }
 
@@ -1521,6 +1578,55 @@ async fn write_documentation(
     Ok(doc)
 }
 
+/// A failed required check reddens the table and says which one failed (#402).
+fn reddened(detail: &str, reference: &str, checks: &PipelineChecks) -> Option<String> {
+    let failed = checks.failed.first()?;
+    let run = checks
+        .run_id
+        .as_deref()
+        .map(|id| format!(" (run {id})"))
+        .unwrap_or_default();
+    Some(format!(
+        "{detail} Required check \"{}\" of {reference} failed{run}.",
+        failed.check
+    ))
+}
+
+/// Apply a verdict to the read answer: a failure reddens it, and the verdict is always shown.
+fn apply_pipeline_checks(view: &mut TableFreshness, reference: &str, checks: PipelineChecks) {
+    if let Some(detail) = reddened(&view.detail, reference, &checks) {
+        view.status = "red".into();
+        view.detail = detail;
+    }
+    view.pipeline_checks = Some(checks);
+}
+
+/// Evaluate the promise's `checkPipeline` for the one-table read. Any failure to read the
+/// pipeline or its runs leaves the freshness verdict and answers no checks.
+async fn with_pipeline_checks(
+    state: &Arc<AppState>,
+    who: &Identity,
+    catalog: &str,
+    ns: &str,
+    tbl: &str,
+    mut view: TableFreshness,
+) -> TableFreshness {
+    let Some(reference) = view
+        .promise
+        .as_ref()
+        .and_then(|promise| promise.check_pipeline.clone())
+    else {
+        return view;
+    };
+    let Ok(checks) =
+        crate::pipelines::table_check_health(state, who, catalog, ns, tbl, &reference).await
+    else {
+        return view;
+    };
+    apply_pipeline_checks(&mut view, &reference, checks);
+    view
+}
+
 /// `GET /api/catalog/tables/{ns}/{tbl}/health`: the table's freshness, evaluated at the read.
 async fn freshness_for(
     state: &Arc<AppState>,
@@ -1531,6 +1637,7 @@ async fn freshness_for(
 ) -> Result<TableFreshness, DocError> {
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
     let mut view = health_of(&loaded, who);
+    view = with_pipeline_checks(state, who, catalog.name, ns, tbl, view).await;
     // A state-store hiccup must not turn a health read into an error: `null` already means
     // "no check information".
     if let Some(pool) = state.db.as_ref() {
@@ -1726,7 +1833,7 @@ async fn write_freshness(
             }),
     };
     if unchanged {
-        let view = health_of(&loaded, who);
+        let view = freshness_for(state, catalog, who, ns, tbl).await?;
         if let Some(promise) = &view.promise
             && !promise.notify.is_empty()
         {
@@ -1765,8 +1872,7 @@ async fn write_freshness(
     catalog.commit(ns, tbl, &body).await.map_err(catalog_fail)?;
 
     audit::catalog_doc_event(who, &format!("{ns}.{tbl}"), &["freshness"]);
-    let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let view = health_of(&loaded, who);
+    let view = freshness_for(state, catalog, who, ns, tbl).await?;
     if let Some(promise) = &view.promise
         && !promise.notify.is_empty()
     {
@@ -1844,12 +1950,15 @@ fn validate_freshness(req: FreshnessUpdate) -> Result<FreshnessWrite, DocError> 
         return Err(bad("graceMinutes must be 0 to 1440"));
     }
     let notify = checked_notify(req.notify.unwrap_or_default()).map_err(|e| bad(&e))?;
+    let check_pipeline =
+        checked_check_pipeline(req.check_pipeline.as_deref()).map_err(|e| bad(&e))?;
     Ok(FreshnessWrite::Set(Freshness {
         by,
         timezone,
         grace_minutes,
         set_at: rfc3339(now()),
         notify,
+        check_pipeline,
     }))
 }
 
@@ -2101,7 +2210,7 @@ pub async fn update(
     operation_id = "table_freshness_get",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured).",
+    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured). `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) does not evaluate it yet.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -2194,7 +2303,7 @@ pub async fn list_health(
     operation_id = "table_freshness_update",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property.",
+    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property.. `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) does not evaluate it yet.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -3474,6 +3583,7 @@ mod tests {
             grace_minutes,
             set_at: "2026-11-01T00:00:00Z".into(),
             notify: Vec::new(),
+            check_pipeline: None,
         }
     }
 
@@ -3567,6 +3677,7 @@ mod tests {
             timezone: Some("Europe/Berlin".into()),
             grace_minutes: None,
             notify: None,
+            check_pipeline: None,
         }
     }
 
@@ -3681,6 +3792,114 @@ mod tests {
             checked_notify(vec![" on-call ".into(), "email".into()]),
             Ok(vec!["on-call".into(), "email".into()]),
             "surrounding spaces are trimmed"
+        );
+    }
+
+    #[test]
+    fn a_check_pipeline_is_namespace_and_name() {
+        assert_eq!(
+            checked_check_pipeline(Some("a/b")),
+            Ok(Some("a/b".into())),
+            "two non-empty segments are a reference"
+        );
+        assert_eq!(
+            checked_check_pipeline(None),
+            Ok(None),
+            "absent names no pipeline"
+        );
+        assert_eq!(
+            checked_check_pipeline(Some("  ")),
+            Ok(None),
+            "blank names no pipeline"
+        );
+        assert!(
+            checked_check_pipeline(Some("a/b/c")).is_err(),
+            "three segments are not a reference"
+        );
+    }
+
+    #[test]
+    fn a_failed_required_check_turns_a_table_red() {
+        let mut view = TableFreshness {
+            promise: Some(promise("07:00", "Europe/Berlin", 60)),
+            status: "green".into(),
+            last_write: None,
+            due_at: None,
+            next_due_at: None,
+            detail: "Fresh".into(),
+            can_edit: true,
+            checks: None,
+            pipeline_checks: None,
+        };
+        let failed = PipelineChecks {
+            pipeline: "ns/pipe".into(),
+            run_id: Some("manual__1".into()),
+            state: Some("failed".into()),
+            failed: vec![FailedCheck {
+                task: "checks".into(),
+                check: "not_null".into(),
+                table: None,
+            }],
+        };
+        apply_pipeline_checks(&mut view, "ns/pipe", failed);
+        assert_eq!(view.status, "red", "a failed required check reddens");
+        assert!(
+            view.detail
+                .ends_with(r#"Required check "not_null" of ns/pipe failed (run manual__1)."#),
+            "the detail names the check and the run: {}",
+            view.detail
+        );
+        assert_eq!(
+            view.pipeline_checks.as_ref().map(|c| c.failed.len()),
+            Some(1),
+            "the verdict is shown"
+        );
+
+        // An empty `failed` leaves the status and the detail alone, and still shows the verdict.
+        let mut green = TableFreshness {
+            promise: Some(promise("07:00", "Europe/Berlin", 60)),
+            status: "green".into(),
+            last_write: None,
+            due_at: None,
+            next_due_at: None,
+            detail: "Fresh".into(),
+            can_edit: true,
+            checks: None,
+            pipeline_checks: None,
+        };
+        apply_pipeline_checks(
+            &mut green,
+            "ns/pipe",
+            PipelineChecks {
+                pipeline: "ns/pipe".into(),
+                run_id: Some("manual__2".into()),
+                state: Some("success".into()),
+                failed: Vec::new(),
+            },
+        );
+        assert_eq!(green.status, "green");
+        assert_eq!(green.detail, "Fresh");
+        assert!(green.pipeline_checks.is_some(), "the verdict is shown");
+    }
+
+    #[test]
+    fn a_table_without_a_check_pipeline_keeps_its_verdict() {
+        let mut body = load_fixture();
+        body["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert(
+                FRESHNESS_PROPERTY.into(),
+                json!(
+                    serde_json::to_string(&promise("07:00", "Europe/Berlin", 60))
+                        .expect("the promise serializes")
+                ),
+            );
+        let loaded = parse_loaded(&body.to_string()).expect("the fixture parses");
+        let view = health_of(&loaded, &admin());
+        assert!(
+            view.pipeline_checks.is_none(),
+            "a promise without checkPipeline answers no checks"
         );
     }
 
