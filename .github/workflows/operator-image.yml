@@ -16,7 +16,6 @@ name: "operator / Image"
 on:
   push:
     branches: [main]
-    tags: ["operator/v*"]
     paths: ["operator/**", ".github/workflows/operator-image.yml"]
   pull_request:
     branches: [main]
@@ -59,7 +58,6 @@ jobs:
           images: ghcr.io/stardelt/stardelt-operator
           tags: |
             type=ref,event=branch
-            type=match,pattern=operator/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 

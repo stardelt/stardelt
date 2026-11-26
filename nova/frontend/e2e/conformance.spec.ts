@@ -5592,7 +5592,7 @@ test.describe('overview metrics', () => {
     const card = firstRunCard(page)
     await expect(card).toBeVisible()
     await expect(card.locator('pre')).toHaveJSProperty('textContent', [
-      'pip install "stardelt @ git+https://github.com/stardelt/stardelt@v0.0.4#subdirectory=python"',
+      'pip install "stardelt @ https://github.com/stardelt/stardelt/releases/download/v0.0.4/stardelt-0.0.4-py3-none-any.whl"',
       `export STARDELT_NOVA_URL=${new URL(page.url()).origin}`,
       'stardelt login',
       'stardelt bundle init shop --name shop-etl --group analysts',

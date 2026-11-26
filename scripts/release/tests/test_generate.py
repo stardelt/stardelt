@@ -31,7 +31,7 @@ class ChartsTest(unittest.TestCase):
 
 class CliDigestTest(unittest.TestCase):
     LINE = (
-        'pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:v0.4.1@'
+        'pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:v0.0.4@'
         'sha256:47e12f49fdf810042fdc74d77a813a186941861c3e00ea4faa97c792c98fb81e";\n'
     )
 

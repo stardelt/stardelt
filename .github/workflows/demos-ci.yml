@@ -66,7 +66,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install the released CLI
-        run: python -m pip install "stardelt @ git+https://github.com/stardelt/stardelt@python/v0.3.0#subdirectory=python"
+        run: python -m pip install "stardelt @ https://github.com/stardelt/stardelt/releases/download/v0.0.4/stardelt-0.0.4-py3-none-any.whl"
 
       - name: Validate the shop bundle
         run: python -m stardelt bundle validate examples/shop-bundle

@@ -584,7 +584,7 @@ function FirstRunCard({ group, onDismiss }: { group: string; onDismiss: () => vo
   // The release tag here is checked against python/pyproject.toml by
   // platform/scripts/tests/test_python_release_pointer.py: bump both in the release.
   const commands = [
-    'pip install "stardelt @ git+https://github.com/stardelt/stardelt@v0.0.4#subdirectory=python"',
+    'pip install "stardelt @ https://github.com/stardelt/stardelt/releases/download/v0.0.4/stardelt-0.0.4-py3-none-any.whl"',
     `export STARDELT_NOVA_URL=${window.location.origin}`,
     'stardelt login',
     `stardelt bundle init shop --name shop-etl --group ${group}`,

@@ -11,7 +11,6 @@ name: "nova / Image"
 on:
   push:
     branches: [main]
-    tags: ["nova/v*"]
     paths: ["nova/**", ".github/workflows/nova-image.yml"]
   pull_request:
     branches: [main]
@@ -54,7 +53,6 @@ jobs:
           images: ghcr.io/stardelt/nova
           tags: |
             type=ref,event=branch
-            type=match,pattern=nova/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
