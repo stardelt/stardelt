@@ -86,11 +86,9 @@ def test_a_variable_must_be_declared_and_have_a_value_in_every_target(tmp_path):
 
 
 def test_a_production_target_needs_a_run_as_principal_of_the_owner_group(tmp_path):
-    for run_as in ("", ", runAs: pipeline-other", ", runAs: someone"):
+    for run_as in ("", ", runAs: pipeline-other", ", runAs: someone", ", runAs: pipeline-sales-prod"):
         manifest = MANIFEST.replace(", runAs: pipeline-sales", run_as)
         assert "a production target needs runAs: pipeline-sales" in said(bundle.validate(make(tmp_path, manifest=manifest))[0]), run_as
-    manifest = MANIFEST.replace("runAs: pipeline-sales", "runAs: pipeline-sales-prod")
-    assert bundle.validate(make(tmp_path, manifest=manifest))[0] == []
 
 
 def test_the_gate_setting_is_checked_offline_and_defaults_to_none(tmp_path):

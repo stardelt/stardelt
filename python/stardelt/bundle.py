@@ -635,8 +635,8 @@ def validate(directory, target=None):
                 problems.append((where, f"variable {v!r} is not declared under variables"))
         run_as = spec.get("runAs")
         if mode == "production":
-            if not (isinstance(run_as, str) and isinstance(owner, str) and re.match(rf"^pipeline-{re.escape(owner)}(-[A-Za-z0-9._-]+)?$", run_as)):
-                problems.append((where, f"a production target needs runAs: pipeline-{owner or '<ownerGroup>'} (or that name with a suffix)"))
+            if not (isinstance(run_as, str) and isinstance(owner, str) and re.match(rf"^pipeline-{re.escape(owner)}$", run_as)):
+                problems.append((where, f"a production target needs runAs: pipeline-{owner or '<ownerGroup>'}"))
         values = {v: (d or {}).get("default") for v, d in variables.items() if (d or {}).get("default") is not None}
         values.update(tvars)
         names = []
