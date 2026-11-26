@@ -409,6 +409,24 @@ def test_fresh_token_re_mints_a_federated_sign_in(tmp_path):
     assert login.load(environ)["federated"] == {"env": "STARDELT_CI_TOKEN"}
 
 
+def test_direct_login_keeps_the_ci_token_and_needs_no_request():
+    creds = login.direct_login("ghs_assertion", clock=lambda: 1000.0)
+    assert creds["access_token"] == "ghs_assertion"
+    assert creds["expires_at"] == 1240
+    assert creds["refresh_token"] is None
+
+
+def test_fresh_token_direct_reads_the_env_without_a_provider_call(tmp_path, monkeypatch):
+    stored(tmp_path, expires_at=1, refresh_token=None, federated={"env": "STARDELT_CI_TOKEN", "direct": True})
+
+    class Exploding:
+        def request(self, method, url, **kwargs):
+            raise AssertionError(f"a direct sign-in must make no request ({method} {url})")
+
+    environ = {"HOME": str(tmp_path), "STARDELT_CI_TOKEN": "ghs_new"}
+    assert login.fresh_token(environ, Exploding(), clock=lambda: 1000) == "ghs_new"
+
+
 def test_fresh_token_refuses_when_the_ci_token_is_gone(tmp_path):
     stored(tmp_path, expires_at=1, refresh_token=None, federated={"env": "STARDELT_CI_TOKEN"})
     with pytest.raises(login.LoginError, match="STARDELT_CI_TOKEN"):

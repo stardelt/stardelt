@@ -269,6 +269,22 @@ def federated_login(session, issuer, client_id, assertion, clock=time.time):
     return _creds(issuer, client_id, endpoint, body, clock())
 
 
+def direct_login(assertion, clock=time.time):
+    """Keep the CI token as the bearer itself (no exchange; a DeployStage verifies it, #1845).
+
+    The token lives five minutes; `fresh_token` reads it from the environment again when it is
+    about to expire, so no request is made here and nothing is stored on the provider.
+    """
+    return {
+        "issuer": "",
+        "client_id": "",
+        "token_endpoint": "",
+        "access_token": assertion,
+        "refresh_token": None,
+        "expires_at": int(clock() + 240),
+    }
+
+
 def fresh_token(environ, session, clock=time.time):
     """The stored access token, renewed first when it has less than a minute left."""
     creds = load(environ)
@@ -279,6 +295,14 @@ def fresh_token(environ, session, clock=time.time):
     federated = creds.get("federated") or {}
     if federated:
         name = federated.get("env") or ASSERTION_ENV
+        if federated.get("direct"):
+            token = environ.get(name, "")
+            if not token:
+                raise LoginError(f"the CI token is gone: set {name} for this step")
+            creds["access_token"] = token
+            creds["expires_at"] = int(clock() + 240)
+            save(environ, creds)
+            return token
         assertion = environ.get(name, "")
         if not assertion:
             raise LoginError(f"the CI token is gone: set {name} for this step")

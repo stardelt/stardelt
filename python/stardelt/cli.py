@@ -62,6 +62,11 @@ def _parser():
         help="sign in with the CI's own token, no browser (a stage's federated client; #57)",
     )
     signin.add_argument(
+        "--direct",
+        action="store_true",
+        help="send the CI token to Nova itself, no provider exchange (a DeployStage verifies it; needs --federated and --host)",
+    )
+    signin.add_argument(
         "--assertion-env",
         default=login.ASSERTION_ENV,
         help=f"the environment variable that holds the CI token (default: {login.ASSERTION_ENV})",
@@ -366,6 +371,23 @@ def _login(args, environ, stderr, session):
         return USAGE
     reaching = host
     try:
+        if args.direct:
+            if not args.federated:
+                stderr.write("stardelt: login --direct needs --federated (it sends the CI token, it does not sign a person in)\n")
+                return USAGE
+            if not host:
+                stderr.write("stardelt: login --direct needs --host (or STARDELT_NOVA_URL): Nova is where the token is checked\n")
+                return USAGE
+            assertion = environ.get(args.assertion_env, "")
+            if not assertion:
+                stderr.write(f"stardelt: login --direct needs the CI token in {args.assertion_env}\n")
+                return USAGE
+            creds = login.direct_login(assertion)
+            creds["host"] = host
+            creds["federated"] = {"env": args.assertion_env, "direct": True}
+            path = login.save(environ, creds)
+            stderr.write(f"stardelt: signed in (CI token, direct); the sign-in is kept in {path}\n")
+            return OK
         if not issuer:
             issuer, advertised = login.nova_sign_in(http, host)
             client_id = client_id or ("" if args.federated else (advertised or ""))

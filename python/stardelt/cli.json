@@ -52,6 +52,13 @@
         },
         {
           "flags": [
+            "--direct"
+          ],
+          "help": "send the CI token to Nova itself, no provider exchange (a DeployStage verifies it; needs --federated and --host)",
+          "flag": true
+        },
+        {
+          "flags": [
             "--assertion-env"
           ],
           "help": "the environment variable that holds the CI token (default: STARDELT_CI_TOKEN)",

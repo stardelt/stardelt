@@ -61,7 +61,7 @@ def run(host, environ, session, out, clock=time.time) -> int:
         else:
             left = int(creds.get("expires_at", 0) - clock())
             if creds.get("federated"):
-                kind = "federated (CI)"
+                kind = "federated (CI, direct)" if creds.get("federated", {}).get("direct") else "federated (CI)"
             elif creds.get("refresh_token"):
                 kind = "renewable"
             else:
