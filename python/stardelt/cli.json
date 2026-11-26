@@ -582,6 +582,13 @@
               ],
               "help": "with --smoke: give up waiting after N seconds (0: no limit); the run is not stopped",
               "metavar": "SECONDS"
+            },
+            {
+              "flags": [
+                "--preview"
+              ],
+              "help": "deploy a preview: every name is prefixed with ID and its schedule is removed (a development target only)",
+              "metavar": "ID"
             }
           ],
           "commands": []
@@ -687,6 +694,13 @@
               ],
               "help": "really remove the pipelines (without it: only list them)",
               "flag": true
+            },
+            {
+              "flags": [
+                "--preview"
+              ],
+              "help": "remove only the pipelines and streams of this preview (a development target only)",
+              "metavar": "ID"
             }
           ],
           "commands": []
