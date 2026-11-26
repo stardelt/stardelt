@@ -148,7 +148,8 @@ class E2EFreshNode(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn(
             "would create stardelt-fresh-e2e-testid (cpx42 @ nbg1), install the operator, "
-            "apply platform-minimal.yaml for <domain>, verify, delete",
+            "apply platform-minimal.yaml (+ pipelines, dashboards pillars) for <domain>, "
+            "verify, delete",
             done.stdout,
         )
         self.assertEqual(len(done.stdout.strip().splitlines()), 1, done.stdout)
@@ -188,7 +189,7 @@ class E2EFreshNode(unittest.TestCase):
         release.mkdir()
         (release / "install.yaml").write_text("kind: Namespace\nmetadata:\n  name: stardelt\n")
         (release / "platform-minimal.yaml").write_text(
-            "# from the release folder\nbaseDomain: data.example.com\n"
+            "# from the release folder\nbaseDomain: data.example.com\n  profile: demo\n"
         )
         self._write(self.bindir / "kubectl", FAKE_KUBECTL_RECORDING)
         done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", RELEASE_DIR=str(release))
@@ -201,7 +202,34 @@ class E2EFreshNode(unittest.TestCase):
         self.assertTrue(instance.exists(), done.stdout + done.stderr)
         self.assertIn("# from the release folder", instance.read_text(), done.stdout)
         self.assertIn("baseDomain: example.test", instance.read_text(), done.stdout)
+        # #1729: the run turns on the two pillars that the product phase checks.
+        self.assertIn(
+            "  profile: demo\n  pillars:\n    pipelines: true\n    dashboards: true\n",
+            instance.read_text(),
+            done.stdout,
+        )
         self.assertIn(f"install: release {release}", done.stdout)
+
+    def test_an_instance_without_the_profile_line_stops_before_apply(self):
+        # #1729: the pillars are inserted after `  profile: demo`; a release file without that
+        # line must stop the run with a message instead of applying a pillar-less instance.
+        release = self.tmp / "release-no-profile"
+        release.mkdir()
+        (release / "install.yaml").write_text("kind: Namespace\nmetadata:\n  name: stardelt\n")
+        (release / "platform-minimal.yaml").write_text(
+            "# from the release folder\nbaseDomain: data.example.com\n"
+        )
+        self._write(self.bindir / "kubectl", FAKE_KUBECTL_RECORDING)
+        done = self.run_script("up", YES="1", FRESH_DOMAIN="example.test", RELEASE_DIR=str(release))
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn(
+            "could not turn on the pipelines and dashboards pillars", done.stderr, done.stdout
+        )
+        self.assertIn("e2e-fresh-node: FAIL", done.stdout, done.stdout)
+        calls = self.home / "kubectl.calls"
+        applied = calls.read_text() if calls.exists() else ""
+        self.assertNotIn("platform-instance.yaml", applied, applied)
+        self.assertFalse((self.home / "hetzner-k3s.called").exists(), "a server was created")
 
     def test_release_dir_without_both_files_refuses_before_creating_a_server(self):
         release = self.tmp / "release-empty"
