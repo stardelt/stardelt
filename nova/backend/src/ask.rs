@@ -372,7 +372,7 @@ async fn check_statement(
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables, sends the question and **the documentation of those tables only** — description, tags, owner, domain, column names and their descriptions — to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables only** — description, tags, owner, domain, column names and their descriptions — to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
@@ -477,11 +477,39 @@ pub(crate) async fn ask(
             .to_string();
         return fail(StatusCode::BAD_GATEWAY, sentence);
     }
-    let candidates: Vec<AskTable> = found
+    let mut candidates: Vec<AskTable> = found
         .get("matches")
         .and_then(Value::as_array)
         .map(|matches| matches.iter().filter_map(ask_table).collect())
         .unwrap_or_default();
+    if candidates.is_empty() {
+        let words: Vec<String> = question.split_whitespace().map(str::to_lowercase).collect();
+        match crate::catalog_search::search_any_word(
+            &state,
+            caller.as_ref().map(|c| &c.0),
+            &words,
+            CANDIDATES,
+        )
+        .await
+        {
+            Ok(found) if !found.is_empty() => {
+                tracing::info!(
+                    tables = found.len(),
+                    "ask: no table had every word; using the best word matches"
+                );
+                candidates = found
+                    .into_iter()
+                    .map(|table| AskTable {
+                        catalog: table.catalog,
+                        namespace: table.namespace,
+                        table: table.table,
+                    })
+                    .collect();
+            }
+            Ok(_) => {}
+            Err(sentence) => return fail(StatusCode::BAD_GATEWAY, sentence),
+        }
+    }
     if candidates.is_empty() {
         let body = AskAnswer {
             endpoint: name,
