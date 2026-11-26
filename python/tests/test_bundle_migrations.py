@@ -272,3 +272,37 @@ def test_an_unavailable_lineage_answer_leaves_the_plan_intact(tmp_path):
     rows = [json.loads(line) for line in out.splitlines()]
     assert rows[1] == {"action": "would-apply-migration", "name": "002_drop.sql", "class": "breaking", "kind": "Migration"}
     assert calls(session)[2] == ("GET", "/api/lineage")
+
+
+def test_a_preview_refuses_a_target_whose_migrations_are_still_pending(tmp_path):
+    build(tmp_path, manifest=DEV_MANIFEST)
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-123"],
+        ME, FakeResponse(payload={"catalogs": [], "default": "gold"}), FakeResponse(payload=PLAN),
+    )
+    assert (code, out) == (2, "")
+    assert err == (
+        "stardelt: dev: a preview cannot apply this target's migrations (002_add.sql): "
+        "they change tables outside the preview; deploy the target without --preview first\n"
+    )
+    assert calls(session) == [
+        ("GET", "/api/me"),
+        ("GET", "/api/catalog/catalogs"),
+        ("POST", "/api/migrations/plan"),
+    ], "nothing is written"
+
+
+def test_a_preview_deploys_when_every_migration_is_in_the_ledger(tmp_path):
+    build(tmp_path, manifest=DEV_MANIFEST)
+    applied = {**PLAN, "files": [{**PLAN["files"][0]}, {**PLAN["files"][1], "status": "applied"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-123"],
+        ME, FakeResponse(payload={"catalogs": [], "default": "gold"}), FakeResponse(payload=applied),
+        FakeResponse(payload=CREATE), FakeResponse(payload=DEPLOY_PLAN), FakeResponse(payload=APPLIED),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(status=201, payload={"name": "pr-123-load"}),
+        FakeResponse(payload={"pipelines": [{"name": "pr-123-load", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 8, "bundle": "sales-etl", "target": "dev", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()][-1] == {"action": "recorded", "id": 8}
+    assert "pr-123-load" in [call[2]["json"].get("name") for call in session.calls if call[0] == "POST" and call[1].endswith("/api/pipelines")]
