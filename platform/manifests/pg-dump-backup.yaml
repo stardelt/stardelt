@@ -59,9 +59,9 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           initContainers:
             - name: pg-dump
-              # Same image as the StatefulSet (scripts derive nothing from the
-              # tag here): pg_dump must not be newer than the server it reads.
-              image: docker.io/bitnamilegacy/postgresql:14.17.0-debian-12-r3@sha256:769d9d755a41e845d00c8eda9bd2c0945ee9c437d64cc215db7a4bd05cd17f17
+              # A newer client dumps the older server;
+              # the StatefulSet keeps its own Bitnami image.
+              image: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4
               command: ["/bin/bash", "-ec"]
               args:
                 - |
@@ -197,8 +197,9 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           initContainers:
             - name: pg-dump
-              # Same image as `airflow-postgresql` (PostgreSQL 16).
-              image: docker.io/bitnamilegacy/postgresql:16.1.0-debian-11-r15@sha256:29e3dd0e7e7a740eabdbae6f82673507d180701a719bbdb6d6308a58cf723e64
+              # A newer client dumps the older server;
+              # the StatefulSet keeps its own Bitnami image.
+              image: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4
               command: ["/bin/bash", "-ec"]
               args:
                 - |

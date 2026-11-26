@@ -12,11 +12,12 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
 
-/// Superset's database, the same image as StatefulSet `superset-postgresql`
-/// (pg_dump must not be newer than the server it reads).
-pub const SUPERSET_PG_IMAGE: &str = "docker.io/bitnamilegacy/postgresql:14.17.0-debian-12-r3";
-/// Airflow's database, the same image as StatefulSet `airflow-postgresql`.
-pub const AIRFLOW_PG_IMAGE: &str = "docker.io/bitnamilegacy/postgresql:16.1.0-debian-11-r15";
+/// The PostgreSQL client that dumps Superset's database. The client is newer than the server
+/// (14.17) on purpose: `pg_dump` dumps older servers, never newer ones. It is the pinned CNPG
+/// operand image the platform already runs (#1898).
+pub const SUPERSET_PG_IMAGE: &str = "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4";
+/// Airflow's database client: the same image (server 16.1). See `SUPERSET_PG_IMAGE`.
+pub const AIRFLOW_PG_IMAGE: &str = "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie@sha256:0f29b435fb501ee534cd0c555d122a6b8e90de477de8e8381c82c5e10d9a9de4";
 /// The uploader, digest-pinned: it is the only container that holds the S3 key.
 pub const AWS_CLI_IMAGE: &str =
     "amazon/aws-cli:2.17.0@sha256:643507c10ada7964ca6157b3d799f030b90577643da9955d319a77399ed80d73";
