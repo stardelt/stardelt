@@ -401,7 +401,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:308f7c3ec966afc8d79377c7a7978dd54de8146359b3cf00d0d4dbd7bfc66b64
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:bcf84fa95ca4786393f8ed7475dcb26cf3b1d6cd1d4e2438550a4f6d57aef6a7
   # spark-pipeline tasks (#80 S2c-2): the same three variables as the platform's
   # helm-values/airflow.yaml — PIPELINE_SPARK_REMOTE is not set, so the loader uses the
   # owner group's SparkCluster. Short names, like every address in this file: the operator
