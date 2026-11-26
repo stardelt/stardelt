@@ -1,10 +1,10 @@
 name: A question
-description: Ask us something; a maintainer moves it to the right repository.
+description: Ask us something.
 labels: [question, community]
 body:
   - type: markdown
     attributes:
-      value: Thank you. A maintainer moves this to the right repository if it belongs somewhere else.
+      value: Thank you.
   - type: markdown
     attributes:
       value: Check the [documentation](https://stardelt.io/docs/intro/overview) first; we answer here when it does not help.
