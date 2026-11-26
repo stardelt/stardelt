@@ -31,6 +31,7 @@ IMAGE_ORDER = [
     "spark",
     "superset",
     "airflow",
+    "dbt",
     "jupyter-singleuser",
     "stardelt-cli",
 ]
@@ -57,6 +58,21 @@ def cli_digest(rs_text: str) -> str:
     found = CLI_RE.findall(rs_text)
     if len(found) != 1:
         print(f"✗ maintenance.rs: expected one IMAGE digest, found {len(found)}", file=sys.stderr)
+        raise SystemExit(1)
+    return found[0]
+
+
+# The dbt task image: pinned in the Airflow values on both install paths (#1893, #1918).
+DBT_RE = re.compile(
+    r"^\s*value: ghcr\.io/stardelt/dbt:demo@(sha256:[0-9a-f]{64})\s*$", re.M
+)
+
+
+def dbt_digest(airflow_values: str) -> str:
+    """The dbt task image's digest from `platform/helm-values/airflow.yaml`, or exit 1."""
+    found = DBT_RE.findall(airflow_values)
+    if len(found) != 1:
+        print(f"✗ airflow.yaml: expected one dbt image digest, found {len(found)}", file=sys.stderr)
         raise SystemExit(1)
     return found[0]
 
@@ -219,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
         out = Path.cwd() / out
 
     images = one_digest_per_app(pins(root))
+    images["dbt"] = dbt_digest(
+        (root / "platform" / "helm-values" / "airflow.yaml").read_text()
+    )
     images["stardelt-cli"] = cli_digest(
         (root / "operator" / "crates" / "stardelt-operator" / "src" / "maintenance.rs").read_text()
     )

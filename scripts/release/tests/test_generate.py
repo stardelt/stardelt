@@ -46,6 +46,20 @@ class CliDigestTest(unittest.TestCase):
             generate.cli_digest("pub const IMAGE: &str = \"ghcr.io/other\";\n")
 
 
+class DbtDigestTest(unittest.TestCase):
+    LINE = (
+        "  - name: PIPELINE_DBT_IMAGE\n"
+        "    value: ghcr.io/stardelt/dbt:demo@sha256:" + "d" * 64 + "\n"
+    )
+
+    def test_one_line(self) -> None:
+        self.assertEqual(generate.dbt_digest(self.LINE), "sha256:" + "d" * 64)
+
+    def test_no_match_exits(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate.dbt_digest("  - name: PIPELINE_DBT_IMAGE\n    value: ghcr.io/stardelt/dbt:demo\n")
+
+
 class OneDigestPerAppTest(unittest.TestCase):
     SHA_A = "sha256:" + "a" * 64
     SHA_B = "sha256:" + "b" * 64
