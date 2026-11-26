@@ -5,10 +5,11 @@
 #   scripts/journey-fresh-node.sh
 #   JOURNEY_WHEEL=/path/to/stardelt-0.0.4-py3-none-any.whl scripts/journey-fresh-node.sh
 #
-# J1 identity: a `ServicePrincipal` comes Ready, its client-credentials token is accepted by
-#   Trino, and `select current_user` answers the principal's `status.subject` — a machine
-#   identity works on this install. The principal is named `journey` in the group every realm
-#   has (`stardelt-users`); it is deleted on exit unless KEEP=1.
+# J1 identity: the operator creates a `ServicePrincipal`'s client and Secret; it comes Ready,
+#   its client-credentials token is accepted by Trino, and `select current_user` answers the
+#   principal's `status.subject` — a machine identity works on this install. The principal is
+#   named `journey` in the group every realm has (`stardelt-users`); it is deleted on exit
+#   unless KEEP=1.
 #   Nova is not used: a ServicePrincipal's token carries `aud=trino,lakekeeper`, and Nova
 #   refuses it with `401 invalid token: wrong audience` (measured 2026-11-26).
 # J2 client: the release's own wheel installs into a throwaway venv and `stardelt --version`
@@ -58,7 +59,6 @@ cleanup() {
   if [ "$KEEP" != 1 ] && command -v kubectl >/dev/null 2>&1; then
     kubectl -n "$NAMESPACE" delete "serviceprincipal/${PRINCIPAL}" --ignore-not-found >/dev/null 2>&1 || true
     kubectl -n "$NAMESPACE" delete catalog/journey --ignore-not-found >/dev/null 2>&1 || true
-    make -C "$PLATFORM_DIR" delete-principal NAME="$PRINCIPAL" YES=1 >/dev/null 2>&1 || true
     NAMESPACE="$NAMESPACE" KIND=service NAME="journey-outsider" YES=1 \
       bash "$PLATFORM_DIR/scripts/keycloak-sync-principal.sh" --delete >/dev/null 2>&1 || true
   fi
@@ -130,13 +130,6 @@ spec:
 EOF
   then
     bad identity "\"the ServicePrincipal was refused: $(head -c 200 "$tmp/apply.err")\""
-    return 0
-  fi
-  # A ServicePrincipal is not self-provisioning: the Keycloak client and its Secret are created
-  # by `make sync-principal` (operator/crates/stardelt-operator/src/principal.rs:153), and the
-  # operator then converges the CR onto them.
-  if ! make -C "$PLATFORM_DIR" sync-principal NAME="$PRINCIPAL" GROUP="$GROUP" >"$tmp/sync.log" 2>&1; then
-    bad identity "\"make sync-principal failed: $(tail -c 300 "$tmp/sync.log")\""
     return 0
   fi
   if ! kubectl -n "$NAMESPACE" wait --for=condition=Ready "serviceprincipal/${PRINCIPAL}" --timeout=120s >/dev/null 2>&1; then
