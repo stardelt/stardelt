@@ -1468,6 +1468,7 @@ async fn main() -> anyhow::Result<()> {
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
     query_log_collector::start(state.db.clone(), state.kube.clone()).await?;
     pipeline_notice::spawn(state.clone());
+    catalog_docs::spawn_health(Arc::clone(&state));
     if let Some(pool) = state.db.clone() {
         query_log_store::spawn_retention(pool.clone());
         mcp_audit::spawn_retention(pool.clone());

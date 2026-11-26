@@ -75,6 +75,7 @@ use tracing::warn;
 use crate::api_json::ApiJson;
 use crate::auth::{Identity, Principal};
 use crate::data::quote_ident;
+use crate::destinations::{DeliveryOutcome, post_webhook};
 use crate::{AppState, audit, catalog};
 
 /// Most characters a description may hold, after trimming.
@@ -749,6 +750,302 @@ fn rfc3339(at: DateTime<Utc>) -> String {
 /// so `Utc::now()` does not exist; the standard library's clock does.
 fn now() -> DateTime<Utc> {
     DateTime::<Utc>::from(std::time::SystemTime::now())
+}
+
+// ---------------------------------------------------------------------------
+// The table-health collector (#402 point 3, slice 2)
+// ---------------------------------------------------------------------------
+
+/// The table-health collector's period (#402 point 3, slice 2).
+const TABLE_HEALTH_TICK: std::time::Duration = std::time::Duration::from_secs(300);
+/// Most promised tables one tick reads; a larger index is picked up over the next ticks.
+const TABLE_HEALTH_MAX_TABLES: i64 = 500;
+
+/// What one promise transition means: the message to send, or nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum Transition {
+    Late,
+    Recovered,
+}
+
+/// The transition rule, pure: one message per turn of a table's health.
+///
+/// `red` after anything but `red` is a new failure; `red` → `green` is the recovery. `amber`,
+/// `red` → `red` and `green` → `green` say nothing: a table that goes red → amber → red is
+/// announced on the second red, which is a real second failure.
+fn transition(last: &str, next: &str) -> Option<Transition> {
+    match (last, next) {
+        (_, "red") if last != "red" => Some(Transition::Late),
+        ("red", "green") => Some(Transition::Recovered),
+        _ => None,
+    }
+}
+
+/// Start the table-health collector. Off — with one line, never a panic — without a state store.
+pub fn spawn_health(state: Arc<AppState>) {
+    if state.db.is_none() {
+        tracing::info!("table-health notices are off: the state store is not configured");
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(TABLE_HEALTH_TICK).await;
+        let mut ticks = tokio::time::interval(TABLE_HEALTH_TICK);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            if let Err(e) = run_health_once(&state).await {
+                tracing::warn!(error = %format!("{e:#}"), "the table-health tick failed");
+            }
+            // One `run_health_once` at a time: the tick is awaited in the loop, never overlapped.
+            ticks.tick().await;
+        }
+    });
+}
+
+/// One pass over the remembered promised tables: evaluate each, send one message per turn of
+/// its status, and keep `table_promise` current. The count is the transitions sent.
+pub(crate) async fn run_health_once(state: &AppState) -> Result<usize, String> {
+    let Some(db) = state.db.as_ref() else {
+        return Ok(0);
+    };
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT catalog, namespace, table_name, last_status FROM table_promise \
+         ORDER BY checked_at LIMIT $1",
+    )
+    .bind(TABLE_HEALTH_MAX_TABLES)
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut sent = 0usize;
+    for (catalog, ns, tbl, last_status) in rows {
+        let Ok(id) = crate::catalog::warehouse_id_for(state, &catalog).await else {
+            tracing::warn!(catalog = %catalog, "the catalog's warehouse did not answer");
+            continue;
+        };
+        let Ok((base, authorization)) = catalog_or_error(state, &id).await else {
+            tracing::warn!(catalog = %catalog, "the catalog's authorization did not answer");
+            continue;
+        };
+        let client = Catalog {
+            http: &state.http,
+            base,
+            id: &id,
+            authorization: authorization.as_deref(),
+            name: &catalog,
+        };
+        // A table that no longer loads is forgotten; a catalog that cannot be reached is not:
+        // it keeps its row and its status, so the next tick tries again.
+        let loaded = match client.load(&ns, &tbl).await {
+            Ok(loaded) => loaded,
+            Err(CatalogError::NotFound) => {
+                forget(db, &catalog, &ns, &tbl).await;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    catalog = %catalog,
+                    namespace = %ns,
+                    table = %tbl,
+                    error = ?e,
+                    "the promised table did not load"
+                );
+                continue;
+            }
+        };
+        let promise = property(&loaded.properties, FRESHNESS_PROPERTY)
+            .as_deref()
+            .and_then(parse_freshness);
+        let Some(promise) = promise else {
+            forget(db, &catalog, &ns, &tbl).await;
+            continue;
+        };
+        let last_write = loaded.last_write;
+        let (status, due, _next, detail) = freshness_health(&promise, last_write, now());
+        let Some(kind) = transition(&last_status, &status) else {
+            mark(db, &catalog, &ns, &tbl, &status).await;
+            continue;
+        };
+        if !promise.notify.is_empty() {
+            let owner = property(&loaded.properties, "stardelt.owner");
+            let body = alert_body(
+                &catalog,
+                &ns,
+                &tbl,
+                &status,
+                &detail,
+                last_write,
+                due,
+                kind == Transition::Recovered,
+            );
+            let subject = format!("{catalog}.{ns}.{tbl}");
+            deliver(db, owner.as_deref(), &promise.notify, &subject, &body).await;
+            sent += 1;
+        }
+        mark(db, &catalog, &ns, &tbl, &status).await;
+    }
+    Ok(sent)
+}
+
+/// The document one transition sends. `kind` and the identifiers match the pipeline notice's
+/// style; nothing secret and no URL goes into it.
+#[allow(clippy::too_many_arguments)]
+fn alert_body(
+    catalog: &str,
+    ns: &str,
+    tbl: &str,
+    status: &str,
+    detail: &str,
+    last_write: Option<DateTime<Utc>>,
+    due: Option<DateTime<Utc>>,
+    recovered: bool,
+) -> Value {
+    let name = format!("{catalog}.{ns}.{tbl}");
+    let text = if recovered {
+        format!("Table {name} is fresh again.")
+    } else {
+        format!("Table {name} is late: {detail}")
+    };
+    let mut body = json!({
+        "text": text,
+        "kind": "table_health",
+        "catalog": catalog,
+        "namespace": ns,
+        "table": tbl,
+        "status": status,
+        "detail": detail,
+        "apiPath": format!("/api/catalog/tables/{ns}/{tbl}/health?catalog={catalog}"),
+    });
+    if recovered {
+        body["recovered"] = Value::Bool(true);
+    }
+    if let Some(at) = due {
+        body["dueAt"] = Value::String(rfc3339(at));
+    }
+    if let Some(at) = last_write {
+        body["lastWrite"] = Value::String(rfc3339(at));
+    }
+    body
+}
+
+/// Send one transition to every destination name of the table's owner group. A name that no
+/// longer exists is a warning and is skipped; the others still receive the message. Every
+/// attempt is one `destination_delivery` row, whatever its ending.
+async fn deliver(
+    db: &sqlx::PgPool,
+    owner: Option<&str>,
+    names: &[String],
+    subject: &str,
+    body: &Value,
+) {
+    let Some(group) = owner else {
+        tracing::warn!(
+            subject = %subject,
+            "the promised table has no owner group; no alert was sent"
+        );
+        return;
+    };
+    for name in names {
+        let found = sqlx::query_as::<_, (i64, String, Value)>(
+            "SELECT id, kind, config FROM destination WHERE owner_group = $1 AND name = $2",
+        )
+        .bind(group)
+        .bind(name)
+        .fetch_optional(db)
+        .await;
+        let (id, kind, config) = match found {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                tracing::warn!(
+                    subject = %subject,
+                    destination = %name,
+                    "the destination named by the promise no longer exists"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(subject = %subject, error = %e, "the destination did not answer");
+                continue;
+            }
+        };
+        if kind != "webhook" {
+            let outcome = DeliveryOutcome {
+                status: "failed",
+                http_status: None,
+                detail: "email delivery needs the platform's SMTP relay, which is not \
+                         configured"
+                    .into(),
+            };
+            record(db, id, subject, &outcome).await;
+            continue;
+        }
+        let Some(url) = config["url"].as_str() else {
+            tracing::warn!(
+                subject = %subject,
+                destination = %name,
+                "the webhook destination has no url"
+            );
+            continue;
+        };
+        let outcome = post_webhook(crate::destinations::webhook_client(), url, body).await;
+        record(db, id, subject, &outcome).await;
+    }
+}
+
+/// One `destination_delivery` row per attempt, tagged `table_health` and the table's dotted id.
+async fn record(
+    db: &sqlx::PgPool,
+    destination_id: i64,
+    subject_id: &str,
+    outcome: &DeliveryOutcome,
+) {
+    let done = sqlx::query(
+        "INSERT INTO destination_delivery \
+         (destination_id, subject_kind, subject_id, status, http_status, detail, attempted_at) \
+         VALUES ($1, 'table_health', $2, $3, $4, $5, $6)",
+    )
+    .bind(destination_id)
+    .bind(subject_id)
+    .bind(outcome.status)
+    .bind(outcome.http_status.map(i32::from))
+    .bind(&outcome.detail)
+    .bind(crate::jobs::now_ms() as i64)
+    .execute(db)
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "the table-health attempt was not recorded");
+    }
+}
+
+/// Forget a table the catalog no longer promises: the index follows the catalog.
+async fn forget(db: &sqlx::PgPool, catalog: &str, ns: &str, tbl: &str) {
+    let done = sqlx::query(
+        "DELETE FROM table_promise WHERE catalog = $1 AND namespace = $2 AND table_name = $3",
+    )
+    .bind(catalog)
+    .bind(ns)
+    .bind(tbl)
+    .execute(db)
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "the promised table was not forgotten");
+    }
+}
+
+/// Record the status the tick acted on and move `checked_at`, so the 500-row order rotates.
+async fn mark(db: &sqlx::PgPool, catalog: &str, ns: &str, tbl: &str, status: &str) {
+    let done = sqlx::query(
+        "UPDATE table_promise SET last_status = $4, checked_at = $5 \
+         WHERE catalog = $1 AND namespace = $2 AND table_name = $3",
+    )
+    .bind(catalog)
+    .bind(ns)
+    .bind(tbl)
+    .bind(status)
+    .bind(crate::jobs::now_ms() as i64)
+    .execute(db)
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "the promised table's status was not recorded");
+    }
 }
 
 /// The read answer for a loaded table: the promise, its status and what the caller may do.
@@ -3384,6 +3681,76 @@ mod tests {
             checked_notify(vec![" on-call ".into(), "email".into()]),
             Ok(vec!["on-call".into(), "email".into()]),
             "surrounding spaces are trimmed"
+        );
+    }
+
+    #[test]
+    fn a_transition_is_one_message_per_turn() {
+        assert_eq!(transition("green", "red"), Some(Transition::Late));
+        assert_eq!(
+            transition("amber", "red"),
+            Some(Transition::Late),
+            "a table that turns red from amber is late"
+        );
+        assert_eq!(
+            transition("red", "red"),
+            None,
+            "a table that stays red is not told twice"
+        );
+        assert_eq!(transition("red", "amber"), None, "amber says nothing");
+        assert_eq!(transition("red", "green"), Some(Transition::Recovered));
+        assert_eq!(transition("green", "green"), None);
+        assert_eq!(transition("amber", "green"), None, "green says nothing");
+        assert_eq!(
+            transition("red", "red"),
+            None,
+            "the second red tick after a red one stays silent"
+        );
+    }
+
+    #[test]
+    fn an_alert_body_names_the_table_and_its_status() {
+        let late = alert_body(
+            "stardelt",
+            "sales",
+            "orders",
+            "red",
+            "Late: the newest write is before the deadline and the grace period has passed.",
+            Some(at("2026-11-25T04:00:00Z")),
+            Some(at("2026-11-25T06:00:00Z")),
+            false,
+        );
+        assert_eq!(late["kind"], "table_health");
+        let text = late["text"].as_str().expect("a text");
+        assert!(text.contains("stardelt.sales.orders"), "{text}");
+        assert_eq!(late["status"], "red");
+        assert!(
+            late.get("recovered").is_none(),
+            "a failure is not a recovery: {late}"
+        );
+        assert_eq!(
+            late["apiPath"],
+            "/api/catalog/tables/sales/orders/health?catalog=stardelt"
+        );
+        assert_eq!(late["dueAt"], "2026-11-25T06:00:00Z");
+        assert_eq!(late["lastWrite"], "2026-11-25T04:00:00Z");
+
+        let recovered = alert_body(
+            "stardelt",
+            "sales",
+            "orders",
+            "green",
+            "Fresh: the newest write is after the deadline.",
+            None,
+            None,
+            true,
+        );
+        assert_eq!(recovered["recovered"], true);
+        let text = recovered["text"].as_str().expect("a text");
+        assert!(text.contains("fresh again"), "{text}");
+        assert!(
+            recovered.get("dueAt").is_none(),
+            "no deadline, no dueAt: {recovered}"
         );
     }
 

@@ -44,8 +44,8 @@ flowchart LR
   end
   subgraph BE["backend/src (axum): areas and modules, production lines"]
     direction TB
-    be_core_identity["<b>Core & identity</b><br/><small>auth 2528 ⚠<br/>main 1482<br/>audit 601<br/>openapi 466<br/>token_exchange 305<br/>catalog_token 287<br/>user_settings 173<br/>embed 153<br/>db 134<br/>people 124<br/>shared_accounts 123<br/>session_store 104<br/>seal 93<br/>metrics 90<br/>api_json 60<br/>version 53<br/>error 47<br/>rfc3339 26</small>"]
-    be_catalog["<b>Catalog</b><br/><small>catalog_docs 2013 ⚠<br/>catalog 1351<br/>admin_catalogs 976<br/>verified_queries 836<br/>catalog_metrics 833<br/>access_requests 416<br/>catalog_search 297<br/>samples 186<br/>catalog_doc_store 177</small>"]
+    be_core_identity["<b>Core & identity</b><br/><small>auth 2528 ⚠<br/>main 1483<br/>audit 601<br/>openapi 466<br/>token_exchange 305<br/>catalog_token 287<br/>user_settings 173<br/>embed 153<br/>db 134<br/>people 124<br/>shared_accounts 123<br/>session_store 104<br/>seal 93<br/>metrics 90<br/>api_json 60<br/>version 53<br/>error 47<br/>rfc3339 26</small>"]
+    be_catalog["<b>Catalog</b><br/><small>catalog_docs 2310 ⚠<br/>catalog 1351<br/>admin_catalogs 976<br/>verified_queries 836<br/>catalog_metrics 833<br/>access_requests 416<br/>catalog_search 297<br/>samples 186<br/>catalog_doc_store 177</small>"]
     be_sql_query_log["<b>SQL & query log</b><br/><small>query_log_api 1353<br/>data 856<br/>statements 737<br/>trino 562<br/>query_log_collector 549<br/>query_log_event 535<br/>warehouses 477<br/>saved_queries 384<br/>query_log_store 189<br/>query_hints 176<br/>query_log 111<br/>jobs 109</small>"]
     be_pipelines_delivery["<b>Pipelines & delivery</b><br/><small>pipelines 8661 ⚠<br/>deployments 1146<br/>streams 947<br/>airflow 895<br/>migrations 862<br/>superset 818<br/>destinations 647<br/>pipeline_notice 462<br/>superset_archive 350<br/>stages 296</small>"]
     be_notebooks_compute["<b>Notebooks & compute</b><br/><small>notebooks 2277 ⚠<br/>compute 1352<br/>workspace 380</small>"]
