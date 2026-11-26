@@ -5363,7 +5363,10 @@ mod tests {
             spec.pillars.pipelines && spec.pillars.dashboards,
             "the release example turns on what the fresh-node run proves (pipelines, dashboards)"
         );
-        assert!(!spec.pillars.notebooks, "notebooks stay off and visible in the example");
+        assert!(
+            !spec.pillars.notebooks,
+            "notebooks stay off and visible in the example"
+        );
         assert_eq!(spec.identity.mode, IdentityMode::Platform);
         // The two rules the CRD enforces on the API server, checked here as well.
         assert!(
