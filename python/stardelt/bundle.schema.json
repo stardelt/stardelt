@@ -122,7 +122,7 @@
           },
           "runAs": {
             "type": "string",
-            "description": "the pipeline identity a production target runs as: pipeline-<ownerGroup>, or that name with a suffix"
+            "description": "the pipeline identity a production target runs as: pipeline-<ownerGroup>"
           },
           "drift": {
             "enum": ["warn", "block", "heal"],
