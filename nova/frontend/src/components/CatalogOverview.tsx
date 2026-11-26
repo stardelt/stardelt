@@ -1,11 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ApiError, api, type Catalog } from '../api'
+import { ApiError, api, type Catalog, type SampleLoaded } from '../api'
+import { useState } from 'react'
 import ErrorBox from './ErrorBox'
 import EnvironmentBadge from './EnvironmentBadge'
 import LayerBadge from './LayerBadge'
 import ObjectIcon from './ObjectIcon'
-import { relativeTime } from '../format'
+import { formatCount, relativeTime } from '../format'
 
 /** A 403 says no: the person's grants do not change by asking again. */
 function forbidden(error: unknown): boolean {
@@ -46,6 +47,18 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
   const owner = catalog.owner || undefined
   const description = catalog.description || undefined
   const canWrite = catalog.canWrite === true
+  const queryClient = useQueryClient()
+  const [loaded, setLoaded] = useState<SampleLoaded | null>(null)
+  // The sample is created as the caller, into <catalog>.samples.trips; a read-only person
+  // would get a 403, so the button is offered only where they may write.
+  const loadSample = useMutation({
+    mutationFn: () => api.loadSample('trips', catalog.name),
+    onSuccess: (answer) => {
+      setLoaded(answer)
+      void queryClient.invalidateQueries({ queryKey: ['catalog', 'namespaces', catalog.name] })
+      void queryClient.invalidateQueries({ queryKey: ['catalog', 'catalogs'] })
+    },
+  })
 
   const namespaces = useQuery({
     queryKey: ['catalog', 'namespaces', catalog.name],
@@ -112,9 +125,27 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
             onRetry={forbidden(namespaces.error) ? undefined : () => void namespaces.refetch()}
           />
         ) : schemas.length === 0 ? (
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="space-y-3">
             <p className="text-text-mute text-sm">This catalog has no schemas yet.</p>
-            <Link to="/data" className="btn-ghost">Load data</Link>
+            {loaded ? (
+              <p role="status" className="text-sm">
+                Loaded {formatCount(loaded.rows)} rows into <span className="font-mono">{loaded.namespace}.{loaded.table}</span>.
+              </p>
+            ) : null}
+            <div className="flex flex-wrap items-center gap-3">
+              {canWrite && !loaded && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={loadSample.isPending}
+                  onClick={() => loadSample.mutate()}
+                >
+                  {loadSample.isPending ? 'Loading the sample…' : 'Load sample data'}
+                </button>
+              )}
+              <Link to="/data" className="btn-ghost">Load data</Link>
+            </div>
+            {loadSample.isError && <ErrorBox error={loadSample.error} />}
           </div>
         ) : (
           <ul className="space-y-0.5">
