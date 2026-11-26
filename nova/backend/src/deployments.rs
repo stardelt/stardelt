@@ -409,6 +409,26 @@ pub(crate) async fn stage_owner_group(
     Ok(stage_group_of(&stage.data))
 }
 
+/// Every `DeployStage` of Nova's namespace, as the API server holds them (#1845).
+pub(crate) async fn deploy_stages(state: &AppState) -> Result<Vec<serde_json::Value>, String> {
+    let Some(client) = state.kube.clone() else {
+        return Err("the cluster is not reachable: no deploy stage could be read".into());
+    };
+    let api: Api<DynamicObject> = Api::namespaced_with(
+        client,
+        &crate::cluster::namespace(),
+        &ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "stardelt.io",
+            "v1alpha1",
+            "DeployStage",
+        )),
+    );
+    api.list(&Default::default())
+        .await
+        .map(|list| list.items.into_iter().map(|o| o.data).collect())
+        .map_err(|e| format!("the cluster did not answer for the deploy stages: {e}"))
+}
+
 /// The group one `DeployStage`'s JSON names, if any; the parsing half of `stage_owner_group`.
 fn stage_group_of(data: &serde_json::Value) -> Option<String> {
     data.get("spec")

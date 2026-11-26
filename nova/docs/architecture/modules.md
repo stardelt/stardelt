@@ -2,7 +2,7 @@
 | module | area | production lines | test lines | routes | talks to |
 |---|---|---:|---:|---:|---|
 | `pipelines.rs` ⚠ | Pipelines & delivery | 8121 | 11382 | 23 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store, S3 (SeaweedFS), Trino |
-| `auth.rs` ⚠ | Core & identity | 2327 | 2092 | 4 | OIDC provider, PostgreSQL state store |
+| `auth.rs` ⚠ | Core & identity | 2526 | 2209 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `catalog_docs.rs` ⚠ | Catalog | 1875 | 1429 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -12,7 +12,7 @@
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `lineage_api.rs` | Lineage | 1175 | 443 | 4 | PostgreSQL state store |
-| `deployments.rs` | Pipelines & delivery | 1112 | 828 | 5 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
+| `deployments.rs` | Pipelines & delivery | 1132 | 828 | 5 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `admin_catalogs.rs` | Catalog | 976 | 1350 | 3 | Kubernetes API (CRDs) |
 | `streams.rs` | Pipelines & delivery | 947 | 847 | 5 | Kubernetes API (CRDs) |
 | `apps.rs` | Platform view | 946 | 346 | 4 | JupyterHub, Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Superset, Trino |
@@ -69,4 +69,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (68 files)** | | **47775** | **42814** | **157** | |
+| **total (68 files)** | | **47994** | **42931** | **157** | |
