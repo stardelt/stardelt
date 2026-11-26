@@ -1055,6 +1055,58 @@ fn waiting_message(outcome: &PlanOutcome) -> Option<String> {
     ))
 }
 
+/// `PillarsReady` (#1735): every enabled optional pillar is ready. `None` when the plan has no
+/// pillar at all. It never changes `Ready`: sign-in, the catalog, query and Nova are what a person
+/// needs first, and a failing optional chart is reported here instead of holding the platform.
+fn pillars_condition(
+    pillars: &[ComponentStatus],
+    previous: Option<&Condition>,
+    generation: Option<i64>,
+    now: &str,
+) -> Option<Condition> {
+    if pillars.is_empty() {
+        return None;
+    }
+    let waiting: Vec<&ComponentStatus> = pillars.iter().filter(|c| !c.ready).collect();
+    let seen = previous.map(std::slice::from_ref).unwrap_or(&[]);
+    if waiting.is_empty() {
+        return Some(crate::conditions::set_condition(
+            seen,
+            "PillarsReady",
+            "True",
+            "AllReady",
+            Some(format!(
+                "all {} optional pillar(s) are ready",
+                pillars.len()
+            )),
+            generation,
+            now,
+        ));
+    }
+    let shown: Vec<String> = waiting
+        .iter()
+        .take(3)
+        .map(|c| match &c.message {
+            Some(message) => format!("{}: {}", c.name, message),
+            None => c.name.clone(),
+        })
+        .collect();
+    Some(crate::conditions::set_condition(
+        seen,
+        "PillarsReady",
+        "False",
+        "PillarNotReady",
+        Some(format!(
+            "{} of {} optional pillar(s) not ready — {}",
+            waiting.len(),
+            pillars.len(),
+            shown.join("; ")
+        )),
+        generation,
+        now,
+    ))
+}
+
 /// Write one Lakehouse status. A merge patch: conditions and components are
 /// replaced wholesale, the rest of the status is left alone.
 async fn patch_lakehouse_status(
@@ -2388,7 +2440,7 @@ async fn reconcile_platform(
     if let Some(job) = ensure_superset_group_roles(&ctx, &instance.spec, &owner).await {
         outcome.components.push(job);
     }
-    let pillar_outcome = apply_plan(
+    let mut pillar_outcome = apply_plan(
         &ctx,
         &instance.spec.namespace,
         &pillar_plan,
@@ -2398,11 +2450,14 @@ async fn reconcile_platform(
         previous,
     )
     .await;
-    outcome.values_resolved &= pillar_outcome.values_resolved;
-    outcome.components.extend(pillar_outcome.components);
     if let Some(bus) = ensure_kafka_broker(&ctx, &instance.spec).await {
-        outcome.components.push(bus);
+        pillar_outcome.components.push(bus);
     }
+    // `Ready` is the core's (#1735): a failing optional pillar is the `PillarsReady` condition.
+    let core_waiting = waiting_message(&outcome);
+    let core_phase = phase(instance.spec.dry_run, &outcome);
+    let pillar_components = pillar_outcome.components.clone();
+    outcome.components.extend(pillar_components.iter().cloned());
     // The Ingress objects come last: they route to the Services above.
     if let Some(ingress) = ensure_ingress(&ctx, &instance.spec, &owner).await {
         outcome.components.push(ingress);
@@ -2415,7 +2470,7 @@ async fn reconcile_platform(
     {
         outcome.components.push(monitoring);
     }
-    let phase = phase(instance.spec.dry_run, &outcome);
+    let phase = core_phase;
 
     let prev = instance
         .status
@@ -2427,7 +2482,7 @@ async fn reconcile_platform(
         instance.metadata.generation,
         prev,
         &now,
-        waiting_message(&outcome),
+        core_waiting,
     )];
     let previous_monitoring = instance.status.as_ref().and_then(|s| {
         s.conditions
@@ -2452,6 +2507,18 @@ async fn reconcile_platform(
         &instance.spec,
         instance.metadata.generation,
         previous_allow_list,
+        &now,
+    ) {
+        conditions.push(condition);
+    }
+    let previous_pillars = instance
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.iter().find(|c| c.type_ == "PillarsReady"));
+    if let Some(condition) = pillars_condition(
+        &pillar_components,
+        previous_pillars,
+        instance.metadata.generation,
         &now,
     ) {
         conditions.push(condition);
@@ -2993,6 +3060,51 @@ mod tests {
             last_transition_time: Some(time.into()),
             observed_generation: None,
         }
+    }
+
+    fn component(name: &str, ready: bool, message: Option<&str>) -> ComponentStatus {
+        ComponentStatus {
+            name: name.into(),
+            ready,
+            message: message.map(str::to_string),
+            applied_hash: None,
+        }
+    }
+
+    #[test]
+    fn pillars_condition_is_none_without_a_pillar() {
+        assert!(pillars_condition(&[], None, Some(1), "2026-01-01T00:00:00Z").is_none());
+    }
+
+    #[test]
+    fn pillars_condition_is_true_when_every_pillar_is_ready() {
+        let pillars = vec![
+            component("superset", true, None),
+            component("airflow", true, None),
+        ];
+        let condition = pillars_condition(&pillars, None, Some(1), "2026-01-01T00:00:00Z")
+            .expect("a condition");
+        assert_eq!(condition.type_, "PillarsReady");
+        assert_eq!(condition.status, "True");
+        assert_eq!(condition.reason.as_deref(), Some("AllReady"));
+    }
+
+    #[test]
+    fn pillars_condition_names_a_failing_pillar() {
+        let pillars = vec![
+            component("superset", false, Some("hook superset-init-db failed")),
+            component("airflow", true, None),
+        ];
+        let condition = pillars_condition(&pillars, None, Some(1), "2026-01-01T00:00:00Z")
+            .expect("a condition");
+        assert_eq!(condition.status, "False");
+        assert_eq!(condition.reason.as_deref(), Some("PillarNotReady"));
+        let message = condition.message.unwrap();
+        assert!(message.contains("1 of 2"), "{message}");
+        assert!(
+            message.contains("superset: hook superset-init-db failed"),
+            "{message}"
+        );
     }
 
     #[test]
