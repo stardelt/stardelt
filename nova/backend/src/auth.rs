@@ -418,11 +418,27 @@ pub struct Identity {
 
 impl Identity {
     /// The one person of `dev` mode, where nobody signs in: `NOVA_DEV_USER`, an administrator
-    /// with no groups. The only place outside the tests that builds an `Identity` by hand.
+    /// with no groups. One of the two constructors outside the tests that build an `Identity`
+    /// by hand; the other is [`Identity::system`].
     pub fn dev_admin(user: &str) -> Self {
         Identity {
             sub: user.to_string(),
             display_name: user.to_string(),
+            email: None,
+            name: None,
+            groups: Vec::new(),
+            roles: Vec::new(),
+            groups_overage: false,
+            is_admin: true,
+        }
+    }
+
+    /// A platform job's identity: an administrator with no groups, for a route that needs a
+    /// caller where no person is in the path (for example the table-health collector).
+    pub fn system(display: &str) -> Self {
+        Identity {
+            sub: display.to_string(),
+            display_name: display.to_string(),
             email: None,
             name: None,
             groups: Vec::new(),
@@ -4832,5 +4848,13 @@ mod tests {
             body.contains("a deploy principal may only plan and record deployments (stage `dev`)"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn a_system_identity_is_an_administrator() {
+        let job = Identity::system("job");
+        assert!(job.is_admin, "a platform job is an administrator");
+        assert!(job.groups.is_empty(), "a platform job has no groups");
+        assert_eq!(job.sub, "job");
     }
 }

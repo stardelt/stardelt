@@ -871,6 +871,7 @@ pub(crate) async fn run_health_once(state: &AppState) -> Result<usize, String> {
     .await
     .map_err(|e| e.to_string())?;
     let mut sent = 0usize;
+    let mut check_budget = CHECK_PIPELINE_MAX_CHECKS;
     for (catalog, ns, tbl, last_status) in rows {
         let Ok(id) = crate::catalog::warehouse_id_for(state, &catalog).await else {
             tracing::warn!(catalog = %catalog, "the catalog's warehouse did not answer");
@@ -915,6 +916,25 @@ pub(crate) async fn run_health_once(state: &AppState) -> Result<usize, String> {
         };
         let last_write = loaded.last_write;
         let (status, due, _next, detail) = freshness_health(&promise, last_write, now());
+        let (status, detail) = match promise
+            .check_pipeline
+            .as_deref()
+            .filter(|_| check_budget > 0)
+        {
+            Some(reference) => {
+                check_budget -= 1;
+                let health = Identity::system("stardelt-table-health");
+                match crate::pipelines::table_check_health(
+                    state, &health, &catalog, &ns, &tbl, reference,
+                )
+                .await
+                {
+                    Ok(checks) => reddened_status(status, detail, reference, &checks),
+                    Err(_) => (status, detail),
+                }
+            }
+            None => (status, detail),
+        };
         let Some(kind) = transition(&last_status, &status) else {
             mark(db, &catalog, &ns, &tbl, &status).await;
             continue;
@@ -1592,12 +1612,24 @@ fn reddened(detail: &str, reference: &str, checks: &PipelineChecks) -> Option<St
     ))
 }
 
+/// The status and sentence after a required pipeline's verdict: a failure is `red` and
+/// names the check; no failure leaves the freshness answer exactly as it was.
+fn reddened_status(
+    status: String,
+    detail: String,
+    reference: &str,
+    checks: &PipelineChecks,
+) -> (String, String) {
+    match reddened(&detail, reference, checks) {
+        Some(detail) => ("red".into(), detail),
+        None => (status, detail),
+    }
+}
+
 /// Apply a verdict to the read answer: a failure reddens it, and the verdict is always shown.
 fn apply_pipeline_checks(view: &mut TableFreshness, reference: &str, checks: PipelineChecks) {
-    if let Some(detail) = reddened(&view.detail, reference, &checks) {
-        view.status = "red".into();
-        view.detail = detail;
-    }
+    (view.status, view.detail) =
+        reddened_status(view.status.clone(), view.detail.clone(), reference, &checks);
     view.pipeline_checks = Some(checks);
 }
 
@@ -1651,6 +1683,10 @@ async fn freshness_for(
 /// Most tables `GET /api/catalog/health` reads in one call.
 const HEALTH_LIST_MAX_TABLES: usize = 200;
 
+/// How many promised tables one list or collector pass evaluates against their
+/// `checkPipeline` (#402). The rest keep the freshness verdict and are picked next time.
+const CHECK_PIPELINE_MAX_CHECKS: usize = 20;
+
 /// The order a person and an assistant read the list in: the broken tables first.
 fn health_rank(status: &str) -> u8 {
     match status {
@@ -1695,6 +1731,7 @@ async fn health_list(
 
     let mut tables = Vec::new();
     let mut checked = 0usize;
+    let mut check_budget = CHECK_PIPELINE_MAX_CHECKS;
     'namespaces: for ns in &namespaces {
         let Some(segment) = catalog::path_segment(ns) else {
             continue;
@@ -1726,16 +1763,42 @@ async fn health_list(
             if health.promise.is_none() {
                 continue;
             }
+            let (status, detail) = match health
+                .promise
+                .as_ref()
+                .and_then(|promise| promise.check_pipeline.clone())
+                .filter(|_| check_budget > 0)
+            {
+                Some(reference) => {
+                    check_budget -= 1;
+                    match crate::pipelines::table_check_health(
+                        state,
+                        who,
+                        catalog.name,
+                        ns,
+                        &name,
+                        &reference,
+                    )
+                    .await
+                    {
+                        Ok(checks) => {
+                            reddened_status(health.status, health.detail, &reference, &checks)
+                        }
+                        Err(_) => (health.status, health.detail),
+                    }
+                }
+                None => (health.status, health.detail),
+            };
             tables.push(ListedHealth {
                 catalog: catalog.name.to_string(),
                 namespace: ns.clone(),
                 name,
-                status: health.status,
+                status,
                 last_write: health.last_write,
                 due_at: health.due_at,
                 next_due_at: health.next_due_at,
                 can_edit: health.can_edit,
-                detail: health.detail,
+                detail,
             });
         }
     }
@@ -2210,7 +2273,7 @@ pub async fn update(
     operation_id = "table_freshness_get",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured). `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) does not evaluate it yet.",
+    description = "Whether this table's data is as fresh as its owner promised. The promise is the Iceberg table property `stardelt.freshness`, a JSON object `{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"2026-11-25T06:00:00Z\"}`: a wall-clock deadline in an IANA zone, a grace period of 0 to 1440 minutes (default 60) and the moment the promise was set. `?catalog=` picks the catalog. `status` is `grey` when the table has no promise (or one that does not parse — never an error), `green` when the newest commit (else `setAt`) is at or after the most recent deadline, `amber` while `now` is still inside the grace after that deadline, and `red` once the grace has passed. `lastWrite` is the newest commit's time and `dueAt`/`nextDueAt` the most recent and the next deadline. A wall clock the zone skips at a DST jump is not a deadline. The interim rule is enforced by Nova: `canEdit` says whether this caller may set the promise. `checks` names the verified queries whose last check failed (`null` when no state store is configured). `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) evaluates at most 20 promised tables per call, worst first, and a table beyond the cap answers its freshness verdict only.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -2259,7 +2322,7 @@ pub async fn health(
     operation_id = "catalog_health_list",
     path = "/api/catalog/health",
     tag = "public",
-    description = "Every table of one catalog that carries a freshness promise, the most broken first: `red`, then `amber`, then `green`, and inside one status by `namespace.name`. The list is the answer `table_health` gives for one table, applied to every table the catalog lists; the promise is the Iceberg property `stardelt.freshness`. `?catalog=` picks the catalog. Views are not listed (they cannot carry the property), and a table that vanished between the list and the read is skipped. A table without a promise is not listed. `checked` is how many tables were read; the list stops after 200 tables, so a larger catalog answers a prefix. The interim rule is enforced by Nova: `canEdit` says whether this caller may set a table's promise.",
+    description = "Every table of one catalog that carries a freshness promise, the most broken first: `red`, then `amber`, then `green`, and inside one status by `namespace.name`. The list is the answer `table_health` gives for one table, applied to every table the catalog lists; the promise is the Iceberg property `stardelt.freshness`. `?catalog=` picks the catalog. Views are not listed (they cannot carry the property), and a table that vanished between the list and the read is skipped. A table without a promise is not listed. `checked` is how many tables were read; the list stops after 200 tables, so a larger catalog answers a prefix, and it evaluates the `checkPipeline` of at most 20 promised tables per call, worst first; a table beyond the cap answers its freshness verdict only. The interim rule is enforced by Nova: `canEdit` says whether this caller may set a table's promise.",
     params(crate::catalog::CatalogParam),
     responses(
         (status = 200, description = "The promised tables, worst first", body = CatalogHealth),
@@ -2303,7 +2366,7 @@ pub async fn list_health(
     operation_id = "table_freshness_update",
     path = "/api/catalog/tables/{ns}/{tbl}/health",
     tag = "public",
-    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property.. `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) does not evaluate it yet.",
+    description = "Set or remove a table's freshness promise, stored as the Iceberg property `stardelt.freshness` (`{\"by\":\"07:00\",\"timezone\":\"Europe/Berlin\",\"graceMinutes\":60,\"setAt\":\"...\"}`). `?catalog=` picks the catalog. `by` is required: a 24-hour clock time `HH:MM` names a deadline, `null` removes the promise. A deadline needs an IANA `timezone`; `graceMinutes` is 0 to 1440 and defaults to 60. Removing a promise takes only `by: null`. A write with nothing to change sends no commit and answers the current status. The promise travels with the table, so any engine can read it; Nova evaluates it when the status is read. The interim rule is enforced by Nova: the catalog does not enforce it yet, and anyone who reaches Lakekeeper or Trino directly can still change the property.. `checkPipeline` is `<namespace>/<name>`; the read evaluates its newest completed run's failed `quality` checks (severity `error`) and `dbt` tests that name this table, and a failure answers `status: red` with `pipelineChecks.failed` naming them; the list route (`GET /api/catalog/health`) evaluates at most 20 promised tables per call, worst first, and a table beyond the cap answers its freshness verdict only.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -3880,6 +3943,47 @@ mod tests {
         assert_eq!(green.status, "green");
         assert_eq!(green.detail, "Fresh");
         assert!(green.pipeline_checks.is_some(), "the verdict is shown");
+    }
+
+    #[test]
+    fn a_failed_check_reddens_a_listed_row() {
+        let failed = PipelineChecks {
+            pipeline: "ns/pipe".into(),
+            run_id: Some("manual__1".into()),
+            state: Some("failed".into()),
+            failed: vec![FailedCheck {
+                task: "checks".into(),
+                check: "not_null".into(),
+                table: None,
+            }],
+        };
+        assert_eq!(
+            reddened_status("green".into(), "Fresh.".into(), "ns/pipe", &failed),
+            (
+                "red".into(),
+                "Fresh. Required check \"not_null\" of ns/pipe failed (run manual__1).".into()
+            ),
+            "a failed check is red and names the check"
+        );
+        let passed = PipelineChecks {
+            pipeline: "ns/pipe".into(),
+            run_id: Some("manual__2".into()),
+            state: Some("success".into()),
+            failed: Vec::new(),
+        };
+        assert_eq!(
+            reddened_status("green".into(), "Fresh.".into(), "ns/pipe", &passed),
+            ("green".into(), "Fresh.".into()),
+            "no failure leaves the freshness answer alone"
+        );
+    }
+
+    #[test]
+    fn the_check_cap_is_twenty() {
+        assert_eq!(
+            CHECK_PIPELINE_MAX_CHECKS, 20,
+            "the design's per-pass cap; change it only with the design"
+        );
     }
 
     #[test]
