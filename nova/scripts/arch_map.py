@@ -58,7 +58,8 @@ AREAS: dict[str, list[str]] = {
         "query_hints", "data",
     ],
     "Pipelines & delivery": [
-        "pipelines", "airflow", "pipeline_notice", "streams", "deployments", "stages",
+        "pipelines", "airflow", "pipeline_notice", "previews", "streams", "deployments",
+        "stages",
         "migrations", "destinations", "superset", "superset_archive",
     ],
     "Notebooks & compute": ["notebooks", "workspace", "compute"],
