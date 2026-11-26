@@ -41,15 +41,19 @@ export default function TableFreshness({
   const [by, setBy] = useState('07:00')
   const [timezone, setTimezone] = useState('Europe/Berlin')
   const [graceMinutes, setGraceMinutes] = useState('60')
+  const [notify, setNotify] = useState('')
 
   // The promise a person sees seeds the form: the first read, and any answer to a write.
   // A plain refetch of the same promise does not undo what is being typed.
-  const seedKey = promise ? `${promise.by}|${promise.timezone}|${promise.graceMinutes}` : ''
+  const seedKey = promise
+    ? `${promise.by}|${promise.timezone}|${promise.graceMinutes}|${promise.notify?.join(',')}`
+    : ''
   useEffect(() => {
     if (!promise) return
     setBy(promise.by)
     setTimezone(promise.timezone)
     setGraceMinutes(String(promise.graceMinutes))
+    setNotify((promise.notify ?? []).join(', '))
   }, [seedKey, promise])
 
   const write = useMutation({
@@ -61,7 +65,15 @@ export default function TableFreshness({
 
   const onSet = (event: FormEvent) => {
     event.preventDefault()
-    write.mutate({ by, timezone, graceMinutes: Number(graceMinutes) })
+    write.mutate({
+      by,
+      timezone,
+      graceMinutes: Number(graceMinutes),
+      notify: notify
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean),
+    })
   }
   const onRemove = () => write.mutate({ by: null })
 
@@ -99,6 +111,11 @@ export default function TableFreshness({
               </dd>
             </dl>
           )}
+          {promise?.notify?.length ? (
+            <p className="mt-2 text-xs text-text-mute break-words">
+              Alerts to {promise.notify.join(', ')} when the table is late.
+            </p>
+          ) : null}
           <p className="mt-2 text-sm text-text-mute">
             Last write {Number.isNaN(lastWriteMs) ? '—' : relativeTime(lastWriteMs)}
           </p>
@@ -134,6 +151,15 @@ export default function TableFreshness({
                   max={1440}
                   value={graceMinutes}
                   onChange={(e) => setGraceMinutes(e.target.value)}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-text-mute">
+                Tell (destination names, comma-separated)
+                <input
+                  className="input"
+                  value={notify}
+                  onChange={(e) => setNotify(e.target.value)}
+                  placeholder="on-call"
                 />
               </label>
               <button type="submit" className="btn-primary py-1.5" disabled={pending}>

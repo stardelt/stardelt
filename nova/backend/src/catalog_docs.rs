@@ -147,6 +147,10 @@ pub struct Freshness {
     pub grace_minutes: u32,
     /// When Nova wrote the promise (RFC 3339); the baseline of a table with no snapshot.
     pub set_at: String,
+    /// The destinations told when this table turns red, and when it is green again (#402).
+    /// Names of `destination` rows of the table's owner group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notify: Vec<String>,
 }
 
 fn default_grace_minutes() -> u32 {
@@ -220,6 +224,8 @@ pub struct FreshnessUpdate {
     pub timezone: Option<String>,
     /// How long after the deadline the table is still `amber` (0 to 1440, default 60).
     pub grace_minutes: Option<u32>,
+    /// The alert destinations; absent or empty means no alert. Replaces the stored list.
+    pub notify: Option<Vec<String>>,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.
@@ -605,6 +611,27 @@ fn checked_timezone(raw: &str) -> Result<String, String> {
         Ok(_) => Ok(text.to_string()),
         Err(_) => Err("the timezone is an IANA name like Europe/Berlin".into()),
     }
+}
+
+/// The alert destinations of a promise: at most five, each 1 to 64 characters, no duplicates.
+fn checked_notify(raw: Vec<String>) -> Result<Vec<String>, String> {
+    const MAX: usize = 5;
+    if raw.len() > MAX {
+        return Err(format!("notify names at most {MAX} destinations"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut names = Vec::with_capacity(raw.len());
+    for name in raw {
+        let text = name.trim().to_string();
+        if text.is_empty() || text.chars().count() > 64 {
+            return Err("a destination name is 1 to 64 characters".into());
+        }
+        if !seen.insert(text.clone()) {
+            return Err(format!("notify names {text:?} twice"));
+        }
+        names.push(text);
+    }
+    Ok(names)
 }
 
 /// The stored promise, or `None` when the text is not one. A hand-edited property that does
@@ -1338,11 +1365,49 @@ async fn write_freshness(
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    may_edit(
-        who,
-        property(&loaded.properties, "stardelt.owner").as_deref(),
-    )
-    .map_err(|e| DocError::new(StatusCode::FORBIDDEN, e))?;
+    let owner = property(&loaded.properties, "stardelt.owner");
+    may_edit(who, owner.as_deref()).map_err(|e| DocError::new(StatusCode::FORBIDDEN, e))?;
+
+    // A promise that names destinations is checked against the state store's `destination`
+    // rows now, so a typo is a sentence here and not silence later (#402 point 3).
+    if let FreshnessWrite::Set(promise) = &write
+        && !promise.notify.is_empty()
+    {
+        let Some(db) = state.db.as_ref() else {
+            return Err(DocError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alerts need the state store, and this Nova has none",
+            ));
+        };
+        let Some(owner) = owner.as_deref() else {
+            return Err(DocError::new(
+                StatusCode::BAD_REQUEST,
+                "set an owner on this table before naming alert destinations",
+            ));
+        };
+        for name in &promise.notify {
+            let found: Option<(i64,)> =
+                sqlx::query_as("SELECT id FROM destination WHERE owner_group = $1 AND name = $2")
+                    .bind(owner)
+                    .bind(name)
+                    .fetch_optional(db)
+                    .await
+                    .map_err(|_| {
+                        DocError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "the state store did not answer",
+                        )
+                    })?;
+            if found.is_none() {
+                return Err(DocError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no destination {name:?} belongs to {owner}: create it on the Destinations page first"
+                    ),
+                ));
+            }
+        }
+    }
 
     let current_text = property(&loaded.properties, FRESHNESS_PROPERTY);
     // A write of the promise that is already stored sends no commit. It compares the promise
@@ -1357,10 +1422,27 @@ async fn write_freshness(
                 current.by == next.by
                     && current.timezone == next.timezone
                     && current.grace_minutes == next.grace_minutes
+                    && current.notify == next.notify
             }),
     };
     if unchanged {
-        return Ok(health_of(&loaded, who));
+        let view = health_of(&loaded, who);
+        if let Some(promise) = &view.promise
+            && !promise.notify.is_empty()
+        {
+            remember_promise(state.db.as_ref(), catalog.name, ns, tbl, &view.status).await;
+        }
+        return Ok(view);
+    }
+
+    match &write {
+        FreshnessWrite::Remove => {
+            forget_promise(state.db.as_ref(), catalog.name, ns, tbl).await;
+        }
+        FreshnessWrite::Set(promise) if promise.notify.is_empty() => {
+            forget_promise(state.db.as_ref(), catalog.name, ns, tbl).await;
+        }
+        FreshnessWrite::Set(_) => {}
     }
 
     let updates = match &write {
@@ -1384,7 +1466,55 @@ async fn write_freshness(
 
     audit::catalog_doc_event(who, &format!("{ns}.{tbl}"), &["freshness"]);
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    Ok(health_of(&loaded, who))
+    let view = health_of(&loaded, who);
+    if let Some(promise) = &view.promise
+        && !promise.notify.is_empty()
+    {
+        remember_promise(state.db.as_ref(), catalog.name, ns, tbl, &view.status).await;
+    }
+    Ok(view)
+}
+
+/// Remember a promised table for the health collector (#402 point 3), or forget it.
+async fn remember_promise(
+    db: Option<&sqlx::PgPool>,
+    catalog: &str,
+    ns: &str,
+    tbl: &str,
+    status: &str,
+) {
+    let Some(db) = db else { return };
+    let done = sqlx::query(
+        "INSERT INTO table_promise (catalog, namespace, table_name, last_status, checked_at) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (catalog, namespace, table_name) DO UPDATE \
+           SET last_status = EXCLUDED.last_status, checked_at = EXCLUDED.checked_at",
+    )
+    .bind(catalog)
+    .bind(ns)
+    .bind(tbl)
+    .bind(status)
+    .bind(crate::jobs::now_ms() as i64)
+    .execute(db)
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "the promised table was not remembered");
+    }
+}
+
+async fn forget_promise(db: Option<&sqlx::PgPool>, catalog: &str, ns: &str, tbl: &str) {
+    let Some(db) = db else { return };
+    let done = sqlx::query(
+        "DELETE FROM table_promise WHERE catalog = $1 AND namespace = $2 AND table_name = $3",
+    )
+    .bind(catalog)
+    .bind(ns)
+    .bind(tbl)
+    .execute(db)
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "the promised table was not forgotten");
+    }
 }
 
 /// The body of a freshness write, validated before the lock.
@@ -1396,7 +1526,10 @@ fn validate_freshness(req: FreshnessUpdate) -> Result<FreshnessWrite, DocError> 
         ));
     };
     let Some(raw) = by else {
-        if req.timezone.is_some() || req.grace_minutes.is_some() {
+        if req.timezone.is_some()
+            || req.grace_minutes.is_some()
+            || req.notify.as_ref().is_some_and(|n| !n.is_empty())
+        {
             return Err(bad("removing a promise takes only by: null"));
         }
         return Ok(FreshnessWrite::Remove);
@@ -1410,11 +1543,13 @@ fn validate_freshness(req: FreshnessUpdate) -> Result<FreshnessWrite, DocError> 
     if grace_minutes > FRESHNESS_MAX_GRACE_MINUTES {
         return Err(bad("graceMinutes must be 0 to 1440"));
     }
+    let notify = checked_notify(req.notify.unwrap_or_default()).map_err(|e| bad(&e))?;
     Ok(FreshnessWrite::Set(Freshness {
         by,
         timezone,
         grace_minutes,
         set_at: rfc3339(now()),
+        notify,
     }))
 }
 
@@ -3038,6 +3173,7 @@ mod tests {
             timezone: timezone.into(),
             grace_minutes,
             set_at: "2026-11-01T00:00:00Z".into(),
+            notify: Vec::new(),
         }
     }
 
@@ -3130,6 +3266,7 @@ mod tests {
             by: Some(Some("07:00".into())),
             timezone: Some("Europe/Berlin".into()),
             grace_minutes: None,
+            notify: None,
         }
     }
 
@@ -3218,6 +3355,64 @@ mod tests {
             json!([{ "action": "remove-properties", "removals": [FRESHNESS_PROPERTY] }]),
             "by: null is a remove-properties of stardelt.freshness"
         );
+    }
+
+    #[test]
+    fn a_notify_list_is_checked() {
+        assert_eq!(
+            checked_notify(Vec::new()),
+            Ok(Vec::new()),
+            "an empty list is no alert"
+        );
+        let six: Vec<String> = (1..=6).map(|n| format!("d{n}")).collect();
+        assert!(
+            checked_notify(six).is_err(),
+            "at most five destinations are named"
+        );
+        assert!(
+            checked_notify(vec!["on-call".into(), "on-call".into()]).is_err(),
+            "a name may not appear twice"
+        );
+        assert!(
+            checked_notify(vec!["   ".into()]).is_err(),
+            "a blank name names no destination"
+        );
+        assert_eq!(
+            checked_notify(vec![" on-call ".into(), "email".into()]),
+            Ok(vec!["on-call".into(), "email".into()]),
+            "surrounding spaces are trimmed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn an_ignored_destination_name_is_refused() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
+             VALUES ('analytics', 'on-call', 'webhook', $1, 0, 0)",
+        )
+        .bind(json!({ "url": "https://example.invalid/hook" }))
+        .execute(&pool)
+        .await
+        .expect("insert a destination");
+        remember_promise(Some(&pool), "stardelt", "sales", "orders", "green").await;
+        remember_promise(Some(&pool), "stardelt", "sales", "orders", "red").await;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT last_status, checked_at FROM table_promise \
+             WHERE catalog = 'stardelt' AND namespace = 'sales' AND table_name = 'orders'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read the watched table back");
+        assert_eq!(rows.len(), 1, "one row per watched table");
+        assert_eq!(rows[0].0, "red", "the second status replaces the first");
+        forget_promise(Some(&pool), "stardelt", "sales", "orders").await;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM table_promise")
+            .fetch_one(&pool)
+            .await
+            .expect("count the watched tables");
+        assert_eq!(count, 0, "forget makes the collector stop watching");
     }
 
     #[tokio::test]

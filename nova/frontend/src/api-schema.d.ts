@@ -3457,6 +3457,11 @@ export interface components {
              * @description How long after the deadline the table is still `amber`.
              */
             graceMinutes?: number;
+            /**
+             * @description The destinations told when this table turns red, and when it is green again (#402).
+             *     Names of `destination` rows of the table's owner group.
+             */
+            notify?: string[];
             /** @description When Nova wrote the promise (RFC 3339); the baseline of a table with no snapshot. */
             setAt: string;
             /** @description The IANA zone the deadline is a wall-clock time in. */
@@ -3475,6 +3480,8 @@ export interface components {
              * @description How long after the deadline the table is still `amber` (0 to 1440, default 60).
              */
             graceMinutes?: number | null;
+            /** @description The alert destinations; absent or empty means no alert. Replaces the stored list. */
+            notify?: string[] | null;
             /** @description The IANA zone of the deadline; required with a deadline. */
             timezone?: string | null;
         };
