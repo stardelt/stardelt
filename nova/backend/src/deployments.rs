@@ -425,7 +425,21 @@ pub(crate) async fn deploy_stages(state: &AppState) -> Result<Vec<serde_json::Va
     );
     api.list(&Default::default())
         .await
-        .map(|list| list.items.into_iter().map(|o| o.data).collect())
+        .map(|list| {
+            list.items
+                .into_iter()
+                .map(|o| {
+                    // `DynamicObject` parses `metadata` into `ObjectMeta`, so `data` holds
+                    // everything but the name the verifier matches the token against.
+                    let name = o.metadata.name;
+                    let mut data = o.data;
+                    if let Some(object) = data.as_object_mut() {
+                        object.insert("metadata".into(), serde_json::json!({ "name": name }));
+                    }
+                    data
+                })
+                .collect()
+        })
         .map_err(|e| format!("the cluster did not answer for the deploy stages: {e}"))
 }
 

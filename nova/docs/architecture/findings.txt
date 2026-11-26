@@ -1,6 +1,6 @@
 B1 file-size budget (1500 production lines): 5 backend files over
   pipelines.rs 8121
-  auth.rs 2526
+  auth.rs 2528
   notebooks.rs 2277
   connection_routes.rs 1949
   catalog_docs.rs 1875
