@@ -48,14 +48,28 @@ def tasks():
     return [(path, doc, task) for path, doc in pipelines() for task in doc["tasks"]]
 
 
-def test_three_pipelines_one_per_layer():
+SQL_PIPELINES = ("shop-1-bronze", "shop-2-silver", "shop-3-gold")
+
+
+def sql_tasks():
+    """The tasks that name a statement file: the three Trino pipelines, not the Spark graph."""
+    return [(path, doc, task) for path, doc, task in tasks() if "sqlFile" in task]
+
+
+def test_four_pipelines_three_sql_layers_and_the_graph():
     found = pipelines()
-    assert [doc["name"] for _, doc in found] == ["shop-1-bronze", "shop-2-silver", "shop-3-gold"]
+    assert [doc["name"] for _, doc in found] == [
+        "shop-1-bronze",
+        "shop-2-silver",
+        "shop-3-gold",
+        "shop-4-graph",
+    ]
     for path, doc in found:
         assert "tasks" in doc, path.name
         for key in ("sql", "sqlFile", "notebook"):
             assert key not in doc, f"{path.name}: `tasks` cannot be combined with {key}"
-        assert len(doc["tasks"]) == 4, path.name
+        if doc["name"] in SQL_PIPELINES:
+            assert len(doc["tasks"]) == 4, path.name
         assert len(doc["name"]) <= MAX_NAME, f"{doc['name']} is {len(doc['name'])} characters"
 
 
@@ -65,14 +79,14 @@ def test_every_pipeline_is_readable_by_visitors():
 
 
 def test_every_task_names_a_statement_file_that_exists():
-    found = pipelines()
+    found = [row for row in pipelines() if row[1]["name"] in SQL_PIPELINES]
     names = {doc["name"]: [task["name"] for task in doc["tasks"]] for _, doc in found}
-    for _, doc, task in tasks():
+    for _, doc, task in sql_tasks():
         expected = f"sql/{TASK_FILES[doc['name']][task['name']]}.sql"
         assert task["sqlFile"] == expected, task
         assert (BUNDLE / task["sqlFile"]).is_file(), task["sqlFile"]
     on_disk = sorted(p.name for p in (BUNDLE / "sql").glob("*.sql"))
-    referenced = sorted(pathlib.Path(task["sqlFile"]).name for _, _, task in tasks())
+    referenced = sorted(pathlib.Path(task["sqlFile"]).name for _, _, task in sql_tasks())
     assert referenced == on_disk, "every statement file belongs to exactly one task"
     assert sorted(names) == sorted(TASK_FILES)
 
@@ -85,7 +99,7 @@ def test_dependencies_name_a_task_of_the_same_pipeline():
         assert set(depends) <= rest, f"{doc['name']}/{task['name']}: {set(depends) - rest}"
         if task["name"] == "schema":
             assert depends == [], "schema must run first"
-        else:
+        elif doc["name"] in SQL_PIPELINES:
             assert depends == ["schema"], f"{doc['name']}/{task['name']}"
 
 
@@ -93,6 +107,8 @@ def test_a_statement_uses_only_the_params_its_pipeline_sets():
     for _, doc in pipelines():
         used = set()
         for task in doc["tasks"]:
+            if "sqlFile" not in task:
+                continue
             sql = (BUNDLE / task["sqlFile"]).read_text(encoding="utf-8")
             task_used = set(PARAM.findall(sql))
             assert task_used <= set(doc.get("params", {})), (
@@ -103,7 +119,7 @@ def test_a_statement_uses_only_the_params_its_pipeline_sets():
 
 
 def test_a_statement_is_one_statement_within_the_limit():
-    for _, doc, task in tasks():
+    for _, doc, task in sql_tasks():
         sql = (BUNDLE / task["sqlFile"]).read_text(encoding="utf-8")
         code = "\n".join(line for line in sql.splitlines() if not line.strip().startswith("--")).strip().rstrip(";")
         assert ";" not in code, f"{doc['name']}/{task['name']} holds more than one statement"
@@ -154,3 +170,17 @@ def test_the_layers_are_the_catalogs_of_the_dbt_example():
     for stem, catalog in targets.items():
         sql = (BUNDLE / "sql" / f"{stem}.sql").read_text(encoding="utf-8")
         assert re.search(rf"create or replace (table|view) {catalog}\.\$\{{params\.schema\}}\.", sql), stem
+
+
+def test_the_graph_is_one_spark_pipeline_task():
+    doc = [doc for _, doc in pipelines() if doc["name"] == "shop-4-graph"][0]
+    (task,) = doc["tasks"]
+    assert task["spark-pipeline"] == {"project": "graph"}
+    assert task["writes"] == ["silver.${var.schema}.customer_value", "silver.${var.schema}.daily_orders"]
+    spec = yaml.safe_load((BUNDLE / "graph" / "spark-pipeline.yml").read_text(encoding="utf-8"))
+    assert spec["configuration"] == {"spark.sql.catalog.silver.type": "rest"}
+    assert spec["libraries"] == [{"glob": {"include": "sql/**"}}]
+    assert sorted(p.name for p in (BUNDLE / "graph" / "sql").glob("*.sql")) == [
+        "customer_value.sql",
+        "daily_orders.sql",
+    ]

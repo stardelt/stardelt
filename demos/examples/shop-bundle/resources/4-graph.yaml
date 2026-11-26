@@ -1,0 +1,11 @@
+name: shop-4-graph
+description: "Builds the shop's customer value and daily order counts as one declarative Spark graph."
+schedule: {cron: "0 5 * * *", timezone: Europe/Berlin}
+viewers: [visitors]
+tasks:
+  - name: graph
+    spark-pipeline:
+      project: graph
+    writes:
+      - silver.${var.schema}.customer_value
+      - silver.${var.schema}.daily_orders
