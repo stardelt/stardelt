@@ -335,6 +335,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalog/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Every table of one catalog that carries a freshness promise, the most broken first: `red`, then `amber`, then `green`, and inside one status by `namespace.name`. The list is the answer `table_health` gives for one table, applied to every table the catalog lists; the promise is the Iceberg property `stardelt.freshness`. `?catalog=` picks the catalog. Views are not listed (they cannot carry the property), and a table that vanished between the list and the read is skipped. A table without a promise is not listed. `checked` is how many tables were read; the list stops after 200 tables, so a larger catalog answers a prefix. The interim rule is enforced by Nova: `canEdit` says whether this caller may set a table's promise. */
+        get: operations["catalog_health_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalog/metrics": {
         parameters: {
             query?: never;
@@ -2688,6 +2705,12 @@ export interface components {
             /** @description One of `browse`, `select`, `write`, `create`, `manage`. */
             verb: string;
         };
+        /** @description `GET /api/catalog/health`: every table that carries a freshness promise, worst first. */
+        CatalogHealth: {
+            /** @description How many tables were read; `tables` stops at 200. */
+            checked: number;
+            tables: components["schemas"]["ListedHealth"][];
+        };
         /**
          * @description One catalog the caller may browse, with its Lakekeeper warehouse id and its medallion
          *     layer when it has one.
@@ -3499,6 +3522,22 @@ export interface components {
         Link: {
             label: string;
             url: string;
+        };
+        /** @description One promised table in `GET /api/catalog/health`. */
+        ListedHealth: {
+            /** @description Whether the interim rule lets this caller set the promise. */
+            canEdit: boolean;
+            catalog: string;
+            /** @description The most recent deadline at or before now, RFC 3339, or `null`. */
+            dueAt?: string | null;
+            /** @description The newest commit, RFC 3339, or `null` for a table with no snapshot. */
+            lastWrite?: string | null;
+            name: string;
+            namespace: string;
+            /** @description The first deadline strictly after now, RFC 3339, or `null`. */
+            nextDueAt?: string | null;
+            /** @description `grey`, `green`, `amber` or `red`; a listed table is never `grey`. */
+            status: string;
         };
         /** @description One log message. `sources` is deliberately absent: it names internal object-store paths. */
         LogLine: {
@@ -6355,6 +6394,74 @@ export interface operations {
             };
             /** @description A catalog the engine lists has no warehouse */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    catalog_health_list: {
+        parameters: {
+            query?: {
+                /** @description Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used. */
+                catalog?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The promised tables, worst first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogHealth"];
+                };
+            };
+            /** @description The catalog name is invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may not browse that catalog */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such catalog */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The catalog is not reachable or did not answer */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };

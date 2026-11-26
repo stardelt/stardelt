@@ -512,7 +512,10 @@ async fn proxy(state: &AppState, path: String) -> Response {
 
 /// GET one catalog path and parse it. The error is the response Nova would have proxied.
 #[allow(clippy::result_large_err)]
-async fn catalog_json(state: &AppState, path: String) -> Result<serde_json::Value, Response> {
+pub(crate) async fn catalog_json(
+    state: &AppState,
+    path: String,
+) -> Result<serde_json::Value, Response> {
     let url = format!("{}{}", state.lakekeeper_url, path);
     let mut request = state.http.get(&url);
     match lakekeeper_authorization(state).await {

@@ -173,6 +173,34 @@ pub struct TableFreshness {
     pub can_edit: bool,
 }
 
+/// One promised table in `GET /api/catalog/health`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedHealth {
+    pub catalog: String,
+    pub namespace: String,
+    pub name: String,
+    /// `grey`, `green`, `amber` or `red`; a listed table is never `grey`.
+    pub status: String,
+    /// The newest commit, RFC 3339, or `null` for a table with no snapshot.
+    pub last_write: Option<String>,
+    /// The most recent deadline at or before now, RFC 3339, or `null`.
+    pub due_at: Option<String>,
+    /// The first deadline strictly after now, RFC 3339, or `null`.
+    pub next_due_at: Option<String>,
+    /// Whether the interim rule lets this caller set the promise.
+    pub can_edit: bool,
+}
+
+/// `GET /api/catalog/health`: every table that carries a freshness promise, worst first.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogHealth {
+    pub tables: Vec<ListedHealth>,
+    /// How many tables were read; `tables` stops at 200.
+    pub checked: usize,
+}
+
 /// `PUT /api/catalog/tables/{ns}/{tbl}/health` body.
 ///
 /// `by: null` removes the promise; an absent key changes nothing.
@@ -328,6 +356,8 @@ struct Catalog<'a> {
     http: &'a reqwest::Client,
     /// `NOVA_LAKEKEEPER_URL/catalog/v1/<warehouse-id>`
     base: String,
+    /// The warehouse id `base` is built from; `catalog_json` takes paths, not URLs.
+    id: &'a str,
     authorization: Option<&'a str>,
     /// The catalog's name (`warehouse`, `finance`, …), for SQL and the edit lock.
     name: &'a str,
@@ -1172,6 +1202,106 @@ async fn freshness_for(
     Ok(health_of(&loaded, who))
 }
 
+/// Most tables `GET /api/catalog/health` reads in one call.
+const HEALTH_LIST_MAX_TABLES: usize = 200;
+
+/// The order a person and an assistant read the list in: the broken tables first.
+fn health_rank(status: &str) -> u8 {
+    match status {
+        "red" => 0,
+        "amber" => 1,
+        "green" => 2,
+        _ => 3,
+    }
+}
+
+/// `GET /api/catalog/health`: every table that carries a freshness promise, worst first.
+///
+/// The namespace and table lists are the Lakekeeper calls `namespaces_list` and
+/// `tables_list` make; only single-level namespaces are read, and views are never asked
+/// for (a view cannot carry the property). A table whose load fails is skipped: a table
+/// that vanished between the list and the load is not an error. The status is the same
+/// evaluation [`health_of`] makes for one table; that is the only rule.
+async fn health_list(
+    state: &Arc<AppState>,
+    who: &Identity,
+    catalog: &Catalog<'_>,
+) -> Result<CatalogHealth, DocError> {
+    let listing_error = |response: Response| {
+        DocError::new(
+            response.status(),
+            "the catalog did not answer the table list",
+        )
+    };
+    let answer = catalog::catalog_json(state, format!("/catalog/v1/{}/namespaces", catalog.id))
+        .await
+        .map_err(listing_error)?;
+    let mut namespaces: Vec<String> = answer["namespaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|levels| match levels.as_array()?.as_slice() {
+            [only] => only.as_str().map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    namespaces.sort();
+
+    let mut tables = Vec::new();
+    let mut checked = 0usize;
+    'namespaces: for ns in &namespaces {
+        let Some(segment) = catalog::path_segment(ns) else {
+            continue;
+        };
+        let list = catalog::catalog_json(
+            state,
+            format!("/catalog/v1/{}/namespaces/{segment}/tables", catalog.id),
+        )
+        .await
+        .map_err(listing_error)?;
+        let mut names: Vec<String> = list["identifiers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id["name"].as_str().map(str::to_string))
+            .collect();
+        names.sort();
+        for name in names {
+            if checked >= HEALTH_LIST_MAX_TABLES {
+                break 'namespaces;
+            }
+            // A table that vanished between the list and the load is not an error: the next
+            // call lists it again, or it is gone for good.
+            let Ok(loaded) = catalog.load(ns, &name).await else {
+                continue;
+            };
+            checked += 1;
+            let health = health_of(&loaded, who);
+            if health.promise.is_none() {
+                continue;
+            }
+            tables.push(ListedHealth {
+                catalog: catalog.name.to_string(),
+                namespace: ns.clone(),
+                name,
+                status: health.status,
+                last_write: health.last_write,
+                due_at: health.due_at,
+                next_due_at: health.next_due_at,
+                can_edit: health.can_edit,
+            });
+        }
+    }
+    tables.sort_by(|a, b| {
+        (health_rank(&a.status), &a.namespace, &a.name).cmp(&(
+            health_rank(&b.status),
+            &b.namespace,
+            &b.name,
+        ))
+    });
+    Ok(CatalogHealth { tables, checked })
+}
+
 /// The validated write: remove the promise, or store this one.
 enum FreshnessWrite {
     Remove,
@@ -1457,6 +1587,7 @@ pub(crate) async fn documentation_for(
     let client = Catalog {
         http: &s.http,
         base,
+        id: &id,
         authorization: authorization.as_deref(),
         name: &name,
     };
@@ -1507,6 +1638,7 @@ pub async fn update(
     let catalog = Catalog {
         http: &s.http,
         base,
+        id: &id,
         authorization: authorization.as_deref(),
         name: &name,
     };
@@ -1555,11 +1687,56 @@ pub async fn health(
     let catalog = Catalog {
         http: &s.http,
         base,
+        id: &id,
         authorization: authorization.as_deref(),
         name: &name,
     };
     match freshness_for(&s, &catalog, &who, &ns, &tbl).await {
         Ok(view) => Json(view).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "catalog_health_list",
+    path = "/api/catalog/health",
+    tag = "public",
+    description = "Every table of one catalog that carries a freshness promise, the most broken first: `red`, then `amber`, then `green`, and inside one status by `namespace.name`. The list is the answer `table_health` gives for one table, applied to every table the catalog lists; the promise is the Iceberg property `stardelt.freshness`. `?catalog=` picks the catalog. Views are not listed (they cannot carry the property), and a table that vanished between the list and the read is skipped. A table without a promise is not listed. `checked` is how many tables were read; the list stops after 200 tables, so a larger catalog answers a prefix. The interim rule is enforced by Nova: `canEdit` says whether this caller may set a table's promise.",
+    params(crate::catalog::CatalogParam),
+    responses(
+        (status = 200, description = "The promised tables, worst first", body = CatalogHealth),
+        (status = 400, description = "The catalog name is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn list_health(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<crate::catalog::CatalogParam>,
+    caller: Option<axum::Extension<Principal>>,
+) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let who = caller_identity(&s, caller);
+    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let (base, authorization) = match catalog_or_error(&s, &id).await {
+        Ok(v) => v,
+        Err(response) => return *response,
+    };
+    let catalog = Catalog {
+        http: &s.http,
+        base,
+        id: &id,
+        authorization: authorization.as_deref(),
+        name: &name,
+    };
+    match health_list(&s, &who, &catalog).await {
+        Ok(answer) => Json(answer).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -1605,6 +1782,7 @@ pub async fn update_health(
     let catalog = Catalog {
         http: &s.http,
         base,
+        id: &id,
         authorization: authorization.as_deref(),
         name: &name,
     };
@@ -1656,6 +1834,7 @@ pub async fn update_column(
     let catalog = Catalog {
         http: &s.http,
         base,
+        id: &id,
         authorization: authorization.as_deref(),
         name: &name,
     };
@@ -1774,6 +1953,11 @@ mod tests {
         in_flight: usize,
         max_in_flight: usize,
         commit_delay: Option<Duration>,
+        /// The namespaces the list endpoint answers, and each one's tables.
+        namespaces: Vec<String>,
+        tables: std::collections::HashMap<String, Vec<String>>,
+        /// Load answers per `ns/tbl`; a table not named here answers `load`.
+        loads: std::collections::HashMap<String, Value>,
     }
 
     #[derive(Clone, Default)]
@@ -1784,6 +1968,25 @@ mod tests {
     impl Fake {
         fn set_load(&self, load: Value) {
             self.inner.lock().unwrap().load = load;
+        }
+
+        /// One namespace with these tables; each table answers the same load unless
+        /// [`Fake::set_table_load`] gives it its own.
+        fn set_catalog(&self, namespace: &str, tables: &[&str]) {
+            let mut s = self.inner.lock().unwrap();
+            s.namespaces = vec![namespace.to_string()];
+            s.tables.insert(
+                namespace.to_string(),
+                tables.iter().map(|t| t.to_string()).collect(),
+            );
+        }
+
+        fn set_table_load(&self, ns: &str, tbl: &str, load: Value) {
+            self.inner
+                .lock()
+                .unwrap()
+                .loads
+                .insert(format!("{ns}/{tbl}"), load);
         }
 
         fn fail_load(&self, status: u16) {
@@ -1814,12 +2017,17 @@ mod tests {
 
     async fn load_handler(
         State(fake): State<Fake>,
-        Path((_wh, _ns, _tbl)): Path<(String, String, String)>,
+        Path((_wh, ns, tbl)): Path<(String, String, String)>,
     ) -> Response {
         let (status, body) = {
             let mut s = fake.inner.lock().unwrap();
             s.requests += 1;
-            (s.load_status.unwrap_or(200), s.load.clone())
+            let body = s
+                .loads
+                .get(&format!("{ns}/{tbl}"))
+                .cloned()
+                .unwrap_or_else(|| s.load.clone());
+            (s.load_status.unwrap_or(200), body)
         };
         match status {
             200 => Json(body).into_response(),
@@ -1877,11 +2085,16 @@ mod tests {
         }
     }
 
-    /// A fake Lakekeeper answering one table's GET and POST.
+    /// A pretend Lakekeeper: namespaces, their tables, one table's GET and POST.
     async fn fake_catalog() -> (Fake, String) {
         let fake = Fake::default();
         fake.set_load(load_fixture());
         let app = Router::new()
+            .route("/catalog/v1/{wh}/namespaces", get(namespaces_handler))
+            .route(
+                "/catalog/v1/{wh}/namespaces/{ns}/tables",
+                get(tables_handler),
+            )
             .route(
                 "/catalog/v1/{wh}/namespaces/{ns}/tables/{tbl}",
                 get(load_handler).post(commit_handler),
@@ -1893,6 +2106,37 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (fake, format!("http://{addr}"))
+    }
+
+    async fn namespaces_handler(State(fake): State<Fake>) -> Response {
+        let namespaces: Vec<Value> = fake
+            .inner
+            .lock()
+            .unwrap()
+            .namespaces
+            .iter()
+            .map(|ns| json!([ns]))
+            .collect();
+        Json(json!({ "namespaces": namespaces })).into_response()
+    }
+
+    async fn tables_handler(
+        State(fake): State<Fake>,
+        Path((_wh, ns)): Path<(String, String)>,
+    ) -> Response {
+        let names = fake
+            .inner
+            .lock()
+            .unwrap()
+            .tables
+            .get(&ns)
+            .cloned()
+            .unwrap_or_default();
+        let identifiers: Vec<Value> = names
+            .iter()
+            .map(|name| json!({ "namespace": [ns], "name": name }))
+            .collect();
+        Json(json!({ "identifiers": identifiers })).into_response()
     }
 
     fn test_state() -> Arc<AppState> {
@@ -1952,6 +2196,7 @@ mod tests {
         Catalog {
             http: &state.http,
             base: format!("{addr}/catalog/v1/wh"),
+            id: "wh",
             authorization: None,
             name: "warehouse",
         }
@@ -2783,6 +3028,24 @@ mod tests {
         }
     }
 
+    /// A load-table answer carrying `promise` as the Iceberg property, and — when
+    /// `last_write_ms` is given — a current snapshot at that time.
+    fn load_with_promise(promise: &Freshness, last_write_ms: Option<i64>) -> Value {
+        let mut body = load_fixture();
+        body["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert(
+                FRESHNESS_PROPERTY.into(),
+                json!(serde_json::to_string(promise).expect("the promise serializes")),
+            );
+        if let Some(ms) = last_write_ms {
+            body["metadata"]["current-snapshot-id"] = json!(7);
+            body["metadata"]["snapshots"] = json!([{ "snapshot-id": 7, "timestamp-ms": ms }]);
+        }
+        body
+    }
+
     #[test]
     fn freshness_is_green_before_the_deadline_amber_inside_the_grace_and_red_after() {
         let promise = promise("07:00", "Europe/Berlin", 60);
@@ -2941,6 +3204,59 @@ mod tests {
             commits[0]["updates"],
             json!([{ "action": "remove-properties", "removals": [FRESHNESS_PROPERTY] }]),
             "by: null is a remove-properties of stardelt.freshness"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_health_list_is_red_first_and_skips_tables_without_a_promise() {
+        let (fake, addr) = fake_catalog().await;
+        let state = crate::router_tests::test_state_with_lakekeeper(&addr);
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        // Deadlines are relative to the real clock the route reads: `by 00:00 UTC` makes
+        // today's deadline the most recent one, and the newest write decides the status.
+        let now = now();
+        fake.set_catalog("sales", &["green_orders", "red_orders", "plain"]);
+        fake.set_table_load(
+            "sales",
+            "green_orders",
+            load_with_promise(&promise("00:00", "UTC", 60), Some(now.timestamp_millis())),
+        );
+        fake.set_table_load(
+            "sales",
+            "red_orders",
+            load_with_promise(
+                &promise("00:00", "UTC", 0),
+                Some((now - chrono::Duration::days(30)).timestamp_millis()),
+            ),
+        );
+        fake.set_table_load("sales", "plain", load_fixture());
+
+        let answer = health_list(&state, &member, &catalog)
+            .await
+            .expect("the list answers");
+        assert_eq!(answer.checked, 3, "all three tables were read");
+        let listed: Vec<(&str, &str)> = answer
+            .tables
+            .iter()
+            .map(|t| (t.name.as_str(), t.status.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![("red_orders", "red"), ("green_orders", "green")],
+            "the red table first, the amber/red order by status, the unpromised table skipped"
+        );
+        assert!(
+            answer
+                .tables
+                .iter()
+                .all(|t| t.catalog == "warehouse" && t.namespace == "sales"),
+            "every row names the catalog and the namespace it was read from"
+        );
+        assert!(
+            answer.tables.iter().all(|t| t.can_edit),
+            "ada owns the group"
         );
     }
 
