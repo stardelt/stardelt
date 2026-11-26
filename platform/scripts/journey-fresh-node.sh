@@ -87,6 +87,8 @@ for _ in range(60):
         raise SystemExit("the engine refused: %s" % state["error"].get("message"))
     next_uri = state.get("nextUri")
     if not next_uri:
+        if (state.get("stats") or {}).get("state") == "FINISHED":
+            break  # DDL/DML answer no rows: nothing to print, not an error
         raise SystemExit("no rows and no nextUri")
     time.sleep(0.3)
     state = call(next_uri)
