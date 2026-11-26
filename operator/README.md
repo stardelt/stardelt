@@ -43,12 +43,10 @@ Every kind is `v1alpha1` until `0.1.0`. A release upgrades the one before it; a 
 | Pillar | Default | What it plans |
 |---|---|---|
 | `lakehouse` | `true` | nothing by itself — the storage + catalog + query components hang off each `Lakehouse` |
-| `batch` | `false` | reserved for Spark compute (stardelt-operator#4); nothing plans from it yet |
 | `notebooks` | `false` | JupyterHub (chart `jupyterhub/jupyterhub`, pinned like every other component) |
 | `pipelines` | `false` | Airflow (chart `apache-airflow/airflow`, pinned like every other component) — scheduled pipelines and jobs; Nova's Pipelines page needs it |
 | `dashboards` | `false` | Superset (chart `superset/superset`, pinned like every other component) — BI dashboards over Trino, sign-in through the platform IdP |
 | `streaming` | `false` | Strimzi Kafka and the Kubeflow Spark operator; a `StreamApp` then runs on the pillar's bus (D42) |
-| `ml` | `false` | reserved for the ML plugs |
 
 ```yaml
 apiVersion: stardelt.io/v1alpha1

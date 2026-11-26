@@ -2,6 +2,12 @@
 
 One section per release, newest first; the `## v<version>` section is what `gh release create` publishes.
 
+## v0.0.5
+
+### Breaking
+
+- `PlatformInstance.spec.pillars.batch` and `PlatformInstance.spec.pillars.ml` are gone: the two fields were accepted and installed nothing. Airflow is the `pipelines` pillar, and the ML pillar has no implementation yet (stardelt/stardelt#1844).
+
 ## v0.0.4
 
 ### Breaking

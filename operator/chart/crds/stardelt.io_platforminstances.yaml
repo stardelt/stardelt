@@ -478,18 +478,13 @@ spec:
                 type: string
               pillars:
                 default:
-                  batch: false
                   dashboards: false
                   lakehouse: true
-                  ml: false
                   notebooks: false
                   pipelines: false
                   streaming: false
                 description: Which pillars a platform instance enables.
                 properties:
-                  batch:
-                    default: false
-                    type: boolean
                   dashboards:
                     default: false
                     description: |-
@@ -499,9 +494,6 @@ spec:
                     type: boolean
                   lakehouse:
                     default: true
-                    type: boolean
-                  ml:
-                    default: false
                     type: boolean
                   notebooks:
                     default: false
