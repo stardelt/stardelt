@@ -926,6 +926,47 @@ def _deployed(nova, bundle_name, target, mode, user, preview=None):
     ]
 
 
+MAX_PREVIEWS_PER_BUNDLE = 5
+MAX_PREVIEWS = 20
+
+
+def _preview_copies(nova):
+    """Every preview copy on the stage, as ``{(bundle, preview, deployedBy)}``."""
+    copies = set()
+    pipelines = nova.call("pipelines_list")["pipelines"]
+    _, streams = _listed(nova)
+    for row in list(pipelines) + list(streams):
+        deployment = row.get("deployment") or {}
+        if deployment.get("preview"):
+            copies.add((deployment.get("bundle"), deployment["preview"], deployment.get("deployedBy")))
+    return copies
+
+
+def _preview_refusal(copies, bundle_name, preview, user):
+    """Why this deploy may not open a preview copy, or ``None`` when it may.
+
+    ``copies`` is ``{(bundle, preview, deployedBy)}``. A deploy into a copy that already exists adds no
+    copy and is never refused.
+    """
+    in_bundle = {p for (b, p, _) in copies if b == bundle_name}
+    if preview in in_bundle:
+        return None
+    mine = sorted(p for (b, p, who) in copies if b == bundle_name and who == user)
+    if len(mine) >= MAX_PREVIEWS_PER_BUNDLE:
+        return (
+            f"a bundle keeps at most {MAX_PREVIEWS_PER_BUNDLE} previews per person; this one already has "
+            f"{len(mine)} of yours ({', '.join(mine)}): remove one with "
+            f"`stardelt bundle destroy <dir> -t dev --preview <id>`"
+        )
+    all_copies = {(b, p) for (b, p, _) in copies}
+    if len(all_copies) >= MAX_PREVIEWS:
+        return (
+            f"this stage already has {len(all_copies)} previews, the most it may hold: remove one with "
+            f"`stardelt bundle destroy <dir> -t <target> --preview <id>`"
+        )
+    return None
+
+
 def _listed(nova):
     """The caller's streams and the namespace they live in: ``(namespace, rows)``."""
     answer = nova.call("streams_list")
@@ -1318,6 +1359,10 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
             "%Y-%m-%dT%H:%M:%SZ"
         )
     stamp = provenance(directory, target, preview, expires_at)
+    if preview:
+        refusal = _preview_refusal(_preview_copies(nova), stamp["bundle"], preview, user)
+        if refusal:
+            return [(target, refusal)], []
     if mode == "production" and str(stamp.get("revision") or "").endswith("-dirty"):
         return [(target, f"a production target cannot deploy from a tree with uncommitted changes (the revision would read {stamp['revision']}): commit or stash them, or deploy a development target")], []
     if mode == "development":
