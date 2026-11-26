@@ -488,6 +488,16 @@ fn stream_api(state: &AppState) -> Result<Api<kube::api::DynamicObject>, Fail> {
     ))
 }
 
+/// Delete one `StreamApp` of Nova's namespace. A resource that is already gone is success.
+pub(crate) async fn delete_stream(state: &AppState, name: &str) -> Result<(), Fail> {
+    let api = stream_api(state)?;
+    match api.delete(name, &kube::api::DeleteParams::default()).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
+        Err(e) => Err(resource_fail(ResourceError::Unavailable(e.to_string()))),
+    }
+}
+
 /// Every `StreamApp` of Nova's namespace.
 pub(crate) async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
     let api = stream_api(state)?;
