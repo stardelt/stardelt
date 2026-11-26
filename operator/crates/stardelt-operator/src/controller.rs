@@ -2454,10 +2454,9 @@ async fn reconcile_platform(
         pillar_outcome.components.push(bus);
     }
     // `Ready` is the core's (#1735): a failing optional pillar is the `PillarsReady` condition.
-    let core_waiting = waiting_message(&outcome);
-    let core_phase = phase(instance.spec.dry_run, &outcome);
+    // The ingress and monitoring steps are core, so their rows must be in `outcome` before
+    // `platform_status` reads the phase (#1787).
     let pillar_components = pillar_outcome.components.clone();
-    outcome.components.extend(pillar_components.iter().cloned());
     // The Ingress objects come last: they route to the Services above.
     if let Some(ingress) = ensure_ingress(&ctx, &instance.spec, &owner).await {
         outcome.components.push(ingress);
@@ -2470,19 +2469,51 @@ async fn reconcile_platform(
     {
         outcome.components.push(monitoring);
     }
-    let phase = core_phase;
+    let status = platform_status(
+        &instance,
+        &outcome,
+        monitoring_crds,
+        &pillar_components,
+        &now_rfc3339(),
+    );
+    let phase = status.phase.clone();
+    let api: Api<PlatformInstance> = Api::all(ctx.client.clone());
+    api.patch_status(
+        &name,
+        &PatchParams::default(),
+        &Patch::Merge(json!({ "status": status })),
+    )
+    .await?;
+    crate::metrics::record_status_write("platform");
+    tracing::info!(instance = %name, phase, dry_run = instance.spec.dry_run, "reconciled");
+    Ok(Action::requeue(Duration::from_secs(300)))
+}
 
+/// Assemble a reconciled `PlatformInstance`'s status (#1787).
+///
+/// `core` holds every component the core applied — the `ingress` and `monitoring` rows included —
+/// so `phase`/`waiting_message` see a failing one. The optional pillars are `PillarsReady` alone
+/// (#1735): they are appended to `status.components` but never hold `Ready`.
+fn platform_status(
+    instance: &PlatformInstance,
+    core: &PlanOutcome,
+    monitoring_crds: bool,
+    pillars: &[ComponentStatus],
+    now: &str,
+) -> PlatformInstanceStatus {
+    let phase = phase(instance.spec.dry_run, core);
+    let mut components = core.components.clone();
+    components.extend(pillars.iter().cloned());
     let prev = instance
         .status
         .as_ref()
         .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Ready"));
-    let now = now_rfc3339();
     let mut conditions = vec![ready_condition(
         phase,
         instance.metadata.generation,
         prev,
-        &now,
-        core_waiting,
+        now,
+        waiting_message(core),
     )];
     let previous_monitoring = instance.status.as_ref().and_then(|s| {
         s.conditions
@@ -2494,7 +2525,7 @@ async fn reconcile_platform(
         monitoring_crds,
         instance.metadata.generation,
         previous_monitoring,
-        &now,
+        now,
     ) {
         conditions.push(condition);
     }
@@ -2507,7 +2538,7 @@ async fn reconcile_platform(
         &instance.spec,
         instance.metadata.generation,
         previous_allow_list,
-        &now,
+        now,
     ) {
         conditions.push(condition);
     }
@@ -2515,30 +2546,17 @@ async fn reconcile_platform(
         .status
         .as_ref()
         .and_then(|s| s.conditions.iter().find(|c| c.type_ == "PillarsReady"));
-    if let Some(condition) = pillars_condition(
-        &pillar_components,
-        previous_pillars,
-        instance.metadata.generation,
-        &now,
-    ) {
+    if let Some(condition) =
+        pillars_condition(pillars, previous_pillars, instance.metadata.generation, now)
+    {
         conditions.push(condition);
     }
-    let status = PlatformInstanceStatus {
+    PlatformInstanceStatus {
         phase: phase.into(),
         conditions,
         observed_generation: instance.metadata.generation,
-        components: outcome.components,
-    };
-    let api: Api<PlatformInstance> = Api::all(ctx.client.clone());
-    api.patch_status(
-        &name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({ "status": status })),
-    )
-    .await?;
-    crate::metrics::record_status_write("platform");
-    tracing::info!(instance = %name, phase, dry_run = instance.spec.dry_run, "reconciled");
-    Ok(Action::requeue(Duration::from_secs(300)))
+        components,
+    }
 }
 
 pub(crate) fn error_policy<K>(_obj: Arc<K>, err: &kube::Error, _ctx: Arc<Context>) -> Action {
@@ -3105,6 +3123,79 @@ mod tests {
             message.contains("superset: hook superset-init-db failed"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_failing_ingress_row_holds_the_platform_off_ready() {
+        let status = platform_status_of(
+            vec![
+                component("trino", true, None),
+                component(
+                    "ingress",
+                    false,
+                    Some(
+                        "nothing to publish: ingress needs baseDomain and an application that has a host",
+                    ),
+                ),
+            ],
+            vec![],
+        );
+        assert_eq!(status.phase, "Progressing");
+        let ready = status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == "Ready")
+            .expect("a Ready condition");
+        assert_eq!(ready.status, "False");
+        assert_eq!(ready.reason.as_deref(), Some("Progressing"));
+        let message = ready.message.as_deref().expect("a waiting message");
+        assert!(message.contains("ingress: nothing to publish"), "{message}");
+    }
+
+    #[test]
+    fn a_failing_pillar_stays_pillarsready_only() {
+        let status = platform_status_of(
+            vec![component("trino", true, None)],
+            vec![component(
+                "superset",
+                false,
+                Some("hook superset-init-db failed"),
+            )],
+        );
+        assert_eq!(status.phase, "Ready");
+        let ready = status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == "Ready")
+            .expect("a Ready condition");
+        assert_eq!(ready.status, "True");
+        let pillars = status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == "PillarsReady")
+            .expect("a PillarsReady condition");
+        assert_eq!(pillars.status, "False");
+        assert_eq!(status.components.len(), 2, "the pillar is still reported");
+        assert_eq!(status.components[1].name, "superset");
+    }
+
+    /// `platform_status` for a non-dry-run instance with `core` and `pillars` as they were applied.
+    fn platform_status_of(
+        core: Vec<ComponentStatus>,
+        pillars: Vec<ComponentStatus>,
+    ) -> PlatformInstanceStatus {
+        let instance: PlatformInstance = serde_json::from_value(json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "PlatformInstance",
+            "metadata": { "name": "cluster", "generation": 3 },
+            "spec": { "dryRun": false }
+        }))
+        .expect("deserialize PlatformInstance");
+        let core = PlanOutcome {
+            components: core,
+            values_resolved: true,
+        };
+        platform_status(&instance, &core, false, &pillars, "2026-01-01T00:00:00Z")
     }
 
     #[test]
