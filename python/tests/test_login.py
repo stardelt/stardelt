@@ -73,6 +73,37 @@ def test_a_provider_that_refuses_offline_access_falls_back_to_openid():
     assert creds["access_token"] == CANARY and creds["refresh_token"] == "rt-1"
 
 
+def test_a_person_refused_offline_tokens_approves_again_without_them():
+    session = FakeSession(
+        FakeResponse(200, META),
+        FakeResponse(200, START),
+        FakeResponse(400, {"error": "not_allowed"}),
+        FakeResponse(200, {**START, "device_code": "dc-2", "user_code": "WXYZ-1234"}),
+        GRANTED,
+    )
+    said = []
+    creds = login.device_login(session, ISSUER, "stardelt-dev", said.append, sleep=lambda s: None, clock=lambda: 1000)
+    starts = [call[2]["data"] for call in session.calls if "scope" in call[2].get("data", {})]
+    assert [start["scope"] for start in starts] == ["openid offline_access", "openid"]
+    assert any("may not hold an offline sign-in" in line for line in said)
+    assert any("ABCD-EFGH" in line for line in said) and any("WXYZ-1234" in line for line in said)
+    assert creds["access_token"] == CANARY and creds["refresh_token"] == "rt-1"
+
+
+def test_not_allowed_without_offline_access_is_a_login_error():
+    session = FakeSession(
+        FakeResponse(200, META),
+        FakeResponse(200, START),
+        FakeResponse(400, {"error": "not_allowed"}),
+        FakeResponse(200, {**START, "device_code": "dc-2", "user_code": "WXYZ-1234"}),
+        FakeResponse(400, {"error": "not_allowed"}),
+    )
+    with pytest.raises(login.LoginError, match="not_allowed"):
+        login.device_login(session, ISSUER, "stardelt-dev", print, sleep=lambda s: None, clock=lambda: 1000)
+    starts = [call for call in session.calls if "scope" in call[2].get("data", {})]
+    assert len(starts) == 2
+
+
 def test_another_refusal_of_the_device_request_is_not_retried_without_offline_access():
     session = FakeSession(FakeResponse(200, META), FakeResponse(400, {"error": "invalid_client"}))
     with pytest.raises(login.LoginError, match="HTTP 400"):
