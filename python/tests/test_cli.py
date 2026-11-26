@@ -32,6 +32,35 @@ def test_whoami_prints_the_answer_as_json_with_the_bearer_token():
     assert kwargs["headers"] == {"Authorization": f"Bearer {CANARY}"}
 
 
+def test_a_server_of_another_release_warns_once_and_names_the_install_line():
+    code, out, err, _ = run(
+        ["whoami"], FakeResponse(payload={"user": "analyst"}, headers={"X-Stardelt-Version": "0.0.9"})
+    )
+    assert code == 0 and json.loads(out) == {"user": "analyst"}
+    assert err.count("stardelt: warning:") == 1, err
+    assert f"the server runs 0.0.9, this CLI is {stardelt.__version__}" in err
+    assert "releases/download/v0.0.9/stardelt-0.0.9-py3-none-any.whl" in err
+
+
+def test_a_server_of_the_same_release_says_nothing():
+    code, out, err, _ = run(
+        ["whoami"],
+        FakeResponse(payload={"user": "analyst"}, headers={"X-Stardelt-Version": stardelt.__version__}),
+    )
+    assert (code, err) == (0, "")
+
+
+def test_the_warning_is_printed_once_even_when_a_command_makes_two_requests():
+    done = {"statementId": "q1", "state": "SUCCEEDED", "columns": RESULT["columns"], "rows": RESULT["rows"], "rowCount": 2, "chunks": 1, "truncated": False}
+    code, _, err, _ = run(
+        ["sql", "select x, y", "--long"],
+        FakeResponse(200, done, headers={"X-Stardelt-Version": "0.0.9"}),
+        FakeResponse(204, None, headers={"X-Stardelt-Version": "0.0.9"}),
+    )
+    assert code == 0
+    assert err.count("stardelt: warning:") == 1, err
+
+
 def test_sql_prints_an_aligned_table_by_default():
     code, out, _, session = run(["sql", "select x, y"], FakeResponse(payload=RESULT))
     assert code == 0

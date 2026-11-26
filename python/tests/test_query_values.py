@@ -5,6 +5,7 @@ import stardelt.api as api
 
 class FakeResponse:
     status_code = 200
+    headers = {}
 
     def json(self):
         return []

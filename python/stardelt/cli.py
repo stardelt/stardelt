@@ -570,7 +570,20 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             stderr.write("stardelt: authentication needed: run `stardelt login` or set STARDELT_TOKEN\n")
             return AUTH
         token = lambda: login.fresh_token(environ, http)  # noqa: E731
-    nova = api.Client(base_url=host, token=token, session=http)
+
+    def _warn_on_server_release(server):
+        """One line, once per command, when Nova runs another release (#1773): the install line."""
+        version = server.removeprefix("v")
+        if not version or version == __version__:
+            return
+        stderr.write(
+            f"stardelt: warning: the server runs {server}, this CLI is {__version__}; "
+            'install the client of the same release: pip install "stardelt @ '
+            f"https://github.com/stardelt/stardelt/releases/download/v{version}/"
+            f'stardelt-{version}-py3-none-any.whl"\n'
+        )
+
+    nova = api.Client(base_url=host, token=token, session=http, on_version=_warn_on_server_release)
 
     try:
         if args.command == "whoami":

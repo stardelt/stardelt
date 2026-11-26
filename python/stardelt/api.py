@@ -136,7 +136,7 @@ class Client:
     ``STARDELT_NOVA_URL`` (the public origin) when both are set.
     """
 
-    def __init__(self, base_url=None, token=None, session=None, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, base_url=None, token=None, session=None, timeout=DEFAULT_TIMEOUT, on_version=None):
         base = (
             base_url
             or os.environ.get("STARDELT_NOVA_API_URL", "")
@@ -148,6 +148,10 @@ class Client:
         self._token = token
         self._session = session or requests.Session()
         self._timeout = timeout
+        # The first `x-stardelt-version` the server answers, and a callback called once with it
+        # (the CLI's warning, #1773). `None` until an answer carries the header.
+        self.server_version = None
+        self._on_version = on_version
 
     def __repr__(self):
         return f"Client(base_url={self.base_url!r})"
@@ -174,6 +178,12 @@ class Client:
             timeout=self._timeout,
             **kwargs,
         )
+        server = response.headers.get("x-stardelt-version")
+        if server:
+            self.server_version = server
+            callback, self._on_version = self._on_version, None
+            if callback is not None:
+                callback(server)
         if response.status_code >= 400:
             try:
                 payload = response.json()
