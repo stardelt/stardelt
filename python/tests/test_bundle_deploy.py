@@ -86,7 +86,9 @@ def test_a_preview_deploy_prefixes_names_and_drops_the_schedule(tmp_path):
     existing = {"pipelines": [{"name": "pr-123-nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
     code, out, err, session = run(
         ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-123"],
-        ME, FakeResponse(payload=NO_CATALOGS), FakeResponse(payload=CREATE), FakeResponse(payload=CREATE),
+        ME,
+        FakeResponse(payload={"pipelines": []}), FakeResponse(payload={"namespace": "stardelt", "streams": []}),
+        FakeResponse(payload=NO_CATALOGS), FakeResponse(payload=CREATE), FakeResponse(payload=CREATE),
         FakeResponse(payload=PLAN_OK),
         FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "pr-123-load"}),
         FakeResponse(payload=existing), FakeResponse(payload={"name": "pr-123-nightly"}),
@@ -944,3 +946,42 @@ def test_a_failed_smoke_run_rolls_back_when_the_target_says_so(tmp_path, monkeyp
         ("POST", "/api/deployments/7/rollback"),
     ]
     assert session.calls[-2][2]["params"] == {"bundle": "sales-etl", "target": "prod"}
+
+
+def copies(n: int, bundle_name: str = "sales-etl", who: str = "alice") -> dict:
+    return {
+        "pipelines": [
+            {
+                "name": f"pr-{i}-load",
+                "namespace": "stardelt",
+                "deployment": {"bundle": bundle_name, "target": "dev", "preview": f"pr-{i}", "deployedBy": who},
+            }
+            for i in range(n)
+        ]
+    }
+
+
+def test_a_sixth_preview_of_one_bundle_is_refused_before_anything_is_checked(tmp_path):
+    make(tmp_path)
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-9"],
+        ME, FakeResponse(payload=copies(5)), FakeResponse(payload={"namespace": "stardelt", "streams": []}),
+    )
+    assert (code, out) == (2, "")
+    assert "a bundle keeps at most 5 previews per person" in err
+    assert err.startswith("stardelt: dev: ")
+    assert calls(session) == [
+        ("GET", "/api/me"), ("GET", "/api/pipelines"), ("GET", "/api/streams"),
+    ], "nothing is checked or written"
+
+
+def test_deploying_into_a_copy_that_exists_is_not_a_new_copy():
+    five = {("sales-etl", f"pr-{i}", "alice") for i in range(5)}
+    assert bundle._preview_refusal(five, "sales-etl", "pr-0", "alice") is None
+    assert bundle._preview_refusal(five, "sales-etl", "pr-9", "bob") is None, "bob has none of his own"
+
+
+def test_the_twenty_first_copy_on_a_stage_is_refused():
+    twenty = {(f"bundle-{i}", "pr-1", "alice") for i in range(20)}
+    message = bundle._preview_refusal(twenty, "sales-etl", "pr-9", "bob")
+    assert "this stage already has 20 previews" in message
