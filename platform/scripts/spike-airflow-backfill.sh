@@ -81,7 +81,6 @@ FROM=""
 TO=""
 pause_changed=no
 dag_was_paused=""
-B5_LATE=""
 B5_WINDOW=""
 B5_MISSING=""
 B5_SLOTS=""
@@ -261,7 +260,7 @@ close_open_backfills() { # row-tag — Airflow allows one open backfill per DAG;
 
 # --- B1: the role of Nova's credential --------------------------------------------------------
 b1() {
-  local code roles manager
+  local code roles
   code="$(api GET /api/v2/users "$tmp/b1-users.json")"
   row B1 public_api=/api/v2/users "status=$code" "body=$(body "$tmp/b1-users.json")"
   cat > "$tmp/b1.py" <<'PY'
@@ -448,7 +447,7 @@ b4() {
 
 # --- B5: the missed schedule -----------------------------------------------------------------
 b5() {
-  local code appeared started first_logical down up states late first_after down_epoch up_epoch waited
+  local code appeared started first_logical down up states late first_after up_epoch waited
   cat > "$tmp/pipeline.yaml" <<YAML
 apiVersion: stardelt.io/v1alpha1
 kind: Pipeline
@@ -510,7 +509,6 @@ YAML
 
   # Down: the scheduler is the only thing that creates runs; two and a half slots pass.
   down="$(stamp "$(now_s)")"
-  down_epoch="$(now_s)"
   kc -n "$NS" scale deploy "$SCHEDULER" --replicas=0 >/dev/null
   sleep 10
   row B5 scheduler_down "at=$down" "replicas=0" "down_seconds=$DOWN_SECONDS" \
@@ -570,7 +568,6 @@ YAML
   pipeline_applied=no
   row B5 scratch_removed "pipeline=$PIPELINE" \
     "left=$(kc -n "$NS" get pipelines.stardelt.io 2>/dev/null | grep -c "$PIPELINE" || true)"
-  B5_LATE="$late"
   B5_WINDOW="$states"
   B5_MISSING="$((gap_slots - gap_created))"
   B5_SLOTS="$gap_slots"
