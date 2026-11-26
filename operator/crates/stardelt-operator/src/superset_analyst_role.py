@@ -77,7 +77,7 @@ def main():
                 sm.add_permission_role(role, pv)
         for n, v in remove:
             sm.del_permission_role(role, sm.find_permission_view_menu(n, v))   # drift: the role is exactly this set
-        sm.get_session.commit()
+        db.session.commit()
         print("role stardelt-analyst:", len(role.permissions), "permissions,", len(trino), "Trino database(s),", len(tables), "dataset(s)")
 
 
