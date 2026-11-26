@@ -1786,6 +1786,33 @@ pub async fn require_auth(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // A cookie-authenticated write must come from Nova's own origin. `SameSite=Lax` stops
+    // cross-*site* requests, but every host under the same registrable domain is one site, and
+    // a page on a sibling host (the notebook host, for example) could start a run with the
+    // person's cookie. A bearer-token caller (CLI, MCP, CI) is not a browser and sends no
+    // `Origin`; a browser write does, so its absence is not a refusal.
+    if !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    ) && !req.headers().contains_key(header::AUTHORIZATION)
+        && let Some(origin) = req.headers().get(header::ORIGIN)
+        && origin.to_str().ok() != Some(ctx.auth.config.public_url.as_str())
+    {
+        warn!(
+            target: "audit",
+            method = %req.method(),
+            path = %crate::audit::original_path(&req),
+            "refused: cross-origin request"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "detail": "cross-origin request refused",
+            })),
+        )
+            .into_response();
+    }
     match ctx.auth.authenticate(req.headers()).await {
         Ok((mut principal, facts)) => {
             // A deploy principal (#57) holds a token for its stage and nothing else: it may
@@ -3503,6 +3530,8 @@ mod tests {
                 "/me",
                 get(|axum::Extension(p): axum::Extension<Principal>| async move { p.identity.sub }),
             )
+            // A mutating route with no body, like `POST /api/pipelines/{ns}/{name}/runs`.
+            .route("/write", post(|| async { "written" }))
             .route_layer(axum::middleware::from_fn_with_state(context, require_auth));
         let api = Router::new()
             .route("/health", get(|| async { "ok" }))
@@ -3517,6 +3546,28 @@ mod tests {
         headers: &[(header::HeaderName, String)],
     ) -> (StatusCode, String) {
         let mut req = HttpRequest::builder().uri(uri);
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// [`call`] for a mutating request: cookie writes are the ones the origin check guards.
+    async fn call_post(
+        app: &Router,
+        uri: &str,
+        headers: &[(header::HeaderName, String)],
+    ) -> (StatusCode, String) {
+        let mut req = HttpRequest::builder().method("POST").uri(uri);
         for (k, v) in headers {
             req = req.header(k, v);
         }
@@ -3985,6 +4036,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// `SameSite=Lax` is not an origin check: a page on a sibling host is the same *site*, so
+    /// a cookie write must be refused unless its `Origin` is Nova's own. A bearer caller is not
+    /// a browser and sends no `Origin`; a browser write does.
+    #[tokio::test]
+    async fn cross_origin_cookie_writes_are_refused() {
+        let auth = test_auth();
+        let app = app(auth.clone());
+        let sid = session_for(&auth, "kc-42");
+        let cookie = cookie_header(&auth, &sid);
+
+        // A signed-in cookie POST from another host: refused before the session is read.
+        let mut evil = cookie.clone();
+        evil.push((header::ORIGIN, "https://evil.example".into()));
+        let (status, body) = call_post(&app, "/api/write", &evil).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("cross-origin request refused"), "{body}");
+
+        // From Nova's own origin: allowed.
+        let mut same = cookie.clone();
+        same.push((header::ORIGIN, auth.config.public_url.clone()));
+        let (status, body) = call_post(&app, "/api/write", &same).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "written");
+
+        // A bearer token identifies the caller, not a browser cookie: its `Origin` is not consulted.
+        let bearer = vec![
+            (header::AUTHORIZATION, "Bearer good".to_string()),
+            (header::ORIGIN, "https://evil.example".to_string()),
+        ];
+        assert_eq!(
+            call_post(&app, "/api/write", &bearer).await.0,
+            StatusCode::OK
+        );
     }
 
     /// The hint reaches the IdP's URL only when it is a plain sign-in name. `a b` is
