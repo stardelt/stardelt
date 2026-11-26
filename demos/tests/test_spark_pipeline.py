@@ -46,7 +46,7 @@ def test_the_pod_speaks_to_the_owner_groups_cluster_by_default(monkeypatch):
     variables = env(monkeypatch, remote=connect_remote("demo"))
     assert (
         variables["SPARK_REMOTE"].value
-        == "sc://spc-demo-server.stardelt.svc.cluster.local:15002"
+        == "sc://spc-demo-server:15002"
     )
 
 

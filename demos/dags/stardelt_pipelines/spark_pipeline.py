@@ -116,11 +116,11 @@ def connect_remote(owner_group: str) -> str:
     """The owner group's SparkCluster Service (`spc-<name>-server`), or `PIPELINE_SPARK_REMOTE`.
 
     The group cluster is the default since #493 point 6: the shared server is no longer where a
-    pipeline lands unless an operator names it with `PIPELINE_SPARK_REMOTE`.
+    pipeline lands unless an operator names it with `PIPELINE_SPARK_REMOTE`. The name is short —
+    like every address in `operator/crates/stardelt-operator/values/airflow.yaml`, the operator installs into another namespace —
+    so it resolves in the pod's own namespace (measured 2026-11-26, #1833).
     """
-    return os.environ.get(REMOTE_ENV) or (
-        f"sc://spc-{owner_group}-server.stardelt.svc.cluster.local:15002"
-    )
+    return os.environ.get(REMOTE_ENV) or f"sc://spc-{owner_group}-server:15002"
 
 
 SPEC_PATH = "/tmp/spark-project/graph/spark-pipeline.yml"
