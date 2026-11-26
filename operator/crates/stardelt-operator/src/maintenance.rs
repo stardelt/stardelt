@@ -30,15 +30,16 @@ use crate::objects::FIELD_MANAGER;
 
 /// Prefix of the CronJob name; the catalog name follows (`maint-<catalog>`).
 pub const JOB_PREFIX: &str = "maint-";
-/// The CLI image, pinned by digest under the immutable release tag `v0.4.1`: the digest is
+/// The CLI image, pinned by digest under the immutable release tag `v0.0.4`: the digest is
 /// what runs, and the tag is what `scripts/check-cli-image.sh` compares against the registry.
 ///
-/// This is the build of `stardelt/stardelt` `15dff221` (tag `python/v0.4.1`), which also names
+/// This is the build of `stardelt/stardelt` `15dff221646fab7ae8c82c1d39c01ca781a3fad0`
+/// (release `v0.0.4`), which also names
 /// its commit in `org.opencontainers.image.revision`: `_fetch_token` posts with
 /// `verify=certifi.where()`, so the identity endpoint's public certificate verifies while the
 /// Trino connection keeps `REQUESTS_CA_BUNDLE` (operator#653). A new release moves `IMAGE` and
 /// nothing else does.
-pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:v0.4.1@sha256:47e12f49fdf810042fdc74d77a813a186941861c3e00ea4faa97c792c98fb81e";
+pub const IMAGE: &str = "ghcr.io/stardelt/stardelt-cli:v0.0.4@sha256:47e12f49fdf810042fdc74d77a813a186941861c3e00ea4faa97c792c98fb81e";
 
 pub fn job_name(catalog: &str) -> String {
     format!("{JOB_PREFIX}{catalog}")

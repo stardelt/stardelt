@@ -41,10 +41,10 @@ Outside this repository, next to it in the workspace: `stardelt-docs/` (public d
 
 - **Image names did not change:** `ghcr.io/stardelt/stardelt-operator`, `nova`, `superset`,
   `jupyter-singleuser`, `spark`, `stardelt-cli`, `airflow`. Every pinned digest stays valid; pin by digest.
-- **Release tags carry the folder:** `operator/v*`, `nova/v*`, `platform/v*`, `python/v*`,
-  `python/jupyterlab-v*`. Image tags drop the prefix (`stardelt-cli:v0.4.1`).
-- **The notebook library installs from here:** `stardelt @ git+https://github.com/stardelt/stardelt@<commit or python/vX.Y.Z>#subdirectory=python`
-  (#128). Nothing builds from the archived repositories; they are private.
+- **One release tag:** `v0.0.N` for the whole repository (stardelt/stardelt#2); every stardelt image
+  carries the same tag on the released digest.
+- **The notebook library installs from here:** `stardelt @ git+https://github.com/stardelt/stardelt@<commit or v0.0.N>#subdirectory=python`
+  or the wheel of a release (#128). Nothing builds from the archived repositories; they are private.
 - **Pin rollup.** `platform-pin-rollup.yml` refreshes the pins in one branch (`chore/pin-rollup`) after each
   push to main that rebuilds a pinned image — `platform / Image`, `operator / Image`, `nova / Image` and
   `demos / CI`. Without `PIN_TOKEN` the branch gets no PR checks and still needs a person to merge it

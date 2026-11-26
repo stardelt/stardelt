@@ -16,9 +16,9 @@ import stardelt
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-# `stardelt` or `stardelt[jupyter]`, from python/ of this repository at the repository's v0.0.N tag.
+# `stardelt` or `stardelt[jupyter]`, the wheel of this repository's v0.0.N release.
 INSTALL_PIN = re.compile(
-    r"stardelt(?:\[[a-z,]+\])? @ git\+https://github\.com/stardelt/stardelt@(?:python/)?(v\d+\.\d+\.\d+)#subdirectory=python"
+    r"stardelt(?:\[[a-z,]+\])? @ https://github\.com/stardelt/stardelt/releases/download/(v\d+\.\d+\.\d+)/stardelt-\d+\.\d+\.\d+-py3-none-any\.whl"
 )
 
 READMES = ["README.md", "stardelt/README.md"]

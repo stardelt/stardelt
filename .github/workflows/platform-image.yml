@@ -18,7 +18,6 @@ name: "platform / Image"
 on:
   push:
     branches: [main]
-    tags: ["platform/v*"]
     paths: ["platform/images/**", "python/**", "demos/**", ".github/workflows/platform-image.yml"]
   pull_request:
     branches: [main]
@@ -90,7 +89,6 @@ jobs:
           images: ghcr.io/stardelt/superset
           tags: |
             type=ref,event=branch
-            type=match,pattern=platform/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
@@ -148,7 +146,6 @@ jobs:
           images: ghcr.io/stardelt/jupyter-singleuser
           tags: |
             type=ref,event=branch
-            type=match,pattern=platform/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 
@@ -216,7 +213,6 @@ jobs:
           images: ghcr.io/stardelt/spark
           tags: |
             type=ref,event=branch
-            type=match,pattern=platform/(v.*),group=1
             type=sha,prefix=sha-,format=short
             type=raw,value=dev,enable={{is_default_branch}}
 

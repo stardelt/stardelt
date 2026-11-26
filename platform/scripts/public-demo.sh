@@ -311,7 +311,7 @@ if [ "$mode" = check ]; then
       return 0
     done
     check_msg="the stardelt CLI is not installed — needed only to re-deploy the shop with stardelt bundle deploy"
-    check_fix="python3 -m venv $venv && $venv/bin/pip install 'stardelt @ git+https://github.com/stardelt/stardelt@v0.0.4#subdirectory=python'"
+    check_fix="python3 -m venv $venv && $venv/bin/pip install 'stardelt @ https://github.com/stardelt/stardelt/releases/download/v0.0.4/stardelt-0.0.4-py3-none-any.whl'"
     return 1
   }
 
