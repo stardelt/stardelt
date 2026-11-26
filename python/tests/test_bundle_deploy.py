@@ -74,6 +74,51 @@ def test_a_deploy_principals_service_account_prefix_is_dropped_from_a_developmen
     ]
 
 
+def test_a_preview_name_longer_than_40_is_refused(tmp_path):
+    long = "name: " + "a" * 34 + "\nownerGroup: sales\nsql: select 1\n"
+    problems, _, specs = bundle.render(make(tmp_path, resources={"long.yaml": long}), "dev", "alice", "pr-123")
+    assert specs == [] and "longer than 40 characters" in problems[0][1]
+
+
+def test_a_preview_deploy_prefixes_names_and_drops_the_schedule(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "pr-123-nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "dev", "--preview", "pr-123"],
+        ME, FakeResponse(payload=NO_CATALOGS), FakeResponse(payload=CREATE), FakeResponse(payload=CREATE),
+        FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "pr-123-load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "pr-123-nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "pr-123-load", "namespace": "stardelt"}, {"name": "pr-123-nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "dev", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "pr-123-load", "kind": "Pipeline"},
+        {"action": "updated", "name": "pr-123-nightly", "kind": "Pipeline"},
+        {"action": "recorded", "id": 7},
+    ]
+    written = [
+        (method, path.removeprefix("https://nova.example"), kwargs["json"]) for method, path, kwargs in session.calls
+        if method in ("POST", "PUT") and "/api/pipelines" in path and "/validate" not in path
+    ]
+    assert [(method, path) for method, path, _ in written] == [
+        ("POST", "/api/pipelines"), ("PUT", "/api/pipelines/stardelt/pr-123-nightly"),
+    ]
+    assert written[0][2]["name"] == "pr-123-load", "the preview prefix, not dev-alice-"
+    assert all("schedule" not in body for _, _, body in written), "nothing may fire"
+
+
+def test_a_preview_is_refused_on_a_production_target(tmp_path):
+    make(tmp_path)
+    session = FakeSession(ME)
+    nova = api.Client(base_url="https://nova.example", token=CANARY, session=session)
+    assert bundle.deploy(nova, tmp_path, "prod", preview="pr-123") == (
+        [("prod", "a preview is only allowed on a development target")], []
+    )
+    assert calls(session) == [("GET", "/api/me")], "nothing is checked or written"
+
+
 def test_plan_asks_nova_about_every_pipeline_and_writes_nothing(tmp_path):
     make(tmp_path)
     code, out, err, session = run(

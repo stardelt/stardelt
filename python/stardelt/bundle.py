@@ -21,6 +21,7 @@ KEYS = {"bundle", "variables", "include", "files", "migrations", "requires", "ta
 KINDS = ("Pipeline", "StreamApp")
 PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
+PREVIEW = re.compile(r"^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$")
 TASK_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 MAX_TASKS = 30
 MAX_TASK_DEPS = 8
@@ -728,15 +729,17 @@ def _slug(user):
     return name.removeprefix("service-account-")
 
 
-def render(directory, target, user=None):
+def render(directory, target, user=None, preview=None):
     """The pipelines of one target as the bodies ``pipelines_create`` takes: ``(problems, mode, specs)``.
 
     Everything ``validate`` checks is checked first. Then each pipeline file gets its variables, its ``sqlFile`` read
     into ``sql`` and the bundle's group as ``ownerGroup`` when it names none. A ``development`` target deploys under
     ``dev-<user>-<name>`` (two people can deploy one bundle side by side) and without a schedule (run it with
-    ``stardelt run``); a ``production`` target deploys as written. A notebook that is a file of the bundle stays
-    ``notebook: {file: ...}`` here: ``deploy`` publishes it and pins the version. ``specs`` is empty when there are problems.
-    A file whose ``kind`` is not ``Pipeline`` (a ``StreamApp``) is not a pipeline spec: ``render_streams`` reads it.
+    ``stardelt run``); a ``production`` target deploys as written. With ``preview`` every name is prefixed with
+    ``<preview>-`` instead and the schedule is removed too: one shared, pull-request-scoped copy. A notebook that is a
+    file of the bundle stays ``notebook: {file: ...}`` here: ``deploy`` publishes it and pins the version. ``specs``
+    is empty when there are problems. A file whose ``kind`` is not ``Pipeline`` (a ``StreamApp``) is not a pipeline
+    spec: ``render_streams`` reads it.
     """
     problems, _, _ = validate(directory, target)
     if problems:
@@ -770,7 +773,14 @@ def render(directory, target, user=None):
                     except apply.ApplyError as err:
                         problems.append((f"{where} ({task.get('name', '?')})", str(err)))
         apply.api_tasks(doc)
-        if mode == "development":
+        if preview:
+            # A preview is one shared, PR-scoped copy: its prefix replaces the dev-<user>- prefix,
+            # so `_deployed` finds it by `preview` and a person's own dev pipelines never collide.
+            doc["name"] = f"{preview}-{doc['name']}"
+            doc.pop("schedule", None)   # a preview is a copy to look at; nothing may fire
+            if len(doc["name"]) > 40:
+                problems.append((where, f"the development name {doc['name']} is longer than 40 characters"))
+        elif mode == "development":
             doc["name"] = f"dev-{_slug(user)}-{doc['name']}"
             doc.pop("schedule", None)
             if len(doc["name"]) > 40:
@@ -779,10 +789,11 @@ def render(directory, target, user=None):
     return problems, mode, ([] if problems else specs)
 
 
-def render_streams(directory, target, user=None):
+def render_streams(directory, target, user=None, preview=None):
     """The stream apps of one target as the bodies ``streams_put`` takes: ``(problems, mode, specs)``.
 
-    A ``development`` target deploys under ``dev-<user>-<name>``; the ``kind`` key is dropped.
+    A ``development`` target deploys under ``dev-<user>-<name>``; with ``preview`` every name is prefixed with
+    ``<preview>-`` instead; the ``kind`` key is dropped.
     """
     problems, _, _ = validate(directory, target)
     if problems:
@@ -804,7 +815,11 @@ def render_streams(directory, target, user=None):
             continue
         doc.pop("kind")
         doc.setdefault("ownerGroup", owner)
-        if mode == "development":
+        if preview:
+            doc["name"] = f"{preview}-{doc['name']}"
+            if len(doc["name"]) > 40:
+                problems.append((where, f"the development name {doc['name']} is longer than 40 characters"))
+        elif mode == "development":
             doc["name"] = f"dev-{_slug(user)}-{doc['name']}"
             if len(doc["name"]) > 40:
                 problems.append((where, f"the development name {doc['name']} is longer than 40 characters"))
@@ -881,14 +896,15 @@ def provenance(directory, target):
     return {"bundle": name, "target": target, **({"revision": revision} if revision else {}), **({"repository": repository} if repository else {})}
 
 
-def _deployed(nova, bundle_name, target, mode, user):
+def _deployed(nova, bundle_name, target, mode, user, preview=None):
     """The listed pipelines an earlier deploy of this bundle target left on the stage.
 
     Only a pipeline that carries the stamp of this bundle and this target counts (a pipeline made by hand,
     or by another bundle or target, never does). In a ``development`` target only the caller's own ones, the
-    names that start with ``dev-<user>-``: two people deploy one bundle side by side.
+    names that start with ``dev-<user>-``: two people deploy one bundle side by side. With ``preview`` the
+    names that start with ``<preview>-`` instead: one shared, pull-request-scoped copy.
     """
-    prefix = f"dev-{_slug(user)}-" if mode == "development" else ""
+    prefix = f"{preview}-" if preview else (f"dev-{_slug(user)}-" if mode == "development" else "")
     return [
         pipeline
         for pipeline in nova.call("pipelines_list")["pipelines"]
@@ -904,9 +920,9 @@ def _listed(nova):
     return answer["namespace"], answer["streams"]
 
 
-def _deployed_streams(rows, bundle_name, target, mode, user):
+def _deployed_streams(rows, bundle_name, target, mode, user, preview=None):
     """The listed streams an earlier deploy of this bundle target left on the stage."""
-    prefix = f"dev-{_slug(user)}-" if mode == "development" else ""
+    prefix = f"{preview}-" if preview else (f"dev-{_slug(user)}-" if mode == "development" else "")
     return [
         stream
         for stream in rows
@@ -916,9 +932,9 @@ def _deployed_streams(rows, bundle_name, target, mode, user):
     ]
 
 
-def _stale(nova, bundle_name, target, mode, user, keep):
+def _stale(nova, bundle_name, target, mode, user, keep, preview=None):
     """The pipelines an earlier deploy of this bundle target left that the bundle no longer names, as ``(namespace, name)``."""
-    return [(p["namespace"], p["name"]) for p in _deployed(nova, bundle_name, target, mode, user) if p["name"] not in keep]
+    return [(p["namespace"], p["name"]) for p in _deployed(nova, bundle_name, target, mode, user, preview=preview) if p["name"] not in keep]
 
 
 def _lines(value):
@@ -1225,7 +1241,7 @@ def _touched(nova, specs, done, stale):
     return touched
 
 
-def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None):
+def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=False, diff=False, allow_breaking=False, smoke=None, smoke_timeout=None, preview=None):
     """Plan, then (unless ``dry_run``) deploy ``target``: ``(problems, results)``.
 
     ``nova`` is a ``stardelt.api.Client``. Every pipeline is first checked by Nova (``pipelines_validate``, the
@@ -1254,11 +1270,15 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     the bundle (with or without the ``dev-<user>-`` prefix); after the writes it is run and waited
     for, and a run that does not end ``success`` records the deploy as ``failed`` and is a problem.
     ``smoke_timeout`` (seconds, default no limit) gives up waiting, which does not stop the run.
+    ``preview`` prefixes every rendered name with ``<preview>-`` instead of ``dev-<user>-`` and
+    removes its schedule; only a development target accepts it.
     """
     user = nova.me().get("user")
-    problems, mode, specs = render(directory, target, user)
+    problems, mode, specs = render(directory, target, user, preview)
     if problems:
         return problems, []
+    if preview and mode != "development":
+        return [(target, "a preview is only allowed on a development target")], []
     migration_problems, migration_catalog, migration_files = _migration_files(directory, target)
     if migration_problems:
         return migration_problems, []
@@ -1280,7 +1300,7 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
                 )
             ], []
     specs = [{**spec, "provenance": stamp} for spec in specs]
-    stream_problems, _, stream_specs = render_streams(directory, target, user)
+    stream_problems, _, stream_specs = render_streams(directory, target, user, preview)
     if stream_problems:
         return stream_problems, []
     stream_specs = [{**spec, "provenance": stamp} for spec in stream_specs]
@@ -1338,13 +1358,13 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
     diffs = _diffs(nova, specs, results) if diff else {}
     results = [{**r, "diff": diffs[r["name"]]} if diffs.get(r["name"]) else r for r in results]
     results += [{k: v for k, v in row.items() if k != "position"} for row in stream_rows]
-    stale = _stale(nova, stamp["bundle"], target, mode, user, {spec["name"] for spec in specs}) if prune else []
+    stale = _stale(nova, stamp["bundle"], target, mode, user, {spec["name"] for spec in specs}, preview=preview) if prune else []
     stale_streams = []
     if prune:
         kept = {spec["name"] for spec in stream_specs}
         stale_streams = [
             (namespace, stream["name"])
-            for stream in _deployed_streams(listed, stamp["bundle"], target, mode, user)
+            for stream in _deployed_streams(listed, stamp["bundle"], target, mode, user, preview=preview)
             if stream["name"] not in kept
         ]
     results += [{"action": "would-delete", "name": name, "kind": "Pipeline"} for _, name in stale]
@@ -1633,12 +1653,13 @@ def run(nova, directory, target, only=None, timeout=None, interval=5):
     return [], results
 
 
-def destroy(nova, directory, target, confirm=False):
+def destroy(nova, directory, target, confirm=False, preview=None):
     """Remove everything an earlier deploy of ``target`` put on the stage: ``(problems, results)``.
 
     The candidates are exactly the pipelines ``--prune`` would remove if the bundle named none: the ones stamped with this
     bundle's name and this target (in a ``development`` target only the caller's own ``dev-<user>-`` ones). A pipeline made by
-    hand, or stamped by another bundle or target, is never touched. Without ``confirm`` nothing is removed and the results
+    hand, or stamped by another bundle or target, is never touched. With ``preview`` only the names prefixed with
+    ``<preview>-`` are removed (a development target only). Without ``confirm`` nothing is removed and the results
     are ``would-delete`` lines; with it each pipeline is deleted and the results are ``deleted`` lines. The files of the
     bundle are not touched. Stream apps stamped by the same bundle and target are removed too, after the pipelines.
     """
@@ -1649,11 +1670,13 @@ def destroy(nova, directory, target, confirm=False):
     user = nova.me().get("user")
     if mode == "development" and not user:
         return [(target, "sign in first: a development target removes only your own pipelines")], []
-    found = _stale(nova, provenance(directory, target)["bundle"], target, mode, user, set())
+    if preview and mode != "development":
+        return [(target, "a preview is only allowed on a development target")], []
+    found = _stale(nova, provenance(directory, target)["bundle"], target, mode, user, set(), preview=preview)
     namespace, listed = _listed(nova)
     found_streams = [
         (namespace, stream["name"])
-        for stream in _deployed_streams(listed, provenance(directory, target)["bundle"], target, mode, user)
+        for stream in _deployed_streams(listed, provenance(directory, target)["bundle"], target, mode, user, preview=preview)
     ]
     if not confirm:
         return [], [

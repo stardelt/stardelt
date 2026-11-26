@@ -83,6 +83,22 @@ def test_a_development_target_removes_only_the_callers_own_pipelines(tmp_path):
     assert [json.loads(line)["name"] for line in out.splitlines()] == ["dev-alice-load"]
 
 
+def test_destroy_preview_removes_only_the_preview_pipelines(tmp_path):
+    make(tmp_path)
+    listing = {"pipelines": [stamped("pr-123-nightly", target="dev"), stamped("dev-alice-nightly", target="dev")]}
+    code, out, err, session = run(
+        ["bundle", "destroy", str(tmp_path), "-t", "dev", "--preview", "pr-123", "--yes"],
+        ME, FakeResponse(payload=listing), STREAMS_NONE, FakeResponse(204),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "deleted", "name": "pr-123-nightly", "kind": "Pipeline"},
+    ]
+    assert [(m, u) for m, u in calls(session) if m == "DELETE"] == [
+        ("DELETE", "/api/pipelines/stardelt/pr-123-nightly"),
+    ]
+
+
 def test_nothing_to_remove_says_so(tmp_path):
     make(tmp_path)
     code, out, err, _ = run(

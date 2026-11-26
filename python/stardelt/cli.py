@@ -164,6 +164,7 @@ def _parser():
     ship.add_argument("--allow-breaking", action="store_true", help="also run migration statements that are not additive (a changed file is always refused)")
     ship.add_argument("--smoke", metavar="NAME", help="after the deploy, run this pipeline of the bundle and fail unless it succeeds")
     ship.add_argument("--smoke-timeout", type=int, default=0, metavar="SECONDS", help="with --smoke: give up waiting after N seconds (0: no limit); the run is not stopped")
+    ship.add_argument("--preview", metavar="ID", help="deploy a preview: every name is prefixed with ID and its schedule is removed (a development target only)")
     approve = package_commands.add_parser(
         "approve", help="approve a migration plan that a production deploy needs a second person for"
     )
@@ -187,6 +188,7 @@ def _parser():
     remove.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
     remove.add_argument("-t", "--target", required=True, help="the target to empty (a name under targets in bundle.yaml)")
     remove.add_argument("--yes", action="store_true", help="really remove the pipelines (without it: only list them)")
+    remove.add_argument("--preview", metavar="ID", help="remove only the pipelines and streams of this preview (a development target only)")
     replay = package_commands.add_parser(
         "rollback", help="replay the documents one recorded deployment applied; lists it first, writes only with --yes"
     )
@@ -579,6 +581,11 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             stderr.write("stardelt: the statement is empty\n")
             return USAGE
 
+    preview = getattr(args, "preview", None)
+    if preview is not None and not bundle.PREVIEW.match(preview):
+        stderr.write("stardelt: the preview id must be lower-case letters, digits and dashes (at most 20)\n")
+        return USAGE
+
     stored = login.load(environ)
     host = (args.host or environ.get("STARDELT_NOVA_URL", "") or (stored or {}).get("host") or "").strip()
     if not host:
@@ -696,7 +703,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 stderr.write(f"stardelt: {ended_badly[0]['name']} ended {ended_badly[0]['state']}\n")
             return USAGE if problems else (ERROR if ended_badly else OK)
         if args.command == "bundle" and args.bundle_command == "destroy":
-            problems, results = bundle.destroy(nova, args.directory, args.target, confirm=args.yes)
+            problems, results = bundle.destroy(nova, args.directory, args.target, confirm=args.yes, preview=args.preview)
             for result in results:
                 stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
             for where, message in problems:
@@ -773,6 +780,7 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 nova, args.directory, args.target, dry_run=args.bundle_command == "plan" or args.dry_run, prune=args.prune,
                 accept_drift=args.accept_drift, diff=args.diff, allow_breaking=args.allow_breaking,
                 smoke=getattr(args, "smoke", None), smoke_timeout=getattr(args, "smoke_timeout", 0) or None,
+                preview=getattr(args, "preview", None),
             )
             shown = []
             plan_rows = []
