@@ -15149,7 +15149,8 @@
           "namespace",
           "name",
           "status",
-          "canEdit"
+          "canEdit",
+          "detail"
         ],
         "properties": {
           "canEdit": {
@@ -15158,6 +15159,10 @@
           },
           "catalog": {
             "type": "string"
+          },
+          "detail": {
+            "type": "string",
+            "description": "The promise's own sentence, the one the table page shows (`TableFreshness.detail`)."
           },
           "dueAt": {
             "type": [

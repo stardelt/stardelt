@@ -200,6 +200,10 @@ export type TableFreshness = Schema<'TableFreshness'>
 /** `by: null` removes the promise; an absent field changes nothing. */
 export type FreshnessUpdate = Schema<'FreshnessUpdate'>
 
+/** Every promised table of one catalog, red first (#402, #1867). */
+export type CatalogHealth = Schema<'CatalogHealth'>
+export type ListedHealth = Schema<'ListedHealth'>
+
 /** One verified query: a question about a table that its owners answered (#1018, #912). */
 export type VerifiedQuery = Schema<'VerifiedQuery'>
 
@@ -1371,6 +1375,9 @@ export const api = {
     jget<TableFreshness>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/health`, catalog)),
   putTableFreshness: (ns: string, tbl: string, body: FreshnessUpdate, catalog?: string) =>
     jput<TableFreshness>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/health`, catalog), body),
+  /** Every promised table of one catalog, red first (#402, #1867). */
+  catalogHealth: (catalog?: string) =>
+    jget<CatalogHealth>(catalogPath('/api/catalog/health', catalog)),
   putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
     jput<TableDocumentation>(
       catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),

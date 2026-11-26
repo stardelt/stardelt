@@ -197,6 +197,8 @@ pub struct ListedHealth {
     pub next_due_at: Option<String>,
     /// Whether the interim rule lets this caller set the promise.
     pub can_edit: bool,
+    /// The promise's own sentence, the one the table page shows (`TableFreshness.detail`).
+    pub detail: String,
 }
 
 /// `GET /api/catalog/health`: every table that carries a freshness promise, worst first.
@@ -1329,6 +1331,7 @@ async fn health_list(
                 due_at: health.due_at,
                 next_due_at: health.next_due_at,
                 can_edit: health.can_edit,
+                detail: health.detail,
             });
         }
     }
