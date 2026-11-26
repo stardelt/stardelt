@@ -16309,7 +16309,8 @@
         "required": [
           "kind",
           "name",
-          "action"
+          "action",
+          "modified"
         ],
         "properties": {
           "action": {
@@ -16326,6 +16327,10 @@
           "kind": {
             "type": "string",
             "description": "`Pipeline` or `StreamApp`."
+          },
+          "modified": {
+            "type": "boolean",
+            "description": "`true` when the object was changed outside the bundle after its last deploy\n(`deployment.modified`): applying this document overwrites that change. `false` for a\n`create`, a delete row, and an object whose stamp carries no digest yet."
           },
           "name": {
             "type": "string"

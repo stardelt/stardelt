@@ -6301,6 +6301,7 @@ pub(crate) async fn plan_bundle(
                         name,
                         action: planned_action(&answer),
                         diff: answer.changes,
+                        modified: answer.modified.unwrap_or(false),
                     }),
                     Ok(answer) => {
                         for issue in answer.errors {
@@ -6335,6 +6336,12 @@ pub(crate) async fn plan_bundle(
                     });
                     continue;
                 }
+                let modified = existing_streams
+                    .iter()
+                    .find(|stream| stream_name(stream) == Some(body.name.as_str()))
+                    .and_then(deployment_of)
+                    .and_then(|deployment| deployment.modified)
+                    .unwrap_or(false);
                 match crate::streams::check_write(&body.name, &body, who) {
                     Ok(_) => {
                         // A stream write is a PUT, so the write cannot say create or update; a listed stream
@@ -6353,6 +6360,7 @@ pub(crate) async fn plan_bundle(
                             name: body.name.clone(),
                             action: action.into(),
                             diff: Vec::new(),
+                            modified,
                         });
                     }
                     Err(message) => errors.push(PlanIssue {
@@ -6394,6 +6402,7 @@ pub(crate) async fn plan_bundle(
                 name: name.to_string(),
                 action: "delete".into(),
                 diff: Vec::new(),
+                modified: false,
             });
             continue;
         }

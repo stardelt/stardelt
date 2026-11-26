@@ -4163,6 +4163,12 @@ export interface components {
             diff?: string[];
             /** @description `Pipeline` or `StreamApp`. */
             kind: string;
+            /**
+             * @description `true` when the object was changed outside the bundle after its last deploy
+             *     (`deployment.modified`): applying this document overwrites that change. `false` for a
+             *     `create`, a delete row, and an object whose stamp carries no digest yet.
+             */
+            modified: boolean;
             name: string;
         };
         PlanFile: {
