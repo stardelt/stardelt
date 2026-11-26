@@ -1,0 +1,3455 @@
+# stardelt v0.0.4 (commit 40bedc5e7e2b6e35fe819b76887b05e5ea0121d1). Install: kubectl apply --server-side --force-conflicts -f install.yaml
+
+---
+# The platform namespace's Pod Security floor (platform#1096 question 5).
+#
+# `restricted` is enforced: no privilege escalation, no added capabilities, seccomp
+# `RuntimeDefault`, non-root. Every pod on both install paths passes it; the one that did
+# not, Lakekeeper's chart `opa` sidecar, is patched by `scripts/lakekeeper-opa-security.sh`
+# (#1095, #1361). The five SeaweedFS pods pass since platform#1758 (uid/gid 65534,
+# `emptyDir` logs).
+apiVersion: v1
+kind: Namespace
+# Applied by `make step-namespace`, which renders `name` from `$(NAMESPACE)`.
+metadata:
+  name: stardelt
+  labels:
+    app.kubernetes.io/part-of: stardelt
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+---
+# Source: stardelt-operator/crds/stardelt.io_catalogs.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: catalogs.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: Catalog
+    plural: catalogs
+    shortNames:
+    - cat
+    singular: catalog
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A data domain: a catalog with its storage location, an owner group and grants.'
+        properties:
+          spec:
+            description: |-
+              One data domain inside the catalog software of a `Lakehouse`: its storage, its owner and its
+              grants. `metadata.name` is the name users type (`finance.orders`) and the name of the
+              catalog's warehouse; there is no alias.
+            properties:
+              description:
+                maxLength: 500
+                nullable: true
+                type: string
+              displayName:
+                maxLength: 100
+                nullable: true
+                type: string
+              grants:
+                default: []
+                items:
+                  description: One group, one verb. Subjects are groups, never people.
+                  properties:
+                    group:
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                      type: string
+                    verb:
+                      description: |-
+                        What a grant lets a group do with a catalog (decision D21, internal note
+                        `design/multitenant-catalogs.md` §5.2). Six verbs exist; `use` belongs to compute (`SqlWarehouse`)
+                        and is not a data verb. There is no deny, no `ALL PRIVILEGES` and no per-column verb.
+                      enum:
+                      - browse
+                      - select
+                      - write
+                      - create
+                      - manage
+                      type: string
+                  required:
+                  - group
+                  - verb
+                  type: object
+                maxItems: 50
+                type: array
+              lakehouseRef:
+                description: The `Lakehouse` that hosts a catalog or a warehouse.
+                properties:
+                  name:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              maintenance:
+                default:
+                  excludeTables: []
+                  expireSnapshots:
+                    retention: 7d
+                  optimize:
+                    fileSizeThreshold: 128MB
+                    minSmallFiles: 20
+                  removeOrphanFiles:
+                    retention: 7d
+                  schedule: 0 2 * * *
+                description: |-
+                  The automatic Iceberg maintenance policy (platform#129): compaction, snapshot expiry and
+                  orphan-file removal, daily at 02:00 unless changed. On by default.
+                properties:
+                  excludeTables:
+                    default: []
+                    description: Tables (`schema.table`) this policy never touches.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                  expireSnapshots:
+                    default:
+                      retention: 7d
+                    description: |-
+                      Snapshot expiry. The engine's minimum is 7 days (`iceberg.expire-snapshots.min-retention`),
+                      so `retention` is a minimum, not a preference. The schema refuses a shorter retention;
+                      `MaintenanceSpec::validate` repeats the rule because no controller runs it yet.
+                    properties:
+                      retention:
+                        default: 7d
+                        pattern: ^([7-9]|[1-9][0-9]+)d$
+                        type: string
+                    type: object
+                  optimize:
+                    default:
+                      fileSizeThreshold: 128MB
+                      minSmallFiles: 20
+                    description: 'Compaction: files smaller than the threshold are rewritten when at least `minSmallFiles` exist.'
+                    properties:
+                      fileSizeThreshold:
+                        default: 128MB
+                        pattern: ^[1-9][0-9]*(MB|GB)$
+                        type: string
+                      minSmallFiles:
+                        default: 20
+                        format: int32
+                        minimum: 1.0
+                        type: integer
+                    type: object
+                  removeOrphanFiles:
+                    default:
+                      retention: 7d
+                    description: |-
+                      Orphan-file removal. The engine's minimum is 7 days
+                      (`iceberg.remove-orphan-files.min-retention`). The schema refuses a shorter retention;
+                      `MaintenanceSpec::validate` repeats the rule because no controller runs it yet.
+                    properties:
+                      retention:
+                        default: 7d
+                        pattern: ^([7-9]|[1-9][0-9]+)d$
+                        type: string
+                    type: object
+                  schedule:
+                    default: 0 2 * * *
+                    description: |-
+                      Five-field cron; the default is 02:00 every day. A `Catalog` that keeps this
+                      default is staggered by name at reconcile time (operator#490); any other value is
+                      applied verbatim.
+                    pattern: ^(\S+\s+){4}\S+$
+                    type: string
+                type: object
+              managedAccess:
+                default: false
+                description: 'True: the owner cannot grant on this catalog; only platform administrators can.'
+                type: boolean
+              owner:
+                description: Exactly one group. Ownership means `manage` and does not mean `select`.
+                maxLength: 64
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              storage:
+                description: 'Where a catalog''s data files live. Omitted: the `Lakehouse`''s storage defaults.'
+                nullable: true
+                properties:
+                  bucket:
+                    description: An isolated bucket per catalog.
+                    maxLength: 63
+                    minLength: 3
+                    nullable: true
+                    pattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+                    type: string
+                  credentialSecretRef:
+                    description: 'The per-catalog storage identity. A reference only: the Secret is never part of this resource.'
+                    nullable: true
+                    properties:
+                      key:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  keyPrefix:
+                    description: Required where all catalogs share one bucket (the demo profile); no leading slash, no `..`.
+                    maxLength: 512
+                    nullable: true
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
+                    type: string
+                type: object
+            required:
+            - lakehouseRef
+            - owner
+            type: object
+            x-kubernetes-validations:
+            - message: each group may hold each verb once
+              rule: self.grants.all(g, self.grants.exists_one(h, h.group == g.group && h.verb == g.verb))
+            - message: storage.keyPrefix must not contain .. or //
+              rule: '!has(self.storage) || !has(self.storage.keyPrefix) || (!self.storage.keyPrefix.contains(''..'') && !self.storage.keyPrefix.contains(''//''))'
+          status:
+            nullable: true
+            properties:
+              catalogName:
+                description: The Trino catalog name actually rendered.
+                nullable: true
+                type: string
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              maintenance:
+                description: The newest finished maintenance Job's result (operator#476 slice c).
+                nullable: true
+                properties:
+                  lastResult:
+                    description: '`Succeeded` when the Job succeeded, `Failed` otherwise.'
+                    nullable: true
+                    type: string
+                  lastRun:
+                    description: The Job's `status.completionTime`, RFC 3339.
+                    nullable: true
+                    type: string
+                  tablesDone:
+                    description: The summary line's `tablesDone`; absent when the log held no summary.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  tablesFailed:
+                    description: The summary line's `tablesFailed`; absent when the log held no summary.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+              warehouseId:
+                description: The Lakekeeper warehouse id, so Nova and the access bridge never guess it by name.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Catalog
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_connections.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: connections.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: Connection
+    plural: connections
+    shortNames:
+    - conn
+    singular: connection
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A typed connection to an outside system: settings here, the credentials in the secret store.'
+        properties:
+          spec:
+            description: |-
+              A typed connection to a system outside the platform: non-secret settings here, the secret
+              fields in the secret store (decision D23). No value of a secret is ever part of this resource.
+            properties:
+              config:
+                additionalProperties:
+                  type: string
+                description: Non-secret settings, for example `host`, `port`, `database`, `bucket`, `baseUrl`.
+                maxProperties: 32
+                type: object
+              ownerGroup:
+                description: 'Scope `group`: the Keycloak group whose members manage and use the connection.'
+                maxLength: 64
+                minLength: 1
+                nullable: true
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              refreshInterval:
+                default: 15m
+                description: How often the synced Secret is refreshed from the store, for example `15m`. Between one minute and 24 hours.
+                pattern: ^[0-9]{1,4}(m|h)$
+                type: string
+              scope:
+                default: group
+                description: |-
+                  Whose credential a connection holds and who may use it (decision D27,
+                  internal note `design/secrets-and-connections.md` §8). Personal connections have no
+                  resource: they live only in the secret store and never reach a pipeline.
+                enum:
+                - group
+                - managed
+                type: string
+              secret:
+                description: |-
+                  The secret fields, when this connection has any. Absent for a connection that needs no
+                  credentials (the platform's own Kafka bus, an anonymous `generic` endpoint). The per-type
+                  validation below still requires it for every type that authenticates.
+                nullable: true
+                properties:
+                  keys:
+                    description: |-
+                      Names of the secret fields, for example `user` and `password`. They become the keys of the
+                      synced Kubernetes Secret and the environment variables `CONN_<NAME>_<KEY>`.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    minItems: 1
+                    type: array
+                  remoteRef:
+                    description: |-
+                      Path in the secret store. Absent: derived from the scope, `connections/group/<ownerGroup>/<name>`
+                      or `connections/managed/<name>`. Set it only when the platform reads the customer's own store
+                      (`spec.secrets` mode `external`); in platform mode the controller refuses a value, because
+                      a path chosen by the author could point at another group's secret.
+                    maxLength: 512
+                    minLength: 1
+                    nullable: true
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
+                    type: string
+                required:
+                - keys
+                type: object
+              type:
+                description: What a connection reaches. The type decides which settings and secret keys are required.
+                enum:
+                - postgresql
+                - mysql
+                - sqlserver
+                - oracle
+                - rest-api
+                - s3
+                - kafka
+                - sftp
+                - generic
+                type: string
+              usableBy:
+                description: 'Scope `managed`: the groups whose platform-run work may use the connection.'
+                items:
+                  maxLength: 64
+                  minLength: 1
+                  type: string
+                maxItems: 20
+                type: array
+              viewers:
+                description: |-
+                  Groups that may SEE this connection in Nova — its name, type, settings and the secret's
+                  key names — and nothing else. Creating, rotating and deleting stay with the scope's owner.
+                  Absent means nobody but the owner's group (or an administrator).
+                items:
+                  maxLength: 64
+                  minLength: 1
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                  type: string
+                maxItems: 16
+                type: array
+            required:
+            - type
+            type: object
+            x-kubernetes-validations:
+            - message: a group connection needs ownerGroup and no usableBy
+              rule: self.scope != 'group' || (has(self.ownerGroup) && !has(self.usableBy))
+            - message: a managed connection needs usableBy and no ownerGroup
+              rule: self.scope != 'managed' || (has(self.usableBy) && !has(self.ownerGroup))
+            - message: usableBy must list group names (letters, digits, dot, underscore, dash)
+              rule: '!has(self.usableBy) || self.usableBy.all(g, g.matches(''^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$''))'
+            - message: secret.remoteRef must not contain .. or //
+              rule: '!has(self.secret) || !has(self.secret.remoteRef) || (!self.secret.remoteRef.contains(''..'') && !self.secret.remoteRef.contains(''//''))'
+            - message: secret.keys must be unique names of letters, digits and underscore
+              rule: '!has(self.secret) || self.secret.keys.all(k, k.matches(''^[A-Za-z][A-Za-z0-9_]{0,62}$'') && self.secret.keys.exists_one(j, j == k))'
+            - message: 'config holds settings, not secrets: a name like password, secret or token belongs in secret.keys'
+              rule: '!has(self.config) || self.config.all(k, k.matches(''^[A-Za-z][A-Za-z0-9_.-]{0,62}$'') && !k.lowerAscii().matches(''(password|passwd|passphrase|secret|token|credential)''))'
+            - message: a database connection needs config.host and the secret keys user and password
+              rule: '!(self.type in [''postgresql'', ''mysql'', ''sqlserver'', ''oracle'']) || (has(self.config) && ''host'' in self.config && has(self.secret) && ''user'' in self.secret.keys && ''password'' in self.secret.keys)'
+            - message: a rest-api connection needs config.baseUrl and the secret key token, or clientId and clientSecret
+              rule: self.type != 'rest-api' || (has(self.config) && 'baseUrl' in self.config && has(self.secret) && ('token' in self.secret.keys || ('clientId' in self.secret.keys && 'clientSecret' in self.secret.keys)))
+            - message: an s3 connection needs config.bucket and the secret keys accessKeyId and secretAccessKey
+              rule: self.type != 's3' || (has(self.config) && 'bucket' in self.config && has(self.secret) && 'accessKeyId' in self.secret.keys && 'secretAccessKey' in self.secret.keys)
+            - message: an sftp connection needs config.host and the secret keys user and password or privateKey
+              rule: self.type != 'sftp' || (has(self.config) && 'host' in self.config && has(self.secret) && 'user' in self.secret.keys && ('password' in self.secret.keys || 'privateKey' in self.secret.keys))
+            - message: a kafka connection needs config.bootstrapServers
+              rule: self.type != 'kafka' || (has(self.config) && 'bootstrapServers' in self.config)
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastSync:
+                description: |-
+                  RFC 3339 time since which the credential has been in its current sync state: the `Ready`
+                  condition's `lastTransitionTime` on the `ExternalSecret`. Stable while the value does not
+                  change, unlike External Secrets' refresh heartbeat (`status.refreshTime`).
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              ready:
+                default: false
+                description: True when the Secret exists and holds every key in `spec.secret.keys`.
+                type: boolean
+              secretName:
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Connection
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_deploystages.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: deploystages.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: DeployStage
+    plural: deploystages
+    shortNames:
+    - dstage
+    singular: deploystage
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'One deploy stage: the bundle target names the object, and spec.subject is the exact CI subject (a GitHub Actions `sub`) allowed to deploy to that stage (#57). The operator renders one Keycloak client per object; Nova authorizes a deploy whose token was issued to that client.'
+        properties:
+          spec:
+            description: 'One deploy stage: the bundle target is the object''s name and `spec.subject` is the exact CI subject allowed to deploy to it (#57).'
+            properties:
+              audience:
+                default: stardelt-deploy
+                description: The audience the realm client's mapper puts in the token this stage accepts. Default `stardelt-deploy`.
+                maxLength: 128
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]*$
+                type: string
+              environment:
+                description: The GitHub `environment` the token was issued for, when the subject names one. Pinning an environment drops the `ref` part of the subject (#819), so the two are either/or.
+                maxLength: 64
+                minLength: 1
+                nullable: true
+                pattern: ^[a-z0-9][a-z0-9-]*$
+                type: string
+              group:
+                description: |-
+                  The owner group this stage deploys (#57): Nova lets a deploy principal whose client is this
+                  stage's act on a bundle of this group only. Optional; without it the deploy principal gets
+                  the "own group" refusal, which is the behaviour before this field existed.
+                maxLength: 64
+                minLength: 1
+                nullable: true
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              subject:
+                description: 'The exact CI subject as the identity provider receives it: `repo:<owner>/<name>:ref:refs/heads/<branch>` or `repo:<owner>/<name>:environment:<name>` (with GitHub''s immutable ids: `repo:<owner>@<id>/<name>@<id>:ref:refs/heads/<branch>`).'
+                maxLength: 512
+                minLength: 8
+                pattern: ^repo:[^\s]+:(ref:refs/heads/[^\s]+|environment:[a-z0-9][a-z0-9-]*)$
+                type: string
+            required:
+            - subject
+            type: object
+        required:
+        - spec
+        title: DeployStage
+        type: object
+    served: true
+    storage: true
+
+---
+# Source: stardelt-operator/crds/stardelt.io_ingestionsources.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ingestionsources.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: IngestionSource
+    plural: ingestionsources
+    shortNames:
+    - ingest
+    singular: ingestionsource
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'An ingestion source: one contract with three domain defaults (saas, enterprise, cdc).'
+        properties:
+          spec:
+            description: |-
+              An ingestion source: one contract, three domain defaults.
+
+              The source itself is deliberately opaque to the operator. `source` carries the
+              connector's own key/value parameters (host, port, database, topics, tables, …)
+              and is read by the plug (SeaTunnel / NiFi / Debezium), not by the reconciler —
+              that keeps the CRD stable while connectors evolve.
+            properties:
+              domain:
+                default: saas
+                description: |-
+                  Ingestion domain — the deliberate three-way split of the ingestion contract
+                  (master spec §5, plugs 8–10). One contract, three defaults.
+                enum:
+                - saas
+                - enterprise
+                - cdc
+                type: string
+              schedule:
+                description: |-
+                  Optional cron schedule; when unset the source follows its domain default
+                  (continuous for cdc, otherwise the connector's own cadence).
+                nullable: true
+                type: string
+              source:
+                additionalProperties:
+                  type: string
+                description: Connector-specific parameters, passed through to the plug verbatim.
+                type: object
+              target:
+                description: |-
+                  Destination table, e.g. `warehouse.raw.events`. Ingestion lands in Iceberg
+                  through the REST catalog — never in a side channel.
+                type: string
+            required:
+            - target
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+            type: object
+        required:
+        - spec
+        title: IngestionSource
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_lakehouses.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: lakehouses.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: Lakehouse
+    plural: lakehouses
+    shortNames:
+    - lh
+    singular: lakehouse
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Waiting
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A managed Trino + catalog + Iceberg unit on object storage.
+        properties:
+          spec:
+            description: 'A managed lakehouse: catalog + storage (+ query) on object storage.'
+            properties:
+              adopt:
+                default: false
+                description: |-
+                  Take over Helm releases this operator did not create. Off by default so a
+                  Lakehouse can never silently clobber an existing install.
+                type: boolean
+              catalog:
+                default:
+                  implementation: lakekeeper
+                properties:
+                  implementation:
+                    default: lakekeeper
+                    description: Catalog implementation (the plug behind the Iceberg REST contract).
+                    enum:
+                    - lakekeeper
+                    - polaris
+                    type: string
+                type: object
+              clusterOperation:
+                default:
+                  reconciliationPaused: false
+                  stopped: false
+                description: 'Freeze this resource: no cluster changes, status phase `Paused`.'
+                properties:
+                  reconciliationPaused:
+                    default: false
+                    description: 'Stop reconciling: the operator writes `Paused` and applies nothing.'
+                    type: boolean
+                  stopped:
+                    default: false
+                    description: |-
+                      Stop the workloads: scale every rendered Deployment and StatefulSet to zero, hibernate the
+                      namespace's CNPG databases, and report `Stopped`. Data, PVCs and Secrets stay.
+                    type: boolean
+                type: object
+              compute:
+                default:
+                  spark:
+                    enabled: false
+                description: 'Compute endpoints installed with the Lakehouse (default: none).'
+                properties:
+                  spark:
+                    default:
+                      enabled: false
+                    description: |-
+                      The Spark Connect endpoint (operator#239's builders): opt-in, because it is a second
+                      driver on the namespace and reads the Lakehouse's own S3 Secret.
+                    properties:
+                      enabled:
+                        default: false
+                        type: boolean
+                    type: object
+                type: object
+              deletionPolicy:
+                default: Retain
+                description: What happens to the data when this resource is deleted (decision D18). Defaults to Retain.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              dryRun:
+                default: true
+                description: Plan only (no cluster changes) until explicitly disabled.  Safe default.
+                type: boolean
+              profile:
+                default: demo
+                description: Deployment size / capability profile.
+                enum:
+                - demo
+                - full
+                - airgap
+                type: string
+              set:
+                additionalProperties:
+                  additionalProperties:
+                    type: string
+                  type: object
+                description: |-
+                  `--set` overrides per component: `set.<component>.<helm.key>: "value"`.
+                  Highest precedence — Helm applies `--set` after any values document.
+                type: object
+              storage:
+                default:
+                  bucket: null
+                  implementation: seaweedfs
+                properties:
+                  bucket:
+                    nullable: true
+                    type: string
+                  implementation:
+                    default: seaweedfs
+                    description: Object-store implementation.
+                    enum:
+                    - seaweedfs
+                    - byoS3
+                    type: string
+                type: object
+              values:
+                additionalProperties:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                description: |-
+                  Free-form Helm values per component, e.g. `values.trino.worker.resources`.
+                  Deep-merged over the golden defaults, so one key can be pinned without
+                  restating the rest.
+                type: object
+              valuesFrom:
+                additionalProperties:
+                  description: |-
+                    External source of one component's Helm values: set exactly one of
+                    `configMapRef` or `secretRef`.
+                  properties:
+                    configMapRef:
+                      description: Read the values document from this ConfigMap key.
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key holding the YAML values document.
+                          type: string
+                        name:
+                          description: Name of the ConfigMap or Secret.
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the referenced object. Defaults to the resource's own
+                            namespace; required for cluster-scoped resources (`PlatformInstance`).
+                          nullable: true
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    secretRef:
+                      description: Read the values document from this Secret key (decoded, then parsed as YAML).
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key holding the YAML values document.
+                          type: string
+                        name:
+                          description: Name of the ConfigMap or Secret.
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the referenced object. Defaults to the resource's own
+                            namespace; required for cluster-scoped resources (`PlatformInstance`).
+                          nullable: true
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                  type: object
+                description: External values documents per component, read from a ConfigMap or Secret key.
+                type: object
+            type: object
+          status:
+            nullable: true
+            properties:
+              components:
+                default: []
+                items:
+                  properties:
+                    appliedHash:
+                      description: |-
+                        Fingerprint (args + values) of the release that was applied last time a
+                        hash was recorded; lets the next reconcile skip an unchanged component.
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                    ready:
+                      type: boolean
+                  required:
+                  - name
+                  - ready
+                  type: object
+                type: array
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+            type: object
+        required:
+        - spec
+        title: Lakehouse
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_modelendpoints.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelendpoints.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: ModelEndpoint
+    plural: modelendpoints
+    shortNames:
+    - me
+    singular: modelendpoint
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'The customer''s own OpenAI-compatible model endpoint: URL, model, key, where it runs, what it is for and how much each group may use.'
+        properties:
+          spec:
+            description: The plug to the customer's own OpenAI-compatible model endpoint (D46). stardelt ships no model.
+            properties:
+              keyRef:
+                description: 'The API key: a key of a `Connection` in the same namespace. Absent for a keyless in-cluster endpoint.'
+                nullable: true
+                properties:
+                  key:
+                    description: The key inside that connection's synced Secret.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z][A-Za-z0-9_]*$
+                    type: string
+                  name:
+                    description: Name of a `Connection` in the same namespace.
+                    maxLength: 40
+                    minLength: 1
+                    pattern: ^[a-z0-9][a-z0-9-]*$
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              location:
+                default: on-premise
+                description: 'Where a model endpoint runs: in the customer''s network, or at a cloud provider (prompts leave the cluster).'
+                enum:
+                - on-premise
+                - cloud
+                type: string
+              model:
+                description: The model id the endpoint serves.
+                maxLength: 200
+                minLength: 1
+                type: string
+              purposes:
+                default:
+                - ask
+                - agents
+                items:
+                  description: What a model endpoint is used for.
+                  enum:
+                  - ask
+                  - agents
+                  type: string
+                maxItems: 2
+                minItems: 1
+                type: array
+              quota:
+                description: Token limits; absent means no limit.
+                nullable: true
+                properties:
+                  perGroupMonthlyTokens:
+                    format: int64
+                    maximum: 10000000000.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  perPersonDailyTokens:
+                    format: int64
+                    maximum: 1000000000.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
+              sendRows:
+                default: false
+                description: May query results (rows) be sent to this model? Off by default.
+                type: boolean
+              url:
+                description: The OpenAI-compatible base URL, for example `https://llm.internal.example/v1`.
+                maxLength: 512
+                minLength: 8
+                pattern: ^https?://
+                type: string
+            required:
+            - model
+            - url
+            type: object
+            x-kubernetes-validations:
+            - message: a cloud endpoint must use https
+              rule: self.location != 'cloud' || self.url.startsWith('https://')
+            - message: each purpose may appear once
+              rule: self.purposes.all(p, self.purposes.exists_one(q, q == p))
+          status:
+            description: What Nova's probe found (slice c writes it).
+            nullable: true
+            properties:
+              checkedAt:
+                nullable: true
+                type: string
+              conditions:
+                description: |-
+                  The conditions Nova reports for this endpoint. `Ready` is `True` when the last probe
+                  found an endpoint that answers and returns a tool call; `False` with a `reason` and a
+                  `message` names what is missing. The `Condition` shape every other status in this file
+                  uses — no new type.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              contextTokens:
+                format: int64
+                nullable: true
+                type: integer
+              jsonOutput:
+                nullable: true
+                type: boolean
+              message:
+                nullable: true
+                type: string
+              reachable:
+                nullable: true
+                type: boolean
+              toolCalling:
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: ModelEndpoint
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_pipelines.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: pipelines.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: Pipeline
+    plural: pipelines
+    shortNames:
+    - pipe
+    singular: pipeline
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A pipeline: tasks with dependencies and an optional schedule, run on one engine.'
+        properties:
+          spec:
+            description: 'A pipeline: tasks with dependencies, an optional schedule, run by one engine.'
+            properties:
+              concurrency:
+                default: Forbid
+                description: What happens when a run is due while the previous one is still running.
+                enum:
+                - Allow
+                - Forbid
+                - Replace
+                type: string
+              description:
+                description: |-
+                  One sentence a person reads on the Pipelines page: what this pipeline does. Optional;
+                  absent keeps every existing pipeline valid and renders as no line.
+                maxLength: 200
+                nullable: true
+                type: string
+              engine:
+                default: airflow
+                description: Engine that orchestrates (and for `spark`, executes) the pipeline.
+                enum:
+                - airflow
+                - spark
+                type: string
+              notify:
+                description: |-
+                  Who to tell when a run ends; names of destinations owned by `ownerGroup`. Optional:
+                  a pipeline without it notifies nobody.
+                nullable: true
+                properties:
+                  onFailure:
+                    description: Destinations told when the run fails, after the last retry.
+                    items:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    maxItems: 5
+                    type: array
+                  onRecovered:
+                    description: Destinations told on the first success after a failure.
+                    items:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    maxItems: 5
+                    type: array
+                  onSuccess:
+                    description: Destinations told when the run succeeds.
+                    items:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    maxItems: 5
+                    type: array
+                type: object
+              ownerGroup:
+                description: |-
+                  The group that owns the pipeline: its members see it, run it and pause it in Nova. Optional so
+                  that existing pipelines keep working; a pipeline without an owner is visible to administrators only.
+                maxLength: 64
+                minLength: 1
+                nullable: true
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              params:
+                additionalProperties:
+                  type: string
+                description: Values for `${params.<name>}` in task statements.
+                type: object
+              publish:
+                default: direct
+                description: |-
+                  `direct` (default) or `wap`; `wap` needs a `quality` task with at least one check
+                  (nova#628 decision 1).
+                enum:
+                - direct
+                - wap
+                type: string
+              retries:
+                description: Retry policy applied to every task.
+                nullable: true
+                properties:
+                  attempts:
+                    description: Extra attempts after the first failure.
+                    format: int32
+                    maximum: 10.0
+                    minimum: 0.0
+                    type: integer
+                  backoff:
+                    description: Wait between attempts, for example `5m`. Absent means one minute.
+                    nullable: true
+                    type: string
+                required:
+                - attempts
+                type: object
+              runAs:
+                description: |-
+                  Service principal the tasks run as. Absent means the platform's default pipeline principal.
+                  By convention the principal of the owner group, named `pipeline-<ownerGroup>`; Nova's Schedule
+                  writes that name.
+                nullable: true
+                type: string
+              schedule:
+                description: Optional schedule; a pipeline without one runs on demand only.
+                nullable: true
+                properties:
+                  cron:
+                    description: Five-field cron expression, for example `0 3 * * *`.
+                    maxLength: 100
+                    minLength: 9
+                    type: string
+                  timezone:
+                    description: IANA time zone name, for example `Europe/Berlin`. Absent means UTC.
+                    nullable: true
+                    type: string
+                required:
+                - cron
+                type: object
+              tasks:
+                description: Tasks of the pipeline; at least one, at most 30.
+                items:
+                  description: |-
+                    One task of a `Pipeline`. A task starts when every task in `dependsOn` has succeeded.
+
+                    A `notebook` task names its source in `config`: `notebook` is the `.ipynb`
+                    file name and `objectVersion` the immutable published version; `params` is a
+                    JSON object string that papermill passes to the notebook. Nothing else is
+                    accepted, so a typo cannot silently become a default.
+                  properties:
+                    checks:
+                      description: A `quality` task's assertions; empty on every other kind.
+                      items:
+                        description: 'One SQL assertion of a `quality` task: the check passes when the query returns no rows.'
+                        properties:
+                          name:
+                            description: Unique within the task; the run page names the check by it.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                            type: string
+                          severity:
+                            default: error
+                            description: '`error` fails the run; `warn` records the rows and lets the run publish.'
+                            enum:
+                            - error
+                            - warn
+                            type: string
+                          sql:
+                            description: |-
+                              The assertion; it passes when it returns zero rows. `${table}` is the branch-qualified
+                              table during the audit (nova#628 decision 2).
+                            maxLength: 20000
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        - sql
+                        type: object
+                      maxItems: 50
+                      type: array
+                    config:
+                      additionalProperties:
+                        maxLength: 4096
+                        type: string
+                      description: Task-specific parameters of the other kinds (model path, gate threshold, …).
+                      maxProperties: 32
+                      type: object
+                    connection:
+                      description: |-
+                        The `Connection` whose secret fields this task receives as `CONN_<NAME>_<KEY>`: the name
+                        upper-cased with `-` written as `_`. The credentials reach the pod through `secretKeyRef`s
+                        and are never part of the resource, the DAG or a log. A `sql` task runs inside the engine
+                        and cannot name one.
+                      maxLength: 40
+                      minLength: 1
+                      nullable: true
+                      pattern: ^[a-z]([a-z0-9-]*[a-z0-9])?$
+                      type: string
+                    dependsOn:
+                      description: Names of the tasks that must succeed first.
+                      items:
+                        type: string
+                      maxItems: 8
+                      type: array
+                    files:
+                      additionalProperties:
+                        maxLength: 65536
+                        type: string
+                      description: |-
+                        The graph's files for a `spark-pipeline` task: relative path to text, `spark-pipeline.yml`
+                        and its sources. Empty on every other kind. The loader caps one file at 64 KiB and a whole
+                        graph at 256 KiB; the schema caps the count and each file's length.
+                      maxProperties: 64
+                      type: object
+                    fullRefresh:
+                      description: Datasets to rebuild from scratch on every run; only a `spark-pipeline` task.
+                      items:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      maxItems: 32
+                      type: array
+                    kind:
+                      description: |-
+                        What a pipeline task does — the task contract behind `Pipeline`
+                        (master spec §5, plugs 6, 7 and 12). `sql`, `notebook` (scheduled jobs
+                        phases J0 and J1), `dbt`, `quality` and `spark-pipeline` run today;
+                        `python` alone is accepted so a manifest can be written ahead of its runtime.
+                      enum:
+                      - sql
+                      - notebook
+                      - python
+                      - dbt
+                      - quality
+                      - spark-pipeline
+                      type: string
+                    name:
+                      description: Unique within the pipeline; becomes the task id in the engine.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                      type: string
+                    project:
+                      description: |-
+                        The declared graph a `spark-pipeline` task runs: a directory of the bundle that holds
+                        `spark-pipeline.yml` and its sources. Absent on every other kind.
+                      maxLength: 128
+                      minLength: 1
+                      nullable: true
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._/-]*$
+                      type: string
+                    refresh:
+                      description: '`incremental` (the default) or `full`; only a `spark-pipeline` task.'
+                      enum:
+                      - incremental
+                      - full
+                      - null
+                      nullable: true
+                      type: string
+                    sql:
+                      description: |-
+                        The statement of a `sql` task. `${run.date}`, `${run.id}` and
+                        `${params.<name>}` are expanded when the task runs, not in the resource.
+                      maxLength: 100000
+                      minLength: 1
+                      nullable: true
+                      type: string
+                    warehouse:
+                      description: Warehouse that runs a `sql` task; absent means the default warehouse.
+                      nullable: true
+                      type: string
+                    writes:
+                      description: |-
+                        The tables a `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`. Only these get an audit
+                        branch when `spec.publish: wap`; a read leaves them alone (nova#628 decision 3).
+                      items:
+                        maxLength: 512
+                        minLength: 1
+                        type: string
+                      maxItems: 16
+                      type: array
+                  required:
+                  - kind
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: a notebook task needs config.notebook (a .ipynb file name) and config.objectVersion (the published version)
+                    rule: self.kind != 'notebook' || (has(self.config) && 'notebook' in self.config && self.config['notebook'].matches('^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$') && 'objectVersion' in self.config && self.config['objectVersion'].matches('^\\S{1,128}$'))
+                  - message: notebook tasks accept only notebook, objectVersion and params
+                    rule: self.kind != 'notebook' || !has(self.config) || self.config.all(k, k in ['notebook', 'objectVersion', 'params'])
+                  - message: notebook params must be a JSON object string of at most 4096 characters
+                    rule: self.kind != 'notebook' || !has(self.config) || !('params' in self.config) || self.config['params'].size() <= 4096
+                  - message: 'a sql task cannot name a connection: it runs inside the engine'
+                    rule: self.kind != 'sql' || !has(self.connection)
+                  - message: only a spark-pipeline or notebook task declares writes
+                    rule: '!has(self.writes) || self.kind == ''notebook'' || self.kind == ''spark-pipeline'''
+                  - message: writes must be catalog.schema.table
+                    rule: '!has(self.writes) || self.writes.all(w, w.matches(''^[^ .]+[.][^ .]+[.][^ .]+$''))'
+                  - message: only a quality task declares checks
+                    rule: '!has(self.checks) || self.kind == ''quality'''
+                  - message: a spark-pipeline task needs project (the bundle directory with spark-pipeline.yml)
+                    rule: self.kind != 'spark-pipeline' || (has(self.project) && size(self.project) > 0)
+                  - message: only a spark-pipeline task names a project
+                    rule: self.kind == 'spark-pipeline' || !has(self.project)
+                  - message: only a spark-pipeline task carries files
+                    rule: '!has(self.files) || self.kind == ''spark-pipeline'''
+                  - message: a spark-pipeline task's files must hold spark-pipeline.yml
+                    rule: self.kind != 'spark-pipeline' || !has(self.files) || ('spark-pipeline.yml' in self.files)
+                  - message: only a spark-pipeline task sets refresh
+                    rule: '!has(self.refresh) || self.kind == ''spark-pipeline'''
+                  - message: only a spark-pipeline task sets fullRefresh
+                    rule: '!has(self.fullRefresh) || self.kind == ''spark-pipeline'''
+                  - message: 'a spark-pipeline task sets refresh: full or fullRefresh, not both'
+                    rule: '!has(self.refresh) || self.refresh != ''full'' || !has(self.fullRefresh)'
+                maxItems: 30
+                minItems: 1
+                type: array
+              timeout:
+                description: Longest a whole run may take, for example `2h`.
+                nullable: true
+                type: string
+              viewers:
+                description: |-
+                  Groups that may READ the pipeline in Nova — list it, open it, see its runs — and
+                  nothing else. Running, pausing, resuming and deleting stay with `ownerGroup`.
+                  Absent means the owner group only, which is what every pipeline had before this field.
+                items:
+                  maxLength: 64
+                  minLength: 1
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                  type: string
+                maxItems: 16
+                type: array
+            required:
+            - tasks
+            type: object
+            x-kubernetes-validations:
+            - message: task names must be unique
+              rule: self.tasks.all(t, self.tasks.exists_one(u, u.name == t.name))
+            - message: dependsOn must name other tasks of this pipeline
+              rule: self.tasks.all(t, !has(t.dependsOn) || t.dependsOn.all(d, d != t.name && self.tasks.exists(u, u.name == d)))
+            - message: a sql task needs a sql statement
+              rule: self.tasks.all(t, t.kind != 'sql' || has(t.sql))
+            - message: 'publish: wap needs a quality task with at least one check'
+              rule: '!has(self.publish) || self.publish != ''wap'' || self.tasks.exists(t, t.kind == ''quality'' && has(t.checks) && size(t.checks) > 0)'
+            - message: 'publish: wap needs a task that writes at least one table'
+              rule: '!has(self.publish) || self.publish != ''wap'' || self.tasks.exists(t, has(t.writes) && size(t.writes) > 0)'
+            - message: 'notify needs an ownerGroup: only a pipeline''s owner group can name destinations'
+              rule: '!has(self.notify) || has(self.ownerGroup)'
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+              runs:
+                default: []
+                items:
+                  description: |-
+                    Last-known run of a pipeline. Intentionally minimal: the authoritative history
+                    belongs to the engine adapter (Airflow / Spark); this is the operator's view.
+                  properties:
+                    id:
+                      type: string
+                    startedAt:
+                      nullable: true
+                      type: string
+                    state:
+                      description: Free-form until the adapters land (`queued` | `running` | `succeeded` | `failed`).
+                      type: string
+                  required:
+                  - id
+                  - state
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        title: Pipeline
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_platforminstances.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: platforminstances.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: PlatformInstance
+    plural: platforminstances
+    shortNames:
+    - platform
+    singular: platforminstance
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Waiting
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A stardelt platform instance.
+        properties:
+          spec:
+            description: 'Cluster-scoped root resource: declares which pillars and profile are installed.'
+            properties:
+              baseDomain:
+                description: |-
+                  Public DNS name the platform is served under, for example `data.example.com`: Nova answers
+                  on the name itself and every other application on a subdomain (`id`, `trino`, `superset`...).
+                maxLength: 253
+                minLength: 3
+                nullable: true
+                pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$
+                type: string
+              clusterOperation:
+                default:
+                  reconciliationPaused: false
+                  stopped: false
+                description: 'Freeze this resource: no cluster changes, status phase `Paused` (operator#64).'
+                properties:
+                  reconciliationPaused:
+                    default: false
+                    description: 'Stop reconciling: the operator writes `Paused` and applies nothing.'
+                    type: boolean
+                  stopped:
+                    default: false
+                    description: |-
+                      Stop the workloads: scale every rendered Deployment and StatefulSet to zero, hibernate the
+                      namespace's CNPG databases, and report `Stopped`. Data, PVCs and Secrets stay.
+                    type: boolean
+                type: object
+              defaultTheme:
+                default: graphite
+                description: |-
+                  Default theme for Nova's interface (the four ids of the theme library); a person's own
+                  choice in Preferences wins. One of `dark`, `light`, `graphite` or `silver`.
+                enum:
+                - dark
+                - light
+                - graphite
+                - silver
+                type: string
+              dryRun:
+                default: true
+                description: Plan only (no cluster changes) until explicitly disabled. Safe default.
+                type: boolean
+              identity:
+                default:
+                  adminGroup: stardelt-admins
+                  mode: none
+                  provider: oidc
+                description: How users sign in; see [`IdentitySpec`].
+                properties:
+                  adminGroup:
+                    default: stardelt-admins
+                    description: Members of this group are platform administrators.
+                    type: string
+                  apiAudience:
+                    description: '`external` only: the audience the engine and the catalog accept.'
+                    maxLength: 256
+                    minLength: 1
+                    nullable: true
+                    pattern: ^\S+$
+                    type: string
+                  clients:
+                    additionalProperties:
+                      description: One app registration made by the customer in their provider.
+                      properties:
+                        clientId:
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^\S+$
+                          type: string
+                        clientSecretRef:
+                          description: Required for every client except the public `lakekeeper` one. Never the value itself.
+                          nullable: true
+                          properties:
+                            key:
+                              default: client-secret
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - clientId
+                      type: object
+                    description: '`external` only: the app registrations the customer made, one entry per client.'
+                    type: object
+                  groupClaim:
+                    description: |-
+                      Name of the token claim that carries group (or role) names. Defaults to `roles` for
+                      `entra` and `groups` otherwise.
+                    nullable: true
+                    type: string
+                  issuerUrl:
+                    description: |-
+                      OIDC issuer URL, `https://` only. Required for `external`; for `platform` it is derived
+                      from `baseDomain` and must be left out.
+                    nullable: true
+                    type: string
+                  jwksUri:
+                    description: |-
+                      `external` only: the provider's JWKS URL — `jwks_uri` in
+                      `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: Envoy cannot
+                      discover it, and the operator does not fetch a customer's discovery document.
+                      A `platform` instance derives it from the Keycloak it deploys and must leave it out.
+                    maxLength: 512
+                    minLength: 1
+                    nullable: true
+                    pattern: ^https://\S+$
+                    type: string
+                  ldap:
+                    description: |-
+                      `platform` only: a directory the platform-IdP imports people and groups from, through
+                      Keycloak's read-only LDAP federation (#39).
+                    nullable: true
+                    properties:
+                      bindSecretRef:
+                        description: The Secret with the bind DN and its password; never the values themselves.
+                        properties:
+                          dnKey:
+                            default: bind-dn
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                            type: string
+                          passwordKey:
+                            default: bind-password
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      groupDn:
+                        description: Subtree that holds groups, for example `ou=groups,dc=example,dc=org`.
+                        maxLength: 512
+                        minLength: 3
+                        pattern: ^\S.*=\S.*$
+                        type: string
+                      host:
+                        description: Directory host name, without a scheme or port.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9.-]*$
+                        type: string
+                      port:
+                        default: 389
+                        description: 'Port of the directory. `389` with `tls: none` or `tls: starttls`; `636` with `tls: ldaps`.'
+                        format: int32
+                        maximum: 65535.0
+                        minimum: 1.0
+                        type: integer
+                      syncSeconds:
+                        default: 3600
+                        description: |-
+                          Full sync interval in seconds. A revoked group keeps its access until the next sync,
+                          so `0` is refused: 60 to 86400, default 3600 (measured in #1516).
+                        format: int32
+                        maximum: 86400.0
+                        minimum: 60.0
+                        type: integer
+                      tls:
+                        default: none
+                        description: How the connection is protected; see [`IdentityLdapTls`]. Defaults to `none`.
+                        enum:
+                        - none
+                        - starttls
+                        - ldaps
+                        type: string
+                      usersDn:
+                        description: Subtree that holds people, for example `ou=users,dc=example,dc=org`.
+                        maxLength: 512
+                        minLength: 3
+                        pattern: ^\S.*=\S.*$
+                        type: string
+                    required:
+                    - bindSecretRef
+                    - groupDn
+                    - host
+                    - usersDn
+                    type: object
+                  mode:
+                    default: none
+                    description: |-
+                      Where users sign in (decision D20). Two modes besides none: an identity provider the
+                      organization already runs (`external`, for example Entra or Okta), or one the platform runs
+                      itself (`platform`, Keycloak). An organization often runs the platform several times against
+                      one external provider; each instance then has its own app registrations and group mapping.
+                    enum:
+                    - none
+                    - platform
+                    - external
+                    type: string
+                  provider:
+                    default: oidc
+                    description: '`external` only: which kind of provider this instance talks to.'
+                    enum:
+                    - oidc
+                    - entra
+                    type: string
+                  tokenEndpoint:
+                    description: |-
+                      `external` only: the provider's OAuth2 token endpoint — `token_endpoint` in
+                      `<issuerUrl>/.well-known/openid-configuration`. Required for `external`: neither the
+                      operator (API-server proxy only) nor Helm can fetch an external discovery document.
+                      A `platform` instance derives it from the Keycloak it deploys and must leave it out.
+                    maxLength: 512
+                    minLength: 1
+                    nullable: true
+                    pattern: ^https://\S+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'platform mode creates its own clients: leave provider, apiAudience and clients out'
+                  rule: self.mode == 'external' || (self.provider == 'oidc' && !has(self.apiAudience) && !has(self.jwksUri) && (!has(self.clients) || size(self.clients) == 0))
+                - message: external mode needs issuerUrl
+                  rule: self.mode != 'external' || has(self.issuerUrl)
+                - message: external mode needs tokenEndpoint
+                  rule: self.mode != 'external' || has(self.tokenEndpoint)
+                - message: external mode needs jwksUri
+                  rule: self.mode != 'external' || has(self.jwksUri)
+                - message: external mode needs apiAudience
+                  rule: self.mode != 'external' || has(self.apiAudience)
+                - message: external mode needs a nova client
+                  rule: self.mode != 'external' || (has(self.clients) && 'nova' in self.clients)
+                - message: client names are nova, trino, lakekeeper, superset, airflow, jupyterhub and trino-group-sync
+                  rule: '!has(self.clients) || self.clients.all(k, k in [''nova'',''trino'',''lakekeeper'',''superset'',''airflow'',''jupyterhub'',''trino-group-sync''])'
+                - message: every client except lakekeeper needs a clientSecretRef
+                  rule: '!has(self.clients) || self.clients.all(k, k == ''lakekeeper'' || has(self.clients[k].clientSecretRef))'
+                - message: ldap only works with mode platform, which runs the Keycloak that imports it
+                  rule: '!has(self.ldap) || self.mode == ''platform'''
+                - message: identity.ldap.port must be 636 when tls is ldaps
+                  rule: '!has(self.ldap) || self.ldap.tls != ''ldaps'' || self.ldap.port == 636'
+                - message: 'identity.ldap.port 636 needs tls: ldaps'
+                  rule: '!has(self.ldap) || self.ldap.tls == ''ldaps'' || self.ldap.port != 636'
+              ingress:
+                default:
+                  allowedCidrs: []
+                  enabled: false
+                  mode: ingress
+                  tls:
+                    enabled: false
+                    secretNameTemplate: '{host}-tls'
+                description: How the applications are reached from outside the cluster; see [`IngressSettings`].
+                properties:
+                  allowedCidrs:
+                    default: []
+                    description: |-
+                      Source ranges that may open a connection to the public endpoints
+                      (`stardelt-platform#427`). Empty = open to everyone. A non-empty list renders
+                      `nginx.ingress.kubernetes.io/whitelist-source-range` on every Ingress this operator
+                      applies (ingress-nginx; other controllers ignore it). Entries are CIDRs, at most 64.
+                      Always include the cluster's own egress address: pods that call the public names
+                      arrive through it.
+
+                      Ignored when `mode: gateway`: source filtering belongs to the Gateway's listener.
+
+                      The bounds are not cosmetic: the API server's CEL cost estimator treats an
+                      unbounded array under a `matches()` rule as unbounded, and refuses the whole
+                      CRD ("estimated rule cost exceeds budget by factor of more than 100x",
+                      operator#536). `maxItems`/`maxLength` are what make the rule affordable.
+                    items:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    maxItems: 64
+                    type: array
+                  className:
+                    description: |-
+                      IngressClass name, for example `nginx` or `traefik`. Absent: the cluster default.
+                      Ignored when `mode: gateway`.
+                    maxLength: 253
+                    minLength: 1
+                    nullable: true
+                    type: string
+                  enabled:
+                    default: false
+                    description: |-
+                      Create an Ingress for Nova (on `baseDomain` itself); the identity provider
+                      on `id.` with `identity.mode: platform`; Airflow on `airflow.` with the `pipelines` pillar;
+                      JupyterHub on `jupyter.` with `notebooks`.
+                    type: boolean
+                  gateway:
+                    description: |-
+                      The Gateway the HTTPRoutes attach to; required by `mode: gateway`, ignored by
+                      `mode: ingress`. Its listeners own TLS, the host name and source filtering.
+                    nullable: true
+                    properties:
+                      name:
+                        description: Name of the Gateway in the cluster.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace of the Gateway; absent means the instance's namespace.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  mode:
+                    default: ingress
+                    description: |-
+                      How the applications are reached; see [`IngressMode`]. Defaults to `ingress`.
+                      With `gateway`, one `HTTPRoute` per application is rendered instead of Ingresses, and
+                      `className`, `allowedCidrs` and `tls` are ignored.
+                    enum:
+                    - ingress
+                    - gateway
+                    type: string
+                  tls:
+                    default:
+                      enabled: false
+                      secretNameTemplate: '{host}-tls'
+                    description: |-
+                      TLS through cert-manager on the Ingresses. Ignored when `mode: gateway`: TLS belongs to
+                      the Gateway's listeners and their certificate references.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Requires cert-manager. Leave off when TLS ends elsewhere (a cloud load balancer, an edge proxy).
+                        type: boolean
+                      issuer:
+                        description: |-
+                          Name of a cert-manager ClusterIssuer; written as the `cert-manager.io/cluster-issuer`
+                          annotation of every Ingress.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        type: string
+                      secretNameTemplate:
+                        default: '{host}-tls'
+                        description: |-
+                          Name of the Secret that holds the certificate; `{host}` becomes the host name with the
+                          dots turned into dashes.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: ingress.tls.enabled needs ingress.tls.issuer, the name of a cert-manager ClusterIssuer
+                  rule: '!has(self.tls) || !has(self.tls.enabled) || !self.tls.enabled || (has(self.tls.issuer) && size(self.tls.issuer) > 0)'
+                - message: 'ingress.allowedCidrs: at most 64 entries'
+                  rule: size(self.allowedCidrs) <= 64
+                - message: 'ingress.allowedCidrs: each entry is a CIDR such as 203.0.113.0/24'
+                  rule: self.allowedCidrs.all(c, c.matches('^[0-9a-fA-F:.]+/[0-9]{1,3}$'))
+              mcp:
+                default:
+                  enabled: false
+                description: |-
+                  The hosted MCP endpoint on Nova: whether it answers, the audience its tokens carry, the
+                  row cap and timeout of `sql_read`, and the client ids allowed to call it. Off by default.
+                properties:
+                  allowedClients:
+                    description: |-
+                      Client ids (`azp`) allowed to call `/mcp`, comma separated in the Deployment.
+                      Empty = every client the audience accepts. Nova refuses a token without an `azp`
+                      while this list is set.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  allowedGroups:
+                    description: |-
+                      Groups (`groups` claim) whose members may call `/mcp`, comma separated in the
+                      Deployment. Empty = every group the audience accepts. Nova refuses a caller whose
+                      token names none of them while this list is set.
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
+                  audience:
+                    description: |-
+                      The resource identifier tokens must carry. Empty = `https://<baseDomain>/mcp`, the
+                      value the realm client `stardelt-mcp`'s `aud-mcp` mapper mints.
+                    nullable: true
+                    type: string
+                  auditRetentionDays:
+                    description: |-
+                      Days the `mcp_call` audit rows are kept (`NOVA_MCP_AUDIT_RETENTION_DAYS`); 0–3650.
+                      Empty = Nova's own default (30); `0` keeps the rows and switches the purge off.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  callsPerMinute:
+                    description: '`tools/call`s one person may make per minute on `/mcp`; 1–600. Empty = Nova''s own default (60).'
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  enabled:
+                    default: false
+                    description: Render `NOVA_MCP_ENABLED`/`NOVA_MCP_AUDIENCE` into Nova. Off by default.
+                    type: boolean
+                  maxRows:
+                    description: Rows one `sql_read` call may return; 1–1000. Empty = Nova's own default (200).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  queryTimeoutSeconds:
+                    description: Seconds one `sql_read` call may run before it is cancelled; 1–300. Empty = Nova's own default (60).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  writesPerHour:
+                    description: |-
+                      `tools/call`s of a write tool one person may make per hour on `/mcp`
+                      (`NOVA_MCP_WRITES_PER_HOUR`); 1–600. Empty = Nova's own default (20).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              monitoring:
+                default:
+                  enabled: false
+                  labels: {}
+                description: 'The customer''s Prometheus: the scrape objects, or a condition that says why not.'
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      Render a ServiceMonitor for every component that exposes Prometheus metrics.
+                      Needs the monitoring.coreos.com/v1 CRDs; without them the operator renders
+                      nothing and reports MonitoringCRDsMissing.
+                    type: boolean
+                  labels:
+                    additionalProperties:
+                      type: string
+                    default: {}
+                    description: |-
+                      Labels added to every rendered object, so the customer's Prometheus selects them
+                      (for example `release: kube-prometheus-stack`).
+                    type: object
+                type: object
+              namespace:
+                default: stardelt
+                description: Namespace the platform's own components are installed into.
+                type: string
+              pillars:
+                default:
+                  batch: false
+                  dashboards: false
+                  lakehouse: true
+                  ml: false
+                  notebooks: false
+                  pipelines: false
+                  streaming: false
+                description: Which pillars a platform instance enables.
+                properties:
+                  batch:
+                    default: false
+                    type: boolean
+                  dashboards:
+                    default: false
+                    description: |-
+                      BI dashboards (Superset). Off by default: it brings a metadata database, Redis and
+                      three long-running pods. People sign in through the platform IdP, with the local
+                      administrator kept as break-glass; each group sees the dashboards its catalog role allows.
+                    type: boolean
+                  lakehouse:
+                    default: true
+                    type: boolean
+                  ml:
+                    default: false
+                    type: boolean
+                  notebooks:
+                    default: false
+                    description: |-
+                      Multi-user notebooks (JupyterHub). Off by default: a notebook stack is
+                      heavy, and a cluster that only serves queries should not carry it.
+                    type: boolean
+                  pipelines:
+                    default: false
+                    description: |-
+                      Scheduled pipelines and jobs (Airflow, run as `KubernetesExecutor`). Off by default: it
+                      brings a metadata database and four long-running pods, and a cluster that only serves
+                      queries does not need them. Nova's Pipelines page and `stardelt bundle run` need it.
+                    type: boolean
+                  streaming:
+                    default: false
+                    type: boolean
+                type: object
+              profile:
+                default: demo
+                description: Deployment size / capability profile.
+                enum:
+                - demo
+                - full
+                - airgap
+                type: string
+              secrets:
+                default:
+                  mode: none
+                description: Where the credentials of `Connection` objects come from; see [`SecretsSpec`].
+                properties:
+                  external:
+                    description: The enterprise's store; required for `external`, refused for the other modes.
+                    nullable: true
+                    properties:
+                      provider:
+                        description: |-
+                          The `provider` block of the `ClusterSecretStore` (`vault`, `aws`, `azurekv`, …), passed to
+                          External Secrets verbatim. Exactly one provider key; credentials are referenced by Secret
+                          name inside the block, never inline.
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    required:
+                    - provider
+                    type: object
+                  groups:
+                    description: |-
+                      Owner groups that get their own store entry in `secrets.mode: platform` or
+                      `secrets.mode: external`: each one may read only its own path (decision D27).
+                      Mirrors the platform's `STORE_GROUPS`.
+                    items:
+                      maxLength: 40
+                      type: string
+                    maxItems: 20
+                    type: array
+                  mode:
+                    default: none
+                    description: Which secret store the platform uses for user credentials (decision D23).
+                    enum:
+                    - none
+                    - platform
+                    - external
+                    type: string
+                type: object
+              set:
+                additionalProperties:
+                  additionalProperties:
+                    type: string
+                  type: object
+                description: |-
+                  `--set` overrides per component: `set.<component>.<helm.key>: "value"`.
+                  Highest precedence — Helm applies `--set` after any values document.
+                type: object
+              values:
+                additionalProperties:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                description: |-
+                  Free-form Helm values per component, e.g. `values.trino.worker.resources`.
+                  Deep-merged over the golden defaults, so one key can be pinned without
+                  restating the rest.
+                type: object
+              valuesFrom:
+                additionalProperties:
+                  description: |-
+                    External source of one component's Helm values: set exactly one of
+                    `configMapRef` or `secretRef`.
+                  properties:
+                    configMapRef:
+                      description: Read the values document from this ConfigMap key.
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key holding the YAML values document.
+                          type: string
+                        name:
+                          description: Name of the ConfigMap or Secret.
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the referenced object. Defaults to the resource's own
+                            namespace; required for cluster-scoped resources (`PlatformInstance`).
+                          nullable: true
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    secretRef:
+                      description: Read the values document from this Secret key (decoded, then parsed as YAML).
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key holding the YAML values document.
+                          type: string
+                        name:
+                          description: Name of the ConfigMap or Secret.
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the referenced object. Defaults to the resource's own
+                            namespace; required for cluster-scoped resources (`PlatformInstance`).
+                          nullable: true
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                  type: object
+                description: External values documents per component, read from a ConfigMap or Secret key.
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: identity.mode external needs identity.issuerUrl, an https:// URL
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode != ''external'' || (has(self.identity.issuerUrl) && self.identity.issuerUrl.startsWith(''https://''))'
+            - message: identity.mode platform derives the issuer from baseDomain; leave identity.issuerUrl out
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode != ''platform'' || !has(self.identity.issuerUrl)'
+            - message: identity.mode platform derives the token endpoint from the issuer; leave identity.tokenEndpoint out
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode != ''platform'' || !has(self.identity.tokenEndpoint)'
+            - message: identity needs baseDomain (the application hosts and redirect addresses are built from it)
+              rule: '!has(self.identity) || !has(self.identity.mode) || self.identity.mode == ''none'' || has(self.baseDomain)'
+            - message: ingress needs baseDomain (the hosts are built from it)
+              rule: '!has(self.ingress) || !has(self.ingress.enabled) || !self.ingress.enabled || has(self.baseDomain)'
+            - message: secrets.mode external needs secrets.external.provider (the ClusterSecretStore provider block)
+              rule: '!has(self.secrets) || !has(self.secrets.mode) || self.secrets.mode != ''external'' || (has(self.secrets.external) && has(self.secrets.external.provider))'
+            - message: secrets.external is only allowed with secrets.mode external
+              rule: '!has(self.secrets) || !has(self.secrets.external) || (has(self.secrets.mode) && self.secrets.mode == ''external'')'
+            - message: secrets.groups entries are lower-case letters, digits and dashes (at most 40 characters)
+              rule: '!has(self.secrets) || !has(self.secrets.groups) || self.secrets.groups.all(g, g.matches(''^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$''))'
+            - message: secrets.groups is only allowed with secrets.mode platform or external
+              rule: '!has(self.secrets) || !has(self.secrets.groups) || size(self.secrets.groups) == 0 || (has(self.secrets.mode) && (self.secrets.mode == ''platform'' || self.secrets.mode == ''external''))'
+            - message: mcp.enabled needs baseDomain (the default audience is https://<baseDomain>/mcp) or an explicit mcp.audience
+              rule: '!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || has(self.baseDomain) || (has(self.mcp.audience) && self.mcp.audience.size() > 0)'
+            - message: mcp.maxRows is from 1 to 1000
+              rule: '!has(self.mcp) || !has(self.mcp.maxRows) || (self.mcp.maxRows >= 1 && self.mcp.maxRows <= 1000)'
+            - message: mcp.queryTimeoutSeconds is from 1 to 300
+              rule: '!has(self.mcp) || !has(self.mcp.queryTimeoutSeconds) || (self.mcp.queryTimeoutSeconds >= 1 && self.mcp.queryTimeoutSeconds <= 300)'
+            - message: mcp.callsPerMinute is from 1 to 600
+              rule: '!has(self.mcp) || !has(self.mcp.callsPerMinute) || (self.mcp.callsPerMinute >= 1 && self.mcp.callsPerMinute <= 600)'
+            - message: mcp.writesPerHour is from 1 to 600
+              rule: '!has(self.mcp) || !has(self.mcp.writesPerHour) || (self.mcp.writesPerHour >= 1 && self.mcp.writesPerHour <= 600)'
+            - message: mcp.auditRetentionDays is from 0 to 3650 (0 keeps the rows)
+              rule: '!has(self.mcp) || !has(self.mcp.auditRetentionDays) || (self.mcp.auditRetentionDays >= 0 && self.mcp.auditRetentionDays <= 3650)'
+          status:
+            nullable: true
+            properties:
+              components:
+                default: []
+                items:
+                  properties:
+                    appliedHash:
+                      description: |-
+                        Fingerprint (args + values) of the release that was applied last time a
+                        hash was recorded; lets the next reconcile skip an unchanged component.
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                    ready:
+                      type: boolean
+                  required:
+                  - name
+                  - ready
+                  type: object
+                type: array
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+            type: object
+        required:
+        - spec
+        title: PlatformInstance
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_serviceprincipals.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: serviceprincipals.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: ServicePrincipal
+    plural: serviceprincipals
+    shortNames:
+    - sp
+    singular: serviceprincipal
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A non-human identity (client credentials) for pipelines, maintenance and collectors.
+        properties:
+          spec:
+            description: |-
+              A non-human identity for jobs, maintenance and collectors (decisions D20 and D21, internal note
+              `design/scheduled-jobs.md`). With the platform identity provider the operator creates a client
+              with a service account and the audiences below and writes its credentials to the Secret
+              `sp-<name>`; with an external provider it only checks the Secret named in `existingSecretRef`.
+              The owner group's members may name the principal as a pipeline's `runAs`; nobody may read the Secret.
+            properties:
+              audiences:
+                default:
+                - trino
+                - lakekeeper
+                description: |-
+                  What the principal's tokens are valid for; at least one, both engines by default
+                  (`trino` for SQL, `lakekeeper` for the `spark` session in a notebook).
+                items:
+                  description: What a principal's tokens are valid for (the `aud` claim of its access token).
+                  enum:
+                  - trino
+                  - lakekeeper
+                  - lakekeeper-trino
+                  type: string
+                maxItems: 2
+                minItems: 1
+                type: array
+              existingSecretRef:
+                description: 'Only with an external identity provider: the Secret that holds the app registration''s credentials.'
+                nullable: true
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              ownerGroup:
+                description: The group whose members may use the principal. Members never read its credentials.
+                maxLength: 64
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              purpose:
+                default: pipeline
+                description: |-
+                  What a service principal is for — a pipeline, maintenance, a collector, or the platform's own
+                  client. It decides nothing by itself (grants do); it makes the intent visible in `kubectl get`
+                  and in Nova.
+                enum:
+                - pipeline
+                - maintenance
+                - collector
+                - catalog
+                type: string
+            required:
+            - ownerGroup
+            type: object
+            x-kubernetes-validations:
+            - message: each audience may appear once
+              rule: self.audiences.all(a, self.audiences.exists_one(b, b == a))
+          status:
+            nullable: true
+            properties:
+              clientId:
+                nullable: true
+                type: string
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              ready:
+                default: false
+                description: True when the client exists (or the referenced Secret is valid) and the Secret is written.
+                type: boolean
+              secretName:
+                nullable: true
+                type: string
+              subject:
+                description: |-
+                  The identity provider's user id of this principal (the `sub` of its tokens), written in
+                  platform mode after the client converges. The query log records it as the engine user;
+                  Nova maps it back to `spec.ownerGroup` so a team sees its principals' queries
+                  (stardelt-nova#116). External mode leaves it unset: the provider's administrator owns
+                  the account and the operator never talks to that provider.
+                nullable: true
+                type: string
+              workloadIdentity:
+                description: |-
+                  The catalog principal of this principal's workloads: `kubernetes~<ServiceAccount UID>`
+                  of the ServiceAccount `sp-<name>` the operator creates next to it (#492). Set in every
+                  identity mode: it does not depend on the identity provider.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: ServicePrincipal
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_sparkclusters.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sparkclusters.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: SparkCluster
+    plural: sparkclusters
+    shortNames:
+    - spc
+    singular: sparkcluster
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'Spark compute for the platform, a team or one person: size, runtime, settings; started by hand, stopped when idle.'
+        properties:
+          spec:
+            description: |-
+              Admin-defined Spark compute for the platform, a team or one person: size, runtime, image,
+              environment, Spark settings and an idle stop. Started by hand, stopped when idle. This resource
+              carries the *desired* state (`Start`/`Stop` write `state`); the controller drives a
+              `SparkApplication` from it.
+            properties:
+              displayName:
+                maxLength: 100
+                nullable: true
+                type: string
+              driver:
+                description: The pod shape of a driver or an executor. Absent fields follow the size class.
+                nullable: true
+                properties:
+                  cores:
+                    format: int32
+                    maximum: 16.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  memory:
+                    description: For example `4Gi`.
+                    nullable: true
+                    pattern: ^[1-9][0-9]*(Mi|Gi)$
+                    type: string
+                type: object
+              env:
+                items:
+                  description: |-
+                    One environment variable of the driver and executors: a literal value or a reference to a
+                    `Connection` key, never both.
+                  properties:
+                    connectionRef:
+                      description: Where an environment variable's value comes from when it is not written in the spec.
+                      nullable: true
+                      properties:
+                        key:
+                          description: The key inside that connection's synced Secret.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[A-Za-z][A-Za-z0-9_]*$
+                          type: string
+                        name:
+                          description: Name of a `Connection` in the same namespace.
+                          maxLength: 40
+                          minLength: 1
+                          pattern: ^[a-z0-9][a-z0-9-]*$
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    name:
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Z_][A-Z0-9_]*$
+                      type: string
+                    value:
+                      maxLength: 1024
+                      nullable: true
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: set exactly one of value and connectionRef
+                    rule: has(self.value) != has(self.connectionRef)
+                maxItems: 50
+                type: array
+              executor:
+                description: The pod shape of a driver or an executor. Absent fields follow the size class.
+                nullable: true
+                properties:
+                  cores:
+                    format: int32
+                    maximum: 16.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  memory:
+                    description: For example `4Gi`.
+                    nullable: true
+                    pattern: ^[1-9][0-9]*(Mi|Gi)$
+                    type: string
+                type: object
+              idleStopMinutes:
+                default: 60
+                description: |-
+                  Minutes without a job before the cluster stops by itself. `0` (never) is reserved for the
+                  shared cluster.
+                format: int32
+                maximum: 1440.0
+                minimum: 0.0
+                type: integer
+              image:
+                description: A custom image, pinned by digest so a tag cannot move under the cluster.
+                maxLength: 512
+                nullable: true
+                type: string
+              maxExecutors:
+                format: int32
+                maximum: 50.0
+                minimum: 0.0
+                nullable: true
+                type: integer
+              owner:
+                description: 'Who owns a `SparkCluster`: a group, or as an exception one person.'
+                properties:
+                  group:
+                    description: The Keycloak group whose members start, stop and use the cluster.
+                    maxLength: 64
+                    minLength: 1
+                    nullable: true
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                    type: string
+                  user:
+                    description: 'One person''s user name. The exception: prefer `group`.'
+                    maxLength: 128
+                    minLength: 1
+                    nullable: true
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._@-]*$
+                    type: string
+                type: object
+              runtime:
+                description: The Spark and Python runtime, for example `spark-4.0-py3.12`.
+                pattern: ^spark-[0-9]+\.[0-9]+-py3\.[0-9]+$
+                type: string
+              size:
+                default: small
+                description: 'A Spark cluster''s size class: three shapes an administrator picks instead of every number.'
+                enum:
+                - small
+                - medium
+                - large
+                type: string
+              sparkConf:
+                additionalProperties:
+                  type: string
+                description: Spark settings applied to the driver and the executors.
+                maxProperties: 100
+                type: object
+              state:
+                default: Stopped
+                description: The desired state of a `SparkCluster`. Start and Stop write it; the controller follows it.
+                enum:
+                - Stopped
+                - Running
+                type: string
+              viewers:
+                description: |-
+                  Groups that may USE the cluster in Nova — see it, connect to it and run work with it —
+                  and nothing else. Starting, stopping and changing it stay with `owner`. Absent means
+                  the owner's group only.
+                items:
+                  maxLength: 64
+                  minLength: 1
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                  type: string
+                maxItems: 16
+                type: array
+            required:
+            - owner
+            - runtime
+            type: object
+            x-kubernetes-validations:
+            - message: set exactly one of owner.group and owner.user
+              rule: has(self.owner.group) != has(self.owner.user)
+            - message: pin the image by digest
+              rule: '!has(self.image) || self.image.contains(''@sha256:'')'
+            - message: each env var name may appear once in env
+              rule: '!has(self.env) || self.env.all(e, self.env.exists_one(f, f.name == e.name))'
+          status:
+            nullable: true
+            properties:
+              driverServiceAccount:
+                description: |-
+                  `metadata.name` of the ServiceAccount the driver runs as (`spark-cluster-driver` until
+                  #1100, then `spark-cluster-driver-<group>`).
+                nullable: true
+                type: string
+              endpoint:
+                description: The Spark Connect endpoint while the cluster runs.
+                nullable: true
+                type: string
+              lastActivityAt:
+                nullable: true
+                type: string
+              message:
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                description: '`Stopped`, `Starting`, `Running`, `Stopping` or `Failed`.'
+                type: string
+              startedAt:
+                nullable: true
+                type: string
+              workloadIdentity:
+                description: |-
+                  The catalog principal the driver's projected token becomes: `kubernetes~<ServiceAccount
+                  uid>` (#538, #493), the same form a ServicePrincipal records. Absent until the operator
+                  has applied the ServiceAccount.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: SparkCluster
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_sqlwarehouses.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sqlwarehouses.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: SqlWarehouse
+    plural: sqlwarehouses
+    shortNames:
+    - wh
+    singular: sqlwarehouse
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A compute class for SQL: size, caps and the groups that may use it.'
+        properties:
+          spec:
+            description: |-
+              The query-serving plug: one named compute class inside the engine of a `Lakehouse`, with its size,
+              its caps and the groups that may use it (decision D21, internal note `design/multitenant-catalogs.md`
+              §4.3). Exactly one warehouse per `Lakehouse` is the default.
+            properties:
+              autoStop:
+                description: |-
+                  How long the engine may sit idle before its workers scale to zero, for example
+                  `15m` or `2h` (platform#131 step A). Absent: the warehouse is always on.
+                nullable: true
+                pattern: ^([1-9][0-9]*)(m|h)$
+                type: string
+              concurrency:
+                description: Overrides of the class defaults. An absent field keeps the class value.
+                nullable: true
+                properties:
+                  memoryShare:
+                    description: Share of the engine's memory the class may use, for example `40%`.
+                    nullable: true
+                    pattern: ^([1-9][0-9]?|100)%$
+                    type: string
+                  queued:
+                    description: Queries that may wait (the resource group's queue limit).
+                    format: int32
+                    maximum: 10000.0
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  running:
+                    description: Queries that run at the same time (the resource group's hard concurrency limit).
+                    format: int32
+                    maximum: 100.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  scheduling:
+                    description: How queued queries are chosen to run.
+                    enum:
+                    - fifo
+                    - fair
+                    - weighted
+                    - weighted_fair
+                    - null
+                    nullable: true
+                    type: string
+                type: object
+              default:
+                default: false
+                description: The class that queries land in when nothing selects another one.
+                type: boolean
+              displayName:
+                maxLength: 100
+                nullable: true
+                type: string
+              grants:
+                default: []
+                items:
+                  description: A group that may send queries into a warehouse (the compute verb `use`).
+                  properties:
+                    group:
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                      type: string
+                  required:
+                  - group
+                  type: object
+                maxItems: 50
+                type: array
+              lakehouseRef:
+                description: The `Lakehouse` that hosts a catalog or a warehouse.
+                properties:
+                  name:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - name
+                type: object
+              maxWorkers:
+                default: 1
+                description: The most workers the engine may run for this class.
+                format: int32
+                maximum: 10.0
+                minimum: 1.0
+                type: integer
+              minWorkers:
+                default: 1
+                description: |-
+                  The workers the engine keeps ready while this class may be used. `0` is only legal
+                  with `autoStop` (a class that never stops cannot ask for no workers).
+                format: int32
+                maximum: 10.0
+                minimum: 0.0
+                type: integer
+              size:
+                default: small
+                description: |-
+                  The platform's compute classes. A class is a name for four numbers (running, queued, memory
+                  share, scheduling), not a promise about hardware: the query engine has resource groups, not
+                  separate clusters (internal note `design/multitenant-catalogs.md` §4.3).
+                enum:
+                - xs
+                - small
+                - medium
+                - large
+                type: string
+            required:
+            - lakehouseRef
+            type: object
+            x-kubernetes-validations:
+            - message: each group may appear once in grants
+              rule: self.grants.all(g, self.grants.exists_one(h, h.group == g.group))
+            - message: autoStop must be at most 24h
+              rule: '!has(self.autoStop) || duration(self.autoStop) <= duration(''24h'')'
+            - message: 'minWorkers: 0 needs autoStop — a warehouse that never stops cannot ask for no workers'
+              rule: self.minWorkers != 0 || has(self.autoStop)
+            - message: maxWorkers must be at least minWorkers
+              rule: self.maxWorkers >= self.minWorkers
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              engine:
+                description: Which engine implements the class, for example `trino@default`.
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                type: string
+              renderedGroup:
+                description: The resource group actually written.
+                nullable: true
+                type: string
+              scale:
+                description: The worker scaling of the engine that serves this class.
+                nullable: true
+                properties:
+                  lastQueryAt:
+                    description: The last query the engine saw, RFC 3339.
+                    nullable: true
+                    type: string
+                  phase:
+                    default: ''
+                    description: '`Running`, `Starting` or `Stopped`.'
+                    type: string
+                  queriesInFlight:
+                    default: 0
+                    description: Queries in flight, as Nova last reported them.
+                    format: int32
+                    type: integer
+                  workers:
+                    default: 0
+                    description: Worker replicas the engine currently asks for.
+                    format: int32
+                    type: integer
+                type: object
+            type: object
+        required:
+        - spec
+        title: SqlWarehouse
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_streamapps.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: streamapps.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: StreamApp
+    plural: streamapps
+    shortNames:
+    - sapp
+    singular: streamapp
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A streaming app: a Kafka topic in, an Iceberg table out.'
+        properties:
+          spec:
+            description: 'One long-running stream: a Kafka topic in, an Iceberg table out (decision D42).'
+            properties:
+              engine:
+                default: spark
+                enum:
+                - spark
+                type: string
+              ownerGroup:
+                description: The group whose members may see and stop the stream; absent means administrators only.
+                maxLength: 64
+                minLength: 1
+                nullable: true
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                type: string
+              restartPolicy:
+                default: always
+                enum:
+                - always
+                - on-failure
+                type: string
+              runAs:
+                description: 'The `ServicePrincipal` the job runs as (convention: `pipeline-<ownerGroup>`).'
+                maxLength: 40
+                minLength: 1
+                nullable: true
+                pattern: ^[a-z0-9][a-z0-9-]*$
+                type: string
+              sink:
+                properties:
+                  catalog:
+                    description: Catalog the sink table lives in; it must let `runAs` write.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9][a-z0-9-]*$
+                    type: string
+                  checkpointPrefix:
+                    description: S3 prefix for the checkpoint; absent means `checkpoints/<namespace>/<name>`.
+                    maxLength: 512
+                    minLength: 1
+                    nullable: true
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
+                    type: string
+                  mergeKeys:
+                    description: Columns of `MERGE … ON`; 1 to 8, each one an existing column.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9_]+$
+                      type: string
+                    maxItems: 8
+                    minItems: 0
+                    type: array
+                  mode:
+                    default: merge
+                    enum:
+                    - merge
+                    - append
+                    type: string
+                  table:
+                    description: '`schema.table`.'
+                    maxLength: 128
+                    minLength: 3
+                    pattern: ^[a-z0-9_]+\.[a-z0-9_]+$
+                    type: string
+                required:
+                - catalog
+                - table
+                type: object
+              source:
+                properties:
+                  connectionRef:
+                    description: |-
+                      Name of the `Connection` (`type: kafka`) whose `config.bootstrapServers` the job reads.
+                      Absent: the platform's own bus, `kafka-kafka-bootstrap.<namespace>.svc.cluster.local:9092`.
+                    maxLength: 63
+                    minLength: 1
+                    nullable: true
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  format:
+                    default: json
+                    enum:
+                    - json
+                    type: string
+                  topic:
+                    maxLength: 249
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9._-]+$
+                    type: string
+                required:
+                - topic
+                type: object
+              stopped:
+                default: false
+                description: |-
+                  `true` stops the job and deletes its SparkApplication; the checkpoint is kept, so
+                  `stopped: false` resumes from it. The one verb Nova's page needs (D42).
+                type: boolean
+              viewers:
+                description: |-
+                  Groups that may READ the stream in Nova — list it and open it — and nothing else.
+                  Stopping it and changing it stay with `ownerGroup`. Absent means the owner group only.
+                items:
+                  maxLength: 64
+                  minLength: 1
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                  type: string
+                maxItems: 16
+                type: array
+            required:
+            - sink
+            - source
+            type: object
+            x-kubernetes-validations:
+            - message: 'a stream needs a topic of 1 to 249 characters: letters, digits, dot, underscore or dash'
+              rule: self.source.topic.size() > 0 && self.source.topic.matches('^[A-Za-z0-9._-]{1,249}$')
+            - message: sink.table is schema.table, lower-case letters, digits and underscores
+              rule: self.sink.table.matches('^[a-z0-9_]+\\.[a-z0-9_]+$')
+            - message: sink.mode merge needs mergeKeys; append forbids them
+              rule: 'self.sink.mode == ''merge'' ? self.sink.mergeKeys.size() > 0 : !has(self.sink.mergeKeys) || self.sink.mergeKeys.size() == 0'
+          status:
+            nullable: true
+            properties:
+              attempts:
+                description: |-
+                  How many times Spark has submitted the application
+                  (`SparkApplication.status.executionAttempts`); absent until it exists.
+                format: int64
+                nullable: true
+                type: integer
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastCheckpointAt:
+                description: |-
+                  The time of the newest checkpoint commit (RFC 3339). Absent until the operator reports
+                  it; the checkpoint itself is written to the object store and survives a stop.
+                nullable: true
+                type: string
+              lastError:
+                nullable: true
+                type: string
+              lastSubmittedAt:
+                description: |-
+                  When Spark last submitted the application (RFC 3339), from
+                  `SparkApplication.status.lastSubmissionAttemptTime`.
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                default: ''
+                description: '`Pending`, `Running`, `Failed` or `Stopped`.'
+                type: string
+            type: object
+        required:
+        - spec
+        title: StreamApp
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/crds/stardelt.io_volumes.yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: volumes.stardelt.io
+spec:
+  group: stardelt.io
+  names:
+    kind: Volume
+    plural: volumes
+    shortNames:
+    - vol
+    singular: volume
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A governed folder of files in the object store with an owner group and grants.
+        properties:
+          spec:
+            description: A governed folder of files in the object store with an owner group and grants.
+            properties:
+              catalog:
+                description: The catalog (Lakehouse) this volume belongs to; the owner group is inherited.
+                maxLength: 40
+                minLength: 1
+                pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              grants:
+                default: []
+                items:
+                  description: One group's rights on a volume. Subjects are groups, never users.
+                  properties:
+                    group:
+                      description: The Keycloak group whose members hold these verbs.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                      type: string
+                    verbs:
+                      description: At least one verb; each verb at most once.
+                      items:
+                        description: |-
+                          What a grant lets a group do: `read` a file or list a folder, `write` upload, change or
+                          delete one, `manage` change the grants and delete the volume.
+                        enum:
+                        - read
+                        - write
+                        - manage
+                        type: string
+                      maxItems: 3
+                      minItems: 1
+                      type: array
+                  required:
+                  - group
+                  - verbs
+                  type: object
+                maxItems: 20
+                type: array
+              purpose:
+                default: data
+                description: |-
+                  What a volume holds. A `libraries` volume is code that every reader executes, so it
+                  restricts `write` to groups that also manage it (decision D28, internal note
+                  `design/volumes.md` §5).
+                enum:
+                - data
+                - libraries
+                type: string
+              storage:
+                description: |-
+                  Where a volume's files live: exactly one of platform-managed storage or an external
+                  prefix. Files live in the volume bucket, never in the table bucket (D28).
+                properties:
+                  external:
+                    description: A prefix in the customer's own bucket, reached through an `s3` connection.
+                    nullable: true
+                    properties:
+                      connection:
+                        description: Name of the `s3` connection that holds the endpoint, bucket and credentials.
+                        maxLength: 40
+                        minLength: 1
+                        pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      prefix:
+                        description: Key prefix inside the bucket; absent means the prefix the connection already scopes.
+                        maxLength: 512
+                        nullable: true
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
+                        type: string
+                    required:
+                    - connection
+                    type: object
+                  managed:
+                    description: |-
+                      Storage the platform owns: the volume gets `volumes/<catalog>/<name>/` in the platform
+                      object store. `managed: {}` selects it.
+                    nullable: true
+                    type: object
+                type: object
+            required:
+            - catalog
+            - storage
+            type: object
+            x-kubernetes-validations:
+            - message: storage must be either managed or external, not both and not neither
+              rule: has(self.storage.managed) != has(self.storage.external)
+            - message: an external prefix must not contain .. or //
+              rule: '!has(self.storage.external) || !has(self.storage.external.prefix) || (!self.storage.external.prefix.contains(''..'') && !self.storage.external.prefix.contains(''//''))'
+            - message: each group may appear once in grants
+              rule: self.grants.all(g, self.grants.exists_one(h, h.group == g.group))
+            - message: a verb may appear once per grant
+              rule: self.grants.all(g, g.verbs.all(v, g.verbs.exists_one(w, w == v)))
+            - message: on a libraries volume only a group that also manages it may write
+              rule: self.purpose != 'libraries' || self.grants.all(g, !('write' in g.verbs) || ('manage' in g.verbs))
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              objects:
+                format: int64
+                nullable: true
+                type: integer
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              prefix:
+                description: The object-store prefix the volume maps to.
+                nullable: true
+                type: string
+              ready:
+                default: false
+                description: True when the prefix exists and its grants apply; filled by a later controller.
+                type: boolean
+              sizeBytes:
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: Volume
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stardelt-operator
+  namespace: stardelt
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stardelt-operator
+rules:
+  - apiGroups: ["stardelt.io"]
+    resources:
+      - "platforminstances"
+      - "lakehouses"
+      - "ingestionsources"
+      - "pipelines"
+      - "connections"
+      - "serviceprincipals"
+      - "sparkclusters"
+      - "catalogs"
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["stardelt.io"]
+    resources:
+      - "platforminstances/status"
+      - "lakehouses/status"
+      - "ingestionsources/status"
+      - "pipelines/status"
+      - "connections/status"
+      - "serviceprincipals/status"
+      - "sparkclusters/status"
+      - "catalogs/status"
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Helm creates the target namespace (--create-namespace), without labels. `patch` adds the
+  # Pod Security floor to a namespace that carries no `pod-security.kubernetes.io/*` label of
+  # its own (provision.rs `ensure_namespace`, stardelt/stardelt#1706); it also lets the
+  # server-side apply of a new namespace through.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # The operator installs upstream charts with Helm, so it applies whatever the
+  # charts contain, cluster-wide. This is the documentation-worthy part of the
+  # RBAC: an installer operator is a privileged component by nature.
+  #
+  # A Role or ClusterRole the operator creates may not grant a verb the operator itself
+  # lacks: RBAC escalation control refuses the create with 403. `deletecollection` is
+  # `delete` applied to a list, so it adds no power this rule does not already give, and
+  # it is needed because the operator hands out roles of its own and installs charts
+  # that ship such roles:
+  # - the `spark-cluster-driver` Role carries `deletecollection` on pods (spark.rs
+  #   `pod_and_config_map_rules`, the Spark driver's own cleanup) — measured on the lab
+  #   2026-11-15: every `SparkCluster` failed with
+  #   `roles.rbac.authorization.k8s.io "spark-cluster-driver" is forbidden ... attempting
+  #   to grant RBAC permissions not currently held: {Resources:["pods"],
+  #   Verbs:["deletecollection"]}`. The same verbs the shared Connect Role gets from the
+  #   platform's manifest (platform#628).
+  # deletecollection too: upstream charts ship aggregated -edit/-admin ClusterRoles that
+  # grant it, and RBAC refuses to let the operator create a role with a verb it lacks
+  # (CNPG on a fresh node, stardelt-platform#293 run, 2026-11-18).
+  # The ServicePrincipal controller renders one Role per principal that grants the Airflow
+  # worker `use` on that principal's ServiceAccount (#492). RBAC refuses a Role that grants a
+  # verb its creator lacks, so the operator needs `use` itself; this is narrower than
+  # `escalate` on roles (the trap the comment above records for the Spark driver's Role).
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["use"]
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stardelt-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stardelt-operator
+subjects:
+  - kind: ServiceAccount
+    name: stardelt-operator
+    namespace: stardelt
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+# The ServicePrincipal controller reads the credentials Secret of each principal. That right is
+# namespaced on purpose: reading every Secret in the cluster is more than the check needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stardelt-operator-principals
+  namespace: stardelt
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stardelt-operator-principals
+  namespace: stardelt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stardelt-operator-principals
+subjects:
+  - kind: ServiceAccount
+    name: stardelt-operator
+    namespace: stardelt
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+# The operator's Prometheus endpoint (stardelt-operator#607): a stable name to select,
+# ClusterIP only — no ingress exposes it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stardelt-operator-metrics
+  namespace: stardelt
+  labels:
+    app: stardelt-operator
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8082"
+    prometheus.io/path: /metrics
+spec:
+  type: ClusterIP
+  selector:
+    app: stardelt-operator
+  ports:
+    - name: metrics
+      port: 8082
+      targetPort: metrics
+
+---
+# Source: stardelt-operator/templates/operator.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stardelt-operator
+  namespace: stardelt
+  labels:
+    app: stardelt-operator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stardelt-operator
+  template:
+    metadata:
+      labels:
+        app: stardelt-operator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8082"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: stardelt-operator
+      # Pod Security `restricted` (platform#1096 question 5): the image's Dockerfile
+      # ends in `USER 65532:65532`; these four fields are what the level requires and
+      # what the pod asserts. `readOnlyRootFilesystem` is deliberately not set: Helm
+      # needs its cache/config/data directories under /home/operator.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: "ghcr.io/stardelt/stardelt-operator:v0.0.4@sha256:928ae75115a8825ee23ea378a9dceab94c61196639bb55285049f2e605fddc87"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8082
+          env:
+            - name: RUST_LOG
+              value: "info"
+            # Leader election (#75): the Lease stardelt-operator-leader names this pod.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
