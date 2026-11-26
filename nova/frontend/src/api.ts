@@ -74,6 +74,9 @@ export type SearchMatch = Schema<'SearchMatch'>
 /** `GET /api/catalog/search`: tables whose `namespace.table` contains every word of `q`. */
 export type SearchResult = Schema<'SearchResult'>
 
+/** `POST /api/samples/{name}` answer: `created` is false when the table was already there. */
+export type SampleLoaded = Schema<'SampleLoaded'>
+
 /**
  * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249, #263), read from
  * the catalog's Iceberg metadata rather than counted by a query. `lastCommitMs` is the
@@ -1349,6 +1352,9 @@ export const api = {
   /** Read every catalog again now (administrators; 429 when a minute has not passed). */
   refreshCatalogMetrics: ()                   => jpost<{ accepted: boolean }>('/api/catalog/metrics/refresh', {}),
   namespaces:   (catalog?: string)            => jget<NamespaceList>(catalogPath('/api/catalog/namespaces', catalog)),
+  /** Load the one sample table as the caller into a catalog (#1816). `trips` is the only name. */
+  loadSample:   (name: string, catalog?: string) =>
+    jpost<SampleLoaded>(catalogPath(`/api/samples/${seg(name)}`, catalog), {}),
   tables:       (ns: string, catalog?: string) =>
     jget<TableList>(catalogPath(`/api/catalog/namespaces/${seg(ns)}/tables`, catalog)),
   tableMeta:    (ns: string, tbl: string, catalog?: string) =>
