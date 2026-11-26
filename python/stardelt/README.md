@@ -253,6 +253,8 @@ A target can say what to do about a pipeline someone changed after its last depl
 `drift: block` (a key of the target in `bundle.yaml`, checked by `bundle validate`) makes `bundle plan` and `bundle deploy` fail
 with exit code 2, naming the pipeline, and a deploy writes nothing, until you look at the change and pass `--accept-drift` to
 overwrite it. A plan still lists everything it would do, so a pull request check shows the whole picture before it fails.
+`drift: heal` (allowed on a `development` target only) reports the change like `warn` and deploys over it, so the next
+deploy of a development target simply overwrites an experiment made in the form; no `--accept-drift` is needed.
 `bundle summary -t TARGET` shows what a deploy of that target left on the stage, one JSON line per pipeline in name order: the `name`
 and, when Nova knows them, the `revision` (Git commit) it was deployed from, `deployedBy`, `deployedAt` and `modified` (true when
 someone changed the pipeline after the deploy). It reads only; a `development` target shows only your own `dev-<your name>-` ones.

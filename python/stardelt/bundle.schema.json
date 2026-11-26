@@ -125,8 +125,8 @@
             "description": "the pipeline identity a production target runs as: pipeline-<ownerGroup>, or that name with a suffix"
           },
           "drift": {
-            "enum": ["warn", "block"],
-            "description": "what to do with a pipeline someone changed after its last deploy"
+            "enum": ["warn", "block", "heal"],
+            "description": "what to do with a pipeline someone changed after its last deploy (`heal` only in development)"
           }
         }
       }

@@ -57,7 +57,7 @@ CHANGE = re.compile(
     r"|\balter\s+table(?:\s+if\s+exists)?\s+([a-z0-9_.]+)"
 )
 MODES = ("development", "production")
-DRIFT = ("warn", "block")
+DRIFT = ("warn", "block", "heal")
 MAX_FILES = 100
 MAX_BYTES = 5 * 1024 * 1024
 
@@ -623,6 +623,8 @@ def validate(directory, target=None):
             problems.append((where, f"mode must be one of {', '.join(MODES)}"))
         if spec.get("drift", "warn") not in DRIFT:
             problems.append((where, f"drift must be one of {', '.join(DRIFT)}"))
+        if spec.get("drift") == "heal" and mode != "development":
+            problems.append((where, "drift: heal is only allowed on a development target"))
         tvars = spec.get("variables") or {}
         for v in tvars:
             if v not in variables:
@@ -965,7 +967,8 @@ def _diffs(nova, specs, results):
 
 
 def _drift_mode(directory, target):
-    """What the target says to do about a pipeline someone changed after its last deploy: ``warn`` (default) or ``block``."""
+    """What the target says to do about a pipeline someone changed after its last deploy: ``warn`` (default),
+    ``block``, or ``heal`` (a development target re-applies over the change)."""
     manifest = yaml.safe_load((Path(directory) / "bundle.yaml").read_text(encoding="utf-8"))
     return ((manifest.get("targets") or {}).get(target) or {}).get("drift", "warn")
 
