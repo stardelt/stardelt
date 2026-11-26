@@ -810,6 +810,9 @@ fn api_router() -> Router<Arc<AppState>> {
             "/catalog/tables/{ns}/{tbl}/health",
             get(catalog_docs::health).put(catalog_docs::update_health),
         )
+        // Every promised table, red first (#402 slice: the list half). One evaluation, the
+        // same one the per-table health route makes.
+        .route("/catalog/health", get(catalog_docs::list_health))
         // A question and its trusted SQL, kept per table by its owners (#911 slice 2a).
         .route(
             "/catalog/tables/{ns}/{tbl}/verified-queries",

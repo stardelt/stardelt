@@ -1365,6 +1365,88 @@
         }
       }
     },
+    "/api/catalog/health": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "Every table of one catalog that carries a freshness promise, the most broken first: `red`, then `amber`, then `green`, and inside one status by `namespace.name`. The list is the answer `table_health` gives for one table, applied to every table the catalog lists; the promise is the Iceberg property `stardelt.freshness`. `?catalog=` picks the catalog. Views are not listed (they cannot carry the property), and a table that vanished between the list and the read is skipped. A table without a promise is not listed. `checked` is how many tables were read; the list stops after 200 tables, so a larger catalog answers a prefix. The interim rule is enforced by Nova: `canEdit` says whether this caller may set a table's promise.",
+        "operationId": "catalog_health_list",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The promised tables, worst first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogHealth"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/metrics": {
       "get": {
         "tags": [
@@ -12397,6 +12479,27 @@
           }
         }
       },
+      "CatalogHealth": {
+        "type": "object",
+        "description": "`GET /api/catalog/health`: every table that carries a freshness promise, worst first.",
+        "required": [
+          "tables",
+          "checked"
+        ],
+        "properties": {
+          "checked": {
+            "type": "integer",
+            "description": "How many tables were read; `tables` stops at 200.",
+            "minimum": 0
+          },
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListedHealth"
+            }
+          }
+        }
+      },
       "CatalogInfo": {
         "type": "object",
         "description": "One catalog the caller may browse, with its Lakekeeper warehouse id and its medallion\nlayer when it has one.",
@@ -14521,6 +14624,57 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "ListedHealth": {
+        "type": "object",
+        "description": "One promised table in `GET /api/catalog/health`.",
+        "required": [
+          "catalog",
+          "namespace",
+          "name",
+          "status",
+          "canEdit"
+        ],
+        "properties": {
+          "canEdit": {
+            "type": "boolean",
+            "description": "Whether the interim rule lets this caller set the promise."
+          },
+          "catalog": {
+            "type": "string"
+          },
+          "dueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The most recent deadline at or before now, RFC 3339, or `null`."
+          },
+          "lastWrite": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest commit, RFC 3339, or `null` for a table with no snapshot."
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nextDueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first deadline strictly after now, RFC 3339, or `null`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`grey`, `green`, `amber` or `red`; a listed table is never `grey`."
           }
         }
       },
