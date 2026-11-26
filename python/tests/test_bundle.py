@@ -1,6 +1,7 @@
 """Bundles (stardelt.bundle) and ``stardelt bundle validate``: offline, no network, no sign-in."""
 
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -822,26 +823,37 @@ def test_generate_writes_a_dbt_task_list(tmp_path):
     assert bundle.validate(directory)[0] == []
 
 
-def test_generate_refuses_a_notebook_task_list(tmp_path):
-    class Nova:
-        """The one call `generate` makes: a task list with a notebook task."""
+def test_generate_writes_a_notebook_task_list(tmp_path):
+    content = {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
 
-        def call(self, method, path=None):
-            assert (method, path) == ("pipelines_spec", {"namespace": "stardelt", "name": "daily"})
-            return {
-                "managedBy": "nova",
-                "editable": False,
-                "document": {
-                    "name": "daily",
-                    "ownerGroup": "sales",
-                    "tasks": [{"name": "nb", "notebook": {"name": "a.ipynb", "objectVersion": "v1"}}],
-                },
-            }
+    class Nova:
+        """The two calls `generate` makes: the spec, then the stored notebook."""
+
+        def call(self, method, path=None, query=None):
+            if method == "pipelines_spec":
+                assert path == {"namespace": "stardelt", "name": "daily"}
+                assert query is None
+                return {
+                    "managedBy": "nova",
+                    "editable": False,
+                    "document": {
+                        "name": "daily",
+                        "ownerGroup": "sales",
+                        "tasks": [{"name": "nb", "notebook": {"name": "a.ipynb", "objectVersion": "v1"}}],
+                    },
+                }
+            assert method == "notebooks_content"
+            assert (path, query) == ({"group": "sales", "name": "a.ipynb"}, {"version": "v1"})
+            return content
 
     directory = tmp_path / "notebook-task"
     directory.mkdir()
-    with pytest.raises(bundle.GenerateError, match="notebook task"):
-        bundle.generate(Nova(), make(directory), "stardelt", "daily")
+    written = bundle.generate(Nova(), make(directory), "stardelt", "daily")
+    assert written == ["notebooks/daily-nb.ipynb", "resources/daily.yaml"]
+    assert json.loads((directory / "notebooks" / "daily-nb.ipynb").read_text()) == content
+    spec = yaml.safe_load((directory / "resources" / "daily.yaml").read_text())
+    assert spec == {"name": "daily", "tasks": [{"name": "nb", "notebook": {"file": "notebooks/daily-nb.ipynb"}}]}
+    assert bundle.validate(directory)[0] == []
 
 
 def _git(directory, *args):

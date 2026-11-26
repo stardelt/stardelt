@@ -1767,6 +1767,20 @@ def _picked_up(relative, patterns):
     return isinstance(patterns, list) and any(PurePosixPath(relative).match(p) for p in patterns if isinstance(p, str))
 
 
+def _notebook_copy(nova, group, notebook, relative):
+    """The bundle file for a pinned notebook: the stored bytes, one `notebook` slot, no network retry."""
+    answer = nova.call(
+        "notebooks_content",
+        path={"group": group, "name": notebook["name"]},
+        query={"version": notebook["objectVersion"]},
+    )
+    slot = {"file": relative}
+    for key in ("params", "connection"):
+        if notebook.get(key):
+            slot[key] = notebook[key]
+    return relative, json.dumps(answer, indent=1, sort_keys=True) + "\n", slot
+
+
 def generate(nova, directory, namespace, name):
     """Write the pipeline ``namespace``/``name`` into the bundle in ``directory``; returns the relative paths written.
 
@@ -1799,8 +1813,15 @@ def generate(nova, directory, namespace, name):
     files = {}
     tasks = document.pop("tasks", None) or []
     for task in tasks:
-        if "notebook" in task:
-            raise GenerateError(f"{name} has a notebook task ({task['name']}): a notebook travels as a file in the bundle, which generate cannot write yet")
+        notebook = task.get("notebook")
+        if isinstance(notebook, dict):
+            if not notebook.get("name") or not notebook.get("objectVersion"):
+                raise GenerateError(f"{name} task {task['name']}: a notebook needs a name and an objectVersion")
+            relative = f"notebooks/{name}-{task['name']}.ipynb"
+            relative, text, slot = _notebook_copy(nova, group, notebook, relative)
+            task["notebook"] = slot
+            files[relative] = text
+            continue
         text = task.pop("sql", None)
         if text is None:
             continue
@@ -1812,12 +1833,20 @@ def generate(nova, directory, namespace, name):
     if statement is not None:
         pipeline["sqlFile"] = f"sql/{name}.sql"
         files[pipeline["sqlFile"]] = statement if statement.endswith("\n") else statement + "\n"
+    notebook = document.pop("notebook", None)
+    if isinstance(notebook, dict):
+        if not notebook.get("name") or not notebook.get("objectVersion"):
+            raise GenerateError(f"{name}: a notebook needs a name and an objectVersion")
+        relative = f"notebooks/{notebook['name']}"
+        relative, text, slot = _notebook_copy(nova, group, notebook, relative)
+        pipeline["notebook"] = slot
+        files[relative] = text
     pipeline.update(document)
     files[f"resources/{name}.yaml"] = yaml.dump(
         pipeline, Dumper=apply._BlockDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
     for relative in sorted(files):
-        key = "files" if relative.startswith("sql/") else "include"
+        key = "files" if relative.startswith(("sql/", "notebooks/")) else "include"
         if not _picked_up(relative, manifest.get(key)):
             raise GenerateError(f"{relative} would not be picked up: add a pattern for it under {key} in bundle.yaml")
         if (root / relative).exists():

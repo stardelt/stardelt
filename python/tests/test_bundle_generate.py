@@ -1,6 +1,7 @@
 """``stardelt bundle generate`` (stardelt.bundle.generate): a pipeline made in the interface becomes files of a bundle."""
 
 import io
+import json
 
 import yaml
 
@@ -69,13 +70,59 @@ def test_what_generate_writes_validates_and_deploys_as_the_pipeline_it_came_from
     assert daily == {**DOCUMENT, "sql": DOCUMENT["sql"] + "\n"}
 
 
-def test_a_notebook_pipeline_needs_no_sql_file(tmp_path):
+def test_a_notebook_pipeline_becomes_a_notebook_file(tmp_path):
     make(tmp_path)
-    notebook = {"name": "nb", "ownerGroup": "sales", "notebook": {"name": "explore", "version": 3}}
-    code, _, err, _ = generate(tmp_path, dict(ANSWER, document=notebook), "nb")
-    assert code == 0 and "wrote resources/nb.yaml in" in err
-    assert (tmp_path / "resources" / "nb.yaml").read_text() == "name: nb\nnotebook:\n  name: explore\n  version: 3\n"
+    notebook = {"name": "nb", "ownerGroup": "sales", "notebook": {"name": "report.ipynb", "objectVersion": "v1"}}
+    content = {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    code, _, err, session = run(
+        ["bundle", "generate", "stardelt", "nb", str(tmp_path)],
+        FakeResponse(payload=dict(ANSWER, document=notebook)),
+        FakeResponse(payload=content),
+    )
+    assert code == 0 and "wrote notebooks/report.ipynb, resources/nb.yaml in" in err
+    assert [(m, u) for m, u, _ in session.calls] == [
+        ("GET", "https://nova.example/api/pipelines/stardelt/nb/spec"),
+        ("GET", "https://nova.example/api/notebooks/sales/report.ipynb/content"),
+    ]
+    assert session.calls[1][2]["params"] == {"version": "v1"}
+    assert yaml.safe_load((tmp_path / "resources" / "nb.yaml").read_text())["notebook"] == {"file": "notebooks/report.ipynb"}
+    assert json.loads((tmp_path / "notebooks" / "report.ipynb").read_text()) == content
     assert not (tmp_path / "sql" / "nb.sql").exists()
+    assert bundle.validate(tmp_path)[0] == []
+
+
+def test_a_notebook_task_becomes_a_file_and_validates(tmp_path):
+    make(tmp_path)
+    document = {
+        "name": "daily",
+        "ownerGroup": "sales",
+        "tasks": [
+            {"name": "nb", "notebook": {"name": "smoke.ipynb", "objectVersion": "v9", "params": {"day": "1"}}},
+        ],
+    }
+    content = {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    code, _, err, session = run(
+        ["bundle", "generate", "stardelt", "daily", str(tmp_path)],
+        FakeResponse(payload=dict(ANSWER, document=document)),
+        FakeResponse(payload=content),
+    )
+    assert code == 0 and "notebooks/daily-nb.ipynb" in err
+    assert session.calls[1][1] == "https://nova.example/api/notebooks/sales/smoke.ipynb/content"
+    assert (tmp_path / "notebooks" / "daily-nb.ipynb").exists()
+    written = yaml.safe_load((tmp_path / "resources" / "daily.yaml").read_text())
+    assert written["tasks"] == [
+        {"name": "nb", "notebook": {"file": "notebooks/daily-nb.ipynb", "params": {"day": "1"}}}
+    ]
+    assert bundle.validate(tmp_path)[0] == []
+
+    missing = {"name": "daily", "ownerGroup": "sales", "tasks": [{"name": "nb", "notebook": {"name": "smoke.ipynb"}}]}
+    blank = tmp_path / "no-version"
+    blank.mkdir()
+    make(blank)
+    code, _, err, _ = generate(blank, dict(ANSWER, document=missing))
+    assert code == 2 and "daily task nb: a notebook needs a name and an objectVersion" in err
+    assert not (blank / "resources" / "daily.yaml").exists(), "a refusal writes nothing"
+    assert not (blank / "notebooks" / "daily-nb.ipynb").exists()
 
 
 def test_nothing_is_overwritten(tmp_path):
