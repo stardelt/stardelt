@@ -62,7 +62,10 @@ esac
 
 # `--host` is a global option of the CLI: it comes before the subcommand.
 plan="$("$CLI" --host "$NOVA" bundle plan "$BUNDLE" -t prod 2>&1)" \
-  || fail "the stardelt CLI is not signed in to $NOVA ($(printf '%s' "$plan" | tail -1)) — run: stardelt login --host $NOVA"
+  || { case "$plan" in
+         *"sign-in"*|*"not signed in"*|*"401"*) fail "the stardelt CLI is not signed in to $NOVA — run: stardelt --host $NOVA login" ;;
+         *) fail "stardelt bundle plan $BUNDLE -t prod failed: $(printf '%s' "$plan" | tail -1)" ;;
+       esac; }
 echo "› stardelt CLI: signed in to $NOVA"
 
 if [ "$YES" = 1 ]; then
