@@ -3612,6 +3612,8 @@ export interface components {
             /** @description Whether the interim rule lets this caller set the promise. */
             canEdit: boolean;
             catalog: string;
+            /** @description The promise's own sentence, the one the table page shows (`TableFreshness.detail`). */
+            detail: string;
             /** @description The most recent deadline at or before now, RFC 3339, or `null`. */
             dueAt?: string | null;
             /** @description The newest commit, RFC 3339, or `null` for a table with no snapshot. */

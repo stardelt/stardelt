@@ -9,6 +9,7 @@ import { formatBytes, formatCount, formatTime, relativeTime, statusLabel } from 
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
 import FreshnessCard from '../components/FreshnessCard'
+import TablesAtRisk from '../components/TablesAtRisk'
 import { QuerySparkline, RunBars } from '../components/PulseCharts'
 import { Skeleton, SkeletonTable } from '../components/Skeleton'
 import { Icon } from '../components/Icon'
@@ -247,8 +248,9 @@ export default function Overview() {
         />
       </section>
 
-      <section>
+      <section className="grid lg:grid-cols-2 gap-4">
         <FreshnessCard />
+        <TablesAtRisk />
       </section>
 
       <CatalogsCard
