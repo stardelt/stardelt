@@ -750,6 +750,45 @@ mod tests {
         );
     }
 
+    /// A dbt task breaks the release's pin promise when the operator's golden values fall back to
+    /// `DEFAULT_IMAGE` (stardelt/stardelt#1914, slice 1 of #1893): the image and its CA Secret must
+    /// both be set, and the image by digest.
+    #[test]
+    fn the_dbt_task_image_is_pinned_by_digest_and_names_the_engine_ca() {
+        let airflow: Value = serde_yaml::from_str(include_str!("../values/airflow.yaml"))
+            .expect("values/airflow.yaml is valid YAML");
+        let extra_env = airflow["extraEnv"]
+            .as_str()
+            .expect("values/airflow.yaml has an extraEnv block scalar");
+        let value_after = |marker: &str| -> String {
+            extra_env
+                .split(marker)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{marker} in extraEnv"))
+                .lines()
+                .map(str::trim)
+                .find_map(|line| line.strip_prefix("value:"))
+                .unwrap_or_else(|| panic!("{marker} has a value"))
+                .trim()
+                .to_string()
+        };
+        let image = value_after("- name: PIPELINE_DBT_IMAGE");
+        let digest = image
+            .split('@')
+            .nth(1)
+            .unwrap_or_else(|| panic!("PIPELINE_DBT_IMAGE is not digest-pinned: {image}"));
+        assert!(
+            digest.len() == 71
+                && digest.starts_with("sha256:")
+                && digest[7..].chars().all(|c| c.is_ascii_hexdigit()),
+            "PIPELINE_DBT_IMAGE must end in @sha256:<64 hex>: {image}"
+        );
+        assert_eq!(
+            value_after("- name: PIPELINE_DBT_TRINO_CA_SECRET"),
+            "trino-ca"
+        );
+    }
+
     /// platform#1605 pinned the JupyterHub chart's own images; the operator installs the same chart
     /// version (4.4.5), so it must not fall back to the chart's appVersion tags.
     #[test]

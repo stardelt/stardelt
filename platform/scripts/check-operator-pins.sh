@@ -26,6 +26,7 @@ images=(
   "superset|helm-values/superset.yaml|crates/stardelt-operator/values/superset.yaml"
   "notebook|helm-values/jupyterhub.yaml|crates/stardelt-operator/values/jupyterhub.yaml|^[[:space:]]+tag: \"dev@sha256:"
   "notebook-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|jupyter-singleuser:dev@sha256:"
+  "dbt-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|dbt:demo@sha256:"
   "external-secrets|helm-values/external-secrets.yaml|crates/stardelt-operator/values/external-secrets.yaml"
   "spark-operator|helm-values/spark-operator.yaml|crates/stardelt-operator/values/spark-operator.yaml"
   "strimzi|helm-values/strimzi.yaml|crates/stardelt-operator/values/kafka.yaml"

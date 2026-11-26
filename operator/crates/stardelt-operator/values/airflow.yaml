@@ -402,6 +402,12 @@ extraEnv: |
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
     value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:58a023c84a147a4bf4ae5ee1f20e115dc6e3f52e0d51bebfc4c22b2f74efd455
+  # dbt tasks (#11): the same two variables as the platform's helm-values/airflow.yaml. The image
+  # runs the demo dbt project in a pod of its own; the digest is the release's pin.
+  - name: PIPELINE_DBT_IMAGE
+    value: ghcr.io/stardelt/dbt:demo@sha256:23342e30fd4c5da38b5534cd68d1c8b344b839b4b64d9703425105d06d02bd5f
+  - name: PIPELINE_DBT_TRINO_CA_SECRET
+    value: trino-ca
   # spark-pipeline tasks (#80 S2c-2): the same three variables as the platform's
   # helm-values/airflow.yaml — PIPELINE_SPARK_REMOTE is not set, so the loader uses the
   # owner group's SparkCluster. Short names, like every address in this file: the operator

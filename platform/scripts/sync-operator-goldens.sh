@@ -47,6 +47,8 @@ rows=(
   # operator's copy behind fails `check-operator-pins.sh`'s whole-file `airflow` row and no
   # pin lands at all (measured on run 44999427123, 2026-11-22T07:42Z).
   "spark-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|spark:dev@sha256:"
+  # The dbt image's second copy: PIPELINE_DBT_IMAGE in the airflow values, on both paths.
+  "dbt-airflow|helm-values/airflow.yaml|crates/stardelt-operator/values/airflow.yaml|dbt:demo@sha256:"
 )
 
 changed=""
@@ -90,7 +92,7 @@ PY
 done
 
 if [ -z "$changed" ]; then
-  echo "sync-operator-goldens: no drift (nova, loader, spark, spark-auth, superset, notebook, notebook-airflow, spark-airflow)"
+  echo "sync-operator-goldens: no drift (nova, loader, spark, spark-auth, superset, notebook, notebook-airflow, spark-airflow, dbt-airflow)"
   exit 0
 fi
 echo "sync-operator-goldens: moved${changed}; proving it with check-operator-pins.sh"
