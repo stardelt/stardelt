@@ -92,13 +92,124 @@ fn email_config(config: &serde_json::Value) -> bool {
         })
 }
 
-/// `{"url": "http(s)://…"}`, at most [`MAX_URL_CHARS`] characters and parseable.
+/// The sentence a refused send carries; it is also the resolver's error.
+const NOT_PUBLIC: &str = "the webhook address is not a public address";
+
+/// Whether `ip` is a public address. A webhook goes to a public address only: everything
+/// else is a server-side request forgery target from inside the cluster.
+///
+/// The ranges are written by hand because `IpAddr::is_global` and `is_shared` are not
+/// stable. An IPv4-mapped IPv6 address answers for its IPv4 part.
+fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_unspecified()
+                || v4.is_loopback()
+                // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_private()
+                // 169.254.0.0/16
+                || v4.is_link_local()
+                // 100.64.0.0/10, the shared address space
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                // The documentation ranges: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24.
+                || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(v4));
+            }
+            let seg = v6.segments();
+            !(v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                // fc00::/7, the unique local addresses
+                || (seg[0] & 0xfe00) == 0xfc00
+                // fe80::/10, the link-local addresses
+                || (seg[0] & 0xffc0) == 0xfe80
+                // 2001:db8::/32, the documentation range
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8))
+        }
+    }
+}
+
+/// Whether `url` names a public host. reqwest does not ask the resolver about an IP
+/// literal, so [`webhook_config`] and [`post_webhook`] check one themselves.
+fn url_is_public(url: &str) -> bool {
+    match url::Url::parse(url).map(|u| u.host().map(|h| h.to_owned())) {
+        Ok(Some(url::Host::Ipv4(ip))) => is_public(std::net::IpAddr::V4(ip)),
+        Ok(Some(url::Host::Ipv6(ip))) => is_public(std::net::IpAddr::V6(ip)),
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+/// The host names an administrator named in `NOVA_WEBHOOK_ALLOW_HOSTS` (comma-separated,
+/// case-insensitive): a receiver inside the cluster keeps all its addresses.
+fn allowed_hosts() -> Vec<String> {
+    std::env::var("NOVA_WEBHOOK_ALLOW_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|host| host.trim().to_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect()
+}
+
+/// The resolver the webhook client uses: a name keeps only its public addresses, unless an
+/// administrator allowed it in [`allowed_hosts`].
+struct PublicOnly {
+    allow: Vec<String>,
+}
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let allowed = self.allow.iter().any(|a| *a == host.to_lowercase());
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|addr| allowed || is_public(addr.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err(NOT_PUBLIC.into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Nova's webhook client: public addresses only and no redirects. It does not trust the
+/// platform CA, so `NOVA_TRINO_CA_PEM` never widens what a webhook may reach.
+pub(crate) fn webhook_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            // An HTTP proxy would send the request to the proxy instead of the resolved
+            // address, so the public-address rule would never see the real target.
+            .no_proxy()
+            .dns_resolver(Arc::new(PublicOnly {
+                allow: allowed_hosts(),
+            }))
+            .build()
+            .expect("building Nova's webhook client")
+    })
+}
+
+/// `{"url": "http(s)://…"}`, at most [`MAX_URL_CHARS`] characters and parseable, and to a
+/// public address.
 fn webhook_config(config: &serde_json::Value) -> bool {
     let Some(raw) = config.get("url").and_then(|v| v.as_str()) else {
         return false;
     };
     raw.chars().count() <= MAX_URL_CHARS
         && matches!(url::Url::parse(raw), Ok(u) if matches!(u.scheme(), "http" | "https"))
+        && url_is_public(raw)
 }
 
 /// Trim the text fields and check the address, so a caller gets a sentence instead of
@@ -235,7 +346,7 @@ pub async fn list(
     operation_id = "destinations_create",
     path = "/api/destinations",
     tag = "public",
-    description = "Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything.",
+    description = "Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything. A webhook must be a public address; Nova never follows a redirect.",
     request_body = NewDestination,
     responses(
         (status = 201, description = "The stored row", body = Destination),
@@ -376,6 +487,14 @@ pub(crate) async fn post_webhook(
     url: &str,
     body: &serde_json::Value,
 ) -> DeliveryOutcome {
+    // Rows stored before the public-address rule existed reach this path too.
+    if !url_is_public(url) {
+        return DeliveryOutcome {
+            status: "failed",
+            http_status: None,
+            detail: NOT_PUBLIC.into(),
+        };
+    }
     let sent = client
         .post(url)
         .timeout(DELIVERY_TIMEOUT)
@@ -492,7 +611,12 @@ pub async fn test(
             "a webhook destination needs config.url with an http or https address",
         );
     };
-    let outcome = deliver_webhook(&s.http, url, &format!("{}/{}", row.owner_group, row.name)).await;
+    let outcome = deliver_webhook(
+        webhook_client(),
+        url,
+        &format!("{}/{}", row.owner_group, row.name),
+    )
+    .await;
     // Epoch milliseconds, like `create` (`chrono` has no `clock` feature here).
     let attempted_at = crate::jobs::now_ms() as i64;
     if let Err(e) = sqlx::query(INSERT_DELIVERY)
@@ -575,6 +699,28 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn webhook_refuses_non_public_addresses() {
+        let refused = [
+            "http://127.0.0.1/x",
+            "http://10.1.2.3/x",
+            "http://169.254.169.254/x",
+            "http://[::1]/x",
+            "http://[fd00::1]/x",
+        ];
+        for url in refused {
+            assert!(
+                !webhook_config(&serde_json::json!({ "url": url })),
+                "a webhook to {url} must be refused"
+            );
+        }
+        assert!(webhook_config(
+            &serde_json::json!({ "url": "https://example.com/hook" })
+        ));
+        assert!(is_public("8.8.8.8".parse().unwrap()));
+        assert!(!is_public("100.64.0.1".parse().unwrap()));
     }
 
     #[test]
@@ -744,7 +890,9 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        format!("http://{addr}/{CANARY}")
+        // A name, not the IP literal: an IP literal is refused at send time, and the mock
+        // receiver is only ever reached by this test.
+        format!("http://localhost:{}/{CANARY}", addr.port())
     }
 
     fn assert_no_canary(outcome: &DeliveryOutcome) {
@@ -781,7 +929,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let url = format!("http://{addr}/{CANARY}");
+        let url = format!("http://localhost:{}/{CANARY}", addr.port());
         let outcome = deliver_webhook(&reqwest::Client::new(), &url, DESTINATION).await;
         assert_eq!(outcome.status, "delivered");
         assert_eq!(outcome.http_status, Some(204));

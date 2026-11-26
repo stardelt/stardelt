@@ -231,7 +231,8 @@ pub(crate) async fn run_once(state: &AppState) -> Result<usize, String> {
             let mut attempts = 0;
             loop {
                 attempts += 1;
-                let outcome = post_webhook(&state.http, url, &ending.body).await;
+                let outcome =
+                    post_webhook(crate::destinations::webhook_client(), url, &ending.body).await;
                 let ok = outcome.status == "delivered";
                 if let Err(e) = record(db, id, &run.dag_run_id, &outcome).await {
                     tracing::warn!(pipeline = %name, error = %e, "the attempt was not recorded");
