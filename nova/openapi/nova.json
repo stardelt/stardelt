@@ -14402,6 +14402,13 @@
           "type"
         ],
         "properties": {
+          "class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The column's class from the `stardelt.column-classes` property, or `null`."
+          },
           "description": {
             "type": [
               "string",
@@ -15597,6 +15604,19 @@
         "type": "object",
         "description": "`PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.\n\nEvery key is optional. Absent changes nothing; `null` removes the property; an empty tag\nlist and a blank description also remove. A field whose value equals what the table\nalready stores is not a change.",
         "properties": {
+          "columnClasses": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Replaces every column class (`null` or `{}` removes them all); absent changes nothing.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "description": {
             "type": [
               "string",
