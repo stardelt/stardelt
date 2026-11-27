@@ -807,6 +807,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // A question with a known answer, kept as catalog context (#125 slice 1).
         .route("/catalog/evals", get(evals::list).post(evals::create))
         .route("/evals/{id}", delete(evals::delete))
+        // The history of an eval (#125 slice 2): an answer the runner posted, and the verdict.
+        .route("/evals/{id}/runs", get(evals::runs).post(evals::create_run))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route(
             "/catalog/tables/{ns}/{tbl}/documentation",
