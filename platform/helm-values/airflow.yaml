@@ -557,8 +557,10 @@ createUserJob:
                   sm.add_permission_to_role(role, permission)
 
           # stardelt-nova-operator: Viewer plus run, pause and stop. Only nova-api holds it;
-          # Nova checks the caller's group before every call (nova#196).
-          WRITE = {("can_edit", "DAGs"), ("can_create", "DAG Runs"), ("can_edit", "DAG Runs")}
+          # Nova checks the caller's group before every call (nova#196). can_create on Assets is
+          # what POST /api/v2/assets/events checks, so Nova may raise the table-update events
+          # spec.triggers waits for (#66).
+          WRITE = {("can_edit", "DAGs"), ("can_create", "DAG Runs"), ("can_edit", "DAG Runs"), ("can_create", "Assets")}
           op = sm.find_role("stardelt-nova-operator") or sm.add_role("stardelt-nova-operator")
           for permission in sm.find_role("Viewer").permissions:
               sm.add_permission_to_role(op, permission)
