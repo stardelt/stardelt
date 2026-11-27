@@ -2905,6 +2905,38 @@ fn a_table_trigger_is_written_and_removed() {
     assert!(spec_of(&replaced).get("triggers").is_none());
 }
 
+/// An absent `mode` must not reach the resource as `null`: the CRD defaults it to `all`
+/// and refuses a null (#66, #2020).
+#[test]
+fn a_trigger_without_mode_leaves_the_key_out() {
+    let trigger = TriggerRequest {
+        tables_updated: vec!["silver.shop.orders".into()],
+        mode: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&trigger).expect("the trigger serializes"),
+        json!({ "tablesUpdated": ["silver.shop.orders"] })
+    );
+    let created = pipeline_resource(
+        "shop-gold",
+        "analytics",
+        &Statement::Sql("select 1".into()),
+        None,
+        Some(std::slice::from_ref(&trigger)),
+        &BTreeMap::new(),
+        &default_options(),
+        "sub-ada",
+        None,
+        &[],
+        None,
+        None,
+    );
+    assert_eq!(
+        spec_of(&created)["triggers"],
+        json!([{ "tablesUpdated": ["silver.shop.orders"] }])
+    );
+}
+
 #[test]
 fn a_trigger_cannot_come_with_a_cron_or_name_its_own_output() {
     let trigger = TriggerRequest {
