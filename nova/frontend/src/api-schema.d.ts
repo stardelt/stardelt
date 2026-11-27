@@ -156,7 +156,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say "about". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). `feedback` carries, per endpoint, how many of this month's calls the people rated 👍 (`up`) and 👎 (`down`); an endpoint nobody rated is absent. Never who voted. No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`. */
+        /** @description What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say "about". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). `feedback` carries, per endpoint, how many of this month's calls the people rated 👍 (`up`) and 👎 (`down`); an endpoint nobody rated is absent. `evals` carries, per endpoint, the last 30 days' eval runs and how many passed (`passed` of `total`); an endpoint whose runs named no endpoint is absent. Never who voted. No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`. */
         get: operations["admin_model_usage"];
         put?: never;
         post?: never;
@@ -4016,6 +4016,8 @@ export interface components {
         /** @description The answer of `GET /api/admin/model-usage`. */
         ModelUsage: {
             calls: components["schemas"]["UsageCall"][];
+            /** @description The last 30 days' eval verdicts per endpoint, name order; an endpoint with no run is absent. */
+            evals: components["schemas"]["UsageEvals"][];
             /** @description This month's votes per endpoint, name order; an endpoint nobody rated is absent. */
             feedback: components["schemas"]["UsageFeedback"][];
             groups: components["schemas"]["UsageRow"][];
@@ -5582,6 +5584,23 @@ export interface components {
             tokensIn: number;
             /** Format: int64 */
             tokensOut: number;
+        };
+        /**
+         * @description One endpoint's eval score for the last 30 days, from `eval_run`. An endpoint whose runs
+         *     named no endpoint is absent from the answer, not a zero row.
+         */
+        UsageEvals: {
+            endpoint: string;
+            /**
+             * Format: int64
+             * @description The runs whose answer was the expected one.
+             */
+            passed: number;
+            /**
+             * Format: int64
+             * @description Every run in the window; `passed <= total`.
+             */
+            total: number;
         };
         /**
          * @description One endpoint's 👍 and 👎 this month, from `model_call.feedback`. An endpoint nobody rated

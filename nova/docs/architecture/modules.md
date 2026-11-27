@@ -49,8 +49,8 @@
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `catalog_doc_store.rs` | Catalog | 242 | 209 | 0 | PostgreSQL state store |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
+| `model_usage.rs` | AI (Ask, MCP, models) | 214 | 125 | 1 | PostgreSQL state store |
 | `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
-| `model_usage.rs` | AI (Ask, MCP, models) | 186 | 93 | 1 | PostgreSQL state store |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
 | `mcp_audit.rs` | AI (Ask, MCP, models) | 176 | 68 | 1 | PostgreSQL state store |
@@ -73,4 +73,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **51833** | **45111** | **170** | |
+| **total (72 files)** | | **51861** | **45143** | **170** | |
