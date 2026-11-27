@@ -264,8 +264,8 @@ pub fn config_document_names_identity(document: &str, access_key: &str) -> bool 
 /// The CloudNative-PG `Cluster` for the catalog (single instance, like the platform manifest).
 pub fn catalog_cluster(lakehouse: &str, namespace: &str, profile: Profile) -> DynamicObject {
     let size = match profile {
-        Profile::Demo => "2Gi",
-        _ => "10Gi",
+        Profile::Starter | Profile::Demo => "2Gi",
+        Profile::Enterprise | Profile::Full | Profile::Airgap => "10Gi",
     };
     DynamicObject {
         types: Some(TypeMeta {
@@ -1077,10 +1077,22 @@ mod tests {
 
     #[test]
     fn catalog_cluster_is_sized_by_profile() {
+        // #62: `starter` is what `demo` was, so it keeps the 2Gi catalog volume.
+        for profile in [Profile::Starter, Profile::Demo] {
+            let cluster = catalog_cluster("main", "data", profile);
+            assert_eq!(
+                cluster.data["spec"]["storage"]["size"], "2Gi",
+                "{profile:?}"
+            );
+        }
+        for profile in [Profile::Enterprise, Profile::Full, Profile::Airgap] {
+            let cluster = catalog_cluster("main", "data", profile);
+            assert_eq!(
+                cluster.data["spec"]["storage"]["size"], "10Gi",
+                "{profile:?}"
+            );
+        }
         let demo = catalog_cluster("main", "data", Profile::Demo);
-        let full = catalog_cluster("main", "data", Profile::Full);
-        assert_eq!(demo.data["spec"]["storage"]["size"], "2Gi");
-        assert_eq!(full.data["spec"]["storage"]["size"], "10Gi");
         assert_eq!(
             demo.data["spec"]["bootstrap"]["initdb"]["database"],
             "lakekeeper"

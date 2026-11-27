@@ -33,12 +33,12 @@ fn meta(namespace: &str) -> ObjectMeta {
     }
 }
 
-/// `KafkaNodePool` `kafka`: one node that is both controller and broker. The demo profile keeps a
-/// 5Gi claim with `deleteClaim: false` — the same as the platform's `manifests/kafka.yaml`, so a
-/// broker restart does not delete the topics a `StreamApp` reads; `full` keeps 10Gi.
+/// `KafkaNodePool` `kafka`: one node that is both controller and broker. The starter profile keeps
+/// a 5Gi claim with `deleteClaim: false` — the same as the platform's `manifests/kafka.yaml`, so a
+/// broker restart does not delete the topics a `StreamApp` reads; `enterprise` keeps 10Gi.
 pub fn node_pool(namespace: &str, profile: Profile) -> DynamicObject {
     let storage = match profile {
-        Profile::Demo => {
+        Profile::Starter | Profile::Demo => {
             json!({"type": "persistent-claim", "size": "5Gi", "deleteClaim": false})
         }
         _ => json!({"type": "persistent-claim", "size": "10Gi", "deleteClaim": false}),
@@ -170,6 +170,23 @@ mod tests {
         assert_eq!(
             pool.data["spec"]["storage"],
             json!({"type": "persistent-claim", "size": "10Gi", "deleteClaim": false})
+        );
+    }
+
+    #[test]
+    fn starter_and_enterprise_size_the_pool_like_their_old_names() {
+        // #62: `starter` is what `demo` was; `enterprise` is what `full` was.
+        assert_eq!(
+            node_pool("data", Profile::Starter).data["spec"]["storage"],
+            node_pool("data", Profile::Demo).data["spec"]["storage"]
+        );
+        assert_eq!(
+            node_pool("data", Profile::Enterprise).data["spec"]["storage"],
+            node_pool("data", Profile::Full).data["spec"]["storage"]
+        );
+        assert_eq!(
+            node_pool("data", Profile::Airgap).data["spec"]["storage"],
+            node_pool("data", Profile::Full).data["spec"]["storage"]
         );
     }
 

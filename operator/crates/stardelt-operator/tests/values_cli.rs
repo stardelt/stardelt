@@ -22,6 +22,8 @@ fn parse_stdout(output: &Output) -> Value {
 #[test]
 fn prints_the_effective_values_for_every_profile() {
     for (profile, arg) in [
+        (Profile::Starter, "starter"),
+        (Profile::Enterprise, "enterprise"),
         (Profile::Demo, "demo"),
         (Profile::Full, "full"),
         (Profile::Airgap, "airgap"),
@@ -41,6 +43,27 @@ fn prints_the_effective_values_for_every_profile() {
             output.stdout.ends_with(b"\n"),
             "YAML document ends with a newline"
         );
+    }
+}
+
+#[test]
+fn an_alias_prints_the_same_values_as_its_replacement() {
+    // #62: `demo` is `starter`, `full` and `airgap` are `enterprise`.
+    for (old, new) in [
+        ("demo", "starter"),
+        ("full", "enterprise"),
+        ("airgap", "enterprise"),
+    ] {
+        for component in ["trino", "seaweedfs", "jupyterhub"] {
+            let old_output = run(&["values", component, old]);
+            let new_output = run(&["values", component, new]);
+            assert!(old_output.status.success(), "values {component} {old}");
+            assert!(new_output.status.success(), "values {component} {new}");
+            assert_eq!(
+                old_output.stdout, new_output.stdout,
+                "values {component} {old} differs from {new}"
+            );
+        }
     }
 }
 
@@ -75,7 +98,7 @@ fn an_unknown_profile_is_a_usage_error() {
         "usage errors print nothing to stdout"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("<demo|full|airgap>"),
+        String::from_utf8_lossy(&output.stderr).contains("<starter|enterprise|demo|full|airgap>"),
         "stderr lists the profiles: {}",
         String::from_utf8_lossy(&output.stderr)
     );

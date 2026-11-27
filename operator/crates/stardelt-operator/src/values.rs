@@ -187,14 +187,14 @@ pub fn substitute_namespace(values: &mut Value, namespace: &str) {
 ///
 /// The platform already thinks this way: `make install-core SLIM=1` layers
 /// `helm-values/slim/` over the base values, and `install` does not. Mirroring that keeps one
-/// story — `demo` is the shape that fits a small node or a CI runner (Trino heaps that fit
-/// next to everything else, PVCs measured in gigabytes), while `full` and `airgap` are the
-/// base values. `airgap` matches `full` for now: the air-gap kit is P4 work layered on top,
-/// not a different size.
+/// story — `starter` is the shape that fits a small node or a CI runner (Trino heaps that fit
+/// next to everything else, PVCs measured in gigabytes), while `enterprise` is the base values.
+/// The deprecated names follow their new word: `demo` is `starter`, `full` and `airgap` are
+/// `enterprise` (the air-gap kit is P4 work layered on top of it, not a different size).
 ///
 /// Anything here can be overridden by the CR: this is a default, not a policy.
 pub fn profile_values(component: &str, profile: Profile) -> Value {
-    if !matches!(profile, Profile::Demo) {
+    if !matches!(profile, Profile::Starter | Profile::Demo) {
         return Value::Object(Map::new());
     }
     match component {
@@ -1084,8 +1084,22 @@ mod tests {
         // limit plus the heap headroom leaves at least 400MB of the heap free, and the
         // kubelet limit sits above the heap.
         let expected = [
-            (Profile::Demo, "1500m", "600MB", "450MB", "1800Mi", "2200Mi"),
-            (Profile::Full, "2G", "800MB", "600MB", "2300Mi", "3000Mi"),
+            (
+                Profile::Starter,
+                "1500m",
+                "600MB",
+                "450MB",
+                "1800Mi",
+                "2200Mi",
+            ),
+            (
+                Profile::Enterprise,
+                "2G",
+                "800MB",
+                "600MB",
+                "2300Mi",
+                "3000Mi",
+            ),
             (Profile::Airgap, "2G", "800MB", "600MB", "2300Mi", "3000Mi"),
         ];
         for (profile, heap, per_node, headroom, request, limit) in expected {

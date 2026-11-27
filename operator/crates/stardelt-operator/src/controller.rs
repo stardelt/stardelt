@@ -664,9 +664,8 @@ async fn resolve_component_values(
 /// The profile as it appears in a status message.
 fn profile_name(profile: Profile) -> &'static str {
     match profile {
-        Profile::Demo => "demo",
-        Profile::Full => "full",
-        Profile::Airgap => "airgap",
+        Profile::Starter | Profile::Demo => "starter",
+        Profile::Enterprise | Profile::Full | Profile::Airgap => "enterprise",
     }
 }
 
@@ -2515,6 +2514,21 @@ fn platform_status(
         now,
         waiting_message(core),
     )];
+    if let Some(message) = instance.spec.profile.deprecated_message() {
+        conditions.push(crate::conditions::set_condition(
+            instance
+                .status
+                .as_ref()
+                .map(|s| s.conditions.as_slice())
+                .unwrap_or(&[]),
+            "ProfileDeprecated",
+            "True",
+            "DeprecatedName",
+            Some(message.to_string()),
+            instance.metadata.generation,
+            now,
+        ));
+    }
     let previous_monitoring = instance.status.as_ref().and_then(|s| {
         s.conditions
             .iter()
@@ -3048,7 +3062,7 @@ mod tests {
 
         assert_eq!(
             outcome.components[0].message.as_deref(),
-            Some("planned (dry-run, profile=demo)")
+            Some("planned (dry-run, profile=starter)")
         );
         assert!(!outcome.components[0].ready);
         assert!(outcome.components[0].applied_hash.is_none());
@@ -3177,6 +3191,78 @@ mod tests {
         assert_eq!(pillars.status, "False");
         assert_eq!(status.components.len(), 2, "the pillar is still reported");
         assert_eq!(status.components[1].name, "superset");
+    }
+
+    /// #62: an old profile name adds a `ProfileDeprecated` condition naming the new word; a new name
+    /// adds none, and the condition keeps its `lastTransitionTime` across reconciles.
+    #[test]
+    fn an_old_profile_name_carries_a_deprecation_condition() {
+        let status_for = |profile: &str, previous: Option<Condition>| {
+            let mut instance: PlatformInstance = serde_json::from_value(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "PlatformInstance",
+                "metadata": { "name": "cluster", "generation": 3 },
+                "spec": { "dryRun": false, "profile": profile }
+            }))
+            .expect("deserialize PlatformInstance");
+            if let Some(condition) = previous {
+                instance.status = Some(PlatformInstanceStatus {
+                    phase: "Ready".into(),
+                    conditions: vec![condition],
+                    observed_generation: Some(3),
+                    components: vec![],
+                });
+            }
+            let core = PlanOutcome {
+                components: vec![],
+                values_resolved: true,
+            };
+            platform_status(&instance, &core, false, &[], "2026-01-01T00:00:00Z")
+        };
+        for name in ["starter", "enterprise"] {
+            assert!(
+                !status_for(name, None)
+                    .conditions
+                    .iter()
+                    .any(|c| c.type_ == "ProfileDeprecated"),
+                "a new name {name} carries no ProfileDeprecated"
+            );
+        }
+        for (name, word) in [
+            ("demo", "starter"),
+            ("full", "enterprise"),
+            ("airgap", "enterprise"),
+        ] {
+            let current = status_for(name, None);
+            let condition = current
+                .conditions
+                .iter()
+                .find(|c| c.type_ == "ProfileDeprecated")
+                .unwrap_or_else(|| panic!("{name} carries a ProfileDeprecated condition"));
+            assert_eq!(condition.status, "True");
+            assert_eq!(condition.reason.as_deref(), Some("DeprecatedName"));
+            let message = condition.message.as_deref().expect("a message");
+            assert!(message.contains(word), "{name}: {message}");
+            let kept = status_for(
+                name,
+                Some(Condition {
+                    type_: "ProfileDeprecated".into(),
+                    status: "True".into(),
+                    reason: Some("DeprecatedName".into()),
+                    message: condition.message.clone(),
+                    last_transition_time: Some("2025-12-01T00:00:00Z".into()),
+                    observed_generation: Some(3),
+                }),
+            );
+            assert_eq!(
+                kept.conditions
+                    .iter()
+                    .find(|c| c.type_ == "ProfileDeprecated")
+                    .and_then(|c| c.last_transition_time.as_deref()),
+                Some("2025-12-01T00:00:00Z"),
+                "{name}: lastTransitionTime stays put while nothing changes"
+            );
+        }
     }
 
     /// `platform_status` for a non-dry-run instance with `core` and `pillars` as they were applied.

@@ -15,14 +15,39 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
+    /// Every starter on: the lab as it is (the pre-#62 `demo`).
     #[default]
+    Starter,
+    /// Every plug; the install needs an OIDC issuer, an S3 endpoint and a secret store.
+    Enterprise,
+    /// Deprecated alias for `Starter` (#62); accepted for one release.
     Demo,
+    /// Deprecated alias for `Enterprise` (#62); accepted for one release.
     Full,
+    /// Deprecated: the air-gap kit is separate (#56); accepted for one release.
     Airgap,
 }
 
+impl Profile {
+    /// The sentence a `PlatformInstance` shows when `spec.profile` is an old name (#62).
+    pub fn deprecated_message(self) -> Option<&'static str> {
+        match self {
+            Profile::Starter | Profile::Enterprise => None,
+            Profile::Demo => {
+                Some("spec.profile demo is now starter; the old name keeps working for one release")
+            }
+            Profile::Full => Some(
+                "spec.profile full is now enterprise; the old name keeps working for one release",
+            ),
+            Profile::Airgap => Some(
+                "spec.profile airgap is now enterprise; the air-gap kit is a separate mode (#56) and the old name keeps working for one release",
+            ),
+        }
+    }
+}
+
 fn default_profile() -> Profile {
-    Profile::Demo
+    Profile::Starter
 }
 
 /// The instance's default theme, used when a person has not chosen one (design/themes.md T2).
@@ -4179,7 +4204,7 @@ mod tests {
     }
 
     #[test]
-    fn lakehouse_defaults_are_lakekeeper_seaweedfs_demo() {
+    fn lakehouse_defaults_are_lakekeeper_seaweedfs_starter() {
         let lh: Lakehouse = serde_json::from_value(serde_json::json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "Lakehouse",
@@ -4189,7 +4214,7 @@ mod tests {
         .expect("deserialize Lakehouse");
         assert_eq!(lh.spec.catalog.implementation, CatalogImpl::Lakekeeper);
         assert_eq!(lh.spec.storage.implementation, StorageImpl::Seaweedfs);
-        assert_eq!(lh.spec.profile, Profile::Demo);
+        assert_eq!(lh.spec.profile, Profile::Starter);
         assert!(lh.spec.dry_run, "new Lakehouses must plan only");
     }
 
@@ -4228,6 +4253,26 @@ mod tests {
         assert_eq!(lh.spec.storage.implementation, StorageImpl::ByoS3);
         assert_eq!(lh.spec.storage.bucket.as_deref(), Some("s3://acme-lake"));
         assert_eq!(lh.spec.profile, Profile::Full);
+    }
+
+    /// #62: a new name has no message; an old one names the word that replaces it.
+    #[test]
+    fn profile_deprecation_names_the_new_word() {
+        assert_eq!(Profile::Starter.deprecated_message(), None);
+        assert_eq!(Profile::Enterprise.deprecated_message(), None);
+        for (profile, new_name) in [
+            (Profile::Demo, "starter"),
+            (Profile::Full, "enterprise"),
+            (Profile::Airgap, "enterprise"),
+        ] {
+            let message = profile
+                .deprecated_message()
+                .expect("an old profile name carries a message");
+            assert!(
+                message.contains(new_name),
+                "{profile:?} must name {new_name}: {message}"
+            );
+        }
     }
 
     #[test]
@@ -4286,7 +4331,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_instance_defaults_to_demo_lakehouse_only() {
+    fn platform_instance_defaults_to_starter_lakehouse_only() {
         let pi: PlatformInstance = serde_json::from_value(serde_json::json!({
             "apiVersion": "stardelt.io/v1alpha1",
             "kind": "PlatformInstance",
@@ -4294,7 +4339,7 @@ mod tests {
             "spec": {}
         }))
         .expect("deserialize PlatformInstance");
-        assert_eq!(pi.spec.profile, Profile::Demo);
+        assert_eq!(pi.spec.profile, Profile::Starter);
         assert!(pi.spec.pillars.lakehouse);
         assert!(pi.spec.dry_run, "a new PlatformInstance must plan only");
     }
