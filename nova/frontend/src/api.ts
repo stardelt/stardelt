@@ -769,6 +769,22 @@ export type StreamView = {
   viewers: string[]
 }
 
+/** The body of PUT /api/streams/{namespace}/{name} (`StreamWrite`); camelCase like the server. */
+export type StreamWriteBody = {
+  name: string
+  ownerGroup: string
+  source: { connectionRef?: string | null; topic: string }
+  sink: {
+    catalog: string
+    table: string
+    mode?: string | null
+    mergeKeys?: string[]
+    checkpointPrefix?: string | null
+  }
+  restartPolicy?: string | null
+  viewers?: string[]
+}
+
 /** One `SparkCluster`: Spark compute for a team, one person, or everyone (`shared`). */
 export type ComputeCluster = Schema<'ComputeCluster'>
 
@@ -1432,10 +1448,16 @@ export const api = {
   queryLogProfile: (id: string)               => jget<QueryProfile>(`/api/query-log/${seg(id)}/profile`),
   queryLogHistory: (id: string)               => jget<QueryHistory>(`/api/query-log/${seg(id)}/history`),
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
-  streams:       ()                            => jget<{ streams: StreamView[] }>('/api/streams'),
+  streams:       ()                            => jget<{ namespace: string; streams: StreamView[] }>('/api/streams'),
   /** Stop or resume one stream; answers the updated view (`spec.stopped`, D42). */
   setStreamState: (namespace: string, name: string, stopped: boolean) =>
     jpatch<StreamView>(`/api/streams/${seg(namespace)}/${seg(name)}`, { stopped }),
+  /** The refusal sentences of the body, without writing anything (`POST /api/streams/validate`). */
+  validateStream: (body: StreamWriteBody) =>
+    jpost<{ ok: boolean; errors: { message: string }[] }>('/api/streams/validate', body),
+  /** Create or update one stream as its owner group (`PUT /api/streams/{ns}/{name}`). */
+  saveStream: (namespace: string, body: StreamWriteBody) =>
+    jput<StreamView>(`/api/streams/${seg(namespace)}/${seg(body.name)}`, body),
   /** The Spark clusters this caller may use (internal#161). */
   compute:        ()                            => jget<{ clusters: ComputeCluster[] }>('/api/compute'),
   startCompute:   (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/start`, {}),

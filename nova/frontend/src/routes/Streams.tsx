@@ -1,7 +1,10 @@
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errorMessage, type StreamView } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
+import { Icon } from '../components/Icon'
+import { NewStreamDialog } from '../components/StreamDialog'
 import { formatWhen } from './Pipelines'
 
 const NEUTRAL = 'border-border bg-bg-soft text-text-dim'
@@ -41,14 +44,15 @@ function PhaseBadge({ phase, reason }: { phase: string; reason: string | null })
 
 export default function Streams() {
   const qc = useQueryClient()
+  const [creating, setCreating] = useState(false)
   const streams = useQuery({ queryKey: ['streams'], queryFn: api.streams, refetchInterval: 15_000 })
   const mutation = useMutation({
     mutationFn: ({ s, stopped }: { s: StreamView; stopped: boolean }) =>
       api.setStreamState(s.namespace, s.name, stopped),
     onMutate: async ({ s, stopped }) => {
       await qc.cancelQueries({ queryKey: ['streams'] })
-      const previous = qc.getQueryData<{ streams: StreamView[] }>(['streams'])
-      qc.setQueryData<{ streams: StreamView[] }>(['streams'], (old) =>
+      const previous = qc.getQueryData<{ namespace: string; streams: StreamView[] }>(['streams'])
+      qc.setQueryData<{ namespace: string; streams: StreamView[] }>(['streams'], (old) =>
         old
           ? {
               ...old,
@@ -70,18 +74,35 @@ export default function Streams() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Streams</h1>
-        <p className="text-sm text-text-dim">
-          Jobs that read a stream topic and write it into a table, without stopping.
-        </p>
-      </div>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight">Streams</h1>
+          <p className="text-sm text-text-dim">
+            Jobs that read a stream topic and write it into a table, without stopping.
+          </p>
+        </div>
+        <button type="button" className="btn-primary" onClick={() => setCreating(true)}>
+          <Icon name="plus" className="w-4 h-4" />
+          New stream
+        </button>
+      </header>
+
+      {creating && (
+        <NewStreamDialog
+          namespace={streams.data?.namespace ?? 'stardelt'}
+          onClose={() => setCreating(false)}
+          onSaved={() => {
+            setCreating(false)
+            void qc.invalidateQueries({ queryKey: ['streams'] })
+          }}
+        />
+      )}
 
       {streams.isError && <ErrorBox error={streams.error} onRetry={() => streams.refetch()} />}
 
       {streams.data && streams.data.streams.length === 0 && (
         <EmptyState icon="spark" title="No streams yet">
-          A stream is created as a <span className="font-mono">StreamApp</span> resource; ask an administrator to add one.
+          Create one to read a topic into a table.
         </EmptyState>
       )}
 
