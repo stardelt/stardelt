@@ -115,7 +115,7 @@ test.describe('every page, every variant', () => {
         if (route === '/streams') {
           const stream = (row: Record<string, unknown>) => ({
             namespace: 'shop', owner_group: 'shop', reason: null, last_error: null,
-            last_checkpoint_at: null, attempts: null, last_submitted_at: null, stopped: false,
+            attempts: null, last_submitted_at: null, stopped: false,
             source_connection: 'events-kafka', source_topic: 'shop.orders',
             sink_catalog: 'lakehouse', sink_table: 'orders', sink_mode: 'append',
             run_as: null, ...row,
@@ -125,7 +125,7 @@ test.describe('every page, every variant', () => {
               streams: [
                 stream({
                   name: 'orders-live', phase: 'Running',
-                  last_checkpoint_at: '2026-11-16T09:12:00Z', attempts: 1,
+                  attempts: 1,
                   last_submitted_at: '2026-11-16T08:00:00Z',
                 }),
                 stream({

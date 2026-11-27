@@ -7,7 +7,6 @@ const STREAM = {
   phase: 'Running',
   reason: null,
   last_error: null,
-  last_checkpoint_at: null,
   attempts: 1,
   last_submitted_at: null,
   stopped: false,

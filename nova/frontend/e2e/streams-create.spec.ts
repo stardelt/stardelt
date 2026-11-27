@@ -37,7 +37,6 @@ const savedStream = {
   phase: 'Pending',
   reason: null,
   last_error: null,
-  last_checkpoint_at: null,
   attempts: null,
   last_submitted_at: null,
   stopped: false,

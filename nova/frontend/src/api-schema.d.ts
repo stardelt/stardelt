@@ -2141,7 +2141,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`. */
+        /** @description The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`. */
         get: operations["streams_list"];
         put?: never;
         post?: never;
@@ -4983,7 +4983,6 @@ export interface components {
              */
             attempts?: number | null;
             deployment?: components["schemas"]["DeploymentView"] | null;
-            last_checkpoint_at?: string | null;
             last_error?: string | null;
             /** @description When Spark last submitted the application, RFC 3339 (`status.lastSubmittedAt`). */
             last_submitted_at?: string | null;

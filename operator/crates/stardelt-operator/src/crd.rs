@@ -2654,14 +2654,6 @@ pub struct StreamAppStatus {
     /// `Pending`, `Running`, `Failed` or `Stopped`.
     #[serde(default)]
     pub phase: String,
-    /// The time of the newest checkpoint commit (RFC 3339). Absent until the operator reports
-    /// it; the checkpoint itself is written to the object store and survives a stop.
-    #[serde(
-        default,
-        rename = "lastCheckpointAt",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub last_checkpoint_at: Option<String>,
     #[serde(default, rename = "lastError", skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     /// How many times Spark has submitted the application
