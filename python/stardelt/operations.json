@@ -403,6 +403,15 @@
       ],
       "body": false
     },
+    "eval_update": {
+      "method": "PUT",
+      "path": "/api/evals/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": true
+    },
     "health": {
       "method": "GET",
       "path": "/api/health",

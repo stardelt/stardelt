@@ -165,6 +165,7 @@ PUT	/api/catalog/tables/{ns}/{tbl}/health	catalog_docs	main	signed-in
 PUT	/api/connections/group/{group}/{name}/secret	connection_routes	main	signed-in
 PUT	/api/connections/managed/{name}/secret	connection_routes	main	signed-in
 PUT	/api/connections/personal/{name}/secret	connection_routes	main	signed-in
+PUT	/api/evals/{id}	evals	main	signed-in
 PUT	/api/notebooks/{group}/{name}	notebooks	notebooks	signed-in
 PUT	/api/pipelines/{namespace}/{name}	pipelines	pipelines	signed-in
 PUT	/api/settings/{key}	user_settings	main	signed-in
