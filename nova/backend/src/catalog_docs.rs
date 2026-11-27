@@ -109,6 +109,12 @@ pub struct TableDocumentation {
     pub domain: Option<String>,
     /// The `stardelt.guide` property: how to use this table (joins, filters, definitions), or `null`.
     pub guide: Option<String>,
+    /// The `stardelt.lifecycle` property: `draft`, `published` or `deprecated`, or `null`.
+    pub lifecycle: Option<String>,
+    /// The `stardelt.replaced-by` property (`catalog.schema.table`), or `null`.
+    #[serde(rename = "replacedBy")]
+    #[schema(rename = "replacedBy")]
+    pub replaced_by: Option<String>,
     /// The fields of the **current** schema, in schema order.
     pub columns: Vec<ColumnDocumentation>,
     /// Whether the interim rule lets this caller edit (see the module docs).
@@ -295,6 +301,14 @@ pub struct DocumentationUpdate {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<String>)]
     pub guide: Option<Option<String>>,
+    /// New lifecycle (`draft`, `published` or `deprecated`; `null` removes it).
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub lifecycle: Option<Option<String>>,
+    /// The table that replaces this one (`catalog.schema.table`; `null` removes it).
+    #[serde(rename = "replacedBy", default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub replaced_by: Option<Option<String>>,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description` body.
@@ -1207,6 +1221,8 @@ fn documentation(
         owner: owner.clone(),
         domain: property(&loaded.properties, "stardelt.domain"),
         guide: property(&loaded.properties, "stardelt.guide"),
+        lifecycle: property(&loaded.properties, "stardelt.lifecycle"),
+        replaced_by: property(&loaded.properties, "stardelt.replaced-by"),
         columns: loaded
             .columns
             .iter()
@@ -1360,6 +1376,8 @@ struct Requested {
     owner: Option<Option<String>>,
     domain: Option<Option<String>>,
     guide: Option<Option<String>>,
+    lifecycle: Option<Option<String>>,
+    replaced_by: Option<Option<String>>,
 }
 
 fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
@@ -1428,13 +1446,44 @@ fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
         None => None,
         Some(raw) => Some(checked_guide(raw)?),
     };
+    let lifecycle = match req.lifecycle {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(lifecycle)) => {
+            if !matches!(lifecycle.as_str(), "draft" | "published" | "deprecated") {
+                return Err("lifecycle must be draft, published or deprecated".into());
+            }
+            Some(Some(lifecycle))
+        }
+    };
+    let replaced_by = match req.replaced_by {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(name)) => {
+            if !table_name_ok(&name) {
+                return Err("replacedBy must be a table name, catalog.schema.table".into());
+            }
+            Some(Some(name))
+        }
+    };
     Ok(Requested {
         description,
         tags,
         owner,
         domain,
         guide,
+        lifecycle,
+        replaced_by,
     })
+}
+
+/// `catalog.schema.table`: three non-empty, whitespace-free segments.
+fn table_name_ok(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 255 && !p.chars().any(char::is_whitespace))
 }
 
 /// The per-table edit lock. Held for the whole write, including the load that decides the
@@ -1514,6 +1563,40 @@ async fn write_documentation(
         ));
     }
 
+    // The state this request leaves behind: an absent key keeps the stored value.
+    let next = |requested: &Option<Option<String>>, current: &Option<String>| match requested {
+        Some(value) => value.clone(),
+        None => current.clone(),
+    };
+    let next_owner = next(&requested.owner, &current.owner);
+    let next_description = next(&requested.description, &current.description);
+    let next_domain = next(&requested.domain, &current.domain);
+    let next_lifecycle = next(&requested.lifecycle, &current.lifecycle);
+    let next_replaced_by = next(&requested.replaced_by, &current.replaced_by);
+
+    if next_lifecycle.as_deref() == Some("published")
+        && (next_owner.is_none()
+            || next_description.as_deref().unwrap_or("").trim().is_empty()
+            || next_domain.is_none())
+    {
+        return Err(DocError::new(
+            StatusCode::BAD_REQUEST,
+            "a published table needs an owner, a description and a domain",
+        ));
+    }
+    if next_lifecycle.as_deref() == Some("deprecated") && next_replaced_by.is_none() {
+        return Err(DocError::new(
+            StatusCode::BAD_REQUEST,
+            "a deprecated table names its replacement in replacedBy",
+        ));
+    }
+    if next_replaced_by.is_some() && next_lifecycle.as_deref() != Some("deprecated") {
+        return Err(DocError::new(
+            StatusCode::BAD_REQUEST,
+            "replacedBy is only set on a deprecated table",
+        ));
+    }
+
     let mut set: BTreeMap<String, String> = BTreeMap::new();
     let mut remove: Vec<String> = Vec::new();
     let mut changed: Vec<&str> = Vec::new();
@@ -1571,6 +1654,28 @@ async fn write_documentation(
                 set.insert("stardelt.guide".into(), guide.clone());
             }
             None => remove.push("stardelt.guide".into()),
+        }
+    }
+    if let Some(next) = &requested.lifecycle
+        && next.as_deref() != current.lifecycle.as_deref()
+    {
+        changed.push("lifecycle");
+        match next {
+            Some(value) => {
+                set.insert("stardelt.lifecycle".into(), value.clone());
+            }
+            None => remove.push("stardelt.lifecycle".into()),
+        }
+    }
+    if let Some(next) = &requested.replaced_by
+        && next.as_deref() != current.replaced_by.as_deref()
+    {
+        changed.push("replacedBy");
+        match next {
+            Some(value) => {
+                set.insert("stardelt.replaced-by".into(), value.clone());
+            }
+            None => remove.push("stardelt.replaced-by".into()),
         }
     }
 
@@ -2161,7 +2266,7 @@ async fn catalog_or_error(
     operation_id = "table_documentation_get",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain`/`stardelt.guide` custom properties, and the description and type of every column of the **current** schema. `stardelt.guide` is a guide in plain text or Markdown, at most 16000 characters: how to use the table. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties.",
+    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain`/`stardelt.guide` custom properties, and the description and type of every column of the **current** schema. `stardelt.guide` is a guide in plain text or Markdown, at most 16000 characters: how to use the table. `stardelt.lifecycle` is `draft`, `published` or `deprecated` (a data product's life, #37), and `stardelt.replaced-by` names the table that replaces a deprecated one. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -2224,7 +2329,7 @@ pub(crate) async fn documentation_for(
     operation_id = "table_documentation_update",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`.",
+    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. `lifecycle` is `draft`, `published` or `deprecated`; `replacedBy` is `catalog.schema.table` and only on a deprecated table. Publishing needs an owner, a description and a domain; a passing quality check is not checked here yet. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -2836,6 +2941,8 @@ mod tests {
             owner: owner.map(|o| o.map(str::to_string)),
             domain: domain.map(|d| d.map(str::to_string)),
             guide: None,
+            lifecycle: None,
+            replaced_by: None,
         }
     }
 
@@ -2847,6 +2954,8 @@ mod tests {
             owner: None,
             domain: None,
             guide: guide.map(|g| g.map(str::to_string)),
+            lifecycle: None,
+            replaced_by: None,
         }
     }
 
@@ -4245,5 +4354,122 @@ mod tests {
         assert_eq!(loaded.last_write, None);
         let loaded = parse_loaded(&load_fixture().to_string()).expect("the fixture parses");
         assert_eq!(loaded.last_write, None);
+    }
+
+    #[tokio::test]
+    async fn read_reports_the_lifecycle_and_the_replacement() {
+        let (fake, addr) = fake_catalog().await;
+        let mut load = load_fixture();
+        let properties = load["metadata"]["properties"].as_object_mut().unwrap();
+        properties.insert("stardelt.lifecycle".into(), json!("deprecated"));
+        properties.insert(
+            "stardelt.replaced-by".into(),
+            json!("warehouse.sales.orders_v2"),
+        );
+        fake.set_load(load);
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
+            .await
+            .expect("the table loads");
+        assert_eq!(doc.lifecycle.as_deref(), Some("deprecated"));
+        assert_eq!(
+            doc.replaced_by.as_deref(),
+            Some("warehouse.sales.orders_v2")
+        );
+        let serialized = serde_json::to_value(&doc).expect("the answer serializes");
+        assert_eq!(serialized["replacedBy"], json!("warehouse.sales.orders_v2"));
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_table_names_its_replacement_in_one_commit() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut body = update_body(None, None, None, None);
+        body.lifecycle = Some(Some("deprecated".into()));
+        body.replaced_by = Some(Some("warehouse.sales.orders_v2".into()));
+        write_documentation(&state, &catalog, &member, "sales", "orders", body)
+            .await
+            .expect("a deprecated table with its replacement");
+
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(
+            commits[0]["updates"][0]["updates"],
+            json!({
+                "stardelt.lifecycle": "deprecated",
+                "stardelt.replaced-by": "warehouse.sales.orders_v2",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_needs_an_owner_a_description_and_a_domain() {
+        let (fake, addr) = fake_catalog().await;
+        let mut bare = load_fixture();
+        bare["metadata"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("stardelt.domain");
+        fake.set_load(bare);
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut body = update_body(None, None, None, None);
+        body.lifecycle = Some(Some("published".into()));
+        let error = write_documentation(&state, &catalog, &member, "sales", "orders", body)
+            .await
+            .expect_err("the table has no domain");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message(),
+            "a published table needs an owner, a description and a domain"
+        );
+        assert!(fake.snapshot().0.is_empty(), "nothing was committed");
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_table_without_a_replacement_and_an_unknown_value_are_refused() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut body = update_body(None, None, None, None);
+        body.lifecycle = Some(Some("deprecated".into()));
+        let error = write_documentation(&state, &catalog, &member, "sales", "orders", body)
+            .await
+            .expect_err("no replacement");
+        assert_eq!(
+            error.message(),
+            "a deprecated table names its replacement in replacedBy"
+        );
+
+        let mut body = update_body(None, None, None, None);
+        body.lifecycle = Some(Some("retired".into()));
+        let error = write_documentation(&state, &catalog, &member, "sales", "orders", body)
+            .await
+            .expect_err("not a lifecycle");
+        assert_eq!(
+            error.message(),
+            "lifecycle must be draft, published or deprecated"
+        );
+
+        let mut body = update_body(None, None, None, None);
+        body.lifecycle = Some(Some("deprecated".into()));
+        body.replaced_by = Some(Some("orders_v2".into()));
+        let error = write_documentation(&state, &catalog, &member, "sales", "orders", body)
+            .await
+            .expect_err("not a three-part table name");
+        assert_eq!(
+            error.message(),
+            "replacedBy must be a table name, catalog.schema.table"
+        );
+        assert!(fake.snapshot().0.is_empty(), "nothing was committed");
     }
 }

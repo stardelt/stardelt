@@ -277,6 +277,8 @@ mod tests {
             owner: Some("analytics".into()),
             domain: Some("Sales".into()),
             guide: None,
+            lifecycle: None,
+            replaced_by: None,
             columns: Vec::new(),
             can_edit: false,
             edit_rule: String::new(),

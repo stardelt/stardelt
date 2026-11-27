@@ -2,8 +2,8 @@
 | module | area | production lines | test lines | routes | talks to |
 |---|---|---:|---:|---:|---|
 | `pipelines.rs` ⚠ | Pipelines & delivery | 9023 | 12226 | 26 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store, S3 (SeaweedFS), Trino |
+| `catalog_docs.rs` ⚠ | Catalog | 2589 | 1886 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `auth.rs` ⚠ | Core & identity | 2544 | 2316 | 4 | OIDC provider, PostgreSQL state store |
-| `catalog_docs.rs` ⚠ | Catalog | 2484 | 1765 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `query_log_api.rs` | SQL & query log | 1492 | 320 | 6 | Kubernetes API (CRDs), PostgreSQL state store |
@@ -38,7 +38,7 @@
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
-| `catalog_search.rs` | Catalog | 351 | 415 | 1 | Lakekeeper (Iceberg REST) |
+| `catalog_search.rs` | Catalog | 351 | 417 | 1 | Lakekeeper (Iceberg REST) |
 | `superset_archive.rs` | Pipelines & delivery | 350 | 213 | 0 | - |
 | `token_exchange.rs` | Core & identity | 305 | 189 | 0 | OIDC provider |
 | `stages.rs` | Pipelines & delivery | 296 | 54 | 1 | - |
@@ -49,7 +49,7 @@
 | `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
-| `catalog_doc_store.rs` | Catalog | 177 | 207 | 0 | PostgreSQL state store |
+| `catalog_doc_store.rs` | Catalog | 177 | 209 | 0 | PostgreSQL state store |
 | `mcp_audit.rs` | AI (Ask, MCP, models) | 176 | 68 | 1 | PostgreSQL state store |
 | `query_hints.rs` | SQL & query log | 176 | 118 | 0 | - |
 | `user_settings.rs` | Core & identity | 173 | 14 | 3 | PostgreSQL state store |
@@ -70,4 +70,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (69 files)** | | **50063** | **44397** | **161** | |
+| **total (69 files)** | | **50168** | **44522** | **161** | |
