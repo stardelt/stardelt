@@ -6971,6 +6971,34 @@ fn spec_response_round_trips_publish() {
     );
 }
 
+/// `pipelines_spec` answers `spec.triggers` in the body form, so the YAML editor can show it
+/// and send it back (#2037).
+#[test]
+fn spec_response_carries_the_trigger() {
+    let mut triggered = resource("shop-gold", Some("analytics"));
+    triggered["spec"]["triggers"] =
+        json!([{ "tablesUpdated": ["silver.shop.orders"], "mode": "any" }]);
+    let document = spec_response(&triggered).document;
+    assert_eq!(
+        document.triggers,
+        Some(vec![TriggerRequest {
+            tables_updated: vec!["silver.shop.orders".into()],
+            mode: Some("any".into()),
+        }])
+    );
+
+    let plain = spec_response(&resource("shop-plain", Some("analytics"))).document;
+    assert!(plain.triggers.is_none());
+    assert!(
+        !serde_json::to_value(&plain)
+            .expect("serialises")
+            .as_object()
+            .expect("an object")
+            .contains_key("triggers"),
+        "a pipeline without a trigger leaves the key out"
+    );
+}
+
 #[tokio::test]
 async fn create_with_tasks_accepts_a_spark_pipeline_task() {
     let resources = analytics_ready();

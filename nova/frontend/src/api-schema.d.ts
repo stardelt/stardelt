@@ -4147,6 +4147,11 @@ export interface components {
              *     `pipelines_validate` accepts; left out for a single-task pipeline.
              */
             tasks?: components["schemas"]["PipelineTaskRequest"][] | null;
+            /**
+             * @description Tables whose update starts a run (`spec.triggers`), at most one entry; left out when
+             *     the resource carries none.
+             */
+            triggers?: components["schemas"]["TriggerRequest"][] | null;
             /** @description Groups that may read the pipeline without being members; left out when there are none. */
             viewers?: string[];
         };
