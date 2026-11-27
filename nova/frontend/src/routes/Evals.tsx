@@ -71,11 +71,14 @@ export default function Evals() {
     }
     setSaving(true)
     try {
-      await api.createEval({
-        ownerGroup,
-        question: question.trim(),
-        expected: parsed as NewEval['expected'],
-      })
+      await api.createEval(
+        {
+          ownerGroup,
+          question: question.trim(),
+          expected: parsed as NewEval['expected'],
+        },
+        catalog,
+      )
       setQuestion('')
       setExpectedText(DEFAULT_EXPECTED)
       setAdding(false)

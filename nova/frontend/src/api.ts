@@ -1497,7 +1497,7 @@ export const api = {
     const q = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
     return jget<EvalWithLastRun[]>(`/api/catalog/evals${q}`)
   },
-  createEval: (body: NewEval) => jpost<Eval>('/api/catalog/evals', body),
+  createEval: (body: NewEval, catalog?: string) => jpost<Eval>(catalogPath('/api/catalog/evals', catalog), body),
   deleteEval: (id: number) => jdel(`/api/evals/${id}`),
   putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
     jput<TableDocumentation>(
