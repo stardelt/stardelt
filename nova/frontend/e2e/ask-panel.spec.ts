@@ -114,9 +114,10 @@ async function view(page: Page, theme: 'dark' | 'light', width: number, height: 
   await page.emulateMedia({ colorScheme: theme })
   await page.evaluate((value) => localStorage.setItem('stardelt-nova:theme', value), theme)
   await page.reload()
-  // The endpoint list arrives after the first paint; the key binding exists with it.
-  await expect(page.getByRole('button', { name: 'Ask about your data' })).toBeVisible()
-  await page.keyboard.press('Control+J')
+  // The endpoint list arrives after the first paint; the shortcut's keydown listener is an
+  // effect that can trail the button by a frame (the 12:08Z main run lost that race). Open the
+  // panel the way a person does — the shortcut has its own test, `⌘J opens the panel …`.
+  await page.getByRole('button', { name: 'Ask about your data' }).click()
   await expect(page.locator('#ask-panel')).toBeVisible()
 }
 
