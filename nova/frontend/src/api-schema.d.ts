@@ -4246,7 +4246,7 @@ export interface components {
              */
             publish: string;
             runAs?: string | null;
-            /** @description The cron schedule, with the time zone in parentheses when there is one. */
+            /** @description The schedule as a person reads it: the cron with its time zone in parentheses, or `when <tables> is updated` for a table trigger. */
             schedule?: string | null;
             /**
              * @description `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`, or `not-loaded` after three

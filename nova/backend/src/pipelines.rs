@@ -494,6 +494,42 @@ fn schedule_of(spec: &Value) -> Option<String> {
     }
 }
 
+/// `spec.triggers` as one line for the schedule column: `when mobility.bronze.trips is
+/// updated`, `when all of a, b are updated`, `when any of a, b is updated`.
+///
+/// The CRD allows one trigger today (stardelt/stardelt#2014): read the first entry and stop.
+/// A hand-written resource with a malformed trigger gets `None`, never an error — a view does
+/// not fail on a resource.
+fn trigger_of(spec: &Value) -> Option<String> {
+    let tables: Vec<&str> = spec
+        .get("triggers")?
+        .as_array()?
+        .first()?
+        .get("tablesUpdated")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    match tables.as_slice() {
+        [] => None,
+        [one] => Some(format!("when {one} is updated")),
+        _ => {
+            let mode = spec
+                .get("triggers")
+                .and_then(Value::as_array)
+                .and_then(|triggers| triggers.first())
+                .and_then(|trigger| trigger.get("mode"))
+                .and_then(Value::as_str)
+                .unwrap_or("all");
+            if mode == "any" {
+                Some(format!("when any of {} is updated", tables.join(", ")))
+            } else {
+                Some(format!("when all of {} are updated", tables.join(", ")))
+            }
+        }
+    }
+}
+
 /// The selectors of a `kind: "dbt"` task's `config` as one line: `config.select`, or the
 /// `config.batches` array parsed back and joined with `, `. A `batches` text that is not a JSON
 /// array of strings leaves `None` — the view never fails on a hand-written resource (`#112`).
@@ -3228,7 +3264,7 @@ pub struct PipelineView {
     /// Whether the caller may also pause, resume, change or delete it — the owner group and
     /// administrators only (epic#895 decision 12).
     pub can_edit: bool,
-    /// The cron schedule, with the time zone in parentheses when there is one.
+    /// The schedule as a person reads it: the cron with its time zone in parentheses, or `when <tables> is updated` for a table trigger.
     pub schedule: Option<String>,
     pub paused: bool,
     /// `false` while Airflow has no DAG for the resource yet; the loader needs about 25 seconds.
@@ -3609,7 +3645,7 @@ fn view_of(
             .map(str::to_string),
         can_run: visible(who, spec),
         can_edit: may_act(who, spec),
-        schedule: schedule_of(spec),
+        schedule: schedule_of(spec).or_else(|| trigger_of(spec)),
         paused,
         loaded,
         next_run: dag.and_then(|d| d.next_dagrun_run_after.clone()),
