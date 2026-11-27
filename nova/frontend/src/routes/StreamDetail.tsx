@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { api, errorMessage, type StreamView } from '../api'
+import { api, ApiError, errorMessage, type StreamView } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { formatWhen } from './Pipelines'
@@ -46,6 +46,55 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
       <dt className="label">{label}</dt>
       <dd className="mt-0.5 break-words">{children}</dd>
     </div>
+  )
+}
+
+/**
+ * The sink table's newest snapshot as the caller (#22 point 3): the row count Iceberg
+ * recorded and when it committed. `GET /api/catalog/tables/{ns}/{tbl}/history` answers the
+ * last 100 snapshots newest first; the first row is the current state. A missing table is
+ * said as such, not as a read failure.
+ */
+function SinkFacts({ stream }: { stream: StreamView }) {
+  const [schema, table] = stream.sink_table.split('.')
+  const history = useQuery({
+    queryKey: ['stream-sink', stream.sink_catalog, stream.sink_table],
+    queryFn: () => api.tableHistory(schema, table, stream.sink_catalog),
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const columns = history.data?.columns ?? []
+  const newest = (history.data?.rows ?? [])[0]
+  const at = (name: string) =>
+    columns.findIndex((column) => column.name === name)
+  const iTime = at('committed_at')
+  const iSummary = at('summary')
+  const summary =
+    iSummary >= 0 && newest?.[iSummary] && typeof newest[iSummary] === 'object'
+      ? (newest[iSummary] as Record<string, unknown>)
+      : undefined
+  const rows = summary?.['total-records']
+  const committed =
+    iTime >= 0 && newest?.[iTime] != null
+      ? String(newest[iTime]).replace(' ', 'T').replace(' UTC', 'Z')
+      : null
+  const when = committed ? formatWhen(committed) : { text: '—' }
+  const missing = history.isError && (history.error as ApiError).status === 404
+  return (
+    <>
+      <Fact label="Sink rows">
+        {history.isPending ? <span>…</span> : <span>{rows == null ? '—' : String(rows)}</span>}
+      </Fact>
+      <Fact label="Last commit">
+        {newest ? <span title={when.title ?? committed ?? undefined}>{when.text}</span> : <span>—</span>}
+        {missing && (
+          <div className="text-xs text-text-dim">The sink table does not exist.</div>
+        )}
+        {history.isError && !missing && (
+          <div className="text-xs text-text-dim">The sink table could not be read.</div>
+        )}
+      </Fact>
+    </>
   )
 }
 
@@ -158,6 +207,7 @@ export default function StreamDetail() {
           </div>
           <div className="text-xs text-text-dim">{stream.sink_mode}</div>
         </Fact>
+        <SinkFacts stream={stream} />
         <Fact label="Runs as">
           <span className="font-mono text-xs">{stream.run_as ?? '—'}</span>
         </Fact>

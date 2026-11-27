@@ -68,3 +68,34 @@ test('a stream the caller cannot see says it does not exist', async ({ page }) =
   await expect(main.getByText('Stream not found')).toBeVisible()
   await expect(main.getByRole('link', { name: 'Back to streams' })).toHaveAttribute('href', '/streams')
 })
+
+test('the sink facts show the newest row count and commit', async ({ page }) => {
+  await page.route('**/api/streams', (route) => json(route, { streams: [STREAM] }))
+  await page.route('**/api/catalog/tables/shop/orders/history*', (route) =>
+    json(route, {
+      columns: [
+        { name: 'committed_at', type: 'timestamp(6) with time zone' },
+        { name: 'summary', type: 'map(varchar, varchar)' },
+      ],
+      rows: [['2026-11-27 03:00:00.000 UTC', { 'total-records': '42', operation: 'append' }]],
+    }),
+  )
+
+  await page.goto('/streams/stardelt/orders')
+
+  const main = page.locator('main')
+  await expect(main.getByText('42', { exact: true })).toBeVisible()
+  await expect(main.getByText('Last commit')).toBeVisible()
+})
+
+test('a sink table that does not exist says so', async ({ page }) => {
+  await page.route('**/api/streams', (route) => json(route, { streams: [STREAM] }))
+  await page.route('**/api/catalog/tables/shop/orders/history*', (route) =>
+    json(route, { error: 'no such table' }, 404),
+  )
+
+  await page.goto('/streams/stardelt/orders')
+
+  const main = page.locator('main')
+  await expect(main.getByText('The sink table does not exist.')).toBeVisible()
+})
