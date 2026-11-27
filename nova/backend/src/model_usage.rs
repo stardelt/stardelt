@@ -55,6 +55,15 @@ pub struct UsageCall {
     pub outcome: String,
 }
 
+/// One endpoint's 👍 and 👎 this month, from `model_call.feedback`. An endpoint nobody rated
+/// is absent from the answer, not a zero row.
+#[derive(Debug, Serialize, FromRow, ToSchema)]
+pub struct UsageFeedback {
+    pub endpoint: String,
+    pub up: i64,
+    pub down: i64,
+}
+
 /// The answer of `GET /api/admin/model-usage`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ModelUsage {
@@ -62,6 +71,8 @@ pub struct ModelUsage {
     pub month: String,
     pub groups: Vec<UsageRow>,
     pub calls: Vec<UsageCall>,
+    /// This month's votes per endpoint, name order; an endpoint nobody rated is absent.
+    pub feedback: Vec<UsageFeedback>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,12 +127,25 @@ async fn calls(
     .await
 }
 
+/// This month's votes per endpoint, name order; an endpoint nobody rated is absent.
+async fn feedback(pool: &PgPool) -> Result<Vec<UsageFeedback>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT endpoint, \
+            count(*) FILTER (WHERE feedback = 'up')::bigint AS up, \
+            count(*) FILTER (WHERE feedback = 'down')::bigint AS \"down\" \
+         FROM model_call WHERE at >= date_trunc('month', now()) \
+         GROUP BY endpoint HAVING count(feedback) > 0 ORDER BY endpoint",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 #[utoipa::path(
     get,
     operation_id = "admin_model_usage",
     path = "/api/admin/model-usage",
     tag = "internal",
-    description = "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
+    description = "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). `feedback` carries, per endpoint, how many of this month's calls the people rated 👍 (`up`) and 👎 (`down`); an endpoint nobody rated is absent. Never who voted. No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
     params(
         ("limit" = Option<i64>, Query, description = "How many calls, 1 to 500 (default 50)"),
         ("group" = Option<String>, Query, description = "Only this group in `calls`; the totals stay the whole month"),
@@ -146,6 +170,7 @@ pub(crate) async fn list(
             month: month(pool).await?,
             groups: totals(pool).await?,
             calls: calls(pool, params.group.as_deref(), limit).await?,
+            feedback: feedback(pool).await?,
         })
     }
     .await;
@@ -240,5 +265,15 @@ mod tests {
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].sub, "alice");
         assert_eq!(narrowed[0].tokens_in, 1_000);
+
+        // One 👍 on the ask row: the endpoint's month carries one vote, no vote.
+        sqlx::query("UPDATE model_call SET feedback = 'up' WHERE sub = 'alice'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let votes = feedback(&pool).await.unwrap();
+        assert_eq!(votes.len(), 1, "no vote is not a zero row");
+        assert_eq!(votes[0].endpoint, "default");
+        assert_eq!((votes[0].up, votes[0].down), (1, 0));
     }
 }
