@@ -399,6 +399,10 @@ spike-trino-idle: _context ## What a query does while no Trino worker runs (#30 
 spike-trino-row-filters: _context ## Can the Trino OPA plugin apply row filters and column masks (#1485, #50)
 	@bash scripts/spike-trino-row-filters.sh
 
+.PHONY: spike-materialized-views
+spike-materialized-views: _context ## Can Trino create, refresh and query a materialized view on the Iceberg catalog? (#32)
+	@bash scripts/spike-materialized-views.sh
+
 .PHONY: spike-superset-dashboards
 spike-superset-dashboards: _context ## Measure Superset's dashboard export/import API (#115)
 	@bash scripts/spike-superset-dashboards.sh
