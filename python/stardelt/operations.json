@@ -412,6 +412,39 @@
       "query_params": [],
       "body": false
     },
+    "metric_definitions_create": {
+      "method": "POST",
+      "path": "/api/catalog/tables/{ns}/{tbl}/metrics",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "metric_definitions_delete": {
+      "method": "DELETE",
+      "path": "/api/metrics/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "metric_definitions_list": {
+      "method": "GET",
+      "path": "/api/catalog/tables/{ns}/{tbl}/metrics",
+      "path_params": [
+        "ns",
+        "tbl"
+      ],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
     "migrations_apply": {
       "method": "POST",
       "path": "/api/migrations/apply",
