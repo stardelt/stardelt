@@ -16584,6 +16584,16 @@
             },
             "description": "The tasks of a task-list pipeline (`sql`, `notebook` and `dbt` tasks), in the shape\n`pipelines_validate` accepts; left out for a single-task pipeline."
           },
+          "triggers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TriggerRequest"
+            },
+            "description": "Tables whose update starts a run (`spec.triggers`), at most one entry; left out when\nthe resource carries none."
+          },
           "viewers": {
             "type": "array",
             "items": {

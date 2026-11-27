@@ -532,6 +532,9 @@ export type ScheduleSpec = { cron: string; timezone: string }
 /** One `spec.triggers` entry: the tables whose update starts the pipeline, and all|any. */
 export type TriggerView = { tablesUpdated: string[]; mode: 'all' | 'any' | string }
 
+/** One `spec.triggers` entry as the write bodies send it; `mode` may be absent (the CRD defaults it to all). */
+export type TriggerRequest = { tablesUpdated: string[]; mode?: 'all' | 'any' }
+
 /**
  * The advanced options of a schedule (stardelt-nova#223). Every field is optional in a request:
  * an omitted one keeps its default (one retry, five minutes between retries, a two-hour time
@@ -846,6 +849,14 @@ export type PipelineDocument = {
    */
   tasks?: PipelineTaskRequest[]
   schedule?: ScheduleSpec
+  /** `spec.description`: one line about what the pipeline does; absent when the resource has none. */
+  description?: string
+  /** `spec.triggers` as the write body spells it; absent when the pipeline is on demand or on a cron. */
+  triggers?: TriggerRequest[]
+  /** Groups that may read the pipeline without being members (`spec.viewers`). */
+  viewers?: string[]
+  /** `wap` when the run publishes only after its checks pass (`spec.publish`); absent for a direct write. */
+  publish?: 'wap' | 'direct' | null
   params?: Record<string, string>
   options: PipelineOptionsView
   /** Who is told when a run ends; absent when the resource carries no `spec.notify`. */
