@@ -18,7 +18,7 @@ import yaml
 
 from stardelt import api, apply, lineage, runs
 
-KEYS = {"bundle", "variables", "include", "files", "migrations", "requires", "targets"}
+KEYS = {"bundle", "variables", "include", "files", "migrations", "requires", "targets", "context"}
 KINDS = ("Pipeline", "StreamApp")
 PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish", "triggers")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
@@ -46,6 +46,9 @@ MAX_SPARK_FILE_BYTES = 64 * 1024
 MAX_SPARK_GRAPH_BYTES = 256 * 1024
 # Directories a graph never carries to the run pod.
 SPARK_SKIPPED_DIRS = ("__pycache__", ".git")
+CONTEXT_KEYS = ("tables",)
+MAX_CONTEXT_TABLES = 50
+MAX_GUIDE = 16000
 # The CRD's `project` pattern and 128-character limit (operator/crates/stardelt-operator/src/crd.rs).
 SPARK_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,127}$")
 # What `spark-pipeline.yml` may not set: stardelt sets them at run time (#80).
@@ -135,6 +138,44 @@ def _migrations(root, spec, problems):
         raw = (root / relative).read_bytes()
         out.append({"name": name, "sha256": hashlib.sha256(raw).hexdigest(), "sql": raw.decode("utf-8")})
     return sorted(out, key=lambda migration: migration["name"])
+
+
+def _context_problems(section, problems):
+    """Check a bundle's `context:` block: table guides, keyed catalog.namespace.table."""
+    where = "context"
+    if not isinstance(section, dict):
+        problems.append((where, "must be a mapping with `tables`"))
+        return
+    for key in sorted(set(section) - set(CONTEXT_KEYS)):
+        problems.append((where, f"unknown key {key!r} (known: {', '.join(CONTEXT_KEYS)})"))
+    tables = section.get("tables")
+    if not isinstance(tables, list) or not tables:
+        problems.append((f"{where}.tables", "must be a list of at least one table"))
+        return
+    if len(tables) > MAX_CONTEXT_TABLES:
+        problems.append((f"{where}.tables", f"holds more than {MAX_CONTEXT_TABLES} tables"))
+    seen = set()
+    for index, entry in enumerate(tables):
+        at = f"{where}.tables[{index}]"
+        if not isinstance(entry, dict):
+            problems.append((at, "must be a mapping with `table` and `guide`"))
+            continue
+        for key in sorted(set(entry) - {"table", "guide"}):
+            problems.append((at, f"unknown key {key!r} (known: table, guide)"))
+        name = entry.get("table")
+        if not isinstance(name, str) or not TABLE.match(name):
+            problems.append((f"{at}.table", "must be catalog.namespace.table"))
+        elif name in seen:
+            problems.append((f"{at}.table", f"{name} is named twice"))
+        else:
+            seen.add(name)
+        guide = entry.get("guide")
+        if not isinstance(guide, str) or not guide.strip():
+            problems.append((f"{at}.guide", "must be a non-empty string"))
+        elif len(guide.strip()) > MAX_GUIDE:
+            problems.append((f"{at}.guide", f"must be at most {MAX_GUIDE} characters"))
+        elif "\x00" in guide:
+            problems.append((f"{at}.guide", "must not contain a NUL character"))
 
 
 def _substitute(text, values, problems, where):
@@ -629,6 +670,8 @@ def validate(directory, target=None):
         problems.append(("include", "is required: the pipeline files of the bundle"))
     if "migrations" in manifest:
         _migrations(root, manifest["migrations"], problems)
+    if "context" in manifest:
+        _context_problems(manifest["context"], problems)
 
     targets = manifest.get("targets")
     if not isinstance(targets, dict) or not targets:
@@ -764,6 +807,57 @@ def validate(directory, target=None):
     for v in sorted(set(variables) - used):
         warnings.append(f"variable {v!r} is declared but no pipeline file uses it")
     return problems, warnings, resolved
+
+
+def context(nova, directory, check=False):
+    """Apply the bundle's `context:` guides; answers ``(problems, rows)``.
+
+    Each row is ``{"table", "action"}`` with action ``unchanged``, ``would-set`` (only with
+    ``check``) or ``set``. A refused read or write is a problem and its table is not retried;
+    the other tables are still visited.
+    """
+    root = Path(directory)
+    try:
+        manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        return [(str(root / "bundle.yaml"), f"cannot read it: {err}")], []
+    if not isinstance(manifest, dict) or "context" not in manifest:
+        return [("context", "the bundle has no `context:` block")], []
+    problems = []
+    _context_problems(manifest["context"], problems)
+    if problems:
+        return problems, []
+    rows = []
+    for entry in manifest["context"]["tables"]:
+        catalog, ns, tbl = entry["table"].split(".")
+        wanted = entry["guide"].strip()
+        try:
+            doc = nova.call(
+                "table_documentation_get",
+                path={"ns": ns, "tbl": tbl},
+                query={"catalog": catalog},
+            )
+        except api.StardeltApiError as err:
+            problems.append((entry["table"], str(err)))
+            continue
+        if ((doc.get("guide") or "").strip()) == wanted:
+            rows.append({"table": entry["table"], "action": "unchanged"})
+            continue
+        if check:
+            rows.append({"table": entry["table"], "action": "would-set"})
+            continue
+        try:
+            nova.call(
+                "table_documentation_update",
+                path={"ns": ns, "tbl": tbl},
+                query={"catalog": catalog},
+                body={"guide": wanted},
+            )
+        except api.StardeltApiError as err:
+            problems.append((entry["table"], str(err)))
+            continue
+        rows.append({"table": entry["table"], "action": "set"})
+    return problems, rows
 
 
 def _slug(user):
