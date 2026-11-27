@@ -668,7 +668,7 @@ def test_publish_must_be_direct_or_wap(tmp_path):
     assert bundle.validate(only, "prod")[0] == []
 
 
-def test_writes_are_up_to_16_catalog_schema_tables_of_a_spark_or_notebook_task(tmp_path):
+def test_writes_are_up_to_16_catalog_schema_tables_of_a_declaring_task(tmp_path):
     bad_table = tmp_path / "bad-table"
     bad_table.mkdir()
     task_bundle(bad_table, ["{name: build, notebook: {file: notebooks/explore.ipynb}, writes: [gold.shop]}"])
@@ -686,15 +686,56 @@ def test_writes_are_up_to_16_catalog_schema_tables_of_a_spark_or_notebook_task(t
     )
     assert "writes must be a list of at most 16 tables, each catalog.schema.table" in said(bundle.validate(too_many)[0])
 
-    sql_task = tmp_path / "sql-task"
-    sql_task.mkdir()
-    task_bundle(sql_task, ["{name: build, sql: select 1, writes: [gold.shop.daily]}"])
-    assert "only a spark-pipeline or notebook task declares writes" in said(bundle.validate(sql_task)[0])
+    quality = tmp_path / "quality"
+    quality.mkdir()
+    task_bundle(quality, ["{name: build, quality: {checks: [{name: c, sql: 'select 1'}]}, writes: [gold.shop.daily]}"])
+    assert "only a sql, notebook or spark-pipeline task declares writes" in said(bundle.validate(quality)[0])
 
     notebook = tmp_path / "notebook"
     notebook.mkdir()
     task_bundle(notebook, ["{name: build, notebook: {file: notebooks/explore.ipynb}, writes: [gold.shop.daily]}"])
     assert bundle.validate(notebook, "prod")[0] == []
+
+
+def test_a_sql_task_may_declare_the_tables_it_writes(tmp_path):
+    resources = {
+        "load.yaml": (
+            "name: load\nownerGroup: sales\ntasks:\n"
+            "  - {name: load, sql: 'create or replace table gold.shop.t as select 1', writes: [gold.shop.t]}\n"
+        )
+    }
+    problems, _, resolved = bundle.validate(make(tmp_path, resources=resources))
+    assert problems == [], said(problems)
+    _, _, specs = bundle.render(make(tmp_path, resources=resources), "prod")
+    assert specs[0]["tasks"][0]["writes"] == ["gold.shop.t"]
+
+
+def test_a_wap_pipeline_needs_a_pod_writer_even_when_a_sql_task_writes(tmp_path):
+    resources = {
+        "load.yaml": (
+            "name: load\nownerGroup: sales\npublish: wap\ntasks:\n"
+            "  - {name: load, sql: 'create or replace table gold.shop.t as select 1', writes: [gold.shop.t]}\n"
+            "  - {name: check, quality: {checks: [{name: rows, sql: 'select * from gold.shop.t where false'}]}, dependsOn: [load]}\n"
+        )
+    }
+    problems, _, _ = bundle.validate(make(tmp_path, resources=resources))
+    assert "publish: wap needs a task list with a quality task that has a check and a spark-pipeline or notebook task with writes" in said(problems)
+
+
+def test_a_wap_pipeline_refuses_a_sql_task_that_writes_beside_a_notebook_writer(tmp_path):
+    task_bundle(
+        tmp_path,
+        [
+            "{name: build, notebook: {file: notebooks/explore.ipynb}, writes: [gold.shop.snapshot]}",
+            "{name: load, sql: 'create or replace table gold.shop.t as select 1', writes: [gold.shop.t]}",
+            "{name: gate, quality: {checks: [{name: rows, sql: 'select * from gold.shop.snapshot where false'}]}}",
+        ],
+        extra="publish: wap\n",
+    )
+    assert (
+        "publish: wap moves main from the audit branch, so a sql task cannot declare writes: only a notebook or spark-pipeline task writes under wap"
+        in said(bundle.validate(tmp_path)[0])
+    )
 
 
 def test_dbt_task_rules_are_reported(tmp_path):
