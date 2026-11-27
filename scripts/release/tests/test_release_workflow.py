@@ -130,7 +130,9 @@ class ReleaseSigningTest(unittest.TestCase):
         # #2189: versions.yaml names the third-party images too; only what stardelt builds gets
         # the v0.0.N tag and a signature.
         self.assertIn("'/source: upstream}/!s/", self.text)
+        self.assertIn('"$(wc -l < "$RUNNER_TEMP/images.txt")" -eq 8', self.text)
         self.assertIn("expected 3 upstream images", self.text)
+        self.assertIn('[ "$upstream" -eq 3 ]', self.text)
 
     def test_every_pushed_image_carries_an_sbom(self) -> None:
         workflows = ROOT / ".github" / "workflows"
