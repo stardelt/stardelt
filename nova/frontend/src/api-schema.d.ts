@@ -6652,7 +6652,10 @@ export interface operations {
     };
     ask_answer: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The catalog to search for tables; omitted, the default one */
+                catalog?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
