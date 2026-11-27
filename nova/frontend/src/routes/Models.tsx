@@ -86,6 +86,7 @@ export default function Models() {
   const rows = endpoints.data ?? []
   const feedbackFor = (name: string) =>
     (usage.data?.feedback ?? []).find((row) => row.endpoint === name)
+  const evalsFor = (name: string) => (usage.data?.evals ?? []).find((row) => row.endpoint === name)
   const groups = usage.data?.groups ?? []
   const calls = usage.data?.calls ?? []
   const anyEstimated = groups.some((row) => row.estimatedCalls > 0)
@@ -121,6 +122,7 @@ export default function Models() {
                   <th scope="col" className="th px-3 py-2.5">Where prompts go</th>
                   <th scope="col" className="th px-3 py-2.5">Purposes</th>
                   <th scope="col" className="th px-3 py-2.5">Rated</th>
+                  <th scope="col" className="th px-3 py-2.5">Evals</th>
                   <th scope="col" className="th px-3 py-2.5">Probe</th>
                   <th scope="col" className="th px-3 py-2.5" />
                 </tr>
@@ -128,7 +130,7 @@ export default function Models() {
               <tbody>
                 {rows.length === 0 && (
                   <tr>
-                    <td className="px-5 py-6" colSpan={7}>
+                    <td className="px-5 py-6" colSpan={8}>
                       <p className="font-medium">No model endpoint is connected yet.</p>
                       <p className="text-text-mute mt-1 max-w-2xl">
                         An administrator connects one with a ModelEndpoint resource — see the{' '}
@@ -153,6 +155,7 @@ export default function Models() {
                     busy={probe.isPending && probe.variables === endpoint.name}
                     onProbe={() => probe.mutate(endpoint.name)}
                     feedback={feedbackFor(endpoint.name)}
+                    evals={evalsFor(endpoint.name)}
                   />
                 ))}
               </tbody>
@@ -285,12 +288,14 @@ function EndpointRow({
   busy,
   onProbe,
   feedback,
+  evals,
 }: {
   endpoint: ModelEndpoint
   disabled: boolean
   busy: boolean
   onProbe: () => void
   feedback?: { up: number; down: number }
+  evals?: { passed: number; total: number }
 }) {
   const word = probeWord(endpoint)
   const checks = probeChecks(endpoint)
@@ -312,6 +317,9 @@ function EndpointRow({
       </td>
       <td className="td px-3 py-3 whitespace-nowrap" title="👍 and 👎 on this month's answers">
         {feedback ? `👍 ${feedback.up} · 👎 ${feedback.down}` : <span className="text-text-mute">—</span>}
+      </td>
+      <td className="td px-3 py-3 whitespace-nowrap" title="eval runs on this endpoint in the last 30 days">
+        {evals ? `${evals.passed} of ${evals.total}` : <span className="text-text-mute">—</span>}
       </td>
       <td className="td px-3 py-3">
         <span className={bad ? 'text-bad whitespace-nowrap' : 'whitespace-nowrap'}>{word}</span>

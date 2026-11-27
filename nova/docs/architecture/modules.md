@@ -22,8 +22,8 @@
 | `ask.rs` | AI (Ask, MCP, models) | 853 | 511 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
-| `evals.rs` | Catalog | 822 | 214 | 5 | PostgreSQL state store |
 | `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
+| `evals.rs` | Catalog | 748 | 214 | 5 | PostgreSQL state store |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
 | `secret_store.rs` | Connections | 699 | 363 | 0 | Secret store (OpenBao) |
 | `destinations.rs` | Pipelines & delivery | 647 | 354 | 4 | PostgreSQL state store |
@@ -33,7 +33,7 @@
 | `model_probe.rs` | AI (Ask, MCP, models) | 601 | 341 | 0 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
-| `openapi.rs` | Core & identity | 488 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 486 | 688 | 1 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
@@ -49,8 +49,8 @@
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `catalog_doc_store.rs` | Catalog | 242 | 209 | 0 | PostgreSQL state store |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
+| `model_usage.rs` | AI (Ask, MCP, models) | 214 | 125 | 1 | PostgreSQL state store |
 | `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
-| `model_usage.rs` | AI (Ask, MCP, models) | 186 | 93 | 1 | PostgreSQL state store |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
 | `mcp_audit.rs` | AI (Ask, MCP, models) | 176 | 68 | 1 | PostgreSQL state store |
@@ -73,4 +73,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **51909** | **45111** | **170** | |
+| **total (72 files)** | | **51861** | **45143** | **170** | |
