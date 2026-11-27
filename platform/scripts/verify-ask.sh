@@ -17,11 +17,11 @@
 #           `POST /api/ask {"question": "customers shop"}` → 200, `endpoint` `model-stub`,
 #           `sql` the stub's statement, `explain` `passed`
 #
-# The question is two words on purpose: Ask passes it verbatim to `catalog_search`, which
-# requires **every** word to appear in `namespace.table` or the table's documentation, so a
-# natural question matches no table and `/api/ask` answers `200` with `sql: null` before the
-# model is called (measured 2026-11-23 on the lab). That is Ask's retrieval defect, filed
-# separately; this check measures the platform chain (search → model → EXPLAIN).
+# The question is two words on purpose so the platform chain stays deterministic: `/api/ask`
+# falls back to the tables sharing the most words when no table contains every word
+# (`catalog_search::search_any_word`, `nova/backend/src/ask.rs:486`), and a two-word question
+# always finds the same table first. This check measures search → model → `EXPLAIN`, not
+# retrieval quality.
 #
 # What is created is deleted on every exit: the `ModelEndpoint` first (a leftover endpoint
 # would be picked up by Ask for the next person), then the Pod, the Service and the
