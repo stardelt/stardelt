@@ -55,6 +55,12 @@ pub(crate) struct AskRequest {
     pub question: String,
 }
 
+/// `POST /api/ask` query: the catalog to search, or the default one.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AskQuery {
+    pub catalog: Option<String>,
+}
+
 /// One table the model was given.
 #[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -418,6 +424,7 @@ async fn check_statement(
     path = "/api/ask",
     tag = "public",
     description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, the default one")),
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
@@ -431,6 +438,7 @@ async fn check_statement(
 pub(crate) async fn ask(
     State(state): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
+    Query(params): Query<AskQuery>,
     Json(request): Json<AskRequest>,
 ) -> Response {
     let question = request.question.trim().to_string();
@@ -504,7 +512,7 @@ pub(crate) async fn ask(
         State(Arc::clone(&state)),
         Query(crate::catalog_search::SearchParams {
             q: Some(question.clone()),
-            catalog: None,
+            catalog: params.catalog.clone(),
             limit: Some(CANDIDATES),
             tag: None,
             owner: None,
