@@ -19,9 +19,12 @@ resource), and the view is the name a query uses, not a permission boundary.
 
 ## Setup
 
+Run these from `demos/`; step 1 runs in `platform/`.
+
 ```bash
-# 1. The Keycloak client and the Secret sp-pipeline-stardelt-users
-make sync-principal NAME=pipeline-stardelt-users GROUP=stardelt-users AUDIENCES="trino lakekeeper"
+# 1. The Keycloak client and the Secret sp-pipeline-stardelt-users (a comma list:
+#    the make target passes AUDIENCES unquoted, so "trino lakekeeper" fails)
+(cd ../platform && make sync-principal NAME=pipeline-stardelt-users GROUP=stardelt-users AUDIENCES=trino,lakekeeper)
 # 2. The resource the pipeline loader checks (make sync-principal does NOT create it)
 kubectl apply -f - <<'YAML'
 apiVersion: stardelt.io/v1alpha1
