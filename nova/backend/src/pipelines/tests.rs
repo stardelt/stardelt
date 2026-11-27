@@ -6730,7 +6730,11 @@ async fn a_wap_create_without_a_quality_check_and_a_written_table_is_refused() {
     );
     assert!(stored_pipeline(&resources, "shop-wap").await.is_none());
 
-    let mut load = pipeline_task("load", "create or replace table gold.shop.t as select 1", &[]);
+    let mut load = pipeline_task(
+        "load",
+        "create or replace table gold.shop.t as select 1",
+        &[],
+    );
     load.writes = vec!["gold.shop.t".into()];
     let mut body = create_body("shop-wap-sql", "analytics", "");
     body.tasks = Some(vec![

@@ -1764,9 +1764,9 @@ fn check_publish(
             task.quality
                 .as_ref()
                 .is_some_and(|quality| !quality.checks.is_empty())
-        }) && tasks
-            .iter()
-            .any(|task| (task.spark_pipeline.is_some() || task.notebook.is_some()) && !task.writes.is_empty())
+        }) && tasks.iter().any(|task| {
+            (task.spark_pipeline.is_some() || task.notebook.is_some()) && !task.writes.is_empty()
+        })
     });
     if ready {
         // `wap-publish` moves `main` from the audit branch of every declared write, and a `sql`
