@@ -797,6 +797,16 @@
       "query_params": [],
       "body": false
     },
+    "query_log_repeated": {
+      "method": "GET",
+      "path": "/api/query-log/repeated",
+      "path_params": [],
+      "query_params": [
+        "scope",
+        "limit"
+      ],
+      "body": false
+    },
     "query_log_usage": {
       "method": "GET",
       "path": "/api/query-log/usage",
