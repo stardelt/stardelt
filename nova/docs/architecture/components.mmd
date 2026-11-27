@@ -8,7 +8,7 @@ flowchart LR
     fe_build["Build<br/><small>Notebooks, Pipelines, Runs, Streams, Compute, Connections, Destinations, Data</small>"]
     fe_share["Share<br/><small>Dashboards</small>"]
     fe_admin["Admin<br/><small>AgentCalls, Models, AdminCatalogs, Platform, Settings, Deployments</small>"]
-    fe_detail_pages["Detail pages<br/><small>AppDetail, DeploymentDetail, NotFound, NotebookDetail, PipelineDetail, Preferences, Profile, Report, RunDetail, RunNotebook</small>"]
+    fe_detail_pages["Detail pages<br/><small>AppDetail, DeploymentDetail, NotFound, NotebookDetail, PipelineDetail, Preferences, Profile, Report, RunDetail, RunNotebook, StreamDetail</small>"]
   end
   subgraph BE["backend/src (axum): areas and modules, production lines"]
     direction TB
@@ -52,7 +52,7 @@ flowchart LR
   fe_build -->|3| be_sql_query_log
   fe_detail_pages -->|2| be_core_identity
   fe_detail_pages -->|4| be_notebooks_compute
-  fe_detail_pages -->|36| be_pipelines_delivery
+  fe_detail_pages -->|38| be_pipelines_delivery
   fe_detail_pages -->|2| be_platform_view
   fe_detail_pages -->|2| be_sql_query_log
   fe_explore -->|23| be_catalog
