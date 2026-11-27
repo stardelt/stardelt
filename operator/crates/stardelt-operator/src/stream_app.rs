@@ -491,9 +491,9 @@ fn ready_condition(
     )
 }
 
-/// The `status` half of the merge patch. `lastError` and `lastCheckpointAt` are serialized as
-/// an explicit JSON `null` when they are absent: the `StreamAppStatus` struct skips `None`, and a
-/// merge patch that omits a key leaves the previous value in place (operator#362).
+/// The `status` half of the merge patch. `lastError` is serialized as an explicit JSON `null`
+/// when it is absent: the `StreamAppStatus` struct skips `None`, and a merge patch that omits a
+/// key leaves the previous value in place (operator#362).
 fn status_patch(
     phase: &str,
     reason: &str,
@@ -506,7 +506,6 @@ fn status_patch(
     let now = now_rfc3339();
     let status = StreamAppStatus {
         phase: phase.into(),
-        last_checkpoint_at: None,
         last_error: last_error.clone(),
         attempts,
         last_submitted_at,
@@ -517,7 +516,6 @@ fn status_patch(
     if last_error.is_none() {
         value["lastError"] = serde_json::Value::Null;
     }
-    value["lastCheckpointAt"] = serde_json::Value::Null;
     value
 }
 
@@ -1301,7 +1299,6 @@ mod tests {
             patch.get("lastError").is_some(),
             "the key must be present; a merge patch that omits it keeps the old sentence"
         );
-        assert_eq!(patch["lastCheckpointAt"], serde_json::Value::Null);
         assert_eq!(patch["phase"], "Running");
 
         let with_error = status_patch(

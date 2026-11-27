@@ -121,7 +121,6 @@ export default function Streams() {
                   <th className="py-2 pr-3 font-medium">Phase</th>
                   <th className="py-2 pr-3 font-medium">Source</th>
                   <th className="py-2 pr-3 font-medium">Sink</th>
-                  <th className="py-2 pr-3 font-medium" title="The newest checkpoint commit, as the operator reports it">Checkpoint</th>
                   <th className="py-2 pr-3 font-medium">Last error</th>
                   <th className="py-2 font-medium">Job</th>
                 </tr>
@@ -156,20 +155,6 @@ export default function Streams() {
                         {s.sink_catalog}.{s.sink_table}
                       </div>
                       <div className="text-xs text-text-dim">{s.sink_mode}</div>
-                    </td>
-                    <td className="py-2 pr-3">
-                      {s.last_checkpoint_at ? (
-                        <span title={formatWhen(s.last_checkpoint_at).title}>
-                          {formatWhen(s.last_checkpoint_at).text}
-                        </span>
-                      ) : (
-                        <span
-                          className="text-text-dim text-xs"
-                          title="The operator does not report a checkpoint time yet; the checkpoint itself is written to the object store and survives a stop."
-                        >
-                          not reported yet
-                        </span>
-                      )}
                     </td>
                     <td className="py-2 pr-3 text-bad text-xs break-words">{s.last_error ?? '—'}</td>
                     <td className="py-2">

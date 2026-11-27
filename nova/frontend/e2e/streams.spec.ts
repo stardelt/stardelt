@@ -19,7 +19,6 @@ const runningStream = {
   phase: 'Running',
   reason: null,
   last_error: null,
-  last_checkpoint_at: null,
   stopped: false,
   source_connection: 'bus',
   source_topic: 'events',
@@ -103,19 +102,4 @@ test('a restarting stream shows the Ready reason beside its phase', async ({ pag
   const main = page.locator('main')
   await expect(main.getByText('Running', { exact: true })).toBeVisible()
   await expect(main.getByText('Restarting', { exact: true })).toBeVisible()
-})
-
-test('a stream without a reported checkpoint says so, never a bare dash', async ({ page }) => {
-  await page.route('**/api/**', (r) => {
-    const path = new URL(r.request().url()).pathname
-    if (path === '/api/me') return json(r, me)
-    if (path === '/api/streams') return json(r, { streams: [runningStream] })
-    return json(r, {})
-  })
-  await page.goto('/streams')
-  await expect(page.locator('main').getByText('not reported yet')).toBeVisible()
-  await expect(page.locator('main').getByRole('columnheader', { name: 'Checkpoint' })).toHaveAttribute(
-    'title',
-    'The newest checkpoint commit, as the operator reports it',
-  )
 })

@@ -40,7 +40,6 @@ pub struct StreamView {
     /// The `Ready` condition's reason, when the operator set one (operator#322: `Restarting`).
     pub reason: Option<String>,
     pub last_error: Option<String>,
-    pub last_checkpoint_at: Option<String>,
     /// How many times Spark has submitted the application (`status.attempts`); absent until
     /// the operator reports it (operator#336).
     pub attempts: Option<i64>,
@@ -165,10 +164,6 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
         reason: ready_reason(status),
         last_error: status
             .get("lastError")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        last_checkpoint_at: status
-            .get("lastCheckpointAt")
             .and_then(Value::as_str)
             .map(str::to_string),
         attempts: status.get("attempts").and_then(Value::as_i64),
@@ -525,7 +520,7 @@ fn not_found() -> Fail {
     operation_id = "streams_list",
     path = "/api/streams",
     tag = "public",
-    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's streams, sorted by namespace and name", body = StreamsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -1058,7 +1053,6 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].phase, "Pending");
         assert!(views[0].last_error.is_none());
-        assert!(views[0].last_checkpoint_at.is_none());
         assert!(!views[0].stopped);
         assert!(views[0].reason.is_none());
         assert!(views[0].attempts.is_none());
