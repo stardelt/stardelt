@@ -97,6 +97,8 @@ condition forced on for the shot (in `dev` mode `/api/me` answers `shared_accoun
 so it does not render otherwise). At 390 px it wraps to four lines above the catalog and
 covers no control.
 
+`evals-last-run-1440-dark.png` — the Evals page with each question's newest run (#125 slice 5, #2111) at 1440×900, dark, from the built UI with stubbed `/api/me` and `/api/catalog/evals` answers. The header says `1 of 2 passed` (one question never ran), the **Last run** column reads `failed — the answer's rows differ from the expected rows` for the first question, `passed` for the second and `not run yet` for the third.
+
 `query-profile-*.png` — the Profile group of a query (stardelt-nova#788), from the real Trino 480
 event of the S0 spike (`completed_profile.json`): plain-word operators with share bars and the plan.
 
