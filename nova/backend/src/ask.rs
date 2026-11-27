@@ -41,7 +41,7 @@ const NO_TABLE: &str =
 /// The one sentence that says why Ask cannot answer: no endpoint, or no usable endpoint.
 const NO_ENDPOINT: &str =
     "no ask model is ready: connect a ModelEndpoint with purpose ask, and wait for its probe";
-const SYSTEM_PROMPT: &str = "You write one Trino SQL statement for a question about the tables you are given. Use only these tables, fully qualified as catalog.namespace.table, and only the columns their documentation lists; never invent a table or a column. You receive metadata only, never rows. When an entry carries a verifiedQueries list and one of its questions matches the question, copy that query's shape — its tables, joins and filters — instead of writing a new one from scratch. Answer with one JSON object with exactly two fields: \"sql\" — one SELECT or WITH statement, no trailing semicolon — and \"sentence\" — one sentence of at most 200 characters saying what the statement answers. Never write DDL or DML, and never write EXPLAIN.";
+const SYSTEM_PROMPT: &str = "You write one Trino SQL statement for a question about the tables you are given. Use only these tables, fully qualified as catalog.namespace.table, and only the columns their documentation lists; never invent a table or a column. You receive metadata only, never rows. When an entry carries a verifiedQueries list and one of its questions matches the question, copy that query's shape — its tables, joins and filters — instead of writing a new one from scratch. When an entry carries a guide, follow it: it says how the table's values join, which rows to leave out and what its numbers mean. Answer with one JSON object with exactly two fields: \"sql\" — one SELECT or WITH statement, no trailing semicolon — and \"sentence\" — one sentence of at most 200 characters saying what the statement answers. Never write DDL or DML, and never write EXPLAIN.";
 
 /// How many of a table's verified queries the model receives (newest first).
 const VERIFIED_QUERIES_IN_CONTEXT: usize = 5;
@@ -147,6 +147,7 @@ fn context_of(
                 "tags": field(doc, "tags"),
                 "owner": field(doc, "owner"),
                 "domain": field(doc, "domain"),
+                "guide": field(doc, "guide"),
                 "columns": field(doc, "columns"),
                 "metrics": table_metrics,
                 "verifiedQueries": verified
@@ -916,6 +917,7 @@ mod tests {
                 "tags": ["raw", "gold"],
                 "owner": "analytics",
                 "domain": "mobility",
+                "guide": "Join zones on id; drop cancelled trips.",
                 "columns": [
                     {"name": "id", "type": "bigint", "description": "the trip"},
                     {"name": "zone", "type": "varchar", "description": null}
@@ -943,12 +945,17 @@ mod tests {
         assert_eq!(context[0]["tags"], json!(["raw", "gold"]));
         assert_eq!(context[0]["owner"], json!("analytics"));
         assert_eq!(context[0]["domain"], json!("mobility"));
+        assert_eq!(
+            context[0]["guide"],
+            json!("Join zones on id; drop cancelled trips.")
+        );
         assert_eq!(context[0]["columns"].as_array().map(Vec::len), Some(2));
         assert_eq!(context[0]["columns"][1]["description"], Value::Null);
         // An unreadable documentation is the table with `null` fields, not an error.
         assert_eq!(context[1]["name"], json!("warehouse.bronze.zones"));
         assert_eq!(context[1]["description"], Value::Null);
         assert_eq!(context[1]["columns"], Value::Null);
+        assert_eq!(context[1]["guide"], Value::Null);
         assert_eq!(context[0]["metrics"][0]["name"], json!("revenue"));
         assert_eq!(context[0]["metrics"][0]["timeColumn"], json!("ordered_at"));
         assert_eq!(context[1]["metrics"], json!([]));

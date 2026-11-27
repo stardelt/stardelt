@@ -19,7 +19,7 @@
 | `airflow.rs` | Pipelines & delivery | 942 | 1003 | 0 | Airflow REST |
 | `migrations.rs` | Pipelines & delivery | 862 | 395 | 3 | PostgreSQL state store, Trino |
 | `data.rs` | SQL & query log | 856 | 104 | 2 | Trino |
-| `ask.rs` | AI (Ask, MCP, models) | 852 | 505 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
+| `ask.rs` | AI (Ask, MCP, models) | 853 | 511 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
 | `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
@@ -73,4 +73,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **51832** | **45105** | **170** | |
+| **total (72 files)** | | **51833** | **45111** | **170** | |
