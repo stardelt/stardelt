@@ -48,7 +48,6 @@ fi
 umask 077
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/verify-evals.XXXXXX")" || exit 1
 EVAL_ID=""
-trap 'rm -rf "$tmp"' EXIT
 trap 'exit 130' INT TERM
 
 PASSWORD_FILE="$tmp/password"
@@ -74,13 +73,7 @@ first_line() { printf '%s\n' "$1" | head -n 1 | cut -c1-200; }
 
 # The eval the check leaves behind must not survive a failed row or a signal: delete it on exit
 # while it still exists. The id is cleared as soon as `delete` succeeds, so this never repeats it.
-delete_eval_on_exit() {
-  if [ -n "$EVAL_ID" ]; then
-    curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $(cat "$TOKEN_FILE" 2>/dev/null)" \
-      "$NOVA/api/evals/$EVAL_ID" >/dev/null 2>&1 || true
-  fi
-}
-trap 'delete_eval_on_exit; rm -rf "$tmp"' EXIT
+trap 'if [ -n "$EVAL_ID" ]; then curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $(cat "$TOKEN_FILE" 2>/dev/null)" "$NOVA/api/evals/$EVAL_ID" >/dev/null 2>&1 || true; fi; rm -rf "$tmp"' EXIT
 
 # call <out-file> <curl args…>: the request as demo, printing only the status code.
 call() {
