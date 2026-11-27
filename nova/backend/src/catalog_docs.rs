@@ -1534,6 +1534,25 @@ async fn read_documentation(
     Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
 }
 
+/// Why a table may not be published yet, from its verified queries' last checks (`#37`):
+/// `None` when nothing failed, so a table with no verified query can publish.
+fn publish_refusal(checks: &crate::verified_queries::TableChecks) -> Option<String> {
+    if checks.failed == 0 {
+        return None;
+    }
+    let Some(failed) = checks.failing.first() else {
+        return Some("a published table may not have a failed check".into());
+    };
+    let what = failed
+        .last_check_message
+        .as_deref()
+        .unwrap_or("its last check failed");
+    Some(format!(
+        "a published table may not have a failed check: \"{}\" — {}",
+        failed.question, what
+    ))
+}
+
 /// `PUT /api/catalog/tables/{ns}/{tbl}/documentation`.
 ///
 /// Validation runs before the lock and before any request. The lock covers the load that
@@ -1583,6 +1602,21 @@ async fn write_documentation(
             StatusCode::BAD_REQUEST,
             "a published table needs an owner, a description and a domain",
         ));
+    }
+    let entering_published = next_lifecycle.as_deref() == Some("published")
+        && current.lifecycle.as_deref() != Some("published");
+    if entering_published && let Some(pool) = state.db.as_ref() {
+        let checks = crate::verified_queries::checks_for(pool, catalog.name, ns, tbl)
+            .await
+            .map_err(|_| {
+                DocError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the state store did not answer, so the table's checks could not be read",
+                )
+            })?;
+        if let Some(reason) = publish_refusal(&checks) {
+            return Err(DocError::new(StatusCode::CONFLICT, reason));
+        }
     }
     if next_lifecycle.as_deref() == Some("deprecated") && next_replaced_by.is_none() {
         return Err(DocError::new(
@@ -2329,7 +2363,7 @@ pub(crate) async fn documentation_for(
     operation_id = "table_documentation_update",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. `lifecycle` is `draft`, `published` or `deprecated`; `replacedBy` is `catalog.schema.table` and only on a deprecated table. Publishing needs an owner, a description and a domain; a passing quality check is not checked here yet. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`.",
+    description = "Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. `lifecycle` is `draft`, `published` or `deprecated`; `replacedBy` is `catalog.schema.table` and only on a deprecated table. Publishing needs an owner, a description and a domain, and is refused with 409 while one of the table's verified queries failed its last check; a table with no verified query can publish. The check is only made when the lifecycle enters `published`, so a published table can still be edited. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -2340,6 +2374,7 @@ pub(crate) async fn documentation_for(
         (status = 200, description = "The documentation after the change, freshly loaded", body = TableDocumentation),
         (status = 400, description = "The body is invalid, the catalog name is invalid, or the table has no owner and this request does not claim it", body = crate::openapi::ErrorResponse),
         (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The table cannot be published while one of its verified queries fails its last check", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable, did not answer, or stayed busy", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -4431,6 +4466,31 @@ mod tests {
             "a published table needs an owner, a description and a domain"
         );
         assert!(fake.snapshot().0.is_empty(), "nothing was committed");
+    }
+
+    #[test]
+    fn a_failing_check_is_why_a_table_cannot_be_published() {
+        use crate::verified_queries::{FailingCheck, TableChecks};
+        let clean = TableChecks {
+            total: 2,
+            failed: 0,
+            last_checked_at: None,
+            failing: Vec::new(),
+        };
+        assert_eq!(publish_refusal(&clean), None);
+        let broken = TableChecks {
+            total: 2,
+            failed: 1,
+            last_checked_at: Some("2026-11-27T08:00:00.000Z".into()),
+            failing: vec![FailingCheck {
+                question: "How many orders in March?".into(),
+                last_check_at: Some("2026-11-27T08:00:00.000Z".into()),
+                last_check_message: Some("the result differs: expected 1284, got 1279".into()),
+            }],
+        };
+        let reason = publish_refusal(&broken).expect("a failed check blocks publishing");
+        assert!(reason.contains("How many orders in March?"), "{reason}");
+        assert!(reason.contains("expected 1284, got 1279"), "{reason}");
     }
 
     #[tokio::test]

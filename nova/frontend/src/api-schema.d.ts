@@ -498,7 +498,7 @@ export interface paths {
         };
         /** @description A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain`/`stardelt.guide` custom properties, and the description and type of every column of the **current** schema. `stardelt.guide` is a guide in plain text or Markdown, at most 16000 characters: how to use the table. `stardelt.lifecycle` is `draft`, `published` or `deprecated` (a data product's life, #37), and `stardelt.replaced-by` names the table that replaces a deprecated one. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. */
         get: operations["table_documentation_get"];
-        /** @description Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. `lifecycle` is `draft`, `published` or `deprecated`; `replacedBy` is `catalog.schema.table` and only on a deprecated table. Publishing needs an owner, a description and a domain; a passing quality check is not checked here yet. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. */
+        /** @description Set or remove a table's description, tags, owner, domain and guide in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description or guide) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; guide at most 16,000 characters and keeps its line breaks; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. `lifecycle` is `draft`, `published` or `deprecated`; `replacedBy` is `catalog.schema.table` and only on a deprecated table. Publishing needs an owner, a description and a domain, and is refused with 409 while one of the table's verified queries failed its last check; a table with no verified query can publish. The check is only made when the lifecycle enters `published`, so a published table can still be edited. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. */
         put: operations["table_documentation_update"];
         post?: never;
         delete?: never;
@@ -7539,6 +7539,15 @@ export interface operations {
             };
             /** @description No such catalog or no such table */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The table cannot be published while one of its verified queries fails its last check */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
