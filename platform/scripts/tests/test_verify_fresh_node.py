@@ -1,13 +1,16 @@
-"""Tests for scripts/verify-fresh-node.sh (platform#1017, platform#1019, platform#1480).
+"""Tests for scripts/verify-fresh-node.sh (platform#1017, platform#1019, platform#1480) and
+scripts/check-ingress-certificate.sh (stardelt#2190).
 
 Standard library only, like the other tests here: `python3 -m unittest discover -s scripts/tests -v`
-runs them in CI. `kubectl`, `curl` and `helm` are replaced by small shell stubs first on PATH, so
-no cluster is touched: `kubectl get` prints a fixture from `$FAKE_DIR`, `wait`/`rollout status`
-succeed, `delete platforminstance` removes the `instance_present` marker (so the following `get`
-is a NotFound) and `port-forward` just sleeps until the script's trap kills it; `curl` prints the
-endpoint fixture that matches its URL; `helm` records its argv in `$FAKE_DIR/helm_argv`.
+runs them in CI. `kubectl`, `curl`, `helm` and `openssl` are replaced by small shell stubs first on
+PATH, so no cluster and no network are touched: `kubectl get` prints a fixture from `$FAKE_DIR`,
+`wait`/`rollout status` succeed, `delete platforminstance` removes the `instance_present` marker
+(so the following `get` is a NotFound) and `port-forward` just sleeps until the script's trap kills
+it; `curl` prints the endpoint fixture that matches its URL; `helm` records its argv in
+`$FAKE_DIR/helm_argv`; `openssl` prints the certificate transcript named by `$FAKE_DIR/certificate`.
 """
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +18,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "verify-fresh-node.sh"
+CERT_SCRIPT = REPO / "scripts" / "check-ingress-certificate.sh"
 
 KUBECTL_STUB = """#!/usr/bin/env bash
 # Fake kubectl: fixtures come from $FAKE_DIR, so each test case answers differently.
@@ -144,6 +148,21 @@ printf '%s\\n' "$*" > "$FAKE_DIR/helm_argv"
 exit 0
 """
 
+OPENSSL_STUB = """#!/usr/bin/env bash
+# Fake openssl: `x509 -noout -issuer` prints $FAKE_DIR/cert_issuer; `s_client` prints the
+# transcript named by $FAKE_DIR/certificate — `trusted`, `untrusted` or `silent` (no verify line).
+set -u
+case " $* " in
+  *" x509 "*) cat >/dev/null 2>&1; cat "$FAKE_DIR/cert_issuer" 2>/dev/null; exit 0 ;;
+esac
+case "$(cat "$FAKE_DIR/certificate" 2>/dev/null || echo trusted)" in
+  untrusted) printf 'CONNECTED\\nverify error:num=18:self-signed certificate\\nVerify return code: 18 (self-signed certificate)\\n' ;;
+  silent) printf 'CONNECTED\\nVerify return code: 1 (unknown)\\n' ;;
+  *) printf 'CONNECTED\\nverify error:num=0:ok\\nVerify return code: 0 (ok)\\n' ;;
+esac
+exit 0
+"""
+
 GOOD_FILES = {
     "components": "airflow\ttrue\nkeycloak\ttrue\nnova\ttrue\ntrino\ttrue\n",
     "deploy": "airflow-dag-processor\t1\t1\nnova\t2\t2\ntrino\t1\t1\n",
@@ -158,6 +177,10 @@ GOOD_FILES = {
     "lakekeeper_health": '{"health":"ok","services":{}}',
     "lakekeeper_management_code": "401",
     "nova_page_code": "200 text/html",
+    # the ingress certificate (stardelt#2190): the openssl stub answers `trusted` from a
+    # transcript with `Verify return code: 0 (ok)` and an issuer line.
+    "certificate": "trusted",
+    "cert_issuer": "issuer=C=US, O=Let's Encrypt, CN=YR1\n",
     # lifecycle fixtures (#1019): the instance exists until `delete` removes the marker, the
     # operator owns three Deployments and the data is two PVCs plus the two Secrets.
     "instance_present": "",
@@ -169,7 +192,7 @@ GOOD_FILES = {
     "secret_stardelt-s3-creds": "",
 }
 
-STUBS = {"kubectl": KUBECTL_STUB, "curl": CURL_STUB, "helm": HELM_STUB}
+STUBS = {"kubectl": KUBECTL_STUB, "curl": CURL_STUB, "helm": HELM_STUB, "openssl": OPENSSL_STUB}
 
 
 class Result:
@@ -247,6 +270,9 @@ class FreshNodeTest(unittest.TestCase):
         self.assertIn("✓ nova answers", out)
         self.assertIn("✓ trino answers", out)
         self.assertIn("✓ keycloak answers", out)
+        self.assertIn(
+            "✓ certificate id.dev.stardelt.io is trusted (C=US, O=Let's Encrypt, CN=YR1)", out
+        )
         self.assertIn("? lakehouse \"not installed\"", out)
         self.assertIn("the fresh-node run still needs a person (not checked here):", out)
         self.assertIn(
@@ -327,6 +353,25 @@ class FreshNodeTest(unittest.TestCase):
         code, out = self.run_script(remove=["base_domain"])
         self.assertEqual(code, 0, out)
         self.assertIn("1. sign in at https://nova.<base domain> as the realm admin", out)
+        # Without a domain there is nothing to ask the ingress for (#2190).
+        self.assertIn('? certificate "no baseDomain to check"', out)
+
+    # -- the ingress certificate (stardelt#2190): a Let's Encrypt refusal must be the failing
+    # line, not three pod logs. The openssl stub answers from $FAKE_DIR/certificate.
+    def test_an_untrusted_certificate_is_a_failure(self):
+        code, out = self.run_script(overrides={"certificate": "untrusted"})
+        self.assertEqual(code, 1, out)
+        self.assertIn('✗ certificate "id.dev.stardelt.io is not trusted for this name', out)
+        self.assertIn(
+            "the ingress serves its default (self-signed) certificate; an ACME rate limit? "
+            "(verify error:num=18:self-signed certificate)",
+            out,
+        )
+
+    def test_a_transcript_without_a_verify_line_still_fails(self):
+        code, out = self.run_script(overrides={"certificate": "silent"})
+        self.assertEqual(code, 1, out)
+        self.assertIn("(no verify error line in the openssl output)", out)
 
     def test_upgrade_refuses_the_same_image(self):
         image = "ghcr.io/stardelt/stardelt-operator:dev"
@@ -410,6 +455,66 @@ class FreshNodeTest(unittest.TestCase):
         )
         self.assertEqual(result.code, 1, result.out)
         self.assertIn("✗ airflow", result.out)
+
+
+class IngressCertificateTest(unittest.TestCase):
+    """scripts/check-ingress-certificate.sh against the openssl stub: no network is touched."""
+
+    def run_cert(self, args, mode="trusted"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake = root / "fixtures"
+            fake.mkdir()
+            stub = bin_dir / "openssl"
+            stub.write_text(OPENSSL_STUB)
+            stub.chmod(0o755)
+            (fake / "certificate").write_text(mode)
+            (fake / "cert_issuer").write_text("issuer=C=US, O=Let's Encrypt, CN=YR1\n")
+            env = dict(os.environ)
+            env.update(
+                {"PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}", "FAKE_DIR": str(fake)}
+            )
+            return subprocess.run(
+                ["bash", str(CERT_SCRIPT), *args], env=env, text=True, capture_output=True
+            )
+
+    def test_a_trusted_name_names_the_issuer(self):
+        done = self.run_cert(["id.dev.stardelt.io"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            done.stdout,
+            "id.dev.stardelt.io is trusted (C=US, O=Let's Encrypt, CN=YR1)\n",
+        )
+
+    def test_a_name_the_ingress_does_not_serve_names_the_acme_rate_limit(self):
+        done = self.run_cert(["no-such-host.dev.stardelt.io", "dev.stardelt.io"], mode="untrusted")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(
+            done.stdout,
+            "no-such-host.dev.stardelt.io is not trusted for this name — the ingress serves its "
+            "default (self-signed) certificate; an ACME rate limit? "
+            "(verify error:num=18:self-signed certificate)\n",
+        )
+
+    def test_a_transcript_without_a_verify_line_still_fails(self):
+        done = self.run_cert(["id.dev.stardelt.io"], mode="silent")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("(no verify error line in the openssl output)", done.stdout)
+
+    def test_no_openssl_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # A PATH that holds no openssl: the script must not try the network.
+            done = subprocess.run(
+                [shutil.which("bash"), str(CERT_SCRIPT), "id.dev.stardelt.io"],
+                env={"PATH": tmp},
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertIn("openssl is not installed", done.stderr)
+        self.assertEqual(done.stdout, "")
 
 
 if __name__ == "__main__":
