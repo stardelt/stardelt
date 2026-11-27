@@ -153,6 +153,20 @@ pub struct DagSummary {
     pub tags: Vec<Tag>,
 }
 
+/// One Airflow asset (`GET /api/v2/assets`), as much as Nova needs: its id and uri.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AirflowAsset {
+    pub id: i64,
+    pub uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetsPage {
+    assets: Vec<AirflowAsset>,
+    #[serde(default)]
+    total_entries: u64,
+}
+
 /// A backfill as Airflow reports it (`POST /api/v2/backfills`, `GET /api/v2/backfills/{id}`).
 /// It names no runs: read them from the DAG's run list and filter `run_type == "backfill"`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -593,6 +607,39 @@ impl AirflowClient {
                 return Ok(dags);
             }
         }
+    }
+
+    /// Every asset, oldest page first. Follows `total_entries` with `offset`; capped at 5 000.
+    pub async fn assets(&self) -> Result<Vec<AirflowAsset>, AirflowError> {
+        let url = self.url(&format!("{API}/assets"));
+        let mut all = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let query = vec![("limit", PAGE.to_string()), ("offset", offset.to_string())];
+            let body = self
+                .send(|token| self.http.get(&url).bearer_auth(token).query(&query))
+                .await?;
+            let page: AssetsPage = Self::parse(body)?;
+            let received = page.assets.len() as u64;
+            all.extend(page.assets);
+            offset += received;
+            if received == 0
+                || (page.total_entries > 0 && offset >= page.total_entries)
+                || offset >= 5000
+            {
+                return Ok(all);
+            }
+        }
+    }
+
+    /// Raise one asset event: `POST /api/v2/assets/events` with `{"asset_id": …}` (the only body
+    /// Airflow 3.2 accepts; measured in stardelt/stardelt#2001). A 403 is `Refused`.
+    pub async fn raise_asset_event(&self, asset_id: i64) -> Result<(), AirflowError> {
+        let url = self.url(&format!("{API}/assets/events"));
+        let payload = serde_json::json!({ "asset_id": asset_id });
+        self.send(|token| self.http.post(&url).bearer_auth(token).json(&payload))
+            .await?;
+        Ok(())
     }
 
     /// One DAG by id. A DAG whose `Pipeline` is gone still answers (with `is_stale: true`).
@@ -1088,6 +1135,38 @@ mod fake {
         )
     }
 
+    /// `GET /api/v2/assets`: the two assets the loader's `stardelt://` uri builds, both with
+    /// Airflow's trailing slash.
+    async fn assets(
+        State(s): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Result<Json<Value>, Refusal> {
+        let mut state = s.lock().unwrap();
+        remember(&mut state, "GET", &uri, None);
+        authorize(&mut state, &headers)?;
+        Ok(Json(json!({
+            "assets": [
+                { "id": 7, "uri": "stardelt://gold/shop/orders/" },
+                { "id": 8, "uri": "stardelt://silver/shop/customers/" }
+            ],
+            "total_entries": 2
+        })))
+    }
+
+    /// `POST /api/v2/assets/events`: records the body and answers the event it created.
+    async fn asset_event(
+        State(s): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, Refusal> {
+        let mut state = s.lock().unwrap();
+        remember(&mut state, "POST", &uri, Some(body));
+        authorize(&mut state, &headers)?;
+        Ok(Json(json!({ "id": 1 })))
+    }
+
     async fn dags(
         State(s): State<Shared>,
         OriginalUri(uri): OriginalUri,
@@ -1244,6 +1323,8 @@ mod fake {
         let app = Router::new()
             .route("/auth/token", post(login))
             .route("/api/v2/dags", get(dags))
+            .route("/api/v2/assets", get(assets))
+            .route("/api/v2/assets/events", post(asset_event))
             .route("/api/v2/dags/{dag_id}", get(one_dag).patch(pause))
             .route("/api/v2/dags/{dag_id}/dagRuns", get(runs).post(trigger))
             .route("/api/v2/dags/{dag_id}/dagRuns/{run_id}", patch(fail_run))
@@ -1399,6 +1480,26 @@ mod tests {
                 "GET /api/v2/dags?limit=100&tags=pipeline&exclude_stale=true&offset=100",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn an_asset_event_is_posted_by_id() {
+        let (client, _cfg, fake) = fake::start().await;
+        let assets = client.assets().await.unwrap();
+        assert_eq!(
+            assets.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [7, 8],
+            "every asset of the one page"
+        );
+        client.raise_asset_event(7).await.unwrap();
+
+        let state = fake.lock().unwrap();
+        let (line, body) = &state.calls[0];
+        assert_eq!(line, "GET /api/v2/assets?limit=100&offset=0");
+        assert_eq!(body, &None);
+        let (line, body) = &state.calls[1];
+        assert_eq!(line, "POST /api/v2/assets/events");
+        assert_eq!(body, &Some(json!({ "asset_id": 7 })));
     }
 
     #[tokio::test]
