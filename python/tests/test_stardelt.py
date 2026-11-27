@@ -9,6 +9,7 @@ round-trip dtypes — the dev-cluster check in the ticket covers.
 import base64
 import json
 import os
+import pathlib
 import socket
 import sys
 import time
@@ -450,8 +451,17 @@ def test_spark_tips_prints_every_row(capsys):
     assert all(line.startswith("instead of ") for line in lines)
 
 
-def test_spark_docstring_mentions_tips():
-    assert "stardelt.spark_tips()" in stardelt._session.__doc__
+def test_spark_docstring_points_at_the_notebook_guide():
+    assert "https://stardelt.io/docs/guides/performance" in stardelt._session.__doc__
+
+
+def test_the_cheat_sheet_names_the_live_loader_ticket():
+    row = next(line for line in stardelt.SPARK_TIPS if "20_000 rows" in line)
+    assert "stardelt/stardelt#52" in row
+    readme = pathlib.Path(stardelt.__file__).with_name("README.md").read_text(encoding="utf-8")
+    assert any(
+        "20_000 rows" in line and "stardelt/stardelt#52" in line for line in readme.splitlines()
+    )
 
 
 # Token source and renewal --------------------------------------------------------
