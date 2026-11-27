@@ -8,8 +8,9 @@
 //! Two rules the module keeps:
 //!
 //! - **Metadata only.** The model receives the question and the documentation of at most
-//!   five candidate tables (description, tags, owner, domain, columns). Never a row, never
-//!   a result, whatever `spec.sendRows` says.
+//!   five candidate tables (description, tags, owner, domain, columns, and the table's
+//!   metric definitions: name, description, expression, time column, dimensions). Never a
+//!   row, never a result, whatever `spec.sendRows` says.
 //! - **The endpoint's URL and key never leave the call.** They are read from the
 //!   `ModelEndpoint` object and the projected key file, used in the one `chat()` call, and
 //!   are in no answer, header, log line or `model_call` row.
@@ -119,13 +120,21 @@ fn ready_ask_endpoint(objects: &[Value]) -> Option<(String, Value)> {
 
 /// The context the model receives: one entry per candidate table, metadata only. A field
 /// the documentation does not have is `null`.
-fn context_of(candidates: &[AskTable], docs: &[Value], verified: &[Value]) -> Value {
+fn context_of(
+    candidates: &[AskTable],
+    docs: &[Value],
+    verified: &[Value],
+    metrics: &[Vec<crate::metric_definitions::MetricDefinition>],
+) -> Value {
     let field = |doc: &Value, name: &str| doc.get(name).cloned().unwrap_or(Value::Null);
     let entries: Vec<Value> = candidates
         .iter()
         .enumerate()
         .map(|(index, table)| {
             let doc = docs.get(index).unwrap_or(&Value::Null);
+            let empty = Vec::new();
+            let table_metrics =
+                serde_json::to_value(metrics.get(index).unwrap_or(&empty)).unwrap_or(Value::Null);
             json!({
                 "name": format!("{}.{}.{}", table.catalog, table.namespace, table.table),
                 "description": field(doc, "description"),
@@ -133,6 +142,7 @@ fn context_of(candidates: &[AskTable], docs: &[Value], verified: &[Value]) -> Va
                 "owner": field(doc, "owner"),
                 "domain": field(doc, "domain"),
                 "columns": field(doc, "columns"),
+                "metrics": table_metrics,
                 "verifiedQueries": verified
                     .get(index)
                     .map(verified_of)
@@ -407,7 +417,7 @@ async fn check_statement(
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
@@ -598,7 +608,20 @@ pub(crate) async fn ask(
         });
     }
 
-    let context = context_of(&candidates, &docs, &verified);
+    let mut metrics = Vec::with_capacity(candidates.len());
+    for table in &candidates {
+        let rows = crate::metric_definitions::list_rows(
+            pool,
+            &table.catalog,
+            &table.namespace,
+            &table.table,
+        )
+        .await
+        .unwrap_or_default();
+        metrics.push(rows);
+    }
+
+    let context = context_of(&candidates, &docs, &verified, &metrics);
     let user_text = format!(
         "The question: {question}\n\nThe tables you may use, with their documentation:\n{context}"
     );
@@ -893,7 +916,20 @@ mod tests {
             }),
             Value::Null,
         ];
-        let context = context_of(&candidates, &docs, &[]);
+        let metrics = vec![
+            vec![crate::metric_definitions::MetricDefinition {
+                id: 1,
+                name: "revenue".into(),
+                description: "Orders times their unit price, in euros".into(),
+                expression: "sum(total_cents) / 100.0".into(),
+                time_column: Some("ordered_at".into()),
+                dimensions: vec!["country".into()],
+                verified_by: "data-eng".into(),
+                verified_at: "2026-11-27T00:00:00.000Z".into(),
+            }],
+            Vec::new(),
+        ];
+        let context = context_of(&candidates, &docs, &[], &metrics);
         assert_eq!(context[0]["name"], json!("warehouse.bronze.trips"));
         assert_eq!(context[0]["description"], json!("One row per trip"));
         assert_eq!(context[0]["tags"], json!(["raw", "gold"]));
@@ -905,6 +941,9 @@ mod tests {
         assert_eq!(context[1]["name"], json!("warehouse.bronze.zones"));
         assert_eq!(context[1]["description"], Value::Null);
         assert_eq!(context[1]["columns"], Value::Null);
+        assert_eq!(context[0]["metrics"][0]["name"], json!("revenue"));
+        assert_eq!(context[0]["metrics"][0]["timeColumn"], json!("ordered_at"));
+        assert_eq!(context[1]["metrics"], json!([]));
         assert_eq!(context[0]["verifiedQueries"], json!([]));
     }
 
@@ -929,7 +968,7 @@ mod tests {
                 })
             })
             .collect();
-        let context = context_of(&candidates, &[Value::Null], &[Value::Array(rows)]);
+        let context = context_of(&candidates, &[Value::Null], &[Value::Array(rows)], &[]);
         let sent = context[0]["verifiedQueries"].as_array().expect("a list");
         assert_eq!(sent.len(), VERIFIED_QUERIES_IN_CONTEXT, "at most five");
         assert_eq!(sent[0]["question"], json!("question 0"));
@@ -940,7 +979,7 @@ mod tests {
         assert_eq!(sent[0].get("expected"), None, "no rows are sent");
         assert_eq!(sent[0].get("verifiedBy"), None, "no author is sent");
         // A table whose read failed carries an empty list, not `null`.
-        let empty = context_of(&candidates, &[Value::Null], &[Value::Null]);
+        let empty = context_of(&candidates, &[Value::Null], &[Value::Null], &[]);
         assert_eq!(empty[0]["verifiedQueries"], json!([]));
     }
 
