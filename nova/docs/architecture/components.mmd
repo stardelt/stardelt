@@ -6,7 +6,7 @@ flowchart LR
     direction TB
     fe_explore["Explore<br/><small>Overview, Catalog, Query, QueryLog, Accelerations, Lineage</small>"]
     fe_build["Build<br/><small>Notebooks, Pipelines, Runs, Streams, Compute, Connections, Destinations, Data</small>"]
-    fe_share["Share<br/><small>Dashboards</small>"]
+    fe_share["Share<br/><small>DataProducts, Dashboards</small>"]
     fe_admin["Admin<br/><small>AgentCalls, Models, AdminCatalogs, Platform, Settings, Deployments</small>"]
     fe_detail_pages["Detail pages<br/><small>AppDetail, DeploymentDetail, NotFound, NotebookDetail, PipelineDetail, Preferences, Profile, Report, RunDetail, RunNotebook, StreamDetail</small>"]
   end
@@ -63,6 +63,7 @@ flowchart LR
   fe_explore -->|8| be_pipelines_delivery
   fe_explore -->|1| be_platform_view
   fe_explore -->|14| be_sql_query_log
+  fe_share -->|1| be_catalog
   fe_share -->|1| be_platform_view
   be_ai_ask_mcp_models -.->|1| x_airflow
   be_ai_ask_mcp_models -.->|3| x_k8s
