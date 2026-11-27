@@ -1110,6 +1110,10 @@ async fn call_tool(
             body_of(response).await
         }
         "evals" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let response = crate::evals::list(
                 State(state.clone()),
                 axum::extract::Query(catalog::CatalogParam {
@@ -1121,6 +1125,10 @@ async fn call_tool(
             body_of(response).await
         }
         "data_products" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let response = crate::catalog_products::list(
                 State(state.clone()),
                 Some(Extension(principal.clone())),
@@ -1636,28 +1644,26 @@ mod tests {
         )
     }
 
-    /// The app the image serves: the MCP routes, `/api`, and the SPA fallback.
-    fn test_app_with(
+    /// The app the image serves with the MCP endpoint on: the MCP routes, `/api`, and the
+    /// SPA fallback, over the `AppState` a test supplies (for example one with an exchange).
+    fn test_app_with_state(
+        mut state: Arc<AppState>,
         tag: &str,
-        enabled: bool,
         allowed_clients: Vec<String>,
     ) -> (Router, crate::router_tests::StaticDir) {
-        let mut state = crate::router_tests::test_state();
-        if enabled {
-            let s = Arc::get_mut(&mut state).expect("a fresh state");
-            s.auth = Some(stub_auth());
-            s.mcp = Some(McpConfig {
-                audience: "stardelt-mcp".into(),
-                max_rows: 200,
-                query_timeout: std::time::Duration::from_secs(60),
-                allowed_clients,
-                allowed_groups: vec![],
-                calls_per_minute: CALLS_PER_MINUTE,
-                calls: Arc::new(Mutex::new(HashMap::new())),
-                writes_per_hour: WRITES_PER_HOUR,
-                writes: Arc::new(Mutex::new(HashMap::new())),
-            });
-        }
+        let s = Arc::get_mut(&mut state).expect("a fresh state");
+        s.auth = Some(stub_auth());
+        s.mcp = Some(McpConfig {
+            audience: "stardelt-mcp".into(),
+            max_rows: 200,
+            query_timeout: std::time::Duration::from_secs(60),
+            allowed_clients,
+            allowed_groups: vec![],
+            calls_per_minute: CALLS_PER_MINUTE,
+            calls: Arc::new(Mutex::new(HashMap::new())),
+            writes_per_hour: WRITES_PER_HOUR,
+            writes: Arc::new(Mutex::new(HashMap::new())),
+        });
         let dir = crate::router_tests::StaticDir::new(tag);
         let app = crate::app(
             state.clone(),
@@ -1666,6 +1672,27 @@ mod tests {
             state.default_theme,
         );
         (app, dir)
+    }
+
+    /// The app the image serves: the MCP routes, `/api`, and the SPA fallback.
+    fn test_app_with(
+        tag: &str,
+        enabled: bool,
+        allowed_clients: Vec<String>,
+    ) -> (Router, crate::router_tests::StaticDir) {
+        let state = crate::router_tests::test_state();
+        if enabled {
+            test_app_with_state(state, tag, allowed_clients)
+        } else {
+            let dir = crate::router_tests::StaticDir::new(tag);
+            let app = crate::app(
+                state.clone(),
+                crate::api_router(),
+                dir.path(),
+                state.default_theme,
+            );
+            (app, dir)
+        }
     }
 
     fn test_app_with_limit(
@@ -2356,6 +2383,51 @@ mod tests {
         assert_eq!(
             error,
             "the engine token could not be minted: exchange refused (HTTP 400 invalid_request)"
+        );
+    }
+
+    /// The exchange is what the engine sees: `data_products` mints the engine token first,
+    /// exactly like `catalog_list`, so an MCP token is never sent to Trino as it is (#2185).
+    #[tokio::test]
+    async fn data_products_exchanges_the_mcp_token_before_the_engine() {
+        // The IdP refuses the exchange: the sentence must be the exchange's, not the engine's.
+        async fn serve(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            format!("http://{addr}")
+        }
+        let idp = format!(
+            "{}/token",
+            serve(Router::new().route(
+                "/token",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_request"})),
+                    )
+                }),
+            ))
+            .await
+        );
+        let exchange = crate::token_exchange::TokenExchange::new(
+            reqwest::Client::new(),
+            crate::token_exchange::TokenExchangeConfig {
+                token_url: idp,
+                client_id: "nova".into(),
+                client_secret: Secret::new("client-secret"),
+                audience: "trino".into(),
+            },
+        );
+        let state = crate::router_tests::test_state_with_exchange("http://127.0.0.1:1", exchange);
+        let (app, _dir) = test_app_with_state(state, "mcp-exchange-arms", Vec::new());
+        let result = call(app, "data_products", json!({ "catalog": "playground" })).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("the engine token could not be minted"),
+            "{result}"
         );
     }
 
