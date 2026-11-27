@@ -411,10 +411,15 @@ pub fn store_payload(req: &NewConnection) -> (BTreeMap<String, String>, BTreeMap
     let fields = req.secret.clone();
     let mut meta = BTreeMap::new();
     meta.insert("type".to_string(), req.kind.clone());
-    meta.insert(
-        "keys".to_string(),
-        req.secret.keys().cloned().collect::<Vec<_>>().join(","),
-    );
+    // The store refuses an empty custom-metadata value (OpenBao: 0 < len(value) <= 512), so a
+    // connection whose type needs no field carries no `keys`; `view_from_store` reads the
+    // missing key as an empty `secretKeys`.
+    if !req.secret.is_empty() {
+        meta.insert(
+            "keys".to_string(),
+            req.secret.keys().cloned().collect::<Vec<_>>().join(","),
+        );
+    }
     for (k, v) in &req.config {
         meta.insert(format!("config.{k}"), v.clone());
     }
