@@ -227,6 +227,27 @@ export type ListedHealth = Schema<'ListedHealth'>
 /** One verified query: a question about a table that its owners answered (#1018, #912). */
 export type VerifiedQuery = Schema<'VerifiedQuery'>
 
+/** One metric definition of a table (#124): a named number, its expression and its cuts. */
+export type MetricDefinition = {
+  id: number
+  name: string
+  description: string
+  expression: string
+  timeColumn: string | null
+  dimensions: string[]
+  verifiedBy: string
+  verifiedAt: string
+}
+
+/** The body of a create: everything but the id and who wrote it. */
+export type NewMetricDefinition = {
+  name: string
+  description: string
+  expression: string
+  timeColumn?: string | null
+  dimensions: string[]
+}
+
 export type QueryColumn = { name: string; type: string }
 export type QueryResult = Schema<'QueryResult'>
 
@@ -1479,6 +1500,11 @@ export const api = {
   ) =>
     jpost<VerifiedQuery>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/verified-queries`, catalog), body),
   deleteVerifiedQuery: (id: number) => jdel(`/api/verified-queries/${id}`),
+  metricDefinitions: (ns: string, tbl: string, catalog?: string) =>
+    jget<MetricDefinition[]>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/metrics`, catalog)),
+  createMetricDefinition: (ns: string, tbl: string, body: NewMetricDefinition, catalog?: string) =>
+    jpost<MetricDefinition>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/metrics`, catalog), body),
+  deleteMetricDefinition: (id: number) => jdel(`/api/metrics/${id}`),
   /** Run one verified query as the caller and compare it with its expected result (#912). */
   checkVerifiedQuery: (id: number) => jpost<VerifiedQuery>(`/api/verified-queries/${id}/check`, {}),
   /** Run every verified query of one table in one call, one after another (#912 slice 1b). */
