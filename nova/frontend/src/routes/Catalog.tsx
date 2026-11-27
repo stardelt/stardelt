@@ -186,6 +186,18 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
   const lineageHref = catalogName
     ? `/lineage?${new URLSearchParams({ catalog: catalogName, schema: ns, table: tbl }).toString()}`
     : ''
+  // `spec.triggers` (#66): the pipelines a write to this table starts. The list route answers
+  // only the caller's pipelines, so a viewer sees the ones they may open.
+  const allPipelines = useQuery({
+    queryKey: ['pipelines'],
+    queryFn: api.pipelines,
+    staleTime: 30_000,
+    enabled: catalogName !== '',
+  })
+  const tableRef = catalogName ? `${catalogName}.${ns}.${tbl}` : ''
+  const updatesStart = (allPipelines.data?.pipelines ?? []).filter((pipeline) =>
+    pipeline.triggers.some((trigger) => trigger.tablesUpdated.includes(tableRef)),
+  )
 
   const m = meta.data?.metadata
   const updatedMs = m?.['last-updated-ms'] ?? 0
@@ -215,6 +227,22 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
               {owner && <>Owner <span className="font-mono">{owner}</span></>}
               {owner && updatedMs > 0 && ' · '}
               {updatedMs > 0 && <>Last changed {relativeTime(updatedMs)}</>}
+            </div>
+          )}
+          {updatesStart.length > 0 && (
+            <div className="text-xs text-text-mute mt-1">
+              Updates start:{' '}
+              {updatesStart.map((pipeline, index) => (
+                <span key={`${pipeline.namespace}/${pipeline.name}`}>
+                  {index > 0 && ', '}
+                  <Link
+                    className="underline decoration-dotted"
+                    to={`/pipelines/${encodeURIComponent(pipeline.namespace)}/${encodeURIComponent(pipeline.name)}`}
+                  >
+                    {pipeline.name}
+                  </Link>
+                </span>
+              ))}
             </div>
           )}
           {numbers && (
