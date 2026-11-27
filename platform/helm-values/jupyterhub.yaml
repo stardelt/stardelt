@@ -428,7 +428,7 @@ singleuser:
     # pods are not Deployments, so this pin is not in `make pin-images`:
     # `WRITE_MANIFEST_ONLY=1 ./scripts/pin-image.sh jupyter` moves both pins;
     # `scripts/check-notebook-image-pin.sh` fails the build when they differ.
-    tag: "dev@sha256:9ace21e4501090bafa98c4e652c0a947e8558b288cbe3a0aa4d609bed9e94e78"
+    tag: "dev@sha256:cf110a151746b615a9919b6848d24f55d7ad9dcaf5932c3da997963049a83ed5"
     pullSecrets:
       - name: ghcr-creds
   defaultUrl: /lab
