@@ -285,6 +285,12 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
 function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') => void }) {
   const navigate = useNavigate()
   const [copied, setCopied] = useState(false)
+  const [verifying, setVerifying] = useState(false)
+  const [verifiedOn, setVerifiedOn] = useState<string | null>(null)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
+  const [verifyQuestion, setVerifyQuestion] = useState('')
+  const [verifyTable, setVerifyTable] = useState('')
+  const [savingVerify, setSavingVerify] = useState(false)
   const answer = turn.answer
 
   async function copy(text: string) {
@@ -294,6 +300,31 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
       setTimeout(() => setCopied(false), 1500)
     } catch {
       // Clipboard access can be refused (insecure origin, permissions); nothing to report.
+    }
+  }
+
+  const label = (table: AskAnswer['tables'][number]) =>
+    `${table.catalog}.${table.namespace}.${table.table}`
+
+  async function saveVerified() {
+    if (answer?.sql == null) return
+    const table = answer.tables.find((t) => label(t) === verifyTable)
+    if (!table) return
+    setSavingVerify(true)
+    setVerifyError(null)
+    try {
+      await api.createVerifiedQuery(
+        table.namespace,
+        table.table,
+        { question: verifyQuestion.trim(), sql: answer.sql },
+        table.catalog,
+      )
+      setVerifiedOn(label(table))
+      setVerifying(false)
+    } catch (e) {
+      setVerifyError(errorMessage(e))
+    } finally {
+      setSavingVerify(false)
     }
   }
 
@@ -351,6 +382,18 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
                   className="btn-primary py-1.5 text-sm"
                   onClick={() => navigate(`/query?sql=${encodeURIComponent(answer.sql ?? '')}`)}
                 >Open in SQL editor</button>
+                {!verifying && verifiedOn === null && answer.tables.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn-ghost py-1.5 px-3 text-sm"
+                    onClick={() => {
+                      setVerifyError(null)
+                      setVerifyQuestion(turn.question)
+                      setVerifyTable(label(answer.tables[0]))
+                      setVerifying(true)
+                    }}
+                  >Mark as verified</button>
+                )}
                 {answer.callId != null && (
                   <>
                     <button
@@ -373,6 +416,46 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
                 )}
               </div>
               {turn.voteError && <p className="text-xs text-bad">{turn.voteError}</p>}
+              {verifying && (
+                <form
+                  className="space-y-2 rounded-[10px] border border-border bg-bg-soft/60 p-3"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    void saveVerified()
+                  }}
+                >
+                  <label className="block text-xs text-text-dim" htmlFor="verify-table">Table</label>
+                  <select
+                    id="verify-table"
+                    className="input w-full"
+                    value={verifyTable}
+                    onChange={(e) => setVerifyTable(e.target.value)}
+                  >
+                    {answer.tables.map((table) => (
+                      <option key={label(table)} value={label(table)}>{label(table)}</option>
+                    ))}
+                  </select>
+                  <label className="block text-xs text-text-dim" htmlFor="verify-question">Question</label>
+                  <input
+                    id="verify-question"
+                    className="input w-full"
+                    maxLength={500}
+                    value={verifyQuestion}
+                    onChange={(e) => setVerifyQuestion(e.target.value)}
+                  />
+                  <p className="text-xs text-text-dim">The statement above is stored as this question&rsquo;s verified answer.</p>
+                  {verifyError && <p className="text-xs text-bad">{verifyError}</p>}
+                  <div className="flex items-center gap-2">
+                    <button type="submit" className="btn-primary py-1.5 px-3 text-sm" disabled={savingVerify || verifyQuestion.trim() === ''}>
+                      {savingVerify ? 'Saving…' : 'Save verified query'}
+                    </button>
+                    <button type="button" className="btn-ghost py-1.5 px-3 text-sm" onClick={() => setVerifying(false)}>Cancel</button>
+                  </div>
+                </form>
+              )}
+              {verifiedOn !== null && (
+                <p className="text-xs text-ok">Verified on {verifiedOn}</p>
+              )}
             </>
           )}
         </div>

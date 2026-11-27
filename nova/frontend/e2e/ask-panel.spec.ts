@@ -74,6 +74,8 @@ type Options = {
   feedback?: (route: Route) => void
   /** What `/api/ask/history` answers; two stored conversations, newest first, by default. */
   history?: (route: Route) => void
+  /** What `POST …/verified-queries` answers; a stored row by default. */
+  verified?: (route: Route) => void
   /** Whether the shell is expected to show the Ask button (it is, unless no endpoint is ready). */
   ready?: boolean
 }
@@ -99,6 +101,10 @@ async function stub(page: Page, options: Options = {}) {
     if (pathname === '/api/ask/feedback') {
       if (options.feedback) return options.feedback(route)
       return route.fulfill({ status: 204 })
+    }
+    if (pathname.endsWith('/verified-queries') && route.request().method() === 'POST') {
+      if (options.verified) return options.verified(route)
+      return json(route, { id: 7 }, 201)
     }
     return json(route, [])
   })
@@ -265,4 +271,36 @@ test('a history that cannot be read shows the API sentence, never an empty list'
   await panel.getByRole('button', { name: 'History' }).click()
   await expect(panel.getByRole('status').filter({ hasText: 'the history was not read' })).toBeVisible()
   await expect(panel.locator('#ask-history').getByText('No questions yet.')).toHaveCount(0)
+})
+
+test('an answer is marked as verified on one of its sources', async ({ page }) => {
+  let posted: { url: string; body: unknown } | null = null
+  await stub(page, {
+    verified: async (route) => {
+      const url = new URL(route.request().url())
+      posted = { url: url.pathname + url.search, body: route.request().postDataJSON() }
+      await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
+    },
+  })
+  await view(page, 'dark', 1440, 900)
+  await ask(page, 'How many customer rows did the shop read yesterday?')
+
+  await page.getByRole('button', { name: 'Mark as verified' }).click()
+  // `exact` because the dashboard underneath draws "Tables at risk" (a section label
+  // Playwright's substring match accepts) and the panel's own box is "Ask a question".
+  await expect(page.getByLabel('Table', { exact: true })).toHaveValue('gold.shop.customer_ltv')
+  await expect(page.getByLabel('Question', { exact: true })).toHaveValue(
+    'How many customer rows did the shop read yesterday?',
+  )
+  await page.getByRole('button', { name: 'Save verified query' }).click()
+
+  await expect.poll(() => posted).toEqual({
+    url: '/api/catalog/tables/shop/customer_ltv/verified-queries?catalog=gold',
+    body: {
+      question: 'How many customer rows did the shop read yesterday?',
+      sql: SQL,
+    },
+  })
+  await expect(page.getByText('Verified on gold.shop.customer_ltv')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Mark as verified' })).toHaveCount(0)
 })
