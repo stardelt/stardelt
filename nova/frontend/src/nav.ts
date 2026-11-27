@@ -35,7 +35,10 @@ export const NAV_GROUPS: NavGroup[] = [
   },
   {
     label: 'Share',
-    items: [{ to: '/dashboards', label: 'Dashboards', icon: 'chart' }],
+    items: [
+      { to: '/products', label: 'Data products', icon: 'grid' },
+      { to: '/dashboards', label: 'Dashboards', icon: 'chart' },
+    ],
   },
   {
     // Operating the platform is not a data-engineering task: an analyst has no use for
