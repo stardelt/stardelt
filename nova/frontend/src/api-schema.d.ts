@@ -1140,6 +1140,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/evals/{id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/evals/{id}/runs` — the eval's runs, newest first.
+         * @description The runs of one eval — one posted answer and its verdict each — newest first. `?limit=` is 1 to 100, 20 by default. The run is history: it is never changed, only read back. `404` when the id is not an eval. Without a state store the route answers 503.
+         */
+        get: operations["eval_run_list"];
+        put?: never;
+        /**
+         * `POST /api/evals/{id}/runs` — compare one answer, then `201` with the stored verdict.
+         * @description Post one answer to an eval — the SQL an agent wrote and the rows it returned, or the runner's own error — and store the verdict: Nova compares it with the eval's `expected` here and never sends the rows to a model. `value` passes for one row of one equal cell (numbers by value); `rows` passes when the two tables equal as a multiset; `uses` passes when the SQL names every expected `namespace.table` as a whole token; an `error` fails with its sentence. Only a member of the eval's owner group or an administrator may post one; the caller is recorded as `createdBy`.
+         */
+        post: operations["eval_run_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -3602,6 +3626,35 @@ export interface components {
             /** @description The question a person asks, in words, 1 to 500 characters. */
             question: string;
         };
+        /** @description One posted answer and its verdict, as the API returns it. */
+        EvalRun: {
+            /** @description When it was posted, RFC 3339. */
+            createdAt: string;
+            /** @description The `sub` of the person who posted the run. */
+            createdBy: string;
+            /** @description The model endpoint that answered, if the runner named it. */
+            endpoint?: string | null;
+            /**
+             * Format: int64
+             * @description The eval the run answers.
+             */
+            evalId: number;
+            /** Format: int64 */
+            id: number;
+            /** @description The model that wrote the answer, if the runner named it. */
+            model?: string | null;
+            /** @description Whether the answer was the expected one. */
+            passed: boolean;
+            /** @description Why it failed; absent when it passed. */
+            reason?: string | null;
+            /** @description The statement the agent wrote, if the runner had one. */
+            sql?: string | null;
+            /**
+             * Format: int64
+             * @description The tokens the model call used, if the runner counted them.
+             */
+            tokens?: number | null;
+        };
         /** @description One label/value pair about an app, as Nova can honestly observe it. */
         Fact: {
             label: string;
@@ -4048,6 +4101,24 @@ export interface components {
             ownerGroup: string;
             /** @description The question, 1 to 500 characters. */
             question: string;
+        };
+        /** @description `POST /api/evals/{id}/runs` body: one answer, compared with the eval's `expected` here. */
+        NewEvalRun: {
+            /** @description The model endpoint that answered, at most 200 characters. */
+            endpoint?: string | null;
+            /** @description The runner's own failure (Ask refused, the statement errored), at most 2 000 characters. */
+            error?: string | null;
+            /** @description The model that wrote the answer, at most 200 characters. */
+            model?: string | null;
+            /** @description The rows the statement returned: 1 to 100 rows of 1 to 50 scalars. */
+            rows?: unknown[][] | null;
+            /** @description The statement an agent wrote, at most 20 000 characters. */
+            sql?: string | null;
+            /**
+             * Format: int64
+             * @description The tokens the model call used; not negative.
+             */
+            tokens?: number | null;
         };
         /** @description `POST /api/catalog/tables/{ns}/{tbl}/metrics` body. */
         NewMetricDefinition: {
@@ -10603,6 +10674,140 @@ export interface operations {
                 };
             };
             /** @description Only a member of the owner group or an administrator may delete an eval */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such eval, or the id is not a number */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    eval_run_list: {
+        parameters: {
+            query?: {
+                /** @description How many runs, 1 to 100 (default 20) */
+                limit?: string;
+            };
+            header?: never;
+            path: {
+                /** @description The eval's id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The eval's runs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRun"][];
+                };
+            };
+            /** @description limit is not a number from 1 to 100 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such eval, or the id is not a number */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    eval_run_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The eval's id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewEvalRun"];
+            };
+        };
+        responses: {
+            /** @description The stored run and its verdict */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRun"];
+                };
+            };
+            /** @description The answer is over one of the limits */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Only a member of the owner group or an administrator may run an eval */
             403: {
                 headers: {
                     [name: string]: unknown;

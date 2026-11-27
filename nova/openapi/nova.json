@@ -6185,6 +6185,184 @@
         }
       }
     },
+    "/api/evals/{id}/runs": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/evals/{id}/runs` — the eval's runs, newest first.",
+        "description": "The runs of one eval — one posted answer and its verdict each — newest first. `?limit=` is 1 to 100, 20 by default. The run is history: it is never changed, only read back. `404` when the id is not an eval. Without a state store the route answers 503.",
+        "operationId": "eval_run_list",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The eval's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many runs, 1 to 100 (default 20)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The eval's runs, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EvalRun"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is not a number from 1 to 100",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such eval, or the id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/evals/{id}/runs` — compare one answer, then `201` with the stored verdict.",
+        "description": "Post one answer to an eval — the SQL an agent wrote and the rows it returned, or the runner's own error — and store the verdict: Nova compares it with the eval's `expected` here and never sends the rows to a model. `value` passes for one row of one equal cell (numbers by value); `rows` passes when the two tables equal as a multiset; `uses` passes when the SQL names every expected `namespace.table` as a whole token; an `error` fails with its sentence. Only a member of the eval's owner group or an administrator may post one; the caller is recorded as `createdBy`.",
+        "operationId": "eval_run_create",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The eval's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEvalRun"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored run and its verdict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRun"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The answer is over one of the limits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only a member of the owner group or an administrator may run an eval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such eval, or the id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "tags": [
@@ -15494,6 +15672,76 @@
           }
         }
       },
+      "EvalRun": {
+        "type": "object",
+        "description": "One posted answer and its verdict, as the API returns it.",
+        "required": [
+          "id",
+          "evalId",
+          "passed",
+          "createdBy",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When it was posted, RFC 3339."
+          },
+          "createdBy": {
+            "type": "string",
+            "description": "The `sub` of the person who posted the run."
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model endpoint that answered, if the runner named it."
+          },
+          "evalId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The eval the run answers."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model that wrote the answer, if the runner named it."
+          },
+          "passed": {
+            "type": "boolean",
+            "description": "Whether the answer was the expected one."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed; absent when it passed."
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The statement the agent wrote, if the runner had one."
+          },
+          "tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The tokens the model call used, if the runner counted them."
+          }
+        }
+      },
       "Fact": {
         "type": "object",
         "description": "One label/value pair about an app, as Nova can honestly observe it.",
@@ -16740,6 +16988,59 @@
           "question": {
             "type": "string",
             "description": "The question, 1 to 500 characters."
+          }
+        }
+      },
+      "NewEvalRun": {
+        "type": "object",
+        "description": "`POST /api/evals/{id}/runs` body: one answer, compared with the eval's `expected` here.",
+        "properties": {
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model endpoint that answered, at most 200 characters."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The runner's own failure (Ask refused, the statement errored), at most 2 000 characters."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model that wrote the answer, at most 200 characters."
+          },
+          "rows": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "The rows the statement returned: 1 to 100 rows of 1 to 50 scalars."
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The statement an agent wrote, at most 20 000 characters."
+          },
+          "tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The tokens the model call used; not negative."
           }
         }
       },
