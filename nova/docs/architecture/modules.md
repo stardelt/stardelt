@@ -8,7 +8,7 @@
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `main.rs` | Core & identity | 1498 | 1617 | 3 | - |
 | `query_log_api.rs` | SQL & query log | 1492 | 320 | 6 | Kubernetes API (CRDs), PostgreSQL state store |
-| `mcp.rs` | AI (Ask, MCP, models) | 1428 | 1270 | 4 | Airflow REST, Trino |
+| `mcp.rs` | AI (Ask, MCP, models) | 1447 | 1270 | 4 | Airflow REST, Trino |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `lineage_api.rs` | Lineage | 1175 | 443 | 4 | PostgreSQL state store |
@@ -19,9 +19,9 @@
 | `airflow.rs` | Pipelines & delivery | 895 | 949 | 0 | Airflow REST |
 | `migrations.rs` | Pipelines & delivery | 862 | 395 | 3 | PostgreSQL state store, Trino |
 | `data.rs` | SQL & query log | 856 | 104 | 2 | Trino |
+| `ask.rs` | AI (Ask, MCP, models) | 844 | 505 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
-| `ask.rs` | AI (Ask, MCP, models) | 821 | 489 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
 | `secret_store.rs` | Connections | 699 | 363 | 0 | Secret store (OpenBao) |
@@ -72,4 +72,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (71 files)** | | **50798** | **44761** | **165** | |
+| **total (71 files)** | | **50840** | **44777** | **165** | |
