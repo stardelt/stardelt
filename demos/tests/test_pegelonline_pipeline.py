@@ -13,7 +13,7 @@ def tasks():
 
 def test_the_view_is_created_and_commented_after_the_gold_table():
     by_name = {task["name"]: task for task in tasks()}
-    assert by_name["view"]["dependsOn"] == ["gold-latest"]
+    assert by_name["view"]["dependsOn"] == ["gold-latest", "checks"]
     assert by_name["view-comment"]["dependsOn"] == ["view"]
     assert "CREATE OR REPLACE VIEW shared.gold.pegelonline_levels_v1" in by_name["view"]["sql"]
     assert "COMMENT ON VIEW shared.gold.pegelonline_levels_v1" in by_name["view-comment"]["sql"]
@@ -35,8 +35,15 @@ def test_value_in_range_checks_the_unit_it_means():
     assert "unit = 'cm'" in sql
     assert "measurement_value < -1000" in sql
     assert "measurement_value > 10000" in sql
-    assert [check["name"] for check in checks] == [
+    assert [check["name"] for check in checks] == ["value_in_range"]
+
+
+def test_the_silver_checks_run_before_gold_and_the_range_check_before_the_view():
+    by_name = {task["name"]: task for task in tasks()}
+    assert "checks-silver" in by_name["gold-latest"]["dependsOn"]
+    assert "checks-silver" in by_name["gold-hourly"]["dependsOn"]
+    assert by_name["view"]["dependsOn"] == ["gold-latest", "checks"]
+    assert {check["name"] for check in by_name["checks-silver"]["checks"]} == {
         "station_uuid_present",
         "one_row_per_measurement",
-        "value_in_range",
-    ]
+    }

@@ -32,9 +32,24 @@ spec:
           FROM shared.bronze.pegelonline_measurements
         )
         WHERE rn = 1
+    - name: checks-silver
+      kind: quality
+      dependsOn: [silver]
+      checks:
+        - name: station_uuid_present
+          sql: |
+            SELECT station_uuid
+            FROM shared.silver.pegelonline_measurements
+            WHERE station_uuid IS NULL
+        - name: one_row_per_measurement
+          sql: |
+            SELECT station_uuid, timeseries, measured_at
+            FROM shared.silver.pegelonline_measurements
+            GROUP BY 1, 2, 3
+            HAVING count(*) > 1
     - name: gold-latest
       kind: sql
-      dependsOn: [silver, schema-gold]
+      dependsOn: [silver, schema-gold, checks-silver]
       sql: |
         CREATE OR REPLACE TABLE shared.gold.pegelonline_station_latest AS
         SELECT station_uuid, station_name, water, timeseries, unit, measured_at,
@@ -48,7 +63,7 @@ spec:
         WHERE rn = 1
     - name: gold-hourly
       kind: sql
-      dependsOn: [silver, schema-gold]
+      dependsOn: [silver, schema-gold, checks-silver]
       sql: |
         CREATE OR REPLACE TABLE shared.gold.pegelonline_station_hourly AS
         SELECT station_uuid, station_name, water, timeseries,
@@ -61,7 +76,7 @@ spec:
         GROUP BY 1, 2, 3, 4, 5
     - name: view
       kind: sql
-      dependsOn: [gold-latest]
+      dependsOn: [gold-latest, checks]
       sql: |
         CREATE OR REPLACE VIEW shared.gold.pegelonline_levels_v1 AS
         SELECT station_uuid, station_name, water, timeseries, unit, measured_at,
@@ -74,19 +89,8 @@ spec:
         COMMENT ON VIEW shared.gold.pegelonline_levels_v1 IS 'Latest PEGELONLINE measurement per station and time series - the stable name of this data product. Owner: stardelt-users. Source: PEGELONLINE (public data).'
     - name: checks
       kind: quality
-      dependsOn: [silver, gold-latest]
+      dependsOn: [gold-latest]
       checks:
-        - name: station_uuid_present
-          sql: |
-            SELECT station_uuid
-            FROM shared.silver.pegelonline_measurements
-            WHERE station_uuid IS NULL
-        - name: one_row_per_measurement
-          sql: |
-            SELECT station_uuid, timeseries, measured_at
-            FROM shared.silver.pegelonline_measurements
-            GROUP BY 1, 2, 3
-            HAVING count(*) > 1
         - name: value_in_range
           sql: |
             SELECT station_uuid, timeseries, measurement_value, unit
