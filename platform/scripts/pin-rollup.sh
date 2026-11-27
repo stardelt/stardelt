@@ -127,13 +127,10 @@ changes=()
 [ "$old_superset" != "$superset_digest" ] && changes+=("superset $(short "$old_superset") → $(short "$superset_digest")")
 [ "$old_jupyter" != "$jupyter_digest" ] && changes+=("jupyter $(short "$old_jupyter") → $(short "$jupyter_digest")")
 
-# #746: a rollup that moves a pin the operator embeds writes that pin into the operator's golden
-# values, but the operator image it pins was built from the previous commit. Rebuild it from this
-# branch and pin that digest instead (#1026 measured the dispatch, the token and the 34 s-5 min).
-embedded_changed=yes
-if [ "${#changes[@]}" -eq 1 ] && [[ "${changes[0]}" == operator\ * ]]; then
-  embedded_changed=no
-fi
+# A roll that moves a pin the operator embeds writes it into the operator's golden values, but the
+# operator image it pins was built on main from the commit before. main keeps linear history, so
+# the roll merges as a squash and is not rebuilt on its branch: the operator built on main from the
+# squash commit is pinned by the next roll, one cycle later (stardelt/stardelt#1789, option B).
 
 if [ "${#changes[@]}" -eq 0 ]; then
   echo "pins current (operator $(short "$operator_digest"), nova $(short "$nova_digest"), spark $(short "$spark_digest"), superset $(short "$superset_digest"), airflow $(short "$airflow_digest"), jupyter $(short "$jupyter_digest"))"
@@ -292,58 +289,6 @@ if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
 fi
 git push --force-with-lease origin "$branch"
 
-if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then
-  echo "the roll moved a pin the operator embeds; rebuilding the operator from $branch (#746)"
-  # The dispatch must use GITHUB_TOKEN: PIN_TOKEN has no Actions permission (#1026 probe 403).
-  # Every run of this script leaves a `workflow_dispatch` run on `$branch` in the Actions
-  # history, so `--limit 1` right after the dispatch can still answer the *previous* build:
-  # remember that id and accept only a new one (#1035 review finding 1). This read must succeed
-  # — with a `set -e` abort a failed read cannot leave the guard silently empty.
-  previous_run="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
-    --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
-  GH_TOKEN="$GITHUB_TOKEN" gh workflow run operator-image.yml --ref "$branch"
-  run_id=""
-  for _ in $(seq 1 12); do
-    candidate="$(GH_TOKEN="$GITHUB_TOKEN" gh run list --workflow operator-image.yml --branch "$branch" \
-      --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""' || true)"
-    if [ -n "$candidate" ] && [ "$candidate" != "$previous_run" ]; then
-      run_id="$candidate"
-      break
-    fi
-    sleep 5
-  done
-  [ -n "$run_id" ] || { echo "no dispatched operator build appeared for $branch" >&2; exit 1; }
-  GH_TOKEN="$GITHUB_TOKEN" gh run watch "$run_id" --interval 15 --exit-status
-  # A branch name's `/` becomes `-` in the published tag, never `dev` (#1026 row 4).
-  operator_branch_digest="$(TAG="${branch//\//-}" WRITE_MANIFEST=0 PRINT_DIGEST=1 \
-    ./scripts/pin-image.sh stardelt-operator | tr -d '[:space:]')"
-  [ -n "$operator_branch_digest" ] || { echo "the branch build's digest did not resolve" >&2; exit 1; }
-  # rewrite_files keeps the tag name (`dev`) and swaps only the digest.
-  rewrite_files "$OP_FILE" "$NOVA_FILE" "$SPARK_FILE" \
-    "$operator_branch_digest" "$nova_digest" "$spark_digest"
-  git add "$OP_FILE"
-  # The message must name the digest the tree now pins, not the main-build digest the branch
-  # rebuild replaced (#1644).
-  operator_line="operator $(short "$old_operator") → $(short "$operator_branch_digest") (rebuilt from $branch)"
-  replaced=no
-  for i in "${!changes[@]}"; do
-    case "${changes[$i]}" in
-      operator\ *) changes[i]="$operator_line"; replaced=yes ;;
-    esac
-  done
-  [ "$replaced" = yes ] || changes+=("$operator_line")
-  git commit --amend -m "$(rollup_message)"
-  require_current_main
-  git push --force-with-lease origin "$branch"
-  {
-    echo ""
-    echo "## Operator image rebuilt from this branch (#746)"
-    echo ""
-    echo "A pin the operator embeds moved, so the operator was built from \`$branch\` (run $run_id) and"
-    echo "its digest pinned: \`$(short "$operator_branch_digest")\`. \`dev\` was not moved by that build."
-  } >> "$body_file"
-fi
-
 # Reuse the open PR only. A merged or closed one for the same branch must not be
 # edited: after a merge the branch is deleted and the next run opens a new PR.
 title="chore(pins): rollup image digests"
@@ -383,10 +328,8 @@ if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
     # already clean ("Pull request is in clean status", run 44337019887). Both mean
     # nobody else will merge this roll: wait for the checks this push started, then
     # merge it here.
-    # A merge commit, never a squash (#1771): when an embedded pin moved, the operator image is
-    # built from this branch's head, and D1 (#1703) proves a pin only with a commit that is an
-    # ancestor of main. A squash drops that commit, so the cut could never prove the pin.
-    if auto_out="$(gh pr merge "$pr_number" --auto --merge 2>&1)"; then
+    # A squash, never a merge commit: main's ruleset requires linear history (stardelt/stardelt#1789).
+    if auto_out="$(gh pr merge "$pr_number" --auto --squash 2>&1)"; then
       echo "auto-merge armed on PR #$pr_number: it merges when the required checks pass"
     else
       echo "auto-merge is not available; waiting for PR #$pr_number's checks (${auto_out//$'\n'/ })"
@@ -401,7 +344,7 @@ if [ "${PIN_TOKEN_SET:-false}" = "true" ]; then
         exit 1
       fi
       gh pr checks "$pr_number" --watch --fail-fast --interval 15
-      gh pr merge "$pr_number" --merge --delete-branch
+      gh pr merge "$pr_number" --squash --delete-branch
       echo "merged PR #$pr_number: the roll is on main"
     fi
   fi

@@ -95,35 +95,20 @@ class PinRollupStagesEveryFilePinImageWritesTest(unittest.TestCase):
         self.assertIn("chart/files/spark-runtimes.json", staged)
 
 
-def dispatch_block(text: str) -> str:
-    """The rebuild block: from the dispatch's `if … embedded_changed` to its closing `fi`."""
-    start = text.index('if [ "${OPEN_PR:-0}" = "1" ] && [ "$embedded_changed" = "yes" ]; then')
-    end = text.index("\nfi\n", start)
-    return text[start:end]
+class RollupMergesAsASquashTest(unittest.TestCase):
+    """stardelt/stardelt#1789, option B: main keeps linear history, so the roll squashes."""
 
-
-class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
-    def test_the_dispatch_follows_the_branch_push_and_uses_github_token(self):
+    def test_the_roll_merges_with_squash_never_a_merge_commit(self):
         text = ROLLUP.read_text()
-        block = dispatch_block(text)
-        # The post-amend push is the last one; `index` would find the pre-dispatch push.
-        post_amend = text.rindex('git push --force-with-lease origin "$branch"')
-        self.assertLess(text.rindex('git commit --amend -m "$(rollup_message)"'), post_amend,
-                        "the rebuilt digest is committed, then the branch is re-pushed")
-        self.assertIn("rollup_message", block,
-                      "the amend regenerates the message; --no-edit named the replaced digest (#1644)")
-        self.assertLess(block.rindex('git push --force-with-lease origin "$branch"'),
-                        text.index("fi\n\n# Reuse the open PR only."), "the re-push closes the block")
-        self.assertLess(text.index('git push --force-with-lease origin "$branch"'),
-                        text.index('gh workflow run operator-image.yml --ref "$branch"'))
-        self.assertIn("embedded_changed=yes", text)
-        self.assertIn('gh workflow run operator-image.yml --ref "$branch"', block,
-                      "the dispatch must be gated on OPEN_PR and embedded_changed")
-        # Every `gh` call in the block runs on the Actions-capable token, not PIN_TOKEN.
-        for line in block.splitlines():
-            if "gh " in line and "gh workflow run" not in line and "gh run " in line:
-                self.assertIn('GH_TOKEN="$GITHUB_TOKEN"', line,
-                              f"a gh call in the rebuild block does not force GITHUB_TOKEN: {line}")
+        self.assertIn('gh pr merge "$pr_number" --auto --squash', text)
+        self.assertIn('gh pr merge "$pr_number" --squash --delete-branch', text)
+        self.assertNotIn("--merge", text, "main's ruleset refuses merge commits")
+
+    def test_the_operator_is_not_rebuilt_on_the_branch(self):
+        text = ROLLUP.read_text()
+        self.assertNotIn("operator-image.yml", text,
+                         "the operator built on main from the squash commit is pinned by the next roll")
+        self.assertNotIn("embedded_changed", text)
 
     def test_a_branch_from_an_old_checkout_is_refused_before_any_push(self):
         """#1644: a run whose checkout main has moved past must not pin images older than main."""
@@ -131,21 +116,6 @@ class OperatorRebuiltFromItsBranchTest(unittest.TestCase):
         guard = text.index("git merge-base --is-ancestor origin/main HEAD")
         self.assertLess(guard, text.index('git push --force-with-lease origin "$branch"'),
                         "the guard runs before the branch is pushed")
-        block = dispatch_block(text)
-        self.assertLess(block.index("require_current_main"),
-                        block.rindex('git push --force-with-lease origin "$branch"'),
-                        "the guard is called again before the post-rebuild push")
-
-    def test_a_previous_run_on_the_branch_is_not_taken_for_the_new_one(self):
-        block = dispatch_block(ROLLUP.read_text())
-        previous = block.index("previous_run=")
-        dispatch = block.index("gh workflow run")
-        self.assertLess(previous, dispatch,
-                        "the previous run's id must be read before the dispatch")
-        self.assertIn('[ "$candidate" != "$previous_run" ]', block)
-
-    def test_the_digest_is_resolved_from_the_branch_tag_not_dev(self):
-        self.assertIn('TAG="${branch//\\//-}"', ROLLUP.read_text())
 
     def test_the_workflow_grants_actions_write_and_ignores_non_main_builds(self):
         wf = REPO.parent / ".github" / "workflows" / "platform-pin-rollup.yml"
