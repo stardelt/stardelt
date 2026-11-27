@@ -258,6 +258,20 @@ def main(argv: list[str] | None = None) -> int:
         if not apps:
             print("– no pin file changed; nothing to check")
             return 0
+        # A manifest can change without its pin moving (a replica count, a culler setting),
+        # and `main` carries pins that are behind until the rollup catches up. Judge only
+        # the apps whose pinned digest actually differs from the base, or a PR that edits
+        # such a file would go red for a pin it did not touch.
+        rev = args.rev or "HEAD"
+        apps = [
+            row
+            for row in apps
+            if parse_pins(pin_text(REPO, row[1], args.base)[0], row[2])
+            != parse_pins(pin_text(REPO, row[1], rev)[0], row[2])
+        ]
+        if not apps:
+            print("– no pin file changed; nothing to check")
+            return 0
     for app, manifest, kind, tag in apps:
         text, file_notes = pin_text(REPO, manifest, args.rev)
         notes.extend(file_notes)

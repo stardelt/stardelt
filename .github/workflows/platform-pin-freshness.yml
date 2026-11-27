@@ -98,6 +98,9 @@ jobs:
           fetch-depth: 0
       - name: Compare the changed pins with the registry
         working-directory: platform
+        env:
+          # Through the environment, not interpolated: a ref name must not become shell code.
+          BASE_REF: ${{ github.base_ref }}
         run: |
           python3 scripts/check_pin_freshness.py \
-            --changed --base "origin/${{ github.base_ref }}" --rev HEAD
+            --changed --base "origin/$BASE_REF" --rev HEAD
