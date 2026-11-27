@@ -21,8 +21,8 @@
 | `data.rs` | SQL & query log | 856 | 104 | 2 | Trino |
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
+| `ask.rs` | AI (Ask, MCP, models) | 821 | 489 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
-| `ask.rs` | AI (Ask, MCP, models) | 767 | 452 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
 | `secret_store.rs` | Connections | 699 | 363 | 0 | Secret store (OpenBao) |
 | `destinations.rs` | Pipelines & delivery | 647 | 354 | 4 | PostgreSQL state store |
@@ -71,4 +71,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (70 files)** | | **50298** | **44630** | **162** | |
+| **total (70 files)** | | **50352** | **44667** | **162** | |
