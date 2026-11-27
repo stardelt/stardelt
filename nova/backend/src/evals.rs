@@ -228,10 +228,12 @@ pub struct NewEvalRun {
     pub tokens: Option<i64>,
 }
 
-/// The eval a run answers: its owner group and its expected answer.
+/// The eval a run answers: the catalog, group and question the notice names, and the expected answer.
 #[derive(sqlx::FromRow)]
 struct EvalExpected {
+    catalog: String,
     owner_group: String,
+    question: String,
     expected: serde_json::Value,
 }
 
@@ -804,6 +806,102 @@ pub async fn runs(
     }
 }
 
+/// The body one failed eval run posts to its owner group's destinations.
+fn failed_run_body(
+    catalog: &str,
+    eval_id: i64,
+    question: &str,
+    owner_group: &str,
+    run: &EvalRun,
+    base_domain: &str,
+) -> serde_json::Value {
+    let reason = run.reason.as_deref().unwrap_or("the run failed");
+    let mut body = serde_json::json!({
+        "text": format!("Eval {eval_id} in {catalog} failed: {question} — {reason}"),
+        "kind": "eval_run",
+        "catalog": catalog,
+        "evalId": eval_id,
+        "runId": run.id,
+        "question": question,
+        "ownerGroup": owner_group,
+        "state": "failed",
+        "reason": reason,
+        "createdBy": run.created_by,
+        "createdAt": run.created_at,
+        "apiPath": format!("/api/evals/{eval_id}/runs"),
+    });
+    if let Some(model) = run.model.as_ref() {
+        body["model"] = serde_json::Value::String(model.clone());
+    }
+    if let Some(endpoint) = run.endpoint.as_ref() {
+        body["endpoint"] = serde_json::Value::String(endpoint.clone());
+    }
+    if !base_domain.is_empty() {
+        body["runUrl"] = serde_json::Value::String(format!(
+            "https://nova.{base_domain}/evals?catalog={catalog}"
+        ));
+    }
+    body
+}
+
+/// Tell every destination of `group` that one eval run failed. Called from a spawned task:
+/// a slow webhook never delays the run's `201`. `subject_id` is `<eval id>:<run id>`.
+pub(crate) async fn tell_group(
+    pool: &sqlx::PgPool,
+    group: &str,
+    subject_id: &str,
+    body: &serde_json::Value,
+) {
+    let found = sqlx::query_as::<_, (i64, String, serde_json::Value)>(
+        "SELECT id, kind, config FROM destination WHERE owner_group = $1 ORDER BY id",
+    )
+    .bind(group)
+    .fetch_all(pool)
+    .await;
+    let rows = match found {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(subject = %subject_id, error = %e, "the eval notice could not read the destinations");
+            return;
+        }
+    };
+    for (id, kind, config) in rows {
+        let outcome = if kind != "webhook" {
+            crate::destinations::DeliveryOutcome {
+                status: "failed",
+                http_status: None,
+                detail: "email delivery needs the platform's SMTP relay, which is not configured"
+                    .into(),
+            }
+        } else if let Some(url) = config["url"].as_str() {
+            crate::destinations::post_webhook(crate::destinations::webhook_client(), url, body)
+                .await
+        } else {
+            crate::destinations::DeliveryOutcome {
+                status: "failed",
+                http_status: None,
+                detail: "the webhook destination has no url".into(),
+            }
+        };
+        let done = sqlx::query(
+            "INSERT INTO destination_delivery \
+             (destination_id, subject_kind, subject_id, status, http_status, detail, attempted_at) \
+             VALUES ($1, 'eval_run', $2, $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(subject_id)
+        .bind(outcome.status)
+        .bind(outcome.http_status.map(i32::from))
+        .bind(&outcome.detail)
+        .bind(crate::jobs::now_ms() as i64)
+        .execute(pool)
+        .await;
+        if let Err(e) = done {
+            tracing::warn!(subject = %subject_id, error = %e, "the eval notice attempt was not recorded");
+        }
+    }
+}
+
 /// `POST /api/evals/{id}/runs` — compare one answer and store the verdict, `201` with the row.
 #[utoipa::path(
     post,
@@ -835,7 +933,7 @@ pub async fn create_run(
         return unavailable();
     };
     let eval = match sqlx::query_as::<_, EvalExpected>(
-        "SELECT owner_group, expected FROM eval WHERE id = $1",
+        "SELECT catalog, owner_group, question, expected FROM eval WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -928,6 +1026,20 @@ pub async fn create_run(
                 passed,
                 "eval run stored",
             );
+            if !row.passed {
+                let pool = pool.clone();
+                let group = eval.owner_group.clone();
+                let subject = format!("{id}:{}", row.id);
+                let body = failed_run_body(
+                    &eval.catalog,
+                    id,
+                    &eval.question,
+                    &eval.owner_group,
+                    &row,
+                    &std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default(),
+                );
+                tokio::spawn(async move { tell_group(&pool, &group, &subject, &body).await });
+            }
             (StatusCode::CREATED, Json(row)).into_response()
         }
         Err(e) => store_failed(e),
@@ -1192,5 +1304,70 @@ mod tests {
         ));
         assert!(member_of("analytics", Some(&principal("root", &[], true))));
         assert!(member_of("analytics", None), "dev mode has one person");
+    }
+
+    #[test]
+    fn a_failed_run_names_the_eval_and_its_reason() {
+        let run = EvalRun {
+            id: 1,
+            eval_id: 7,
+            passed: false,
+            reason: Some(ROWS_DIFFER.into()),
+            sql: None,
+            model: None,
+            endpoint: None,
+            tokens: None,
+            created_by: "ada".into(),
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+        };
+        let body = failed_run_body("playground", 7, "how many trips?", "visitors", &run, "");
+        assert_eq!(body["kind"], "eval_run");
+        assert_eq!(body["apiPath"], "/api/evals/7/runs");
+        assert_eq!(body["reason"], ROWS_DIFFER);
+        assert!(
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("how many trips?")),
+            "the text names the question: {body}"
+        );
+        assert!(body.get("runUrl").is_none(), "no base domain, no runUrl");
+        let with_url = failed_run_body(
+            "playground",
+            7,
+            "how many trips?",
+            "visitors",
+            &run,
+            "example.test",
+        );
+        assert_eq!(
+            with_url["runUrl"],
+            "https://nova.example.test/evals?catalog=playground"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_failed_eval_run_tells_the_group() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
+             VALUES ('visitors', 'probe', 'webhook', '{\"url\":\"http://127.0.0.1:9/hook\"}', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let body = serde_json::json!({"text": "x"});
+        tell_group(&pool, "visitors", "7:1", &body).await;
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT subject_kind, subject_id, status FROM destination_delivery \
+             WHERE subject_id = '7:1'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![("eval_run".into(), "7:1".into(), "failed".into())]
+        );
     }
 }
