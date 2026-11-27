@@ -1004,6 +1004,8 @@ pub async fn reconcile_spark_cluster(
         && let (Some(pod), Some(server_pod_name)) = (pod.as_ref(), server_pod.as_deref())
         && let Some(code) = dead_driver(pod, k8s_openapi::jiff::Timestamp::now())
     {
+        // The `SparkConnect` is `spc-<cluster>`, not `spc-<pod>`: the server pod is
+        // `spc-<cluster>-server` (#2090).
         match connects
             .delete(&format!("spc-{name}"), &Default::default())
             .await
@@ -2462,6 +2464,75 @@ mod tests {
         assert!(
             log.contains("the server pod spc-trial-server is not ready (CrashLoopBackOff)"),
             "{log}"
+        );
+    }
+
+    /// #2090: the SparkConnect is `spc-<cluster>`, so a dead server pod must delete
+    /// `spc-trial` — not `spc-spc-trial-server`, which does not exist and 404s.
+    #[tokio::test]
+    async fn a_dead_server_pod_deletes_the_connect_and_says_so() {
+        let (client, requests) = mock_client(|method, path, _body| {
+            if method == "DELETE" && path.contains("/sparkconnects/") {
+                return (
+                    200,
+                    r#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/configmaps/stardelt-spark-runtimes") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"stardelt-spark-runtimes","namespace":"data"},"data":{"spark-4.0-py3.12":"{\"image\":\"ghcr.io/example/spark@sha256:runtime\",\"sparkVersion\":\"4.0.1\",\"serviceAccount\":\"spark-runtime\",\"sparkConf\":{}}"}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/sparkconnects/spc-trial") {
+                return (
+                    200,
+                    r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"},"status":{"state":"NotReady","server":{"serviceName":"spc-trial-server","podName":"spc-trial-server"}}}"#.into(),
+                );
+            }
+            if method == "GET" && path.contains("/pods/spc-trial-server") {
+                return (
+                    200,
+                    r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"spc-trial-server","namespace":"data"},"status":{"conditions":[],"containerStatuses":[{"name":"spark-kubernetes-driver","state":{"terminated":{"exitCode":137,"reason":"Error","finishedAt":"2026-01-01T00:00:00Z"}}}]}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/networkpolicies/") {
+                return (
+                    200,
+                    r#"{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"spc-trial-ingress","namespace":"data"}}"#.into(),
+                );
+            }
+            if method == "PATCH" && path.contains("/sparkclusters/trial/status") {
+                return (
+                    200,
+                    r#"{"apiVersion":"stardelt.io/v1alpha1","kind":"SparkCluster","metadata":{"name":"trial","namespace":"data"},"spec":{"owner":{"group":"mobility-analytics"},"runtime":"spark-4.0-py3.12","state":"Running"},"status":{"phase":"Starting"}}"#.into(),
+                );
+            }
+            (
+                200,
+                r#"{"apiVersion":"sparkoperator.k8s.io/v1alpha1","kind":"SparkConnect","metadata":{"name":"spc-trial","namespace":"data"}}"#.into(),
+            )
+        });
+        let action =
+            reconcile_spark_cluster(Arc::new(cluster(SparkClusterState::Running)), ctx(client))
+                .await
+                .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+        let log = requests.lock().expect("requests").join("\n");
+        let deletes: Vec<&str> = log
+            .lines()
+            .filter(|line| line.starts_with("DELETE") && line.contains("/sparkconnects/"))
+            .collect();
+        assert_eq!(deletes.len(), 1, "{log}");
+        assert!(
+            deletes[0].contains("/sparkconnects/spc-trial?"),
+            "the SparkConnect is deleted by its own name: {log}"
+        );
+        let patches = status_patches(&requests);
+        assert!(
+            patches.iter().any(|p| p["status"]["message"]
+                == json!("the server pod spc-trial-server exited with 137; recreating the server")),
+            "{patches:?}"
         );
     }
 
