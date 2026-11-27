@@ -73,6 +73,7 @@ declare -A recipe=(
   [verify-external-secrets]='bash scripts/verify-external-secrets.sh'
   [verify-storage-capacity]='bash scripts/verify-storage-capacity.sh'
   [verify-perf]='bash scripts/perf-smoke.sh && PERF_STRICT=1 python3 perf/compare.py'
+  [verify-pegelonline]='bash scripts/verify-pegelonline.sh'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -90,7 +91,7 @@ verify-operator-values verify-connections verify-maintenance verify-pod-security
 verify-trino-tls verify-oidc-clients verify-mcp verify-mcp-tools verify-realm-admin verify-images verify-airflow-runs verify-catalog-workload-auth verify-workload-identity
 verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query verify-spark-janitor verify-spark-demo-security
 verify-wap verify-product-path verify-usage verify-cli verify-pipeline-validate verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
-verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports verify-s3-sts verify-airflow-actions verify-operator-quiet verify-pod-security-baseline verify-external-secrets verify-storage-capacity verify-perf"
+verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports verify-s3-sts verify-airflow-actions verify-operator-quiet verify-pod-security-baseline verify-external-secrets verify-storage-capacity verify-perf verify-pegelonline"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
