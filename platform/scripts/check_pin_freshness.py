@@ -34,6 +34,11 @@ APPS = [
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
+def changed_apps(changed: set[str]) -> list[tuple[str, str, str, str]]:
+    """The APPS rows whose pinned file is in `changed` (paths relative to platform/)."""
+    return [row for row in APPS if row[1] in changed]
+
+
 def _short(digest: str) -> str:
     m = re.search(r"sha256:([0-9a-f]{8})", digest)
     if m:
@@ -221,12 +226,39 @@ def main(argv: list[str] | None = None) -> int:
         help="the commit whose pins are judged, e.g. the release commit "
         "(default: origin/main, then HEAD, then the working tree)",
     )
+    parser.add_argument(
+        "--changed",
+        action="store_true",
+        help="judge only the apps whose pinned file changed against --base (a pull request)",
+    )
+    parser.add_argument(
+        "--base",
+        default="origin/main",
+        help="the commit --changed diffs against (default: origin/main)",
+    )
     args = parser.parse_args(argv)
 
     lines: list[str] = []
     notes: list[str] = []
     offline_failed = False
-    for app, manifest, kind, tag in APPS:
+    apps = APPS
+    if args.changed:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO), "diff", "--name-only", "--relative",
+             f"{args.base}...{args.rev or 'HEAD'}"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            print(f"! git diff {args.base}...{args.rev or 'HEAD'} failed: "
+                  f"{(proc.stderr.strip() or 'unknown error').splitlines()[0]}")
+            return 1
+        changed = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+        apps = changed_apps(changed)
+        if not apps:
+            print("– no pin file changed; nothing to check")
+            return 0
+    for app, manifest, kind, tag in apps:
         text, file_notes = pin_text(REPO, manifest, args.rev)
         notes.extend(file_notes)
         pinned = parse_pins(text, kind)

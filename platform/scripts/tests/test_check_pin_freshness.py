@@ -3,15 +3,20 @@
 Standard library only; discovered by `python3 -m unittest discover -s scripts/tests`.
 """
 
+import io
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from scripts.check_pin_freshness import (
+    APPS,
+    changed_apps,
     compare,
     exit_code,
+    main,
     parse_pins,
     pin_text,
 )
@@ -199,6 +204,29 @@ class PinTextTest(unittest.TestCase):
         text, notes = pin_text(self.dir, "pins.yaml", "no-such-ref")
         self.assertIn("f" * 64, text)
         self.assertTrue(any("does not resolve, judging the working tree" in n for n in notes), notes)
+
+
+class ChangedTest(unittest.TestCase):
+    """`--changed` judges only the pins a pull request moves (stardelt/stardelt#2173)."""
+
+    def test_changed_with_no_pin_file_exits_zero(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["--changed", "--base", "HEAD"])
+        self.assertEqual(code, 0)
+        self.assertIn("no pin file changed; nothing to check", out.getvalue())
+
+    def test_changed_selects_the_changed_manifest(self):
+        nova = changed_apps({"manifests/nova-deployment.yaml"})
+        self.assertEqual(nova, [APPS[0]])
+        self.assertEqual(changed_apps({"unrelated.yaml"}), [])
+
+    def test_changed_reports_an_unresolvable_base(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["--changed", "--base", "no-such-ref"])
+        self.assertEqual(code, 1)
+        self.assertTrue(out.getvalue().startswith("! git diff"), out.getvalue())
 
 
 if __name__ == "__main__":
