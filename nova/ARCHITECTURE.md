@@ -88,7 +88,7 @@ flowchart LR
   fe_detail_pages -->|39| be_pipelines_delivery
   fe_detail_pages -->|2| be_platform_view
   fe_detail_pages -->|2| be_sql_query_log
-  fe_explore -->|26| be_catalog
+  fe_explore -->|25| be_catalog
   fe_explore -->|3| be_core_identity
   fe_explore -->|5| be_lineage
   fe_explore -->|2| be_notebooks_compute
