@@ -93,6 +93,17 @@ def test_the_deployment_history_is_offered_by_default():
     assert deployments["annotations"]["readOnlyHint"] is True
 
 
+def test_the_eval_list_is_offered_by_default():
+    # The list is derived from DEFAULT_TOOLS, so the set test above cannot notice an omission;
+    # an agent that keeps itself honest needs the questions with known answers (#125).
+    srv, _ = server()
+    tools = {t["name"]: t for t in srv.handle(rpc("tools/list"))["result"]["tools"]}
+    evals = tools["catalog_eval_list"]
+    assert evals["description"] == "GET /api/catalog/evals: the Stardelt API operation catalog_eval_list"
+    assert set(evals["inputSchema"]["properties"]) == {"catalog"}
+    assert evals["annotations"]["readOnlyHint"] is True
+
+
 def test_one_recorded_deploy_is_offered_by_default():
     # The list says a stage was deployed; the row says what it applied (#110).
     srv, _ = server()
