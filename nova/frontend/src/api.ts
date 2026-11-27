@@ -195,6 +195,20 @@ export type TableDocsUpdate = {
   guide?: string | null
 }
 
+/** One data product of a catalog (#37): a table with a `stardelt.lifecycle`. */
+export type DataProduct = {
+  namespace: string
+  table: string
+  description: string | null
+  owner: string | null
+  domain: string | null
+  lifecycle: string
+  replacedBy: string | null
+}
+
+/** `GET /api/catalog/products` — the catalog's data products, in domain order. */
+export type DataProducts = { catalog: string; products: DataProduct[] }
+
 /** The freshness promise and the status it yields (#402 slice 2). */
 export type TableFreshness = Schema<'TableFreshness'>
 /** `by: null` removes the promise; an absent field changes nothing. */
@@ -1440,6 +1454,10 @@ export const api = {
   /** Every promised table of one catalog, red first (#402, #1867). */
   catalogHealth: (catalog?: string) =>
     jget<CatalogHealth>(catalogPath('/api/catalog/health', catalog)),
+  dataProducts: (catalog?: string) => {
+    const q = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
+    return jget<DataProducts>(`/api/catalog/products${q}`)
+  },
   putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
     jput<TableDocumentation>(
       catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),
