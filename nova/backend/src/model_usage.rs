@@ -64,6 +64,17 @@ pub struct UsageFeedback {
     pub down: i64,
 }
 
+/// One endpoint's eval score for the last 30 days, from `eval_run`. An endpoint whose runs
+/// named no endpoint is absent from the answer, not a zero row.
+#[derive(Debug, Serialize, FromRow, ToSchema)]
+pub struct UsageEvals {
+    pub endpoint: String,
+    /// The runs whose answer was the expected one.
+    pub passed: i64,
+    /// Every run in the window; `passed <= total`.
+    pub total: i64,
+}
+
 /// The answer of `GET /api/admin/model-usage`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ModelUsage {
@@ -73,6 +84,8 @@ pub struct ModelUsage {
     pub calls: Vec<UsageCall>,
     /// This month's votes per endpoint, name order; an endpoint nobody rated is absent.
     pub feedback: Vec<UsageFeedback>,
+    /// The last 30 days' eval verdicts per endpoint, name order; an endpoint with no run is absent.
+    pub evals: Vec<UsageEvals>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,12 +153,26 @@ async fn feedback(pool: &PgPool) -> Result<Vec<UsageFeedback>, sqlx::Error> {
     .await
 }
 
+/// The last 30 days' eval verdicts per endpoint, name order. A run whose runner named no
+/// endpoint is not attributed to a model.
+async fn evals(pool: &PgPool) -> Result<Vec<UsageEvals>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT endpoint, \
+            count(*) FILTER (WHERE passed)::bigint AS passed, \
+            count(*)::bigint AS total \
+         FROM eval_run WHERE endpoint IS NOT NULL AND created_at >= now() - interval '30 days' \
+         GROUP BY endpoint ORDER BY endpoint",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 #[utoipa::path(
     get,
     operation_id = "admin_model_usage",
     path = "/api/admin/model-usage",
     tag = "internal",
-    description = "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). `feedback` carries, per endpoint, how many of this month's calls the people rated 👍 (`up`) and 👎 (`down`); an endpoint nobody rated is absent. Never who voted. No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
+    description = "What the platform used of each model endpoint this month (UTC). `month` is the calendar month as `YYYY-MM`; `groups` holds the month's tokens per group and endpoint, the largest total first — `(none)` is `nova`'s probe rows and callers without a group; `estimatedCalls` counts the calls whose tokens were estimated as `ceil(bytes / 4)`, so the page can say \"about\". `calls` holds the last calls, newest first; `limit` is 1 to 500 (50 by default) and `group` narrows `calls` only (the totals are always the whole month). `feedback` carries, per endpoint, how many of this month's calls the people rated 👍 (`up`) and 👎 (`down`); an endpoint nobody rated is absent. `evals` carries, per endpoint, the last 30 days' eval runs and how many passed (`passed` of `total`); an endpoint whose runs named no endpoint is absent. Never who voted. No prompt and no answer text: the table stores sizes and SHA-256 hashes. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Without a state store the answer is 503. Answers `Cache-Control: no-store`.",
     params(
         ("limit" = Option<i64>, Query, description = "How many calls, 1 to 500 (default 50)"),
         ("group" = Option<String>, Query, description = "Only this group in `calls`; the totals stay the whole month"),
@@ -171,6 +198,7 @@ pub(crate) async fn list(
             groups: totals(pool).await?,
             calls: calls(pool, params.group.as_deref(), limit).await?,
             feedback: feedback(pool).await?,
+            evals: evals(pool).await?,
         })
     }
     .await;
@@ -275,5 +303,37 @@ mod tests {
         assert_eq!(votes.len(), 1, "no vote is not a zero row");
         assert_eq!(votes[0].endpoint, "default");
         assert_eq!((votes[0].up, votes[0].down), (1, 0));
+
+        let eval_id: i64 = sqlx::query_scalar(
+            "INSERT INTO eval (catalog, owner_group, question, expected, created_by) \
+             VALUES ('playground', 'analytics', 'how many orders?', '{\"kind\":\"value\",\"value\":1}', 'alice') \
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (passed, endpoint) in [
+            (true, Some("default")),
+            (false, Some("default")),
+            (true, None),
+        ] {
+            sqlx::query(
+                "INSERT INTO eval_run (eval_id, passed, created_by, endpoint) VALUES ($1, $2, 'alice', $3)",
+            )
+            .bind(eval_id)
+            .bind(passed)
+            .bind(endpoint)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let scores = evals(&pool).await.unwrap();
+        assert_eq!(
+            scores.len(),
+            1,
+            "a run without an endpoint is not attributed to a model"
+        );
+        assert_eq!(scores[0].endpoint, "default");
+        assert_eq!((scores[0].passed, scores[0].total), (1, 2));
     }
 }
