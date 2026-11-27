@@ -827,6 +827,10 @@ def context(nova, directory, check=False):
     _context_problems(manifest["context"], problems)
     if problems:
         return problems, []
+    head = manifest.get("bundle")
+    group = head.get("ownerGroup") if isinstance(head, dict) else None
+    if not isinstance(group, str) or not group:
+        return [("bundle.ownerGroup", "must be a group name, so a table with no owner can be claimed")], []
     rows = []
     for entry in manifest["context"]["tables"]:
         catalog, ns, tbl = entry["table"].split(".")
@@ -846,12 +850,15 @@ def context(nova, directory, check=False):
         if check:
             rows.append({"table": entry["table"], "action": "would-set"})
             continue
+        body = {"guide": wanted}
+        if not doc.get("owner"):
+            body["owner"] = group
         try:
             nova.call(
                 "table_documentation_update",
                 path={"ns": ns, "tbl": tbl},
                 query={"catalog": catalog},
-                body={"guide": wanted},
+                body=body,
             )
         except api.StardeltApiError as err:
             problems.append((entry["table"], str(err)))

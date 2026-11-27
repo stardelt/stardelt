@@ -25,6 +25,7 @@ class Nova:
 
     def __init__(self, guides):
         self.guides = guides  # {"catalog.ns.tbl": guide or None}
+        self.owners = {}  # {"catalog.ns.tbl": owner or None}
         self.calls = []
 
     def call(self, op, path=None, query=None, body=None, headers=None):
@@ -33,7 +34,7 @@ class Nova:
             key = f"{query['catalog']}.{path['ns']}.{path['tbl']}"
             if self.guides.get("refuse-get") == key:
                 raise api.StardeltApiError(403, "only the table's owner may read it")
-            return {"guide": self.guides.get(key)}
+            return {"guide": self.guides.get(key), "owner": self.owners.get(key)}
         if op == "table_documentation_update":
             key = f"{query['catalog']}.{path['ns']}.{path['tbl']}"
             self.guides[key] = body["guide"]
@@ -99,9 +100,26 @@ def test_the_command_exits_1_on_drift_under_check(tmp_path, monkeypatch):
     assert nova.updates() == []
 
 
-def test_applying_sets_the_guide_with_only_the_guide_in_the_body(tmp_path):
+def test_applying_claims_an_ownerless_table_with_the_bundles_group(tmp_path):
     directory = make(tmp_path)
     nova = Nova({})
+    problems, rows = bundle.context(nova, directory)
+    assert problems == []
+    assert rows == [{"table": "bronze.shop.customers", "action": "set"}]
+    assert nova.updates() == [
+        (
+            "table_documentation_update",
+            {"ns": "shop", "tbl": "customers"},
+            {"catalog": "bronze"},
+            {"guide": "How orders join customers.", "owner": "sales"},
+        )
+    ]
+
+
+def test_an_owned_table_is_written_without_an_owner(tmp_path):
+    directory = make(tmp_path)
+    nova = Nova({})
+    nova.owners["bronze.shop.customers"] = "shop-owners"
     problems, rows = bundle.context(nova, directory)
     assert problems == []
     assert rows == [{"table": "bronze.shop.customers", "action": "set"}]
