@@ -80,7 +80,7 @@ BASE_DOMAIN ?= $(or $(INGRESS_HOST),alpha.dev.stardelt.io)
 
 .PHONY: _context help deps lint install install-core install-notebooks install-spark install-spark-demo install-identity install-operator openfga trino catalogs upgrade uninstall build-superset-image push-superset-image build-jupyter-image push-jupyter-image pf pin pin-images dev-refresh dev-watch dev-status check-pins check-cnpg-pin verify-pins spike-superset-dashboards spike-spark-pipeline-dry-run spike-pyiceberg-catalog-token verify-spark-guard verify-spark-group-write verify-spark-config verify-spark-demo-sandbox verify-spark-auth verify-spark-query verify-demo-visitor dev-up dev-down dev-dns dev-dns-down platform-config check-hub-config demo-inventory demo-inventory-check demo-notebook exit-status verify-product-path verify-product-path-create verify-usage perf-smoke verify-cli spike-trino-idle spike-trino-row-filters perf-compare verify-perf perf-pipelines perf-concurrency perf-spark perf-highwater perf-ingest perf-report
 .PHONY: chart-deps chart-template chart-install
-.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale verify-warehouse-autostop sync-realm-admin sync-realm-user-management
+.PHONY: verify-backups verify-backups-identity verify-backups-nova verify-backups-openfga verify-backups-all verify-restore verify-images verify-streaming verify-stream-path verify-compute verify-maintenance verify-cronjobs verify-cron-schedule verify-restarts verify-fresh-node verify-fresh-node-product e2e-fresh-node e2e-cleanup verify-backup-config verify-realm-admin verify-seaweedfs-ports verify-metrics verify-pod-security verify-pod-security-baseline verify-warehouse-scale verify-warehouse-autostop sync-realm-admin sync-realm-user-management
 .PHONY: backups verify-pgdump offsite-backup export-recovery-secrets import-recovery-secrets
 .PHONY: sync-oidc-clients verify-oidc-clients verify-mcp verify-trino-tls verify-trino-auth verify-trino-system-catalog verify-trino-graceful-shutdown sync-trino-group-sync-client sync-pipeline-runner-client sync-dev-client sync-mcp-client sync-mcp-exchange sync-catalog-audience openbao test-openbao-policies seaweedfs-admin
 .PHONY: external-secrets verify-external-secrets eso-stores
@@ -228,6 +228,10 @@ verify-images: _context ## Every pinned stardelt image is readable with the clus
 
 verify-streaming: _context ## The broker, the Spark Operator's watch and every StreamApp are wired (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-streaming.sh
+
+.PHONY: verify-stream-path
+verify-stream-path: _context ## One Kafka message becomes one sink row, end to end (live; creates and removes its own stream)
+	@NS=$(NAMESPACE) bash scripts/verify-stream-path.sh
 
 verify-compute: _context ## The SparkCluster CRD, runtime catalogue, Nova RBAC and every cluster's reconcile state (manual)
 	@NS=$(NAMESPACE) bash scripts/verify-compute.sh
