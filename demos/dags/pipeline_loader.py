@@ -46,7 +46,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import DAG
+from airflow.sdk import Asset, DAG
 from airflow.timetables.trigger import CronTriggerTimetable
 
 # The support package sits next to this file. Airflow does not put the DAGs folder on the
@@ -57,7 +57,13 @@ from stardelt_pipelines.access import dag_access  # noqa: E402
 from stardelt_pipelines.dbt import DbtPodOperator  # noqa: E402
 from stardelt_pipelines.expand import expand, run_values  # noqa: E402
 from stardelt_pipelines.notebook import NotebookPodOperator  # noqa: E402
-from stardelt_pipelines.plan import DEFAULT_PRINCIPAL, PlanError, plan, refuse_unrunnable  # noqa: E402
+from stardelt_pipelines.plan import (  # noqa: E402
+    DEFAULT_PRINCIPAL,
+    PlanError,
+    asset_uri,
+    plan,
+    refuse_unrunnable,
+)
 from stardelt_pipelines.principal import principal_pod_override  # noqa: E402
 from stardelt_pipelines.spark_pipeline import SparkPipelinePodOperator  # noqa: E402
 
@@ -304,12 +310,30 @@ def _wap_publish(tables: list[str], **context) -> None:
     log.info("wap: published %s, dropped branch %s", ", ".join(tables), branch)
 
 
+def _asset(table: str) -> Asset:
+    """The asset an outlet raises and a trigger waits for; one helper, one uri."""
+    return Asset(asset_uri(table))
+
+
+def _schedule(p):
+    """The DAG's schedule: `[Asset]` for `all`, `Asset | Asset` for `any`, the cron otherwise."""
+    if not p.trigger:
+        return CronTriggerTimetable(p.cron, timezone=p.timezone) if p.cron else None
+    assets = [_asset(table) for table in p.trigger.tables]
+    if p.trigger.mode == "all":
+        return assets
+    schedule = assets[0]
+    for asset in assets[1:]:
+        schedule = schedule | asset
+    return schedule
+
+
 def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
     refuse_unrunnable(p)
     access = dag_access(p.owner_group)
     dag = DAG(
         dag_id=p.dag_id,
-        schedule=CronTriggerTimetable(p.cron, timezone=p.timezone) if p.cron else None,
+        schedule=_schedule(p),
         start_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
         catchup=False,
         is_paused_upon_creation=False,
@@ -372,6 +396,7 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
                 connection_type=t.connection_type,
                 connection_config=t.connection_config,
                 wap=p.publish == "wap",
+                outlets=[_asset(table) for table in t.writes],
                 namespace=namespace,
                 dag=dag,
             )
@@ -413,6 +438,7 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
                 # (`crd.rs::principal_client_id`: `sp-<name>`); the worker may `use` it (#1260).
                 principal_sa=f"sp-{p.principal.name}",
                 wap=p.publish == "wap",
+                outlets=[_asset(table) for table in t.writes],
                 namespace=namespace,
                 dag=dag,
             )

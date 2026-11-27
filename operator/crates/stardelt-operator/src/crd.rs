@@ -1322,6 +1322,30 @@ pub enum PipelineEngine {
     Spark,
 }
 
+/// Whether a run waits for every named table or for any one of them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineTriggerMode {
+    /// Start when every named table was updated.
+    #[default]
+    All,
+    /// Start when any one named table was updated.
+    Any,
+}
+
+/// What starts a run besides a person: the update of one or more tables.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineTrigger {
+    /// Tables whose update starts the pipeline, as `catalog.schema.table`; 1 to 10.
+    #[serde(rename = "tablesUpdated")]
+    #[schemars(length(min = 1, max = 10), inner(length(min = 1, max = 512)))]
+    pub tables_updated: Vec<String>,
+    /// `all` (default) waits for every table, `any` for one of them.
+    #[serde(default)]
+    pub mode: PipelineTriggerMode,
+}
+
 /// When a pipeline runs by itself.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 pub struct PipelineSchedule {
@@ -1411,6 +1435,10 @@ pub enum PipelineConcurrency {
     {
         "rule": "!has(self.notify) || has(self.ownerGroup)",
         "message": "notify needs an ownerGroup: only a pipeline's owner group can name destinations"
+    },
+    {
+        "rule": "!has(self.schedule) || !has(self.triggers)",
+        "message": "a pipeline has spec.schedule or spec.triggers, not both"
     }
 ]))]
 pub struct PipelineSpec {
@@ -1420,6 +1448,11 @@ pub struct PipelineSpec {
     /// Optional schedule; a pipeline without one runs on demand only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<PipelineSchedule>,
+    /// Tables whose update starts a run. At most one trigger today, and not together with
+    /// `spec.schedule`; absent means the pipeline starts on demand or by its cron only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 1))]
+    pub triggers: Vec<PipelineTrigger>,
     /// The group that owns the pipeline: its members see it, run it and pause it in Nova. Optional so
     /// that existing pipelines keep working; a pipeline without an owner is visible to administrators only.
     #[serde(
@@ -1553,6 +1586,39 @@ impl PipelineSpec {
             && !group_name_ok(group)
         {
             return Err("ownerGroup must be a valid group name".to_string());
+        }
+        if self.schedule.is_some() && !self.triggers.is_empty() {
+            return Err("a pipeline has spec.schedule or spec.triggers, not both".to_string());
+        }
+        if self.triggers.len() > 1 {
+            return Err("a pipeline has one trigger today".to_string());
+        }
+        let written: std::collections::BTreeSet<&str> = self
+            .tasks
+            .iter()
+            .flat_map(|task| task.writes.iter().map(String::as_str))
+            .collect();
+        for trigger in &self.triggers {
+            if trigger.tables_updated.is_empty() {
+                return Err("a trigger needs at least one table in tablesUpdated".to_string());
+            }
+            for table in &trigger.tables_updated {
+                let parts: Vec<&str> = table.split('.').collect();
+                if parts.len() != 3
+                    || parts
+                        .iter()
+                        .any(|p| p.is_empty() || p.contains(char::is_whitespace))
+                {
+                    return Err(format!(
+                        "trigger table `{table}` is not catalog.schema.table"
+                    ));
+                }
+                if written.contains(table.as_str()) {
+                    return Err(format!(
+                        "trigger table `{table}` is written by this pipeline: a pipeline cannot be triggered by its own output"
+                    ));
+                }
+            }
         }
         let mut names = std::collections::BTreeSet::new();
         for task in &self.tasks {
@@ -4705,6 +4771,7 @@ mod tests {
         PipelineSpec {
             tasks,
             schedule: None,
+            triggers: Vec::new(),
             run_as: None,
             owner_group: None,
             description: None,
@@ -4826,6 +4893,64 @@ mod tests {
         .expect("deserialize Pipeline");
         assert_eq!(p.spec.owner_group, None);
         assert_eq!(p.spec.validate(), Ok(()));
+    }
+
+    #[test]
+    fn pipeline_triggers_are_optional_and_checked() {
+        let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
+        spec.triggers = vec![PipelineTrigger {
+            tables_updated: vec!["mobility.bronze.trips".to_string()],
+            mode: PipelineTriggerMode::Any,
+        }];
+        assert_eq!(spec.validate(), Ok(()));
+
+        let mut both = spec.clone();
+        both.schedule = Some(PipelineSchedule {
+            cron: "0 3 * * *".to_string(),
+            timezone: None,
+        });
+        assert_eq!(
+            both.validate().unwrap_err(),
+            "a pipeline has spec.schedule or spec.triggers, not both"
+        );
+
+        let mut two = spec.clone();
+        two.triggers.push(spec.triggers[0].clone());
+        assert_eq!(
+            two.validate().unwrap_err(),
+            "a pipeline has one trigger today"
+        );
+
+        let mut bad = spec.clone();
+        bad.triggers[0].tables_updated = vec!["mobility.bronze".to_string()];
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            "trigger table `mobility.bronze` is not catalog.schema.table"
+        );
+
+        let mut own = spec_of(vec![task("load", TaskKind::SparkPipeline, &[])]);
+        own.tasks[0].project = Some("graphs/shop".into());
+        own.tasks[0].writes = vec!["mobility.silver.trips".to_string()];
+        own.triggers = vec![PipelineTrigger {
+            tables_updated: vec!["mobility.silver.trips".to_string()],
+            mode: PipelineTriggerMode::All,
+        }];
+        assert_eq!(
+            own.validate().unwrap_err(),
+            "trigger table `mobility.silver.trips` is written by this pipeline: a pipeline cannot be triggered by its own output"
+        );
+
+        let yaml = serde_json::json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Pipeline",
+            "metadata": { "name": "daily", "namespace": "stardelt" },
+            "spec": {
+                "tasks": [{ "name": "load", "kind": "sql", "sql": "SELECT 1" }],
+                "triggers": [{ "tablesUpdated": ["mobility.bronze.trips"], "mode": "any" }]
+            }
+        });
+        let p: Pipeline = serde_json::from_value(yaml).expect("deserialize a trigger");
+        assert_eq!(p.spec.triggers[0].mode, PipelineTriggerMode::Any);
     }
 
     #[test]
