@@ -60,7 +60,7 @@ test.describe('parseDefinition', () => {
   test('a key that is not part of a pipeline is named, with its line, before Nova silently ignores it', () => {
     expect(parseDefinition('name: a\nshedule:\n  cron: x\n')).toEqual({
       ok: false,
-      message: 'Unknown key "shedule"; the keys are name, ownerGroup, sql, notebook, tasks, schedule, params, options.',
+      message: 'Unknown key "shedule"; the keys are name, ownerGroup, description, sql, notebook, tasks, schedule, triggers, params, options, notify, viewers, publish.',
       line: 2,
     })
   })
@@ -83,11 +83,11 @@ test.describe('editorRule and the requests', () => {
 
   test('the update carries the version that was read; the check does not', () => {
     expect(toUpdateRequest(DOCUMENT, '7')).toEqual({
-      sql: 'select 1', schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      sql: 'select 1', schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' }, triggers: null,
       params: { day: '2026-11-01' }, options: OPTIONS, resourceVersion: '7',
     })
     const bare = { name: 'daily', ownerGroup: 'etl', sql: 'select 1', options: OPTIONS }
-    expect(toUpdateRequest(bare, null)).toEqual({ sql: 'select 1', schedule: null, params: {}, options: OPTIONS })
+    expect(toUpdateRequest(bare, null)).toEqual({ sql: 'select 1', schedule: null, triggers: null, params: {}, options: OPTIONS })
     expect(toValidateRequest(bare)).toEqual({
       name: 'daily', ownerGroup: 'etl', sql: 'select 1', schedule: null, options: OPTIONS,
     })
@@ -108,9 +108,35 @@ test.describe('editorRule and the requests', () => {
     expect(toUpdateRequest(document, '7')).toEqual({
       tasks: document.tasks,
       schedule: null,
+      triggers: null,
       params: {},
       options: OPTIONS,
       resourceVersion: '7',
     })
+  })
+
+  test('every key a pipeline can carry is read and carried into both requests', () => {
+    const document: PipelineDocument = {
+      name: 'shop-gold',
+      ownerGroup: 'etl',
+      description: 'Builds the gold layer.',
+      sql: 'select 1',
+      triggers: [{ tablesUpdated: ['silver.shop.orders'], mode: 'any' }],
+      params: {},
+      options: OPTIONS,
+      notify: { onFailure: ['ops'] },
+      viewers: ['visitors'],
+      publish: 'wap',
+    }
+    expect(parseDefinition(toYaml(document))).toEqual({ ok: true, document })
+    const carried = {
+      description: 'Builds the gold layer.',
+      triggers: [{ tablesUpdated: ['silver.shop.orders'], mode: 'any' }],
+      notify: { onFailure: ['ops'] },
+      viewers: ['visitors'],
+      publish: 'wap',
+    }
+    expect(toUpdateRequest(document, null)).toMatchObject(carried)
+    expect(toValidateRequest(document)).toMatchObject(carried)
   })
 })
