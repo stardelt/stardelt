@@ -49,6 +49,16 @@ SPARK_SKIPPED_DIRS = ("__pycache__", ".git")
 CONTEXT_KEYS = ("tables",)
 MAX_CONTEXT_TABLES = 50
 MAX_GUIDE = 16000
+# The store's own limits (nova/backend/src/metric_definitions.rs): a bundle checks them offline
+# with the same sentences, so a refused write is caught in the pull request, not in CI.
+METRIC_KEYS = ("name", "description", "expression", "timeColumn", "dimensions")
+MAX_METRICS = 20
+MAX_METRIC_NAME = 64
+MAX_METRIC_DESCRIPTION = 500
+MAX_METRIC_EXPRESSION = 2000
+MAX_METRIC_DIMENSIONS = 10
+METRIC_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # The CRD's `project` pattern and 128-character limit (operator/crates/stardelt-operator/src/crd.rs).
 SPARK_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{1,127}$")
 # What `spark-pipeline.yml` may not set: stardelt sets them at run time (#80).
@@ -140,8 +150,57 @@ def _migrations(root, spec, problems):
     return sorted(out, key=lambda migration: migration["name"])
 
 
+def _metric_problems(at, metrics, problems):
+    """Check one table's `metrics:` list with the rules Nova's store enforces."""
+    if not isinstance(metrics, list) or not metrics:
+        problems.append((at, "must be a list of at least one metric"))
+        return
+    if len(metrics) > MAX_METRICS:
+        problems.append((at, f"holds more than {MAX_METRICS} metrics"))
+    seen = set()
+    for index, metric in enumerate(metrics):
+        where = f"{at}[{index}]"
+        if not isinstance(metric, dict):
+            problems.append((where, "must be a mapping with name, description and expression"))
+            continue
+        for key in sorted(set(metric) - set(METRIC_KEYS)):
+            problems.append((where, f"unknown key {key!r} (known: {', '.join(METRIC_KEYS)})"))
+        name = metric.get("name")
+        if not isinstance(name, str) or not METRIC_NAME.match(name):
+            problems.append((f"{where}.name", "must start with a lower-case letter and hold only lower-case letters, digits and underscores, at most 64"))
+        elif name in seen:
+            problems.append((f"{where}.name", f"{name} is named twice in this table"))
+        else:
+            seen.add(name)
+        description = metric.get("description")
+        if not isinstance(description, str) or not (1 <= len(description) <= MAX_METRIC_DESCRIPTION):
+            problems.append((f"{where}.description", f"must be 1 to {MAX_METRIC_DESCRIPTION} characters"))
+        expression = metric.get("expression")
+        if (
+            not isinstance(expression, str)
+            or not (1 <= len(expression) <= MAX_METRIC_EXPRESSION)
+            or ";" in expression
+            or "--" in expression
+            or "/*" in expression
+        ):
+            problems.append((f"{where}.expression", f"must be a SQL expression of 1 to {MAX_METRIC_EXPRESSION} characters: no semicolon and no comment"))
+        time_column = metric.get("timeColumn")
+        if time_column is not None and (not isinstance(time_column, str) or not COLUMN.match(time_column)):
+            problems.append((f"{where}.timeColumn", "must be a column name"))
+        dimensions = metric.get("dimensions", [])
+        if not isinstance(dimensions, list) or len(dimensions) > MAX_METRIC_DIMENSIONS:
+            problems.append((f"{where}.dimensions", f"must be at most {MAX_METRIC_DIMENSIONS} distinct column names"))
+        else:
+            for dimension in dimensions:
+                if not isinstance(dimension, str) or not COLUMN.match(dimension):
+                    problems.append((f"{where}.dimensions", f"must be at most {MAX_METRIC_DIMENSIONS} distinct column names"))
+                    break
+            if len(set(dimensions)) != len(dimensions):
+                problems.append((f"{where}.dimensions", "a column is named twice"))
+
+
 def _context_problems(section, problems):
-    """Check a bundle's `context:` block: table guides, keyed catalog.namespace.table."""
+    """Check a bundle's `context:` block: table guides and metrics, keyed catalog.namespace.table."""
     where = "context"
     if not isinstance(section, dict):
         problems.append((where, "must be a mapping with `tables`"))
@@ -158,10 +217,10 @@ def _context_problems(section, problems):
     for index, entry in enumerate(tables):
         at = f"{where}.tables[{index}]"
         if not isinstance(entry, dict):
-            problems.append((at, "must be a mapping with `table` and `guide`"))
+            problems.append((at, "must be a mapping with `table` and a `guide` or `metrics`"))
             continue
-        for key in sorted(set(entry) - {"table", "guide"}):
-            problems.append((at, f"unknown key {key!r} (known: table, guide)"))
+        for key in sorted(set(entry) - {"table", "guide", "metrics"}):
+            problems.append((at, f"unknown key {key!r} (known: table, guide, metrics)"))
         name = entry.get("table")
         if not isinstance(name, str) or not TABLE.match(name):
             problems.append((f"{at}.table", "must be catalog.namespace.table"))
@@ -170,12 +229,16 @@ def _context_problems(section, problems):
         else:
             seen.add(name)
         guide = entry.get("guide")
-        if not isinstance(guide, str) or not guide.strip():
+        if guide is not None and (not isinstance(guide, str) or not guide.strip()):
             problems.append((f"{at}.guide", "must be a non-empty string"))
-        elif len(guide.strip()) > MAX_GUIDE:
+        elif isinstance(guide, str) and len(guide.strip()) > MAX_GUIDE:
             problems.append((f"{at}.guide", f"must be at most {MAX_GUIDE} characters"))
-        elif "\x00" in guide:
+        elif isinstance(guide, str) and "\x00" in guide:
             problems.append((f"{at}.guide", "must not contain a NUL character"))
+        if guide is None and "metrics" not in entry:
+            problems.append((at, "needs a `guide`, a `metrics` list, or both"))
+        if "metrics" in entry:
+            _metric_problems(f"{at}.metrics", entry["metrics"], problems)
 
 
 def _substitute(text, values, problems, where):
@@ -809,12 +872,78 @@ def validate(directory, target=None):
     return problems, warnings, resolved
 
 
-def context(nova, directory, check=False):
-    """Apply the bundle's `context:` guides; answers ``(problems, rows)``.
+def _same_metric(have, body):
+    """Whether a stored definition already says what the bundle says (no write needed)."""
+    return (
+        (have.get("description") or "") == body["description"]
+        and (have.get("expression") or "") == body["expression"]
+        and (have.get("timeColumn") or None) == (body["timeColumn"] or None)
+        and list(have.get("dimensions") or []) == list(body["dimensions"])
+    )
 
-    Each row is ``{"table", "action"}`` with action ``unchanged``, ``would-set`` (only with
-    ``check``) or ``set``. A refused read or write is a problem and its table is not retried;
-    the other tables are still visited.
+
+def _apply_metrics(nova, catalog, ns, tbl, wanted, check, table, rows, problems):
+    """Create, replace or leave the table's metric definitions; appends to ``rows``/``problems``.
+
+    Nova stores metrics, it never updates one: a definition whose words differ is deleted and
+    created again, which is why a ``check`` row says ``would-replace``. A metric the bundle does
+    not name is left alone, exactly as a guide is.
+    """
+    try:
+        existing = nova.call(
+            "metric_definitions_list",
+            path={"ns": ns, "tbl": tbl},
+            query={"catalog": catalog},
+        )
+    except api.StardeltApiError as err:
+        problems.append((table, str(err)))
+        return
+    by_name = {(row.get("name") or ""): row for row in existing or []}
+    for metric in wanted:
+        body = {
+            "name": metric["name"],
+            "description": metric["description"],
+            "expression": metric["expression"],
+            "timeColumn": metric.get("timeColumn"),
+            "dimensions": list(metric.get("dimensions") or []),
+        }
+        have = by_name.get(metric["name"])
+        if have is not None and _same_metric(have, body):
+            rows.append({"table": table, "metric": metric["name"], "action": "unchanged"})
+            continue
+        if check:
+            rows.append({
+                "table": table,
+                "metric": metric["name"],
+                "action": "would-replace" if have is not None else "would-create",
+            })
+            continue
+        try:
+            if have is not None:
+                nova.call("metric_definitions_delete", path={"id": have["id"]})
+            nova.call(
+                "metric_definitions_create",
+                path={"ns": ns, "tbl": tbl},
+                query={"catalog": catalog},
+                body=body,
+            )
+        except api.StardeltApiError as err:
+            problems.append((f"{table} {metric['name']}", str(err)))
+            continue
+        rows.append({
+            "table": table,
+            "metric": metric["name"],
+            "action": "replaced" if have is not None else "created",
+        })
+
+
+def context(nova, directory, check=False):
+    """Apply the bundle's `context:` guides and metric definitions; answers ``(problems, rows)``.
+
+    Each row is ``{"table", "action"}`` for a guide and ``{"table", "metric", "action"}`` for a
+    metric, with action ``unchanged``, ``set``/``created``/``replaced``, or ``would-set``/
+    ``would-create``/``would-replace`` (only with ``check``). A refused read or write is a problem
+    and its table is not retried; the other tables are still visited.
     """
     root = Path(directory)
     try:
@@ -834,7 +963,8 @@ def context(nova, directory, check=False):
     rows = []
     for entry in manifest["context"]["tables"]:
         catalog, ns, tbl = entry["table"].split(".")
-        wanted = entry["guide"].strip()
+        guide = entry.get("guide")
+        wanted = guide.strip() if isinstance(guide, str) else None
         try:
             doc = nova.call(
                 "table_documentation_get",
@@ -844,26 +974,28 @@ def context(nova, directory, check=False):
         except api.StardeltApiError as err:
             problems.append((entry["table"], str(err)))
             continue
-        if ((doc.get("guide") or "").strip()) == wanted:
-            rows.append({"table": entry["table"], "action": "unchanged"})
-            continue
-        if check:
-            rows.append({"table": entry["table"], "action": "would-set"})
-            continue
-        body = {"guide": wanted}
-        if not doc.get("owner"):
-            body["owner"] = group
-        try:
-            nova.call(
-                "table_documentation_update",
-                path={"ns": ns, "tbl": tbl},
-                query={"catalog": catalog},
-                body=body,
-            )
-        except api.StardeltApiError as err:
-            problems.append((entry["table"], str(err)))
-            continue
-        rows.append({"table": entry["table"], "action": "set"})
+        if wanted is not None:
+            if ((doc.get("guide") or "").strip()) == wanted:
+                rows.append({"table": entry["table"], "action": "unchanged"})
+            elif check:
+                rows.append({"table": entry["table"], "action": "would-set"})
+            else:
+                body = {"guide": wanted}
+                if not doc.get("owner"):
+                    body["owner"] = group
+                try:
+                    nova.call(
+                        "table_documentation_update",
+                        path={"ns": ns, "tbl": tbl},
+                        query={"catalog": catalog},
+                        body=body,
+                    )
+                except api.StardeltApiError as err:
+                    problems.append((entry["table"], str(err)))
+                    continue
+                rows.append({"table": entry["table"], "action": "set"})
+        if "metrics" in entry:
+            _apply_metrics(nova, catalog, ns, tbl, entry["metrics"], check, entry["table"], rows, problems)
     return problems, rows
 
 

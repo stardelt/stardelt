@@ -75,3 +75,40 @@ def test_an_unknown_key_is_refused():
     assert len(inside) == 1, [error.message for error in inside]
     assert "'schedual' was unexpected" in inside[0].message
     assert list(inside[0].absolute_path)[-1] == "prod", "jsonschema names the object that holds the extra key"
+
+
+def test_a_context_row_may_carry_metrics_and_no_guide():
+    doc = {
+        "bundle": {"name": "shop-etl", "ownerGroup": "shop"},
+        "include": ["x.yaml"],
+        "targets": {"prod": {"mode": "production", "runAs": "pipeline-shop"}},
+        "context": {
+            "tables": [
+                {
+                    "table": "bronze.shop.orders",
+                    "metrics": [
+                        {
+                            "name": "revenue",
+                            "description": "Order revenue in euros.",
+                            "expression": "sum(total_cents) / 100.0",
+                            "timeColumn": "ordered_at",
+                            "dimensions": ["country"],
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    assert errors(doc) == []
+
+
+def test_a_context_row_with_neither_a_guide_nor_metrics_is_refused():
+    doc = {
+        "bundle": {"name": "shop-etl", "ownerGroup": "shop"},
+        "include": ["x.yaml"],
+        "targets": {"prod": {"mode": "production", "runAs": "pipeline-shop"}},
+        "context": {"tables": [{"table": "bronze.shop.orders"}]},
+    }
+    found = errors(doc)
+    assert len(found) == 1, [error.message for error in found]
+    assert "is not valid under any of the given schemas" in found[0].message

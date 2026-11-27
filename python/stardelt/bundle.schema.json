@@ -91,7 +91,7 @@
       }
     },
     "context": {
-      "description": "Guides the bundle sets on its tables; `stardelt bundle context` applies them.",
+      "description": "Guides and metric definitions the bundle sets on its tables; `stardelt bundle context` applies them.",
       "type": "object",
       "additionalProperties": false,
       "required": ["tables"],
@@ -103,10 +103,33 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["table", "guide"],
+            "required": ["table"],
+            "anyOf": [{ "required": ["guide"] }, { "required": ["metrics"] }],
             "properties": {
               "table": { "type": "string", "pattern": "^[^ .]+\\.[^ .]+\\.[^ .]+$" },
-              "guide": { "type": "string", "minLength": 1, "maxLength": 16000 }
+              "guide": { "type": "string", "minLength": 1, "maxLength": 16000 },
+              "metrics": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "description", "expression"],
+                  "properties": {
+                    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+                    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+                    "expression": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "timeColumn": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+                    "dimensions": {
+                      "type": "array",
+                      "maxItems": 10,
+                      "uniqueItems": true,
+                      "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+                    }
+                  }
+                }
+              }
             }
           }
         }
