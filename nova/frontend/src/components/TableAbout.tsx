@@ -93,6 +93,8 @@ export default function TableAbout({
   const [tagError, setTagError] = useState<string | null>(null)
   const [owner, setOwner] = useState('')
   const [domain, setDomain] = useState('')
+  const [lifecycle, setLifecycle] = useState('')
+  const [replacedBy, setReplacedBy] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -120,6 +122,8 @@ export default function TableAbout({
     setTagError(null)
     setOwner(initialOwner(groups, doc.owner, admin))
     setDomain(doc.domain ?? '')
+    setLifecycle(doc.lifecycle ?? '')
+    setReplacedBy(doc.replacedBy ?? '')
     setSaveError(null)
     setNotice(null)
     setEditing(true)
@@ -171,6 +175,10 @@ export default function TableAbout({
   const ownerTouched = owner !== (doc ? initialOwner(groups, doc.owner, admin) : '')
   const nextDomain = domain.trim()
   const domainChanged = (nextDomain === '' ? null : nextDomain) !== (doc?.domain ?? null)
+  const nextLifecycle = lifecycle === '' ? null : lifecycle
+  const lifecycleChanged = nextLifecycle !== (doc?.lifecycle ?? null)
+  const nextReplacedBy = replacedBy.trim() === '' ? null : replacedBy.trim()
+  const replacedByChanged = nextReplacedBy !== (doc?.replacedBy ?? null)
 
   const draftTag = tagDraft.trim()
   // The current owner is normally one of the person's groups; keep it selectable if a
@@ -181,7 +189,7 @@ export default function TableAbout({
     : (owner === '' && doc?.canEdit === true) || (owner !== '' && !groups.includes(owner))
   const domainInvalid = domain.trim() !== '' && !DOMAIN_RE.test(domain.trim())
   const tagsInvalid = (draftTag !== '' && !TAG_RE.test(draftTag)) || tags.length > MAX_TAGS
-  const changed = descriptionChanged || guideChanged || tagsChanged || ownerTouched || domainChanged
+  const changed = descriptionChanged || guideChanged || tagsChanged || ownerTouched || domainChanged || lifecycleChanged || replacedByChanged
   const canSave = changed && !ownerInvalid && !domainInvalid && !tagsInvalid && !saving
 
   async function save(event: FormEvent) {
@@ -213,6 +221,14 @@ export default function TableAbout({
     if (!sameList(finalTags, doc.tags)) body.tags = finalTags
     if (ownerChanged) body.owner = nextOwner === '' ? null : nextOwner
     if (domainChanged) body.domain = nextDomain === '' ? null : nextDomain
+    if (lifecycleChanged) body.lifecycle = nextLifecycle
+    // The server refuses a replacement on anything but `deprecated`; leaving that state
+    // clears it in the same request.
+    if (nextLifecycle === 'deprecated') {
+      if (replacedByChanged) body.replacedBy = nextReplacedBy
+    } else if (doc.replacedBy !== null) {
+      body.replacedBy = null
+    }
 
     setSaving(true)
     setSaveError(null)
@@ -258,6 +274,14 @@ export default function TableAbout({
           <p className="mt-3 text-sm text-text-dim whitespace-pre-wrap break-words">
             {doc.description ?? <span className="text-text-mute">No description yet.</span>}
           </p>
+          {doc.lifecycle && (
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-dim">
+              <span className="badge border-accent/40 bg-accent/10 text-accent">{doc.lifecycle}</span>
+              {doc.replacedBy && (
+                <span>replaced by <code className="break-all">{doc.replacedBy}</code></span>
+              )}
+            </p>
+          )}
           {!doc.description && doc.canEdit && (
             <p className="mt-1 text-xs text-text-mute">Say what the table holds and where it comes from.</p>
           )}
@@ -423,6 +447,42 @@ export default function TableAbout({
               />
               {domain.trim() !== '' && !DOMAIN_RE.test(domain.trim()) && (
                 <p className="mt-1 text-xs text-bad break-words">{DOMAIN_RULE}</p>
+              )}
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="min-w-0">
+              <label htmlFor={`${id}-lifecycle`} className="label block mb-1.5">Data product</label>
+              <select
+                id={`${id}-lifecycle`}
+                className="input"
+                value={lifecycle}
+                onChange={(event) => setLifecycle(event.target.value)}
+              >
+                <option value="">Not a data product</option>
+                <option value="draft">draft</option>
+                <option value="published">published</option>
+                <option value="deprecated">deprecated</option>
+              </select>
+              <p className="mt-1 text-xs text-text-mute">
+                Published needs an owner, a description and a domain.
+              </p>
+            </div>
+            <div className="min-w-0">
+              <label htmlFor={`${id}-replaced-by`} className="label block mb-1.5">Replaced by</label>
+              <input
+                id={`${id}-replaced-by`}
+                className="input"
+                value={replacedBy}
+                onChange={(event) => setReplacedBy(event.target.value)}
+                disabled={lifecycle !== 'deprecated'}
+                placeholder="catalog.schema.table"
+              />
+              {lifecycle !== 'deprecated' && (
+                <p className="mt-1 text-xs text-text-mute">
+                  Only a deprecated table names its replacement.
+                </p>
               )}
             </div>
           </div>

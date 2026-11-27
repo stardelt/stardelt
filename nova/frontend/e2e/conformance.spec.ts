@@ -1292,6 +1292,8 @@ test.describe('table documentation', () => {
     owner: string | null
     domain: string | null
     guide: string | null
+    lifecycle: string | null
+    replacedBy: string | null
     columns: Array<{ name: string; type: string; description: string | null }>
     canEdit: boolean
     editRule: string
@@ -1303,6 +1305,8 @@ test.describe('table documentation', () => {
     owner: 'data-eng',
     domain: 'sales',
     guide: null,
+    lifecycle: null,
+    replacedBy: null,
     columns: [
       { name: 'id', type: 'long', description: 'the order id' },
       { name: 'amount', type: 'double', description: 'the amount' },
@@ -1319,6 +1323,8 @@ test.describe('table documentation', () => {
     if ('owner' in body) next.owner = (body.owner as string | null) ?? null
     if ('domain' in body) next.domain = (body.domain as string | null) ?? null
     if ('guide' in body) next.guide = (body.guide as string | null) ?? null
+    if ('lifecycle' in body) next.lifecycle = (body.lifecycle as string | null) ?? null
+    if ('replacedBy' in body) next.replacedBy = (body.replacedBy as string | null) ?? null
     return next
   }
 

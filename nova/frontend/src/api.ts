@@ -176,6 +176,10 @@ export type TableDocumentation = {
   domain: string | null
   /** The `stardelt.guide` property: how to use the table, in plain text, or `null`. */
   guide: string | null
+  /** The `stardelt.lifecycle` property: `draft`, `published`, `deprecated` or `null`. */
+  lifecycle: string | null
+  /** The `stardelt.replaced-by` property (`catalog.schema.table`), on a deprecated table. */
+  replacedBy: string | null
   columns: ColumnDoc[]
   canEdit: boolean
   editRule: string
@@ -193,6 +197,8 @@ export type TableDocsUpdate = {
   owner?: string | null
   domain?: string | null
   guide?: string | null
+  lifecycle?: string | null
+  replacedBy?: string | null
 }
 
 /** One data product of a catalog (#37): a table with a `stardelt.lifecycle`. */
