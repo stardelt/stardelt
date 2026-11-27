@@ -530,6 +530,37 @@ fn trigger_of(spec: &Value) -> Option<String> {
     }
 }
 
+/// `spec.triggers` as typed rows. A malformed hand-written entry is skipped, never an error:
+/// a view does not fail on a resource.
+fn triggers_of(spec: &Value) -> Vec<TriggerView> {
+    let Some(entries) = spec.get("triggers").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let tables_updated: Vec<String> = entry
+                .get("tablesUpdated")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            if tables_updated.is_empty() {
+                return None;
+            }
+            Some(TriggerView {
+                tables_updated,
+                mode: entry
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("all")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
 /// The selectors of a `kind: "dbt"` task's `config` as one line: `config.select`, or the
 /// `config.batches` array parsed back and joined with `, `. A `batches` text that is not a JSON
 /// array of strings leaves `None` — the view never fails on a hand-written resource (`#112`).
@@ -2169,6 +2200,39 @@ fn validate_schedule(
     Ok(Some((cron.to_string(), timezone.to_string())))
 }
 
+/// The trigger rules of the CRD and the loader, or the sentence the caller sees.
+fn checked_triggers(
+    triggers: Option<&[TriggerRequest]>,
+    schedule: Option<&ScheduleRequest>,
+    statement: &Statement,
+) -> Result<Option<Vec<TriggerRequest>>, String> {
+    let Some(triggers) = triggers.filter(|triggers| !triggers.is_empty()) else {
+        return Ok(None);
+    };
+    let [trigger] = triggers else {
+        return Err("a pipeline has one trigger today".to_string());
+    };
+    if schedule.is_some() {
+        return Err("a pipeline has spec.schedule or spec.triggers, not both".to_string());
+    }
+    trigger.check_shape()?;
+    let written: BTreeSet<&str> = match statement {
+        Statement::Tasks(tasks) => tasks
+            .iter()
+            .flat_map(|task| task.writes.iter().map(String::as_str))
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    for table in &trigger.tables_updated {
+        if written.contains(table.as_str()) {
+            return Err(format!(
+                "trigger table `{table}` is written by this pipeline: a pipeline cannot be triggered by its own output"
+            ));
+        }
+    }
+    Ok(Some(vec![trigger.clone()]))
+}
+
 /// The sentence for a group whose principal an administrator has not created yet. It is the
 /// `principals` route's message and the create/update refusal, word for word.
 fn no_principal_message(group: &str) -> String {
@@ -2339,6 +2403,7 @@ fn pipeline_resource(
     group: &str,
     statement: &Statement,
     schedule: Option<&(String, String)>,
+    triggers: Option<&[TriggerRequest]>,
     params: &BTreeMap<String, String>,
     options: &PipelineOptionsView,
     created_by: &str,
@@ -2389,6 +2454,9 @@ fn pipeline_resource(
     if let Some((cron, timezone)) = schedule {
         spec["schedule"] = json!({ "cron": cron, "timezone": timezone });
     }
+    if let Some(triggers) = triggers.filter(|triggers| !triggers.is_empty()) {
+        spec["triggers"] = serde_json::to_value(triggers).unwrap_or(Value::Null);
+    }
     // Never an empty object: the CRD refuses `notify` without an owner group, and an empty
     // object says nothing a reader can use.
     if let Some(notify) = notify.filter(|notify| !notify.is_empty()) {
@@ -2430,6 +2498,7 @@ fn updated_resource(
     options: &PipelineOptionsView,
     params: &BTreeMap<String, String>,
     schedule: Option<&(String, String)>,
+    triggers: Option<&[TriggerRequest]>,
     notify: Option<&PipelineNotify>,
     viewers: Option<&[String]>,
     description: Option<&str>,
@@ -2490,6 +2559,16 @@ fn updated_resource(
         None => {
             if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
                 spec.remove("schedule");
+            }
+        }
+    }
+    match triggers {
+        Some(triggers) if !triggers.is_empty() => {
+            updated["spec"]["triggers"] = serde_json::to_value(triggers).unwrap_or(Value::Null);
+        }
+        _ => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("triggers");
             }
         }
     }
@@ -2558,6 +2637,7 @@ fn changes_of(before_resource: &Value, after_resource: &Value) -> Vec<String> {
     [
         (run, before.get("tasks") != after.get("tasks")),
         ("schedule", before.get("schedule") != after.get("schedule")),
+        ("triggers", before.get("triggers") != after.get("triggers")),
         (
             "description",
             before.get("description") != after.get("description"),
@@ -2609,6 +2689,43 @@ fn take_create_slot(limiter: &CreateLimiter, sub: &str) -> bool {
 pub struct ScheduleRequest {
     pub cron: String,
     pub timezone: String,
+}
+
+/// One `spec.triggers` entry: the tables whose update starts a run, and whether every one
+/// or any one must update. The CRD allows one entry today (#66, #2014).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerRequest {
+    #[serde(default)]
+    pub tables_updated: Vec<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+impl TriggerRequest {
+    /// The loader's shape rules and sentences (`demos/dags/stardelt_pipelines/plan.py`,
+    /// `_trigger`): 1 to 10 tables, each `catalog.schema.table`, and `all` or `any`.
+    fn check_shape(&self) -> Result<(), String> {
+        if !(1..=10).contains(&self.tables_updated.len()) {
+            return Err("a trigger needs at least one table in tablesUpdated".to_string());
+        }
+        for table in &self.tables_updated {
+            let parts: Vec<&str> = table.split('.').collect();
+            if parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|part| part.is_empty() || part.contains(char::is_whitespace))
+            {
+                return Err(format!(
+                    "trigger table `{table}` is not catalog.schema.table"
+                ));
+            }
+        }
+        match self.mode.as_deref() {
+            None | Some("all") | Some("any") => Ok(()),
+            Some(_) => Err("mode must be `all` or `any`".to_string()),
+        }
+    }
 }
 
 /// Who is told when a run of this pipeline ends (`spec.notify`, operator#582 / nova#815).
@@ -2882,6 +2999,10 @@ pub struct CreatePipelineRequest {
     pub tasks: Option<Vec<PipelineTaskRequest>>,
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
+    /// Tables whose update starts the run (`spec.triggers`). At most one entry, 1 to 10
+    /// tables, and not together with `schedule`; omitted means none.
+    #[serde(default)]
+    pub triggers: Option<Vec<TriggerRequest>>,
     /// Values for `${params.<name>}` in the statement; at most 16. A notebook's values are in
     /// `notebook.params`, not here.
     #[serde(default)]
@@ -2934,6 +3055,10 @@ pub struct UpdatePipelineRequest {
     /// Omitted means no schedule: the pipeline then runs on demand only.
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
+    /// Tables whose update starts the run (`spec.triggers`). At most one entry, 1 to 10
+    /// tables, and not together with `schedule`; omitted means none.
+    #[serde(default)]
+    pub triggers: Option<Vec<TriggerRequest>>,
     /// The whole parameter table; omitted means none.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
@@ -3248,6 +3373,14 @@ pub struct TaskSpecView {
     pub depends_on: Vec<String>,
 }
 
+/// One `spec.triggers` entry as the pages read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerView {
+    pub tables_updated: Vec<String>,
+    pub mode: String,
+}
+
 /// One pipeline in the list: the resource plus what Airflow says about it.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -3266,6 +3399,8 @@ pub struct PipelineView {
     pub can_edit: bool,
     /// The schedule as a person reads it: the cron with its time zone in parentheses, or `when <tables> is updated` for a table trigger.
     pub schedule: Option<String>,
+    /// `spec.triggers` as data: the tables and whether all or any starts a run.
+    pub triggers: Vec<TriggerView>,
     pub paused: bool,
     /// `false` while Airflow has no DAG for the resource yet; the loader needs about 25 seconds.
     pub loaded: bool,
@@ -3646,6 +3781,7 @@ fn view_of(
         can_run: visible(who, spec),
         can_edit: may_act(who, spec),
         schedule: schedule_of(spec).or_else(|| trigger_of(spec)),
+        triggers: triggers_of(spec),
         paused,
         loaded,
         next_run: dag.and_then(|d| d.next_dagrun_run_after.clone()),
@@ -6291,6 +6427,7 @@ fn check_description(text: Option<&str>) -> Result<Option<String>, String> {
 struct Planned {
     statement: Statement,
     schedule: Option<(String, String)>,
+    triggers: Option<Vec<TriggerRequest>>,
     options: PipelineOptionsView,
 }
 
@@ -6372,7 +6509,13 @@ async fn plan_pipeline(
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
-    // 6b. What a deploy says about where the pipeline came from, when it says anything.
+    // 6b. Table triggers: one entry, 1 to 10 tables, not together with a cron.
+    let triggers = checked_triggers(body.triggers.as_deref(), body.schedule.as_ref(), &statement)
+        .map_err(|message: String| {
+        ActionError::refused("triggers", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
+    // 6c. What a deploy says about where the pipeline came from, when it says anything.
     if let Some(provenance) = &body.provenance {
         check_provenance(provenance).map_err(|message| {
             ActionError::refused("provenance", Fail::new(StatusCode::BAD_REQUEST, message))
@@ -6382,6 +6525,7 @@ async fn plan_pipeline(
     Ok(Planned {
         statement,
         schedule,
+        triggers,
         options,
     })
 }
@@ -6628,6 +6772,7 @@ async fn create_pipeline_inner(
     let Planned {
         statement,
         schedule,
+        triggers,
         options,
     } = plan_pipeline(resources, db, notebooks_store, who, &body).await?;
 
@@ -6654,6 +6799,7 @@ async fn create_pipeline_inner(
         &body.owner_group,
         &statement,
         schedule.as_ref(),
+        triggers.as_deref(),
         &body.params,
         &options,
         &who.display_name,
@@ -6820,6 +6966,7 @@ pub(crate) async fn validate_pipeline(
                 &planned.options,
                 &body.params,
                 planned.schedule.as_ref(),
+                planned.triggers.as_deref(),
                 body.notify.as_ref(),
                 body.viewers.as_deref(),
                 description.as_deref(),
@@ -7265,6 +7412,11 @@ async fn update_pipeline_inner(
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
+    let triggers = checked_triggers(body.triggers.as_deref(), body.schedule.as_ref(), &requested)
+        .map_err(|message: String| {
+        ActionError::refused("triggers", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
     if let Some(provenance) = &body.provenance {
         check_provenance(provenance).map_err(|message| {
             ActionError::refused("provenance", Fail::new(StatusCode::BAD_REQUEST, message))
@@ -7291,6 +7443,7 @@ async fn update_pipeline_inner(
         &options,
         &body.params,
         schedule.as_ref(),
+        triggers.as_deref(),
         body.notify.as_ref(),
         body.viewers.as_deref(),
         description.as_deref(),

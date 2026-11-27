@@ -3213,6 +3213,11 @@ export interface components {
              */
             tasks?: components["schemas"]["PipelineTaskRequest"][] | null;
             /**
+             * @description Tables whose update starts the run (`spec.triggers`). At most one entry, 1 to 10
+             *     tables, and not together with `schedule`; omitted means none.
+             */
+            triggers?: components["schemas"]["TriggerRequest"][] | null;
+            /**
              * @description Groups that may read the pipeline without being members (`spec.viewers`). At most 16,
              *     each a group name; omitted writes none. A bundle's pipeline file carries it (#79).
              */
@@ -4254,6 +4259,8 @@ export interface components {
              */
             state: string;
             tasks: components["schemas"]["TaskSpecView"][];
+            /** @description `spec.triggers` as data: the tables and whether all or any starts a run. */
+            triggers: components["schemas"]["TriggerView"][];
         };
         PlanAnswer: {
             /** @description Whether this Nova can record an approval (a state store is configured). */
@@ -5190,6 +5197,19 @@ export interface components {
             target_catalog?: string | null;
         };
         /**
+         * @description One `spec.triggers` entry: the tables whose update starts a run, and whether every one
+         *     or any one must update. The CRD allows one entry today (#66, #2014).
+         */
+        TriggerRequest: {
+            mode?: string | null;
+            tablesUpdated?: string[];
+        };
+        /** @description One `spec.triggers` entry as the pages read it. */
+        TriggerView: {
+            mode: string;
+            tablesUpdated: string[];
+        };
+        /**
          * @description `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
          *     and the options — or, for a notebook pipeline, the notebook, its version and its parameters.
          *     Every other field of the resource stays as it is, and what the pipeline runs never changes
@@ -5227,6 +5247,11 @@ export interface components {
              *     `notebook`.
              */
             tasks?: components["schemas"]["PipelineTaskRequest"][] | null;
+            /**
+             * @description Tables whose update starts the run (`spec.triggers`). At most one entry, 1 to 10
+             *     tables, and not together with `schedule`; omitted means none.
+             */
+            triggers?: components["schemas"]["TriggerRequest"][] | null;
             /** @description Omitted keeps the stored viewers; an empty list removes them. */
             viewers?: string[] | null;
         };

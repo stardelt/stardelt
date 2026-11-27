@@ -2766,6 +2766,7 @@ fn the_view_has_no_raw_airflow_fields() {
             "canRun",
             "canEdit",
             "schedule",
+            "triggers",
             "paused",
             "loaded",
             "nextRun",
@@ -2862,6 +2863,85 @@ fn a_pipeline_description_reaches_the_view() {
     );
 }
 
+/// A create writes the body's trigger as `spec.triggers`, and an update body that names none
+/// removes it (#66, #2020).
+#[test]
+fn a_table_trigger_is_written_and_removed() {
+    let trigger = TriggerRequest {
+        tables_updated: vec!["silver.shop.orders".into()],
+        mode: Some("any".into()),
+    };
+    let created = pipeline_resource(
+        "shop-gold",
+        "analytics",
+        &Statement::Sql("select 1".into()),
+        None,
+        Some(std::slice::from_ref(&trigger)),
+        &BTreeMap::new(),
+        &default_options(),
+        "sub-ada",
+        None,
+        &[],
+        None,
+        None,
+    );
+    assert_eq!(
+        spec_of(&created)["triggers"],
+        json!([{ "tablesUpdated": ["silver.shop.orders"], "mode": "any" }])
+    );
+
+    let replaced = updated_resource(
+        &created,
+        &Statement::Sql("select 2".into()),
+        &default_options(),
+        &BTreeMap::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(spec_of(&replaced).get("triggers").is_none());
+}
+
+#[test]
+fn a_trigger_cannot_come_with_a_cron_or_name_its_own_output() {
+    let trigger = TriggerRequest {
+        tables_updated: vec!["silver.shop.orders".into()],
+        mode: None,
+    };
+    let cron = ScheduleRequest {
+        cron: "0 3 * * *".into(),
+        timezone: "Europe/Berlin".into(),
+    };
+    assert_eq!(
+        checked_triggers(
+            Some(std::slice::from_ref(&trigger)),
+            Some(&cron),
+            &Statement::Sql("select 1".into())
+        )
+        .unwrap_err(),
+        "a pipeline has spec.schedule or spec.triggers, not both"
+    );
+
+    let writing = TaskStatement {
+        name: "load".into(),
+        depends_on: Vec::new(),
+        writes: vec!["silver.shop.orders".into()],
+        statement: Statement::Sql("select 1".into()),
+    };
+    assert_eq!(
+        checked_triggers(
+            Some(std::slice::from_ref(&trigger)),
+            None,
+            &Statement::Tasks(vec![writing])
+        )
+        .unwrap_err(),
+        "trigger table `silver.shop.orders` is written by this pipeline: a pipeline cannot be triggered by its own output"
+    );
+}
+
 /// A create writes the body's line as `spec.description`, and leaves the key out of a body
 /// that names none (#997).
 #[test]
@@ -2870,6 +2950,7 @@ fn a_create_writes_the_description() {
         "shop-bronze",
         "analytics",
         &Statement::Sql("select 1".into()),
+        None,
         None,
         &BTreeMap::new(),
         &default_options(),
@@ -2885,6 +2966,7 @@ fn a_create_writes_the_description() {
         "shop-bronze",
         "analytics",
         &Statement::Sql("select 1".into()),
+        None,
         None,
         &BTreeMap::new(),
         &default_options(),
@@ -2916,6 +2998,7 @@ fn an_update_replaces_and_clears_the_description() {
         None,
         None,
         None,
+        None,
         Some("the new line"),
         None,
     );
@@ -2926,6 +3009,7 @@ fn an_update_replaces_and_clears_the_description() {
         &statement,
         &default_options(),
         &BTreeMap::new(),
+        None,
         None,
         None,
         None,
@@ -4912,6 +4996,7 @@ fn create_body(name: &str, group: &str, sql: &str) -> CreatePipelineRequest {
             cron: "0 3 * * *".into(),
             timezone: "Europe/Berlin".into(),
         }),
+        triggers: None,
         params: BTreeMap::new(),
         options: None,
         provenance: None,
@@ -4928,6 +5013,7 @@ fn update_body(sql: &str) -> UpdatePipelineRequest {
         notebook: None,
         tasks: None,
         schedule: None,
+        triggers: None,
         params: BTreeMap::new(),
         options: None,
         resource_version: None,
@@ -5037,6 +5123,7 @@ fn nova_pipeline(name: &str, group: &str) -> Value {
         group,
         &Statement::Sql("select 1".into()),
         Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
+        None,
         &BTreeMap::new(),
         &default_options(),
         "sub-ada",
@@ -5726,6 +5813,7 @@ async fn update_changes_the_editable_fields_only() {
         notebook: None,
         tasks: None,
         schedule: None,
+        triggers: None,
         params: BTreeMap::from([
             ("days".to_string(), "7".to_string()),
             ("region".to_string(), "eu".to_string()),
@@ -5801,6 +5889,7 @@ async fn update_changes_the_editable_fields_only() {
                 cron: "30 6 * * mon-fri".into(),
                 timezone: "UTC".into(),
             }),
+            triggers: None,
             params: BTreeMap::new(),
             options: None,
             resource_version: None,
@@ -6705,6 +6794,7 @@ fn an_update_with_publish_direct_removes_it_and_none_keeps_it() {
         "analytics",
         &Statement::Sql("select 1".into()),
         None,
+        None,
         &BTreeMap::new(),
         &default_options(),
         "sub-ada",
@@ -6721,6 +6811,7 @@ fn an_update_with_publish_direct_removes_it_and_none_keeps_it() {
             &statement,
             &default_options(),
             &BTreeMap::new(),
+            None,
             None,
             None,
             None,
@@ -6753,6 +6844,7 @@ fn spec_response_round_trips_publish() {
         "shop-wap",
         "analytics",
         &Statement::Sql("select 1".into()),
+        None,
         None,
         &BTreeMap::new(),
         &default_options(),
@@ -9514,6 +9606,7 @@ async fn spec_is_the_document_that_validate_accepts_unchanged() {
         notebook: None,
         tasks: None,
         schedule: document.schedule.clone(),
+        triggers: None,
         params: document.params.clone(),
         options: Some(PipelineOptions {
             retries: Some(document.options.retries),
@@ -9718,6 +9811,7 @@ async fn notebook_usage_lists_only_this_groups_pipelines_for_the_notebook() {
                 connection: None,
             },
             Some(&("0 3 * * *".to_string(), "UTC".to_string())),
+            None,
             &Default::default(),
             &default_options(),
             "ann",
@@ -10375,6 +10469,7 @@ fn notebook_body(name: &str, group: &str, notebook: &str, version: &str) -> Crea
             cron: "0 3 * * *".into(),
             timezone: "Europe/Berlin".into(),
         }),
+        triggers: None,
         params: BTreeMap::new(),
         options: None,
         provenance: None,
@@ -10396,6 +10491,7 @@ fn update_notebook_body(notebook: &str, version: &str) -> UpdatePipelineRequest 
         }),
         tasks: None,
         schedule: None,
+        triggers: None,
         params: BTreeMap::new(),
         options: None,
         resource_version: None,
@@ -10418,6 +10514,7 @@ fn stored_notebook_pipeline(name: &str, group: &str, notebook: &str, version: &s
             connection: None,
         },
         Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
+        None,
         &BTreeMap::new(),
         &default_options(),
         "sub-ada",
@@ -11187,6 +11284,7 @@ fn pipeline_notify_is_written_and_read_back() {
         "analytics",
         &Statement::Sql("select 1".into()),
         None,
+        None,
         &BTreeMap::new(),
         &default_options(),
         "sub-ada",
@@ -11275,6 +11373,7 @@ fn an_update_without_notify_keeps_it_an_empty_one_removes_it() {
         "analytics",
         &Statement::Sql("select 1".into()),
         None,
+        None,
         &BTreeMap::new(),
         &default_options(),
         "sub-ada",
@@ -11298,6 +11397,7 @@ fn an_update_without_notify_keeps_it_an_empty_one_removes_it() {
         None,
         None,
         None,
+        None,
     );
     assert_eq!(
         spec_of(&kept)["tasks"][0]["sql"],
@@ -11311,6 +11411,7 @@ fn an_update_without_notify_keeps_it_an_empty_one_removes_it() {
         &statement,
         &default_options(),
         &BTreeMap::new(),
+        None,
         None,
         Some(&PipelineNotify::default()),
         None,
@@ -11328,6 +11429,7 @@ fn an_update_without_notify_keeps_it_an_empty_one_removes_it() {
         &statement,
         &default_options(),
         &BTreeMap::new(),
+        None,
         None,
         Some(&PipelineNotify {
             on_success: vec!["digest".into()],
@@ -11353,6 +11455,7 @@ fn a_create_body_with_viewers_writes_them() {
             "daily-trips",
             "analytics",
             &statement,
+            None,
             None,
             &BTreeMap::new(),
             &default_options(),
@@ -11383,6 +11486,7 @@ fn an_update_writes_viewers_only_when_given() {
         "analytics",
         &Statement::Sql("select 1".into()),
         None,
+        None,
         &BTreeMap::new(),
         &default_options(),
         "sub-ada",
@@ -11398,6 +11502,7 @@ fn an_update_writes_viewers_only_when_given() {
             &statement,
             &default_options(),
             &BTreeMap::new(),
+            None,
             None,
             None,
             viewers,
