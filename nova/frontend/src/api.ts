@@ -158,6 +158,8 @@ export type ColumnDoc = {
   name: string
   type: string
   description: string | null
+  /** The column's class from the `stardelt.column-classes` property, or `null` (#491). */
+  class: string | null
 }
 
 /**

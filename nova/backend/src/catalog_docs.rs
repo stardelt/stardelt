@@ -84,6 +84,11 @@ pub const MAX_DESCRIPTION_CHARS: usize = 4000;
 pub const MAX_GUIDE_CHARS: usize = 16000;
 /// Most tags one table may carry.
 pub const MAX_TAGS: usize = 20;
+/// The Iceberg table property that carries column classes (#491): a JSON object from a
+/// current-schema column name to a short class token.
+pub const COLUMN_CLASSES_PROPERTY: &str = "stardelt.column-classes";
+/// Most columns one table may label.
+pub const MAX_COLUMN_CLASSES: usize = 200;
 
 /// One column of the current schema, as the documentation read reports it.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -94,6 +99,8 @@ pub struct ColumnDocumentation {
     pub r#type: String,
     /// The field's Iceberg `doc`, or `null`.
     pub description: Option<String>,
+    /// The column's class from the `stardelt.column-classes` property, or `null`.
+    pub class: Option<String>,
 }
 
 /// The documentation of one table, plus what the caller may do with it.
@@ -309,6 +316,10 @@ pub struct DocumentationUpdate {
     #[serde(rename = "replacedBy", default, deserialize_with = "present")]
     #[schema(value_type = Option<String>)]
     pub replaced_by: Option<Option<String>>,
+    /// Replaces every column class (`null` or `{}` removes them all); absent changes nothing.
+    #[serde(rename = "columnClasses", default, deserialize_with = "present")]
+    #[schema(value_type = Option<BTreeMap<String, String>>)]
+    pub column_classes: Option<Option<BTreeMap<String, String>>>,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description` body.
@@ -1213,6 +1224,7 @@ fn documentation(
 ) -> TableDocumentation {
     let owner = property(&loaded.properties, "stardelt.owner");
     let can_edit = may_edit(who, owner.as_deref()).is_ok();
+    let classes = column_classes(&loaded.properties);
     TableDocumentation {
         description: property(&loaded.properties, "comment"),
         tags: property(&loaded.properties, "stardelt.tags")
@@ -1230,6 +1242,7 @@ fn documentation(
                 name: c.name.clone(),
                 r#type: c.ty.clone(),
                 description: c.doc.clone(),
+                class: classes.get(&c.name).cloned(),
             })
             .collect(),
         can_edit,
@@ -1357,6 +1370,24 @@ fn tag_ok(tag: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
 }
 
+/// A class token: 1 to 32 lower-case ASCII letters, digits, `-` or `_`, starting with a
+/// letter — `^[a-z][a-z0-9_-]{0,31}$`.
+fn class_ok(class: &str) -> bool {
+    let bytes = class.as_bytes();
+    (1..=32).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+}
+
+/// The stored column classes, or an empty map when the property is absent or malformed.
+fn column_classes(properties: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
+    property(properties, COLUMN_CLASSES_PROPERTY)
+        .and_then(|raw| serde_json::from_str::<BTreeMap<String, String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
 /// A domain: 1 to 40 lower-case ASCII letters, digits, `-` or `_`, starting with a letter or
 /// digit — `^[a-z0-9][a-z0-9_-]{0,39}$`.
 fn domain_ok(domain: &str) -> bool {
@@ -1378,6 +1409,7 @@ struct Requested {
     guide: Option<Option<String>>,
     lifecycle: Option<Option<String>>,
     replaced_by: Option<Option<String>>,
+    column_classes: Option<Option<BTreeMap<String, String>>>,
 }
 
 fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
@@ -1466,6 +1498,27 @@ fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
             Some(Some(name))
         }
     };
+    let column_classes = match req.column_classes {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(map)) if map.is_empty() => Some(None),
+        Some(Some(map)) => {
+            if map.len() > MAX_COLUMN_CLASSES {
+                return Err(format!(
+                    "at most {MAX_COLUMN_CLASSES} columns carry a class"
+                ));
+            }
+            for (column, class) in &map {
+                if !class_ok(class) {
+                    return Err(format!(
+                        "class for {column}: 1 to 32 lower-case letters, digits, dashes or \
+                         underscores, starting with a letter"
+                    ));
+                }
+            }
+            Some(Some(map))
+        }
+    };
     Ok(Requested {
         description,
         tags,
@@ -1474,6 +1527,7 @@ fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
         guide,
         lifecycle,
         replaced_by,
+        column_classes,
     })
 }
 
@@ -1580,6 +1634,15 @@ async fn write_documentation(
             StatusCode::BAD_REQUEST,
             "choose an owner: one of your groups",
         ));
+    }
+    if let Some(Some(next)) = &requested.column_classes {
+        let known: BTreeSet<&str> = loaded.columns.iter().map(|c| c.name.as_str()).collect();
+        if let Some(bad) = next.keys().find(|name| !known.contains(name.as_str())) {
+            return Err(DocError::new(
+                StatusCode::BAD_REQUEST,
+                format!("no such column: {bad}"),
+            ));
+        }
     }
 
     // The state this request leaves behind: an absent key keeps the stored value.
@@ -1710,6 +1773,21 @@ async fn write_documentation(
                 set.insert("stardelt.replaced-by".into(), value.clone());
             }
             None => remove.push("stardelt.replaced-by".into()),
+        }
+    }
+
+    if let Some(requested) = &requested.column_classes {
+        let next = requested.clone().unwrap_or_default();
+        if next != column_classes(&loaded.properties) {
+            changed.push("columnClasses");
+            if next.is_empty() {
+                remove.push(COLUMN_CLASSES_PROPERTY.into());
+            } else {
+                set.insert(
+                    COLUMN_CLASSES_PROPERTY.into(),
+                    serde_json::to_string(&next).unwrap_or_default(),
+                );
+            }
         }
     }
 
@@ -2978,6 +3056,7 @@ mod tests {
             guide: None,
             lifecycle: None,
             replaced_by: None,
+            column_classes: None,
         }
     }
 
@@ -2991,6 +3070,7 @@ mod tests {
             guide: guide.map(|g| g.map(str::to_string)),
             lifecycle: None,
             replaced_by: None,
+            column_classes: None,
         }
     }
 
@@ -3001,6 +3081,19 @@ mod tests {
             .as_object_mut()
             .expect("properties")
             .insert("stardelt.guide".into(), json!(guide));
+        load
+    }
+
+    /// The load fixture with column classes stored in `stardelt.column-classes`.
+    fn load_fixture_with_classes() -> Value {
+        let mut load = load_fixture();
+        load["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert(
+                "stardelt.column-classes".into(),
+                json!("{\"amount\":\"financial\"}"),
+            );
         load
     }
 
@@ -3077,6 +3170,53 @@ mod tests {
         assert_eq!(serialized["editRule"], json!(doc.edit_rule));
         assert_eq!(serialized["columns"][0]["name"], json!("id"));
         assert!(serialized["columns"][0]["description"].is_string());
+    }
+
+    #[tokio::test]
+    async fn read_reports_column_classes_from_the_property() {
+        let (fake, addr) = fake_catalog().await;
+        fake.set_load(load_fixture_with_classes());
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
+            .await
+            .expect("the table loads");
+        let amount = doc
+            .columns
+            .iter()
+            .find(|c| c.name == "amount")
+            .expect("amount is a column");
+        assert_eq!(amount.class.as_deref(), Some("financial"));
+        let id = doc
+            .columns
+            .iter()
+            .find(|c| c.name == "id")
+            .expect("id is a column");
+        assert_eq!(id.class, None, "a column without a class reports none");
+    }
+
+    #[tokio::test]
+    async fn malformed_column_classes_are_ignored() {
+        let (fake, addr) = fake_catalog().await;
+        let mut load = load_fixture();
+        load["metadata"]["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .insert("stardelt.column-classes".into(), json!("not json"));
+        fake.set_load(load);
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
+            .await
+            .expect("a malformed property does not fail the read");
+        assert!(
+            doc.columns.iter().all(|c| c.class.is_none()),
+            "every class is null"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3169,6 +3309,99 @@ mod tests {
         .await
         .expect("an empty body is a no-op");
         assert!(fake.snapshot().0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_replaces_the_whole_map_in_one_commit() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut req = update_body(None, None, None, None);
+        req.column_classes = Some(Some(BTreeMap::from([(
+            "amount".into(),
+            "financial".into(),
+        )])));
+        write_documentation(&state, &catalog, &member, "sales", "orders", req)
+            .await
+            .expect("the write succeeds");
+
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(commits.len(), 1, "one commit carries the whole map");
+        assert_eq!(
+            commits[0]["updates"],
+            json!([
+                {
+                    "action": "set-properties",
+                    "updates": { "stardelt.column-classes": "{\"amount\":\"financial\"}" }
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_class_removes_the_property() {
+        let (fake, addr) = fake_catalog().await;
+        fake.set_load(load_fixture_with_classes());
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut req = update_body(None, None, None, None);
+        req.column_classes = Some(None);
+        write_documentation(&state, &catalog, &member, "sales", "orders", req)
+            .await
+            .expect("the write succeeds");
+
+        let (commits, _, _) = fake.snapshot();
+        assert_eq!(commits.len(), 1, "one commit removes the property");
+        assert_eq!(
+            commits[0]["updates"],
+            json!([
+                {
+                    "action": "remove-properties",
+                    "removals": ["stardelt.column-classes"]
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_class_for_no_such_column_is_400_and_sends_nothing() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut req = update_body(None, None, None, None);
+        req.column_classes = Some(Some(BTreeMap::from([("nope".into(), "personal".into())])));
+        let (status, message) = status_of(
+            write_documentation(&state, &catalog, &member, "sales", "orders", req)
+                .await
+                .expect_err("the column does not exist"),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(message, "no such column: nope");
+        assert!(fake.snapshot().0.is_empty(), "nothing was committed");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_class_token_is_400() {
+        let (fake, addr) = fake_catalog().await;
+        let state = test_state();
+        let catalog = catalog(&state, &addr);
+        let member = who("ada", &["data-eng"], false);
+
+        let mut req = update_body(None, None, None, None);
+        req.column_classes = Some(Some(BTreeMap::from([("amount".into(), "PII!".into())])));
+        let (status, _message) = status_of(
+            write_documentation(&state, &catalog, &member, "sales", "orders", req)
+                .await
+                .expect_err("the class token is invalid"),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(fake.snapshot().0.is_empty(), "nothing was committed");
     }
 
     // -----------------------------------------------------------------------

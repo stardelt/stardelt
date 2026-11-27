@@ -3141,6 +3141,8 @@ export interface components {
         };
         /** @description One column of the current schema, as the documentation read reports it. */
         ColumnDocumentation: {
+            /** @description The column's class from the `stardelt.column-classes` property, or `null`. */
+            class?: string | null;
             /** @description The field's Iceberg `doc`, or `null`. */
             description?: string | null;
             /** @description Field name, exactly as the current schema spells it. */
@@ -3555,6 +3557,10 @@ export interface components {
          *     already stores is not a change.
          */
         DocumentationUpdate: {
+            /** @description Replaces every column class (`null` or `{}` removes them all); absent changes nothing. */
+            columnClasses?: {
+                [key: string]: string;
+            } | null;
             /** @description New table description (`null` removes it). */
             description?: string | null;
             /** @description New domain (`null` removes it). */
