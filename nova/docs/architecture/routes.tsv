@@ -73,6 +73,7 @@ GET	/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs	pipelin
 GET	/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/notebook	pipelines	pipelines	signed-in
 GET	/api/pipelines/{namespace}/{name}/spec	pipelines	pipelines	signed-in
 GET	/api/query-log	query_log_api	main	signed-in
+GET	/api/query-log/repeated	query_log_api	main	signed-in
 GET	/api/query-log/usage	query_log_api	main	signed-in
 GET	/api/query-log/{id}	query_log_api	main	signed-in
 GET	/api/query-log/{id}/history	query_log_api	main	signed-in
