@@ -216,6 +216,11 @@ export type DataProduct = {
 /** `GET /api/catalog/products` — the catalog's data products, in domain order. */
 export type DataProducts = { catalog: string; products: DataProduct[] }
 
+/** An eval of one catalog (#125): a question with a known answer. */
+export type Eval = Schema<'Eval'>
+/** A `POST /api/catalog/evals` body. */
+export type NewEval = Schema<'NewEval'>
+
 /** The freshness promise and the status it yields (#402 slice 2). */
 export type TableFreshness = Schema<'TableFreshness'>
 /** `by: null` removes the promise; an absent field changes nothing. */
@@ -1486,6 +1491,12 @@ export const api = {
     const q = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
     return jget<DataProducts>(`/api/catalog/products${q}`)
   },
+  evals: (catalog?: string) => {
+    const q = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
+    return jget<Eval[]>(`/api/catalog/evals${q}`)
+  },
+  createEval: (body: NewEval) => jpost<Eval>('/api/catalog/evals', body),
+  deleteEval: (id: number) => jdel(`/api/evals/${id}`),
   putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
     jput<TableDocumentation>(
       catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),
