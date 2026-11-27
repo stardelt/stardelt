@@ -388,6 +388,9 @@ function ColumnSources({ loading, failed, sources }: {
   )
 }
 
+/** The classes the design names (D10); a stored class outside this list is still offered. */
+const COLUMN_CLASSES = ['public', 'personal', 'financial', 'secret'] as const
+
 function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
   ns: string
   tbl: string
@@ -398,6 +401,8 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
 }) {
   const canEdit = docs.data?.canEdit === true
   const descriptions = new Map((docs.data?.columns ?? []).map(c => [c.name, c.description]))
+  const classes = new Map((docs.data?.columns ?? []).map(c => [c.name, c.class]))
+  const [savingClass, setSavingClass] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [saving, setSaving] = useState<string | null>(null)
@@ -462,6 +467,27 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
     }
   }
 
+  async function setClass(column: string, value: string) {
+    const next: Record<string, string> = {}
+    for (const [name, cls] of classes) if (cls) next[name] = cls
+    if (value === '') delete next[column]
+    else next[column] = value
+    setSavingClass(column)
+    setError(null)
+    try {
+      const answer = await api.putTableDocs(ns, tbl, { columnClasses: next }, catalog)
+      onSaved(answer)
+      setNotice('Saved.')
+    } catch (e) {
+      setError(errorMessage(e))
+    } finally {
+      setSavingClass(null)
+    }
+  }
+
+  const storedClasses = [...classes.values()].filter((c): c is string => Boolean(c))
+  const classOptions = [...new Set<string>([...COLUMN_CLASSES, ...storedClasses])].sort()
+
   return (
     <div className="card overflow-hidden min-w-0">
       {notice && <p role="status" className="border-b border-border px-4 py-2 text-sm text-ok break-words">{notice}</p>}
@@ -472,6 +498,7 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
               <th className="th px-4 py-2.5">#</th>
               <th className="th px-4 py-2.5">Column</th>
               <th className="th px-4 py-2.5">Type</th>
+              <th className="th px-4 py-2.5">Class</th>
               <th className="th px-4 py-2.5">From</th>
               <th className="th px-4 py-2.5">Required</th>
               <th className="th px-4 py-2.5">Description</th>
@@ -483,6 +510,24 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
                 <td className="td px-4 text-text-mute font-mono">{f.id}</td>
                 <td className="td px-4 font-mono break-words">{f.name}</td>
                 <td className="td px-4 text-text-dim font-mono break-words">{typeof f.type === 'string' ? f.type : JSON.stringify(f.type)}</td>
+                <td className="td px-4">
+                  {canEdit ? (
+                    <select
+                      aria-label={`Class of ${f.name}`}
+                      className="input py-0.5 text-xs"
+                      value={classes.get(f.name) ?? ''}
+                      disabled={savingClass === f.name}
+                      onChange={(e) => void setClass(f.name, e.target.value)}
+                    >
+                      <option value="">—</option>
+                      {classOptions.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="text-text-dim">{classes.get(f.name) ?? '—'}</span>
+                  )}
+                </td>
                 <td className="td px-4 text-text-dim max-w-[20rem]">
                   <ColumnSources
                     loading={lineage.isLoading}
@@ -554,7 +599,7 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
                 </td>
               </tr>
             ))}
-            {!fields && <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>Loading…</td></tr>}
+            {!fields && <tr><td className="px-4 py-5 text-text-mute" colSpan={6}>Loading…</td></tr>}
           </tbody>
         </table>
       </div>
