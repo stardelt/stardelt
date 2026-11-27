@@ -5602,6 +5602,7 @@ mod tests {
         let text = include_str!("../../../examples/platform-minimal.yaml");
         let mut platform = None;
         let mut lakehouse = None;
+        let mut warehouse = None;
         for document in serde_yaml::Deserializer::from_str(text) {
             let value = serde_yaml::Value::deserialize(document).expect("a YAML document");
             match value.get("kind").and_then(serde_yaml::Value::as_str) {
@@ -5614,6 +5615,11 @@ mod tests {
                 Some("Lakehouse") => {
                     lakehouse =
                         Some(serde_yaml::from_value::<Lakehouse>(value).expect("a Lakehouse"));
+                }
+                Some("SqlWarehouse") => {
+                    warehouse = Some(
+                        serde_yaml::from_value::<SqlWarehouse>(value).expect("a SqlWarehouse"),
+                    );
                 }
                 other => panic!("unexpected kind {other:?}"),
             }
@@ -5649,6 +5655,31 @@ mod tests {
             "the Lakehouse lives in the platform namespace"
         );
         assert!(!lakehouse.spec.dry_run);
+        let warehouse = warehouse.expect("a SqlWarehouse document");
+        assert_eq!(
+            warehouse.metadata.name.as_deref(),
+            Some("small"),
+            "the example ships one class, named like the seed's"
+        );
+        assert_eq!(
+            warehouse.metadata.namespace.as_deref(),
+            Some(spec.namespace.as_str()),
+            "the class lives in the platform namespace"
+        );
+        assert_eq!(warehouse.spec.size, WarehouseSize::Small);
+        assert!(warehouse.spec.default, "the class is the catch-all");
+        assert_eq!(warehouse.spec.auto_stop.as_deref(), Some("15m"));
+        assert_eq!(warehouse.spec.min_workers, 0);
+        assert_eq!(warehouse.spec.max_workers, 1);
+        assert_eq!(
+            warehouse
+                .spec
+                .grants
+                .iter()
+                .map(|grant| grant.group.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stardelt-users", "stardelt-admins"]
+        );
     }
 
     #[test]
