@@ -4,6 +4,7 @@ import Shell from './components/Shell'
 import Overview from './routes/Overview'
 import Catalog from './routes/Catalog'
 import DataProducts from './routes/DataProducts'
+import Evals from './routes/Evals'
 import Query from './routes/Query'
 import Data from './routes/Data'
 import Connections from './routes/Connections'
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="/"           element={<Overview   />} />
         <Route path="/catalog"    element={<Catalog    />} />
         <Route path="/products"    element={<DataProducts />} />
+        <Route path="/evals"       element={<Evals       />} />
         <Route path="/query"      element={<Query      />} />
         <Route path="/data"       element={<Data       />} />
         <Route path="/connections" element={<Connections />} />

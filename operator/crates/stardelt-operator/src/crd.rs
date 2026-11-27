@@ -1875,6 +1875,7 @@ pub enum ConnectionType {
     S3,
     Kafka,
     Sftp,
+    Mlflow,
     Generic,
 }
 
@@ -1953,6 +1954,10 @@ pub struct ConnectionSecret {
     {
         "rule": "self.type != 'kafka' || (has(self.config) && 'bootstrapServers' in self.config)",
         "message": "a kafka connection needs config.bootstrapServers"
+    },
+    {
+        "rule": "self.type != 'mlflow' || (has(self.config) && 'trackingUrl' in self.config)",
+        "message": "an mlflow connection needs the setting trackingUrl"
     }
 ]))]
 pub struct ConnectionSpec {
@@ -2123,6 +2128,10 @@ impl ConnectionSpec {
             ConnectionType::Kafka => needs(
                 has_config("bootstrapServers"),
                 "a kafka connection needs config.bootstrapServers",
+            )?,
+            ConnectionType::Mlflow => needs(
+                has_config("trackingUrl"),
+                "an mlflow connection needs the setting trackingUrl",
             )?,
             ConnectionType::Generic => {}
         }
@@ -5860,6 +5869,12 @@ mod tests {
         );
     }
 
+    fn connection_spec_schema() -> serde_json::Value {
+        let yaml = serde_yaml::to_string(&Connection::crd()).unwrap();
+        let crd: serde_json::Value = serde_yaml::from_str(&yaml).unwrap();
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"].clone()
+    }
+
     fn connection(spec: serde_json::Value) -> Connection {
         serde_json::from_value(serde_json::json!({
             "apiVersion": "stardelt.io/v1alpha1",
@@ -6029,6 +6044,45 @@ mod tests {
         ] {
             assert!(connection(crm(ok)).spec.validate("c").is_ok());
         }
+    }
+
+    #[test]
+    fn an_mlflow_connection_is_admitted_with_a_tracking_url() {
+        let schema = connection_spec_schema();
+        assert!(
+            serde_json::to_string(&schema["properties"]["type"])
+                .unwrap()
+                .contains("mlflow"),
+            "the schema offers the type mlflow"
+        );
+        assert!(has_cel_rule(
+            &schema,
+            "self.type != 'mlflow' || (has(self.config) && 'trackingUrl' in self.config)",
+            "an mlflow connection needs the setting trackingUrl"
+        ));
+        let c = connection(serde_json::json!({
+            "scope": "group",
+            "ownerGroup": "analytics",
+            "type": "mlflow",
+            "config": { "trackingUrl": "https://mlflow.example.com" }
+        }));
+        assert_eq!(c.spec.type_, ConnectionType::Mlflow);
+        assert!(c.spec.secret.is_none(), "a bare server needs no token");
+        assert!(c.spec.validate("tracking").is_ok());
+    }
+
+    #[test]
+    fn an_mlflow_connection_without_a_tracking_url_is_refused() {
+        let c = connection(serde_json::json!({
+            "scope": "group",
+            "ownerGroup": "analytics",
+            "type": "mlflow",
+            "config": {}
+        }));
+        assert_eq!(
+            c.spec.validate("tracking").unwrap_err(),
+            "an mlflow connection needs the setting trackingUrl"
+        );
     }
 
     #[test]

@@ -143,6 +143,18 @@ export const CONNECTION_TYPES: Record<string, TypeSpec> = {
       },
     ],
   },
+  mlflow: {
+    label: 'MLflow tracking server',
+    config: [
+      {
+        name: 'trackingUrl',
+        label: 'Tracking URL',
+        required: true,
+        placeholder: 'https://mlflow.example.com',
+      },
+    ],
+    variants: [{ id: 'token', label: 'Bearer token', secret: [{ name: 'token', label: 'Token' }] }],
+  },
   // Free rows: settings (name and value, up to 32) and secret fields (name and a password
   // value, up to 16). The dialog renders the rows; the type carries no fixed fields. This is
   // the type for a secret that fits none of the named types — the label says so, because a

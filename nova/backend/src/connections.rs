@@ -31,7 +31,7 @@ pub const MAX_SETTING_BYTES: usize = 512;
 /// The kinds of connection and what each needs. The operator's `Connection` resource enforces the
 /// same table at admission (stardelt-operator `crd.rs`); a personal connection has no resource, so
 /// Nova must enforce it itself.
-pub const TYPES: [&str; 9] = [
+pub const TYPES: [&str; 10] = [
     "postgresql",
     "mysql",
     "sqlserver",
@@ -40,6 +40,7 @@ pub const TYPES: [&str; 9] = [
     "s3",
     "kafka",
     "sftp",
+    "mlflow",
     "generic",
 ];
 
@@ -343,6 +344,10 @@ fn type_rules(
         "kafka" => ok(
             has_c("bootstrapServers"),
             "a kafka connection needs the setting bootstrapServers",
+        ),
+        "mlflow" => ok(
+            has_c("trackingUrl"),
+            "an mlflow connection needs the setting trackingUrl",
         ),
         _ => Ok(()),
     }
@@ -772,11 +777,16 @@ mod tests {
         assert!(
             bad(json!({ "type": "kafka", "config": {}, "secret": { "x": "y" } })).contains("kafka")
         );
+        assert!(
+            bad(json!({ "type": "mlflow", "config": {}, "secret": { "token": "t" } }))
+                .contains("trackingUrl")
+        );
         for ok in [
             json!({ "type": "rest-api", "config": { "baseUrl": "https://x" }, "secret": { "token": "t" } }),
             json!({ "type": "rest-api", "config": { "baseUrl": "https://x" }, "secret": { "clientId": "a", "clientSecret": "b" } }),
             json!({ "type": "s3", "config": { "bucket": "b" }, "secret": { "accessKeyId": "a", "secretAccessKey": "b" } }),
             json!({ "type": "sftp", "config": { "host": "h" }, "secret": { "user": "u", "privateKey": "k" } }),
+            json!({ "type": "mlflow", "config": { "trackingUrl": "https://mlflow.example.com" }, "secret": { "token": "t" } }),
             json!({ "type": "generic", "config": {}, "secret": { "anything": "x" } }),
         ] {
             assert!(validate_new(&with(ok)).is_ok());

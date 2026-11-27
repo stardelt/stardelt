@@ -22,7 +22,7 @@ the transitional dev install until the operator path is proven on a fresh node
 | `Lakehouse` | namespaced | a managed catalog + storage (+ query) unit on object storage |
 | `IngestionSource` | namespaced | ingestion into Iceberg — one contract, three domains (`saas` / `enterprise` / `cdc`) |
 | `Pipeline` | namespaced | ordered `sql` / `notebook` / `python` / `dbt` / `quality` steps on one engine (`airflow` / `spark`) |
-| `Connection` | namespaced | a typed connection to an outside system: settings in the resource, credentials in the secret store (types: `postgresql`, `mysql`, `sqlserver`, `oracle`, `rest-api`, `s3`, `kafka`, `sftp`, `generic`); validated at admission and synced into the Secret `conn-<name>` through External Secrets |
+| `Connection` | namespaced | a typed connection to an outside system: settings in the resource, credentials in the secret store (types: `postgresql`, `mysql`, `sqlserver`, `oracle`, `rest-api`, `s3`, `kafka`, `sftp`, `mlflow`, `generic`); validated at admission and synced into the Secret `conn-<name>` through External Secrets |
 | `Volume` | namespaced | a governed folder of files in the object store with an owner group and grants (`read` / `write` / `manage`), on managed or external storage; the resource is validated, nothing reconciles it yet |
 | `Catalog` | namespaced | a data domain: a catalog with its storage location, an owner group and grants |
 | `SqlWarehouse` | namespaced | a compute class for SQL: size, caps and the groups that may use it |
@@ -311,7 +311,7 @@ metadata:
 spec:
   scope: group             # group (default) | managed
   ownerGroup: analytics    # scope group; for scope managed use usableBy: [analytics, finance]
-  type: sqlserver          # postgresql | mysql | sqlserver | oracle | rest-api | s3 | kafka | sftp | generic
+  type: sqlserver          # postgresql | mysql | sqlserver | oracle | rest-api | s3 | kafka | sftp | mlflow | generic
   config:                  # settings only; a name like password or token is refused
     host: crm.example.com
     port: "1433"
@@ -323,7 +323,8 @@ spec:
 
 Each `type` requires settings and secret keys (a database: `config.host`, `user`, `password`; `rest-api`: `config.baseUrl`
 and `token` or `clientId` and `clientSecret`; `s3`: `config.bucket`, `accessKeyId`, `secretAccessKey`; `sftp`:
-`config.host`, `user` and `password` or `privateKey`; `kafka`: `config.bootstrapServers`). The API server enforces the
+`config.host`, `user` and `password` or `privateKey`; `kafka`: `config.bootstrapServers`; `mlflow`:
+`config.trackingUrl` and, optionally, the secret key `token`). The API server enforces the
 rules at admission; `ConnectionSpec::validate` repeats them for the controller.
 
 The controller (`connection.rs`) creates one External Secrets `ExternalSecret` `conn-<name>` per connection, owned by the

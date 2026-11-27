@@ -5,7 +5,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
-const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/destinations', '/pipelines', '/runs', '/deployments', '/queries',
+const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/destinations', '/pipelines', '/runs', '/deployments', '/queries', '/evals',
   '/streams', '/platform', '/products', '/admin/catalogs', '/admin/agent-calls', '/admin/models', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [

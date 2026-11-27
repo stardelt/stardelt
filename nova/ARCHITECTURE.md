@@ -36,7 +36,7 @@ flowchart LR
   agents(["Agents and CLI: MCP, REST, SDK"])
   subgraph FE["frontend/src (pages by nav group)"]
     direction TB
-    fe_explore["Explore<br/><small>Overview, Catalog, Query, QueryLog, Accelerations, Lineage</small>"]
+    fe_explore["Explore<br/><small>Overview, Catalog, Query, QueryLog, Evals, Accelerations, Lineage</small>"]
     fe_build["Build<br/><small>Notebooks, Pipelines, Runs, Streams, Compute, Connections, Destinations, Data</small>"]
     fe_share["Share<br/><small>DataProducts, Dashboards</small>"]
     fe_admin["Admin<br/><small>AgentCalls, Models, AdminCatalogs, Platform, Settings, Deployments</small>"]
@@ -49,7 +49,7 @@ flowchart LR
     be_sql_query_log["<b>SQL & query log</b><br/><small>query_log_api 1492<br/>data 856<br/>statements 737<br/>query_log_collector 643<br/>trino 562<br/>query_log_event 549<br/>warehouses 477<br/>saved_queries 384<br/>query_log_store 191<br/>query_hints 176<br/>query_log 111<br/>jobs 109</small>"]
     be_pipelines_delivery["<b>Pipelines & delivery</b><br/><small>pipelines 9033 ⚠<br/>deployments 1146<br/>streams 952<br/>airflow 942<br/>migrations 862<br/>superset 818<br/>destinations 647<br/>pipeline_notice 462<br/>superset_archive 350<br/>stages 296<br/>previews 150</small>"]
     be_notebooks_compute["<b>Notebooks & compute</b><br/><small>notebooks 2277 ⚠<br/>compute 1352<br/>workspace 380</small>"]
-    be_connections["<b>Connections</b><br/><small>connection_routes 1949 ⚠<br/>secret_store 699<br/>connections 616</small>"]
+    be_connections["<b>Connections</b><br/><small>connection_routes 1949 ⚠<br/>secret_store 699<br/>connections 621</small>"]
     be_lineage["<b>Lineage</b><br/><small>lineage_api 1175<br/>lineage_store 179<br/>lineage_event 170</small>"]
     be_ai_ask_mcp_models["<b>AI (Ask, MCP, models)</b><br/><small>mcp 1472<br/>ask 852<br/>model_probe 601<br/>model_calls 281<br/>model_endpoints 246<br/>model_usage 186<br/>mcp_audit 176<br/>model_chat 148</small>"]
     be_platform_view["<b>Platform view</b><br/><small>apps 946<br/>cluster 234</small>"]
@@ -88,7 +88,7 @@ flowchart LR
   fe_detail_pages -->|39| be_pipelines_delivery
   fe_detail_pages -->|2| be_platform_view
   fe_detail_pages -->|2| be_sql_query_log
-  fe_explore -->|23| be_catalog
+  fe_explore -->|26| be_catalog
   fe_explore -->|3| be_core_identity
   fe_explore -->|5| be_lineage
   fe_explore -->|2| be_notebooks_compute

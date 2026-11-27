@@ -46,6 +46,7 @@ from trino.auth import Authentication, JWTAuthentication
 from trino.dbapi import connect as _trino_connect
 
 from stardelt.connections import ConnectionUnavailable, connection
+from stardelt.mlflow_tracking import mlflow
 from stardelt.publish import publish
 
 try:
@@ -66,6 +67,7 @@ __all__ = [
     "compute",
     "ClusterStopped",
     "connection",
+    "mlflow",
     "ConnectionUnavailable",
 ]
 
