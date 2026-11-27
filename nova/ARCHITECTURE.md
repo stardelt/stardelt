@@ -51,7 +51,7 @@ flowchart LR
     be_notebooks_compute["<b>Notebooks & compute</b><br/><small>notebooks 2277 ⚠<br/>compute 1352<br/>workspace 380</small>"]
     be_connections["<b>Connections</b><br/><small>connection_routes 1949 ⚠<br/>secret_store 699<br/>connections 616</small>"]
     be_lineage["<b>Lineage</b><br/><small>lineage_api 1175<br/>lineage_store 179<br/>lineage_event 170</small>"]
-    be_ai_ask_mcp_models["<b>AI (Ask, MCP, models)</b><br/><small>mcp 1447<br/>ask 844<br/>model_probe 601<br/>model_calls 281<br/>model_endpoints 246<br/>mcp_audit 176<br/>model_usage 161<br/>model_chat 148</small>"]
+    be_ai_ask_mcp_models["<b>AI (Ask, MCP, models)</b><br/><small>mcp 1447<br/>ask 844<br/>model_probe 601<br/>model_calls 281<br/>model_endpoints 246<br/>model_usage 186<br/>mcp_audit 176<br/>model_chat 148</small>"]
     be_platform_view["<b>Platform view</b><br/><small>apps 946<br/>cluster 234</small>"]
   end
   subgraph EXT["external systems"]

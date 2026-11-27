@@ -11,9 +11,10 @@ import { formatDurationMs, formatTime, relativeTime } from '../format'
 
 // The administrator's view of the models (design stardelt-nova#890 item 5): the endpoints
 // an administrator connected and what the probe found (`GET /api/model-endpoints`, #985),
-// this month's tokens per group and endpoint (`GET /api/admin/model-usage`, #997) and the
-// last calls. The page only arranges the API's answers; the endpoint stays a
-// `ModelEndpoint` resource, so there is no form here — connecting one is Kubernetes work.
+// this month's tokens per group and endpoint and the 👍/👎 the people left per endpoint
+// (`GET /api/admin/model-usage`, #997) and the last calls. The page only arranges the API's
+// answers; the endpoint stays a `ModelEndpoint` resource, so there is no form here —
+// connecting one is Kubernetes work.
 // Nova keeps sizes and hashes, never a conversation, and this page shows no URL and no key.
 
 /** How many calls the page asks for; the API accepts 1 to 500. */
@@ -83,6 +84,8 @@ export default function Models() {
   })
 
   const rows = endpoints.data ?? []
+  const feedbackFor = (name: string) =>
+    (usage.data?.feedback ?? []).find((row) => row.endpoint === name)
   const groups = usage.data?.groups ?? []
   const calls = usage.data?.calls ?? []
   const anyEstimated = groups.some((row) => row.estimatedCalls > 0)
@@ -117,6 +120,7 @@ export default function Models() {
                   <th scope="col" className="th px-3 py-2.5">Model</th>
                   <th scope="col" className="th px-3 py-2.5">Where prompts go</th>
                   <th scope="col" className="th px-3 py-2.5">Purposes</th>
+                  <th scope="col" className="th px-3 py-2.5">Rated</th>
                   <th scope="col" className="th px-3 py-2.5">Probe</th>
                   <th scope="col" className="th px-3 py-2.5" />
                 </tr>
@@ -124,7 +128,7 @@ export default function Models() {
               <tbody>
                 {rows.length === 0 && (
                   <tr>
-                    <td className="px-5 py-6" colSpan={6}>
+                    <td className="px-5 py-6" colSpan={7}>
                       <p className="font-medium">No model endpoint is connected yet.</p>
                       <p className="text-text-mute mt-1 max-w-2xl">
                         An administrator connects one with a ModelEndpoint resource — see the{' '}
@@ -148,6 +152,7 @@ export default function Models() {
                     disabled={probe.isPending}
                     busy={probe.isPending && probe.variables === endpoint.name}
                     onProbe={() => probe.mutate(endpoint.name)}
+                    feedback={feedbackFor(endpoint.name)}
                   />
                 ))}
               </tbody>
@@ -279,11 +284,13 @@ function EndpointRow({
   disabled,
   busy,
   onProbe,
+  feedback,
 }: {
   endpoint: ModelEndpoint
   disabled: boolean
   busy: boolean
   onProbe: () => void
+  feedback?: { up: number; down: number }
 }) {
   const word = probeWord(endpoint)
   const checks = probeChecks(endpoint)
@@ -302,6 +309,9 @@ function EndpointRow({
       </td>
       <td className="td px-3 py-3 text-text-dim">
         {endpoint.purposes.length > 0 ? endpoint.purposes.join(', ') : '—'}
+      </td>
+      <td className="td px-3 py-3 whitespace-nowrap" title="👍 and 👎 on this month's answers">
+        {feedback ? `👍 ${feedback.up} · 👎 ${feedback.down}` : <span className="text-text-mute">—</span>}
       </td>
       <td className="td px-3 py-3">
         <span className={bad ? 'text-bad whitespace-nowrap' : 'whitespace-nowrap'}>{word}</span>
