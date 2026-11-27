@@ -7,7 +7,10 @@
 Writes `versions.yaml` (every image digest with its source revision, every chart version and
 the library versions), `install.yaml` (namespace plus the rendered operator chart) and
 `platform-minimal.yaml` (a copy of the example `PlatformInstance`). The digests are read from
-the pins in `platform/` and from the CLI constant in `operator/`; nothing is typed by hand.
+the pins in `platform/` and from the constants in `operator/`; nothing is typed by hand.
+
+`versions.yaml` names every image the install runs; the ones stardelt does not build carry
+`source: upstream`.
 
 Only 0.0.N is accepted: there is no 0.1.0 before the maintainer says so.
 """
@@ -34,6 +37,9 @@ IMAGE_ORDER = [
     "dbt",
     "jupyter-singleuser",
     "stardelt-cli",
+    "keycloak",
+    "postgresql-superset",
+    "postgresql-airflow",
 ]
 
 # `cnpg` -> `cnpg`, `PLUGIN_BARMAN_CLOUD` -> `plugin-barman-cloud`.
@@ -77,6 +83,43 @@ def dbt_digest(airflow_values: str) -> str:
     return found[0]
 
 
+UPSTREAM_PINS = re.compile(
+    r'^pub const (?P<name>IMAGE|SUPERSET_PG_IMAGE|AIRFLOW_PG_IMAGE): &str = '
+    r'"(?P<ref>[^"@]+)@(?P<digest>sha256:[0-9a-f]{64})";$',
+    re.M,
+)
+
+
+def _upstream_constant(name: str, text: str, path: str) -> tuple[str, str]:
+    """(reference without tag, digest) of one pinned constant, or exit 1."""
+    found = [m for m in UPSTREAM_PINS.finditer(text) if m["name"] == name]
+    if len(found) != 1:
+        print(f"✗ {path}: expected one {name} digest, found {len(found)}", file=sys.stderr)
+        raise SystemExit(1)
+    return found[0]["ref"].rsplit(":", 1)[0], found[0]["digest"]
+
+
+def upstream_pins(keycloak_rs: str, pg_dump_rs: str) -> dict[str, tuple[str, str]]:
+    """The three third-party images the install runs, as (reference, digest), in order."""
+    pg_dump = "operator/crates/stardelt-operator/src/pg_dump.rs"
+    return {
+        "keycloak": _upstream_constant(
+            "IMAGE", keycloak_rs, "operator/crates/stardelt-operator/src/keycloak.rs"
+        ),
+        "postgresql-superset": _upstream_constant("SUPERSET_PG_IMAGE", pg_dump_rs, pg_dump),
+        "postgresql-airflow": _upstream_constant("AIRFLOW_PG_IMAGE", pg_dump_rs, pg_dump),
+    }
+
+
+def upstream_images(root: Path) -> dict[str, tuple[str, str]]:
+    """`upstream_pins` read from the operator sources."""
+    src = root / "operator" / "crates" / "stardelt-operator" / "src"
+    return upstream_pins(
+        (src / "keycloak.rs").read_text(),
+        (src / "pg_dump.rs").read_text(),
+    )
+
+
 def one_digest_per_app(pins: dict[str, list[str]]) -> dict[str, str]:
     """One digest per app, image names as versions.yaml writes them.
 
@@ -93,26 +136,43 @@ def one_digest_per_app(pins: dict[str, list[str]]) -> dict[str, str]:
 
 
 def _get(url: str, token: str, accept: str = "") -> bytes:
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {}
+    # Quay answers 401 to a request that carries `Authorization: Bearer ` with nothing in it.
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if accept:
         headers["Accept"] = accept
     return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30).read()
 
 
-def revision(image: str, digest: str) -> str:
-    """`org.opencontainers.image.revision` of a public GHCR image at `digest`.
+def registry(reference: str) -> tuple[str, str]:
+    """(token URL, v2 base URL) for a full reference without tag or digest."""
+    host, _, repo = reference.partition("/")
+    if host == "ghcr.io":
+        return (
+            f"https://ghcr.io/token?scope=repository:{repo}:pull&service=ghcr.io",
+            f"https://ghcr.io/v2/{repo}",
+        )
+    if host == "quay.io":
+        return (
+            f"https://quay.io/v2/auth?service=quay.io&scope=repository:{repo}:pull",
+            f"https://quay.io/v2/{repo}",
+        )
+    raise SystemExit(f"✗ {reference}: unknown registry")
 
-    What operator/scripts/check-cli-image.sh does with curl: anonymous token, the manifest
-    (index or single), the linux/amd64 manifest, its config blob, the label. A network error
-    is fatal — a release must not be packed blind.
+
+def revision(reference: str, digest: str) -> str:
+    """`org.opencontainers.image.revision` of a public image at `digest`.
+
+    `reference` is a full repository reference (`ghcr.io/stardelt/nova`,
+    `quay.io/keycloak/keycloak`). What operator/scripts/check-cli-image.sh does with curl:
+    anonymous token, the manifest (index or single), the linux/amd64 manifest, its config blob,
+    the label. A network error is fatal — a release must not be packed blind.
     """
-    repo = f"stardelt/{image}"
-    base = f"https://ghcr.io/v2/{repo}"
+    token_url, base = registry(reference)
     accept = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
     try:
-        token = json.loads(
-            _get(f"https://ghcr.io/token?scope=repository:{repo}:pull&service=ghcr.io", "")
-        )["token"]
+        token = json.loads(_get(token_url, ""))["token"]
         manifest = json.loads(_get(f"{base}/manifests/{digest}", token, accept))
         if "manifests" in manifest:
             amd64 = ""
@@ -128,10 +188,15 @@ def revision(image: str, digest: str) -> str:
             )
         config = json.loads(_get(f"{base}/blobs/{manifest['config']['digest']}", token))
     except Exception as err:  # noqa: BLE001 — any failure here must stop the release
-        print(f"✗ {image}: cannot read {digest} from ghcr.io ({err})", file=sys.stderr)
+        print(f"✗ {reference}: cannot read {digest} from {base} ({err})", file=sys.stderr)
         raise SystemExit(1) from err
     labels = (config.get("config") or {}).get("Labels") or {}
     return labels.get(REVISION_LABEL, "")
+
+
+def stardelt_revision(image: str, digest: str) -> str:
+    """`org.opencontainers.image.revision` of one of the images stardelt builds."""
+    return revision(f"ghcr.io/stardelt/{image}", digest)
 
 
 def versions_yaml(
@@ -140,6 +205,7 @@ def versions_yaml(
     images: dict[str, str],
     charts_: list[tuple[str, str]],
     python: dict[str, str],
+    upstream: frozenset[str] = frozenset(),
 ) -> str:
     """The versions.yaml text: every image digest, chart version and library version."""
     lines = [
@@ -153,7 +219,8 @@ def versions_yaml(
         raise SystemExit(1)
     for image in IMAGE_ORDER:
         digest, rev = images[image]
-        lines.append(f'  {image}: {{digest: "{digest}", revision: "{rev}"}}')
+        extra = ", source: upstream" if image in upstream else ""
+        lines.append(f'  {image}: {{digest: "{digest}", revision: "{rev}"{extra}}}')
     lines.append("charts:")
     for name, chart_version in charts_:
         lines.append(f"  {name}: {chart_version}")
@@ -241,15 +308,28 @@ def main(argv: list[str] | None = None) -> int:
     images["stardelt-cli"] = cli_digest(
         (root / "operator" / "crates" / "stardelt-operator" / "src" / "maintenance.rs").read_text()
     )
+    upstream = upstream_images(root)
+    images.update({name: digest for name, (_ref, digest) in upstream.items()})
 
-    image_lines = {
-        image: (digest, revision(image, digest)) for image, digest in images.items()
-    }
+    image_lines = {}
+    for image, digest in images.items():
+        if image in upstream:
+            ref, _digest = upstream[image]
+            image_lines[image] = (digest, revision(ref, digest))
+        else:
+            image_lines[image] = (digest, stardelt_revision(image, digest))
     chart_lines = charts((root / "platform" / "Makefile").read_text())
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "versions.yaml").write_text(
-        versions_yaml(args.version, commit, image_lines, chart_lines, library_versions(root))
+        versions_yaml(
+            args.version,
+            commit,
+            image_lines,
+            chart_lines,
+            library_versions(root),
+            upstream=frozenset(upstream),
+        )
     )
     (out / "install.yaml").write_text(
         install_yaml(root, args.version, commit, images["stardelt-operator"])

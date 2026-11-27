@@ -125,8 +125,11 @@ jobs:
           V: ${{ steps.rel.outputs.v }}
         run: |
           set -euo pipefail
-          sed -n 's/^  \([a-z-]*\): {digest: "\(sha256:[0-9a-f]\{64\}\)".*$/\1 \2/p' "releases/$V/versions.yaml" > "$RUNNER_TEMP/images.txt"
-          [ "$(wc -l < "$RUNNER_TEMP/images.txt")" -eq 7 ] || { cat "$RUNNER_TEMP/images.txt"; echo "✗ expected 7 images"; exit 1; }
+          # The images stardelt builds (the upstream rows are named, pinned and unsigned: #2189).
+          sed -n '/source: upstream}/!s/^  \([a-z-]*\): {digest: "\(sha256:[0-9a-f]\{64\}\)".*$/\1 \2/p' "releases/$V/versions.yaml" > "$RUNNER_TEMP/images.txt"
+          [ "$(wc -l < "$RUNNER_TEMP/images.txt")" -eq 8 ] || { cat "$RUNNER_TEMP/images.txt"; echo "✗ expected 8 images"; exit 1; }
+          upstream="$(sed -n '/source: upstream}/p' "releases/$V/versions.yaml" | wc -l)"
+          [ "$upstream" -eq 3 ] || { echo "✗ expected 3 upstream images, found $upstream"; exit 1; }
           while read -r image digest; do
             docker buildx imagetools create --tag "ghcr.io/stardelt/$image:$V" "ghcr.io/stardelt/$image@$digest"
             got="$(docker buildx imagetools inspect "ghcr.io/stardelt/$image:$V" | sed -n 's/^Digest: *//p' | head -n 1)"
