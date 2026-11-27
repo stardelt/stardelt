@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, type DataProduct, type ListedHealth } from '../api'
 import CatalogSelect from '../components/CatalogSelect'
@@ -33,6 +34,9 @@ const byDomain = (a: DataProduct, b: DataProduct) => {
 export default function DataProducts() {
   const [params] = useSearchParams()
   const catalog = params.get('catalog') ?? undefined
+  const qc = useQueryClient()
+  const [publishing, setPublishing] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<unknown>(null)
   const list = useQuery({
     queryKey: ['data-products', catalog ?? ''],
     queryFn: () => api.dataProducts(catalog),
@@ -49,6 +53,21 @@ export default function DataProducts() {
   })
   const fresh = new Map<string, ListedHealth>()
   for (const row of health.data?.tables ?? []) fresh.set(`${row.namespace}.${row.name}`, row)
+
+  async function publish(p: DataProduct) {
+    const key = `${p.namespace}.${p.table}`
+    if (publishing !== null) return
+    setPublishing(key)
+    setActionError(null)
+    try {
+      await api.putTableDocs(p.namespace, p.table, { lifecycle: 'published' }, catalog)
+      await qc.invalidateQueries({ queryKey: ['data-products', catalog ?? ''] })
+    } catch (error) {
+      setActionError(error)
+    } finally {
+      setPublishing(null)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -71,6 +90,8 @@ export default function DataProducts() {
           <em>draft</em> or <em>published</em>.
         </p>
       )}
+
+      {actionError !== null && <ErrorBox error={actionError} />}
 
       {domains.map((domain) => (
         <section key={domain || '(no domain)'} className="card p-5 min-w-0">
@@ -127,6 +148,19 @@ export default function DataProducts() {
                         <div className="mt-1 text-xs text-text-mute break-all">
                           replaced by {p.replacedBy}
                         </div>
+                      )}
+                      {p.lifecycle === 'draft' && (
+                        <button
+                          type="button"
+                          className="btn-ghost mt-1 py-1 px-2.5 text-xs"
+                          disabled={!p.owner || !p.description || !p.domain || publishing === `${p.namespace}.${p.table}`}
+                          title={!p.owner || !p.description || !p.domain
+                            ? 'A published product needs an owner, a description and a domain. Set them on the table page.'
+                            : 'Publish this product'}
+                          onClick={() => void publish(p)}
+                        >
+                          Publish
+                        </button>
                       )}
                     </td>
                   </tr>
