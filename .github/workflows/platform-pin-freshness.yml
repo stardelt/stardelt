@@ -2,6 +2,14 @@ name: "platform / Pin freshness"
 on:
   schedule: [{cron: "17 4 * * *"}]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - platform/manifests/**
+      - platform/helm-values/**
+      - platform/chart/values.yaml
+      - platform/chart/files/spark-runtimes.json
+      - operator/crates/stardelt-operator/src/provision.rs
+      - .github/workflows/platform-pin-freshness.yml
 permissions:
   contents: read
   issues: write
@@ -12,6 +20,7 @@ defaults:
 jobs:
   pins:
     name: The checked-in pins and the operator's golden-value checks
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       # The operator is ../operator in this checkout; full history so check_golden_image.py can
@@ -77,3 +86,21 @@ jobs:
           fi
           gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "All four checks pass again at ${GITHUB_SHA}: \`check_pin_freshness.py\`, \`check-operator-pins.sh\`, \`check_golden_image.py\` and \`check_golden_values.py\` are green, so this issue is closed. The maintenance CLI image decision is platform#1571."
           gh issue close "$number" --repo "$GITHUB_REPOSITORY"
+
+  pr-pins:
+    name: A pin this pull request changes is not behind the registry
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: `--changed` diffs against the base ref, and `pin_text` reads a commit.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Compare the changed pins with the registry
+        working-directory: platform
+        env:
+          # Through the environment, not interpolated: a ref name must not become shell code.
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          python3 scripts/check_pin_freshness.py \
+            --changed --base "origin/$BASE_REF" --rev HEAD

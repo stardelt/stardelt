@@ -3,15 +3,21 @@
 Standard library only; discovered by `python3 -m unittest discover -s scripts/tests`.
 """
 
+import io
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import check_pin_freshness
 from scripts.check_pin_freshness import (
+    changed_apps,
     compare,
     exit_code,
+    main,
     parse_pins,
     pin_text,
 )
@@ -199,6 +205,82 @@ class PinTextTest(unittest.TestCase):
         text, notes = pin_text(self.dir, "pins.yaml", "no-such-ref")
         self.assertIn("f" * 64, text)
         self.assertTrue(any("does not resolve, judging the working tree" in n for n in notes), notes)
+
+
+class ChangedTest(unittest.TestCase):
+    """`--changed` judges only the pins a pull request moves (stardelt/stardelt#2173)."""
+
+    def test_changed_with_no_pin_file_exits_zero(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["--changed", "--base", "HEAD"])
+        self.assertEqual(code, 0)
+        self.assertIn("no pin file changed; nothing to check", out.getvalue())
+
+    def test_changed_selects_the_changed_manifest(self):
+        nova = changed_apps({"manifests/nova-deployment.yaml"})
+        self.assertEqual(len(nova), 1)
+        self.assertEqual(nova[0][0], "nova")
+        self.assertEqual(nova[0][1], "manifests/nova-deployment.yaml")
+        self.assertEqual(changed_apps({"unrelated.yaml"}), [])
+
+    def test_changed_reports_an_unresolvable_base(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(["--changed", "--base", "no-such-ref"])
+        self.assertEqual(code, 1)
+        self.assertTrue(out.getvalue().startswith("! git diff"), out.getvalue())
+
+
+class ChangedPinMovedTest(unittest.TestCase):
+    """A manifest change that does not move its pin is not judged (stardelt/stardelt#2173).
+
+    `main` carries pins that are behind until the rollup catches up; failing every pull request
+    that edits such a file is the fleet-blocking outcome the ticket exists to avoid.
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.git("init", "-q")
+        self.write("a" * 64, 1)
+        self.commit("base")
+        self.write("a" * 64, 2)
+        self.commit("a non-pin change")
+
+    def write(self, pin, replicas):
+        (self.dir / "pins.yaml").write_text(f"tag: dev@sha256:{pin}\nreplicas: {replicas}\n")
+
+    def commit(self, message):
+        self.git("add", "pins.yaml")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", message)
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.dir), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def run_main(self, resolved):
+        out = io.StringIO()
+        with patch.object(check_pin_freshness, "REPO", self.dir), patch.object(
+            check_pin_freshness, "APPS", [("nova", "pins.yaml", "tag", "dev")]
+        ), patch.object(
+            check_pin_freshness, "resolve_digest", lambda app, tag: (resolved, "")
+        ), redirect_stdout(out):
+            code = main(["--changed", "--base", "HEAD~1", "--rev", "HEAD"])
+        return code, out.getvalue()
+
+    def test_a_manifest_change_that_moves_no_pin_is_green(self):
+        code, out = self.run_main("sha256:" + "a" * 64)
+        self.assertEqual(code, 0)
+        self.assertIn("no pin file changed; nothing to check", out)
+
+    def test_a_manifest_change_that_moves_the_pin_is_judged(self):
+        self.write("0" * 64, 2)
+        self.commit("a pin that is behind")
+        code, out = self.run_main("sha256:" + "a" * 64)
+        self.assertEqual(code, 1)
+        self.assertIn("✗ nova pinned 00000000…", out)
 
 
 if __name__ == "__main__":
