@@ -247,7 +247,7 @@ pub fn cron_job(namespace: &str, admin_group: &str) -> CronJob {
         metadata: ObjectMeta {
             name: Some(JOB.into()),
             namespace: Some(namespace.into()),
-            labels: Some(labels),
+            labels: Some(labels.clone()),
             ..ObjectMeta::default()
         },
         spec: CronJobSpec {
@@ -260,7 +260,7 @@ pub fn cron_job(namespace: &str, admin_group: &str) -> CronJob {
             time_zone: None,
             job_template: JobTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(meta(JOB, namespace).labels.unwrap_or_default()),
+                    labels: Some(labels.clone()),
                     ..ObjectMeta::default()
                 }),
                 spec: Some(JobSpec {
@@ -268,7 +268,7 @@ pub fn cron_job(namespace: &str, admin_group: &str) -> CronJob {
                     active_deadline_seconds: Some(110),
                     template: PodTemplateSpec {
                         metadata: Some(ObjectMeta {
-                            labels: Some(meta(JOB, namespace).labels.unwrap_or_default()),
+                            labels: Some(labels.clone()),
                             ..ObjectMeta::default()
                         }),
                         spec: Some(PodSpec {
@@ -379,6 +379,44 @@ pub fn group_file_config_map(namespace: &str) -> ConfigMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sync_pod_carries_the_label_the_catalog_policy_admits() {
+        // A fresh operator install refused every sync with "Connection refused": the pod had
+        // only `part-of`, and `lakekeeper-ingress` admits `app.kubernetes.io/name=access-sync`.
+        let cj = cron_job("data", "platform-admins");
+        let job = cj.spec.job_template.spec.as_ref().unwrap();
+        let pod_labels = job
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            pod_labels.get("app.kubernetes.io/name").map(String::as_str),
+            Some("access-sync")
+        );
+        let policy = crate::network_policy::lakekeeper_ingress("data");
+        let admitted = policy
+            .spec
+            .unwrap()
+            .ingress
+            .unwrap()
+            .into_iter()
+            .any(|rule| {
+                rule.from.unwrap_or_default().into_iter().any(|peer| {
+                    peer.pod_selector
+                        .and_then(|s| s.match_labels)
+                        .is_some_and(|m| m.iter().all(|(k, v)| pod_labels.get(k) == Some(v)))
+                })
+            });
+        assert!(
+            admitted,
+            "lakekeeper-ingress must admit the sync pod's labels"
+        );
+    }
 
     #[test]
     fn the_cron_job_runs_every_two_minutes_without_overlap() {
