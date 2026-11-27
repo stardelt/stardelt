@@ -1277,6 +1277,65 @@ def ensure_warehouse(name, spec, s3):
     return warehouse_id, "created"
 
 
+def refresh_storage_credentials():
+    """Re-write every platform warehouse's storage credential from Secret stardelt-s3-creds.
+
+    Rotation (#2174): Lakekeeper never returns a stored credential, so a rotated key pair can
+    only be pushed. Only warehouses whose `storage-profile` names the platform bucket and
+    endpoint are touched; a warehouse on somebody else's bucket keeps its own key. Returns 0
+    when every platform warehouse was refreshed, 1 when one could not be.
+    """
+    s3 = s3_credentials()
+    endpoint = s3["endpoint"].rstrip("/")
+    credential = {
+        "type": "s3",
+        "credential-type": "access-key",
+        "aws-access-key-id": s3["access-key"],
+        "aws-secret-access-key": s3["secret-key"],
+    }
+    status, listing = lk("GET", "/management/v1/warehouse")
+    if status != 200 or listing is None:
+        fail("cannot list Lakekeeper warehouses (HTTP %s)" % status)
+    refreshed, failures = 0, 0
+    for entry in listing.get("warehouses") or []:
+        name = entry.get("name")
+        warehouse_id = entry.get("warehouse-id") or entry.get("id")
+        if not name or not warehouse_id:
+            continue
+        status, warehouse = lk("GET", "/management/v1/warehouse/%s" % warehouse_id)
+        if status != 200:
+            print(
+                "rotate: warehouse %s could not be read (HTTP %s)" % (name, status),
+                file=sys.stderr,
+            )
+            failures += 1
+            continue
+        profile = (warehouse or {}).get("storage-profile") or {}
+        if profile.get("bucket") != s3["bucket"]:
+            print("rotate: warehouse %s uses another bucket — left alone" % name)
+            continue
+        if (profile.get("endpoint") or "").rstrip("/") != endpoint:
+            print("rotate: warehouse %s uses another endpoint — left alone" % name)
+            continue
+        status, _ = lk(
+            "POST",
+            "/management/v1/warehouse/%s/storage-credential" % warehouse_id,
+            {"new-storage-credential": credential},
+        )
+        if status not in (200, 201, 204):
+            print(
+                "rotate: warehouse %s refused the new credential (HTTP %s)"
+                % (name, status),
+                file=sys.stderr,
+            )
+            failures += 1
+            continue
+        print("rotate: warehouse %s refreshed (%s)" % (name, warehouse_id))
+        refreshed += 1
+    print("rotate: %d warehouse(s) refreshed, %d failure(s)" % (refreshed, failures))
+    return 1 if failures else 0
+
+
 def list_warehouses():
     """Every `SqlWarehouse` in the namespace (the CRD is installed)."""
     status, listing = k8s_request("GET", SQLWAREHOUSE_PATH)
@@ -1995,8 +2054,11 @@ def converge_warehouses(warehouses, members, unknown, realm_members=None):
     return 0
 
 
-def main():
+def main(argv=None):
     """Converge every Catalog and SqlWarehouse, then report orphan warehouses."""
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "--refresh-storage-credentials" in argv:
+        return refresh_storage_credentials()
     global PLATFORM_BUCKET, _TABLE_DROPPED
     # One drop per tick is enough: a removal drops the table, nothing republishes it
     # until step 5, so a second removal needs no second DELETE (platform#384).

@@ -85,6 +85,7 @@ class FakeLakekeeper:
         self.warehouse_assignments = {}
         self.profiles = {}
         self.storage_updates = []
+        self.credential_updates = []
         self.storage_refused = False
         self.project_assignments = []
         state = self
@@ -202,6 +203,13 @@ class FakeLakekeeper:
                         return
                     state.storage_updates.append((warehouse.group(1), body))
                     state.profiles[warehouse.group(1)] = body.get("storage-profile")
+                    self._reply(200, {})
+                    return
+                credential = re.fullmatch(
+                    r"/management/v1/warehouse/([^/]+)/storage-credential", path
+                )
+                if credential:
+                    state.credential_updates.append((credential.group(1), body))
                     self._reply(200, {})
                     return
                 if path == "/management/v1/role":
@@ -859,6 +867,47 @@ class EnsureWarehouseTest(JobTestCase):
         again, action = access_sync.ensure_warehouse("sandbox", {}, dict(S3))
         self.assertEqual((again, action), (warehouse_id, "failed"))
         self.assertEqual(len(self.fake.storage_updates), 0)
+
+
+class RefreshStorageCredentialsTest(JobTestCase):
+    """The rotation pass (#2174 a1): the platform's warehouses get the Secret's pair."""
+
+    def test_only_the_platform_bucket_and_endpoint_are_refreshed(self):
+        self.fake.warehouses = {
+            "shop": "wh-shop",
+            "finance": "wh-finance",
+            "elsewhere": "wh-elsewhere",
+        }
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"] + "/"},
+            "wh-finance": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]},
+            "wh-elsewhere": {"bucket": "someone-else", "endpoint": S3["endpoint"]},
+        }
+
+        self.assertEqual(access_sync.refresh_storage_credentials(), 0)
+
+        refreshed = {warehouse for warehouse, _ in self.fake.credential_updates}
+        self.assertEqual(refreshed, {"wh-shop", "wh-finance"})
+        for _, body in self.fake.credential_updates:
+            credential = body["new-storage-credential"]
+            self.assertEqual(credential["type"], "s3")
+            self.assertEqual(credential["credential-type"], "access-key")
+            self.assertEqual(credential["aws-access-key-id"], S3["access-key"])
+            self.assertEqual(credential["aws-secret-access-key"], S3["secret-key"])
+
+    def test_the_flag_runs_only_the_refresh_pass(self):
+        self.fake.warehouses = {"shop": "wh-shop"}
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]}
+        }
+
+        self.assertEqual(access_sync.main(["--refresh-storage-credentials"]), 0)
+
+        self.assertEqual([entry[0] for entry in self.fake.credential_updates], ["wh-shop"])
+        self.assertFalse(
+            any("/permissions/" in request[1] for request in self.fake.requests),
+            "the pass must not touch roles, grants or the group files",
+        )
 
 
 class PatchStatusTest(JobTestCase):
