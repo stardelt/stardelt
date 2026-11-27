@@ -7,6 +7,7 @@
 //! time. The consumer is a task that stores each record when a state store is configured.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -196,6 +197,88 @@ fn lineage_from_query(
         outputs,
         raw,
     })
+}
+
+/// The asset uri of one lineage output (#66): `stardelt://<catalog>/<schema>/<table>`, the
+/// uri the loader's `asset_uri` builds. `None` for a branch write (`table$…`, the WAP
+/// branch's name) and for a namespace that is not `catalog.schema`: the publish job raises
+/// the main table's event, and a dataset Nova cannot name is not raised at all.
+pub(crate) fn asset_uri_of(dataset: &crate::lineage_event::LineageDataset) -> Option<String> {
+    if dataset.name.is_empty() || dataset.name.contains('$') {
+        return None;
+    }
+    let mut parts = dataset.namespace.split('.');
+    let catalog = parts.next()?;
+    let schema = parts.next()?;
+    if catalog.is_empty() || schema.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("stardelt://{catalog}/{schema}/{}", dataset.name))
+}
+
+/// How long the uri → asset-id map is reused before it is read again.
+const ASSET_CACHE: Duration = Duration::from_secs(300);
+
+/// Posts one asset event per completed write. The uri → id map is read from Airflow at most
+/// every five minutes and only while events arrive; a failure is logged, never retried here.
+pub(crate) struct AssetEvents {
+    client: crate::airflow::AirflowClient,
+    cached:
+        tokio::sync::Mutex<Option<(std::time::Instant, std::collections::HashMap<String, i64>)>>,
+}
+
+impl AssetEvents {
+    fn new(client: crate::airflow::AirflowClient) -> Self {
+        Self {
+            client,
+            cached: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn ids(&self) -> Option<std::collections::HashMap<String, i64>> {
+        let mut cached = self.cached.lock().await;
+        if let Some((at, map)) = cached.as_ref()
+            && at.elapsed() < ASSET_CACHE
+        {
+            return Some(map.clone());
+        }
+        match self.client.assets().await {
+            Ok(assets) => {
+                let map: std::collections::HashMap<String, i64> = assets
+                    .into_iter()
+                    .map(|a| (a.uri.trim_end_matches('/').to_string(), a.id))
+                    .collect();
+                *cached = Some((std::time::Instant::now(), map.clone()));
+                Some(map)
+            }
+            Err(e) => {
+                warn!(error = %e, "cannot read Airflow's assets; no table-update event is raised");
+                cached.as_ref().map(|(_, map)| map.clone())
+            }
+        }
+    }
+
+    /// One event per output, in order. A pipeline that waits for the table starts within a
+    /// second (measured: delay 0 s, stardelt/stardelt#2001).
+    pub(crate) async fn raise(&self, event: &crate::lineage_event::LineageEvent) {
+        if event.event_type != "COMPLETE" {
+            return;
+        }
+        let Some(ids) = self.ids().await else {
+            return;
+        };
+        for output in &event.outputs {
+            let Some(uri) = asset_uri_of(output) else {
+                continue;
+            };
+            let Some(id) = ids.get(&uri).copied() else {
+                continue;
+            };
+            if let Err(e) = self.client.raise_asset_event(id).await {
+                warn!(error = %e, asset = %uri, "could not raise a table-update event");
+            }
+        }
+    }
 }
 
 async fn ingest(State(c): State<Arc<Collector>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -398,6 +481,12 @@ pub async fn start(db: Option<sqlx::PgPool>, client: Option<kube::Client>) -> an
     let (tx, mut rx) = mpsc::channel::<Accepted>(QUEUE_LEN);
     let (lineage_tx, mut lineage_rx) =
         mpsc::channel::<lineage_event::LineageEvent>(LINEAGE_QUEUE_LEN);
+    let assets = crate::airflow::AirflowConfig::from_env().map(|cfg| {
+        std::sync::Arc::new(AssetEvents::new(crate::airflow::AirflowClient::new(
+            reqwest::Client::new(),
+            cfg,
+        )))
+    });
     // The consumer: store every record when there is a state store, otherwise just log it.
     let db_clone = db.clone();
     tokio::spawn(async move {
@@ -449,6 +538,11 @@ pub async fn start(db: Option<sqlx::PgPool>, client: Option<kube::Client>) -> an
                 && let Err(e) = crate::lineage_store::insert_event(pool, &ev).await
             {
                 warn!(error = %e, "could not store a lineage event");
+            }
+            if let Some(assets) = &assets {
+                let assets = std::sync::Arc::clone(assets);
+                let ev = ev.clone();
+                tokio::spawn(async move { assets.raise(&ev).await });
             }
         }
     });
@@ -938,6 +1032,25 @@ mod tests {
         assert_eq!(namespace, "query");
         assert_eq!(name, "bob");
         assert_eq!(run_key, "q6");
+    }
+
+    #[test]
+    fn an_asset_uri_matches_the_loader() {
+        let dataset = |namespace: &str, name: &str| crate::lineage_event::LineageDataset {
+            namespace: namespace.into(),
+            name: name.into(),
+            facets: None,
+        };
+        assert_eq!(
+            asset_uri_of(&dataset("gold.shop", "orders")).as_deref(),
+            Some("stardelt://gold/shop/orders")
+        );
+        assert_eq!(
+            asset_uri_of(&dataset("gold.shop", "orders$wap-20261127061003")),
+            None
+        );
+        assert_eq!(asset_uri_of(&dataset("orders", "orders")), None);
+        assert_eq!(asset_uri_of(&dataset("a.b.c", "orders")), None);
     }
 
     #[tokio::test]
