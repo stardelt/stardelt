@@ -16,6 +16,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/catalog', label: 'Catalog', icon: 'database' },
       { to: '/query', label: 'SQL editor', icon: 'terminal' },
       { to: '/queries', label: 'Query log', icon: 'table' },
+      { to: '/evals', label: 'Evals', icon: 'list' },
       { to: '/accelerations', label: 'Accelerations', icon: 'clock' },
       { to: '/lineage', label: 'Lineage', icon: 'lineage' },
     ],
