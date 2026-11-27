@@ -1202,8 +1202,8 @@ pub enum PipelineRefresh {
         "message": "a sql task cannot name a connection: it runs inside the engine"
     },
     {
-        "rule": "!has(self.writes) || self.kind == 'notebook' || self.kind == 'spark-pipeline'",
-        "message": "only a spark-pipeline or notebook task declares writes"
+        "rule": "!has(self.writes) || self.kind == 'sql' || self.kind == 'notebook' || self.kind == 'spark-pipeline'",
+        "message": "only a sql, notebook or spark-pipeline task declares writes"
     },
     {
         "rule": "!has(self.writes) || self.writes.all(w, w.matches('^[^ .]+[.][^ .]+[.][^ .]+$'))",
@@ -1276,8 +1276,10 @@ pub struct PipelineTask {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(schema_with = "task_config_schema")]
     pub config: BTreeMap<String, String>,
-    /// The tables a `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`. Only these get an audit
-    /// branch when `spec.publish: wap`; a read leaves them alone (nova#628 decision 3).
+    /// The tables a `sql`, `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`.
+    /// Only these get an audit branch when `spec.publish: wap`; a read leaves them alone (nova#628
+    /// decision 3). A `sql` task's writes never make it a `wap` writer: only a `notebook` or
+    /// `spark-pipeline` task writes the audit branch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 16), inner(length(min = 1, max = 512)))]
     pub writes: Vec<String>,
@@ -1429,7 +1431,7 @@ pub enum PipelineConcurrency {
         "message": "publish: wap needs a quality task with at least one check"
     },
     {
-        "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.exists(t, has(t.writes) && size(t.writes) > 0)",
+        "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.exists(t, (t.kind == 'notebook' || t.kind == 'spark-pipeline') && has(t.writes) && size(t.writes) > 0)",
         "message": "publish: wap needs a task that writes at least one table"
     },
     {
@@ -1646,10 +1648,13 @@ impl PipelineSpec {
                 }
             }
             if !task.writes.is_empty()
-                && !matches!(task.kind, TaskKind::SparkPipeline | TaskKind::Notebook)
+                && !matches!(
+                    task.kind,
+                    TaskKind::SparkPipeline | TaskKind::Notebook | TaskKind::Sql
+                )
             {
                 return Err(format!(
-                    "task `{}` cannot write a table: only a spark-pipeline or notebook task declares writes",
+                    "task `{}` cannot write a table: only a sql, notebook or spark-pipeline task declares writes",
                     task.name
                 ));
             }
@@ -1726,7 +1731,11 @@ impl PipelineSpec {
         {
             return Err("publish: wap needs a quality task with at least one check".to_string());
         }
-        if self.publish == PipelinePublish::Wap && !self.tasks.iter().any(|t| !t.writes.is_empty())
+        if self.publish == PipelinePublish::Wap
+            && !self.tasks.iter().any(|t| {
+                matches!(t.kind, TaskKind::Notebook | TaskKind::SparkPipeline)
+                    && !t.writes.is_empty()
+            })
         {
             return Err("publish: wap needs a task that writes at least one table".to_string());
         }
@@ -5183,6 +5192,25 @@ mod tests {
     }
 
     #[test]
+    fn wap_needs_a_notebook_or_spark_writer_even_when_a_sql_task_writes() {
+        let mut spec = spec_of(vec![
+            task("load", TaskKind::Sql, &[]),
+            task("check", TaskKind::Quality, &["load"]),
+        ]);
+        spec.tasks[0].writes = vec!["mobility.silver.trips".to_string()];
+        spec.tasks[1].checks = vec![QualityCheck {
+            name: "c".into(),
+            sql: "SELECT 1".into(),
+            severity: QualitySeverity::Warn,
+        }];
+        spec.publish = PipelinePublish::Wap;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "publish: wap needs a task that writes at least one table"
+        );
+    }
+
+    #[test]
     fn only_a_spark_or_notebook_task_declares_writes_and_only_a_quality_task_checks() {
         let mut spec = spec_of(vec![task("nb", TaskKind::Notebook, &[])]);
         spec.tasks[0]
@@ -5204,9 +5232,9 @@ mod tests {
 
         let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);
         spec.tasks[0].writes = vec!["mobility.silver.trips".to_string()];
-        assert_eq!(
-            spec.validate().unwrap_err(),
-            "task `load` cannot write a table: only a spark-pipeline or notebook task declares writes"
+        assert!(
+            spec.validate().is_ok(),
+            "a sql task declares the table it writes"
         );
 
         let mut spec = spec_of(vec![task("load", TaskKind::Sql, &[])]);

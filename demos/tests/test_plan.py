@@ -572,6 +572,15 @@ def test_publish_wap_accepts_a_spark_pipeline_task():
     with pytest.raises(PlanError) as error:
         plan(*owned(sql("a"), publish="wap"))
     assert str(error.value) == "publish: wap needs a task that writes at least one table"
+    with pytest.raises(PlanError) as error:
+        plan(*owned({**sql("a"), "writes": ["m.b.t"]}, publish="wap"))
+    assert str(error.value) == "publish: wap needs a task that writes at least one table"
+
+
+def test_a_sql_task_may_declare_the_tables_it_writes():
+    p = plan(*owned({**sql("load"), "writes": ["silver.shop.orders"]}))
+    (load,) = p.tasks
+    assert load.writes == ("silver.shop.orders",)
 
 
 def test_a_table_trigger_is_planned_with_all_by_default():
