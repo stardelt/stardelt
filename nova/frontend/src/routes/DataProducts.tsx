@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, type DataProduct } from '../api'
+import { api, type DataProduct, type ListedHealth } from '../api'
 import CatalogSelect from '../components/CatalogSelect'
 import ErrorBox from '../components/ErrorBox'
 
@@ -9,6 +9,13 @@ const BADGE: Record<string, string> = {
   published: 'badge border-accent/40 bg-accent/10 text-accent',
   draft: 'badge border-border bg-bg-soft text-text-dim',
   deprecated: 'badge border-amber-400/40 bg-amber-400/10 text-warn',
+}
+
+/** The table page's words and ink (`TableFreshness.tsx`), so the two screens cannot drift. */
+const FRESH: Record<string, { word: string; ink: string }> = {
+  green: { word: 'Fresh', ink: 'border-ok/40 bg-ok/10 text-ok' },
+  amber: { word: 'Late (grace)', ink: 'border-warn/40 bg-warn/10 text-warn' },
+  red: { word: 'Late', ink: 'border-warn/40 bg-warn/10 text-warn' },
 }
 
 const byDomain = (a: DataProduct, b: DataProduct) => {
@@ -32,6 +39,16 @@ export default function DataProducts() {
   })
   const products = [...(list.data?.products ?? [])].sort(byDomain)
   const domains = [...new Set(products.map((p) => p.domain ?? ''))]
+  // Freshness (#37 slice 6): the promise the table's owner made, from the same route the
+  // Overview and the table page read. A catalog with no promised table answers an empty list.
+  const health = useQuery({
+    queryKey: ['catalog-health', catalog ?? ''],
+    queryFn: () => api.catalogHealth(catalog),
+    staleTime: 60_000,
+    retry: false,
+  })
+  const fresh = new Map<string, ListedHealth>()
+  for (const row of health.data?.tables ?? []) fresh.set(`${row.namespace}.${row.name}`, row)
 
   return (
     <div className="space-y-6">
@@ -64,6 +81,7 @@ export default function DataProducts() {
                 <th className="py-1 pr-3 font-medium">Table</th>
                 <th className="py-1 pr-3 font-medium">Description</th>
                 <th className="py-1 pr-3 font-medium">Owner</th>
+                <th className="py-1 pr-3 font-medium">Freshness</th>
                 <th className="py-1 pr-3 font-medium">State</th>
               </tr>
             </thead>
@@ -84,6 +102,18 @@ export default function DataProducts() {
                       {p.description ?? <span className="text-text-mute">No description</span>}
                     </td>
                     <td className="py-2 pr-3 align-top text-text-dim">{p.owner ?? '—'}</td>
+                    <td className="py-2 pr-3 align-top">
+                      {(() => {
+                        const h = fresh.get(`${p.namespace}.${p.table}`)
+                        if (!h) return <span className="text-text-mute">—</span>
+                        const badge = FRESH[h.status] ?? FRESH.red
+                        return (
+                          <span className={`badge ${badge.ink}`} title={h.detail}>
+                            {badge.word}
+                          </span>
+                        )
+                      })()}
+                    </td>
                     <td className="py-2 pr-3 align-top">
                       <span className={BADGE[p.lifecycle] ?? BADGE.draft}>{p.lifecycle}</span>
                       {p.lifecycle === 'deprecated' && p.replacedBy && (

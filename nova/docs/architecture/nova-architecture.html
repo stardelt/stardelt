@@ -94,7 +94,7 @@ flowchart LR
   fe_explore --&gt;|8| be_pipelines_delivery
   fe_explore --&gt;|1| be_platform_view
   fe_explore --&gt;|14| be_sql_query_log
-  fe_share --&gt;|1| be_catalog
+  fe_share --&gt;|2| be_catalog
   fe_share --&gt;|1| be_platform_view
   be_ai_ask_mcp_models -.-&gt;|1| x_airflow
   be_ai_ask_mcp_models -.-&gt;|3| x_k8s
