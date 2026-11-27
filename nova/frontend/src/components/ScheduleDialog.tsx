@@ -315,6 +315,8 @@ export default function ScheduleDialog({
   const weekdayId = `${prefix}-weekday`
   const customId = `${prefix}-custom`
   const customHintId = `${prefix}-custom-hint`
+  const tablesId = `${prefix}-tables`
+  const triggerModeId = `${prefix}-trigger-mode`
   const timezoneId = `${prefix}-timezone`
   const statementId = `${prefix}-statement`
   const counterId = `${prefix}-counter`
@@ -348,6 +350,16 @@ export default function ScheduleDialog({
   const [version, setVersion] = useState(() => (editing && startWithNewest ? '' : storedNotebook?.objectVersion ?? initialNotebook?.objectVersion ?? ''))
   const [notebookValues, setNotebookValues] = useState<Record<string, string>>({})
   const [when, setWhen] = useState<WhenPreset>(seed.preset)
+  // `spec.triggers` (#66): a second cadence beside the cron. The detail view carries the raw
+  // list; `storedTrigger` is its one entry (the CRD allows one today).
+  const storedTrigger = pipeline?.triggers?.[0]
+  const [tablesMode, setTablesMode] = useState(() => Boolean(storedTrigger))
+  const [triggerTables, setTriggerTables] = useState(
+    () => storedTrigger?.tablesUpdated.join('\n') ?? '',
+  )
+  const [triggerMode, setTriggerMode] = useState<'all' | 'any'>(() =>
+    storedTrigger?.mode === 'any' ? 'any' : 'all',
+  )
   const [time, setTime] = useState(seed.time)
   const [weekday, setWeekday] = useState(seed.weekday)
   const [custom, setCustom] = useState(seed.custom)
@@ -523,7 +535,13 @@ export default function ScheduleDialog({
       ? hovered.message
       : null
 
-  const wantsSchedule = when !== 'ondemand'
+  const wantsSchedule = !tablesMode && when !== 'ondemand'
+  const triggerList = triggerTables.split(/\s+/).filter(Boolean)
+  const triggerOk =
+    !tablesMode ||
+    (triggerList.length >= 1 &&
+      triggerList.length <= 10 &&
+      triggerList.every((table) => /^[^ .]+\.[^ .]+\.[^ .]+$/.test(table)))
   const cron = cronFor({ preset: when, time, weekday, custom })
   // Custom text is checked exactly as the API checks it; a preset is built valid, but it is
   // validated too so a broken preview cannot be sent as a surprise refusal.
@@ -670,6 +688,7 @@ export default function ScheduleDialog({
 
   const disabled =
     submitting ||
+    !triggerOk ||
     !nameOk ||
     !principalsUsable ||
     !groupReady ||
@@ -685,9 +704,10 @@ export default function ScheduleDialog({
     inFlight.current = true
     setSubmitting(true)
     setError(null)
-    const schedule = wantsSchedule && cron !== null
+    const schedule = !tablesMode && wantsSchedule && cron !== null
       ? { cron, timezone }
       : null
+    const triggers = tablesMode ? [{ tablesUpdated: triggerList, mode: triggerMode }] : []
     // `PUT` describes the whole editable state: an omitted `params` would remove the table and
     // an omitted option would reset it. The dialog always sends all four fields.
     const optionsBody: PipelineOptions = {
@@ -722,11 +742,11 @@ export default function ScheduleDialog({
     try {
       const view = editing && pipeline
         ? await api.updatePipeline(pipeline.namespace, pipeline.name, notebookMode
-            ? { notebook: notebookBody, schedule, options: optionsBody, notify: notifyResource }
-            : { sql: statementText, schedule, params: table, options: optionsBody, notify: notifyResource })
+            ? { notebook: notebookBody, schedule, triggers, options: optionsBody, notify: notifyResource }
+            : { sql: statementText, schedule, triggers, params: table, options: optionsBody, notify: notifyResource })
         : await api.createPipeline(notebookMode
-            ? { name, ownerGroup: group, notebook: notebookBody, schedule, options: optionsBody, notify: notifyResource }
-            : { name, ownerGroup: group, sql: statementText, schedule, params: table, options: optionsBody, notify: notifyResource })
+            ? { name, ownerGroup: group, notebook: notebookBody, schedule, triggers, options: optionsBody, notify: notifyResource }
+            : { name, ownerGroup: group, sql: statementText, schedule, triggers, params: table, options: optionsBody, notify: notifyResource })
       onScheduled(view)
     } catch (e: unknown) {
       // The API's own sentence, kept beside the fields it is about.
@@ -848,23 +868,63 @@ export default function ScheduleDialog({
 
         <fieldset>
           <legend className="label mb-2">When</legend>
-          <div className="grid gap-x-5 gap-y-2 sm:grid-cols-2">
-            {PRESETS.map((preset) => (
-              <label key={preset.id} className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  name={whenName}
-                  value={preset.id}
-                  checked={when === preset.id}
-                  onChange={() => setWhen(preset.id)}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={tablesMode}
+              onChange={(event) => setTablesMode(event.target.checked)}
+            />
+            <span>When these tables are updated</span>
+          </label>
+          {tablesMode ? (
+            <div className="mt-3 space-y-3">
+              <label htmlFor={tablesId} className="block">
+                <span className="label block mb-1.5">Tables, one per line (catalog.schema.table)</span>
+                <textarea
+                  id={tablesId}
+                  className="input font-mono"
+                  rows={3}
+                  value={triggerTables}
+                  onChange={(event) => setTriggerTables(event.target.value)}
                 />
-                <span>{preset.label}</span>
               </label>
-            ))}
-          </div>
+              <label htmlFor={triggerModeId} className="block">
+                <span className="label block mb-1.5">Start when</span>
+                <select
+                  id={triggerModeId}
+                  className="input w-auto"
+                  value={triggerMode}
+                  onChange={(event) => setTriggerMode(event.target.value === 'any' ? 'any' : 'all')}
+                >
+                  <option value="all">all of them update</option>
+                  <option value="any">any of them updates</option>
+                </select>
+              </label>
+              {!triggerOk && (
+                <p className="text-xs text-bad">
+                  Name 1 to 10 tables as catalog.schema.table, one per line.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="mt-3 grid gap-x-5 gap-y-2 sm:grid-cols-2">
+              {PRESETS.map((preset) => (
+                <label key={preset.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name={whenName}
+                    value={preset.id}
+                    checked={when === preset.id}
+                    onChange={() => setWhen(preset.id)}
+                  />
+                  <span>{preset.label}</span>
+                </label>
+              ))}
+            </div>
+          )}
         </fieldset>
 
-        {(when === 'daily' || when === 'weekdays' || when === 'weekly' || when === 'monthly') && (
+        {!tablesMode && (when === 'daily' || when === 'weekdays' || when === 'weekly' || when === 'monthly') && (
           <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
             {when === 'weekly' && (
               <label htmlFor={weekdayId} className="block">
@@ -896,7 +956,7 @@ export default function ScheduleDialog({
           </div>
         )}
 
-        {when === 'custom' && (
+        {!tablesMode && when === 'custom' && (
           <div>
             <label htmlFor={customId} className="block">
               <span className="label block mb-1.5">Custom schedule</span>
@@ -920,6 +980,7 @@ export default function ScheduleDialog({
           <p className="font-mono text-xs text-text-mute break-all">{cron}</p>
         )}
 
+        {!tablesMode && (
         <label htmlFor={timezoneId} className="block">
           <span className="label block mb-1.5">Time zone</span>
           <select
@@ -931,7 +992,9 @@ export default function ScheduleDialog({
             {zones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
           </select>
         </label>
+        )}
 
+        {!tablesMode && (
         <section aria-labelledby={nextRunsId}>
           <h3 id={nextRunsId} className="label mb-1.5">Next runs</h3>
           {!wantsSchedule ? (
@@ -952,6 +1015,7 @@ export default function ScheduleDialog({
             </ol>
           )}
         </section>
+        )}
 
         <fieldset>
           <legend className="label mb-2">What to run</legend>

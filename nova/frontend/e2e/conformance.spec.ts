@@ -3294,6 +3294,7 @@ test.describe('schedule', () => {
       ownerGroup: 'analytics',
       sql: 'select 1',
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      triggers: [],
       params: {},
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       // The dialog always sends all three lists: an empty one removes that notice (#815).
@@ -3357,10 +3358,11 @@ test.describe('schedule', () => {
     const puts = requests.filter((request) => request.method === 'PUT')
     expect(puts.map((request) => new URL(request.url).pathname)).toEqual([`/api/pipelines/${NS}/team-smoke`])
     const putBody = JSON.parse(puts[0].body ?? '{}') as Record<string, unknown>
-    expect(Object.keys(putBody).sort()).toEqual(['notify', 'options', 'params', 'schedule', 'sql'])
+    expect(Object.keys(putBody).sort()).toEqual(['notify', 'options', 'params', 'schedule', 'sql', 'triggers'])
     expect(putBody).toEqual({
       sql: 'select 1',
       schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' },
+      triggers: [],
       params: {},
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
@@ -3489,6 +3491,85 @@ test.describe('schedule', () => {
     await page.getByRole('button', { name: 'Delete pipeline' }).click()
     await expect(page.getByRole('dialog', { name: 'Delete team-smoke?' })).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+
+  test('a table trigger is created instead of a schedule (#66)', async ({ browser }) => {
+    const detail = pipeline({ name: 'on-update' })
+    let posted: Record<string, unknown> | null = null
+    const { context, page } = await open(browser, {
+      write: (route, path, method, body) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        posted = JSON.parse(body ?? '{}') as Record<string, unknown>
+        json(route, { ...detail, runs: [], params: {}, retries: null }, 201)
+        return true
+      },
+    })
+    await page.getByLabel('SQL query').fill('select 1')
+    const dialog = await openDialog(page)
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('on-update')
+    await dialog.getByRole('checkbox', { name: 'When these tables are updated' }).check()
+
+    // The cron controls go with the cron: presets, time of day, zone and the next runs.
+    await expect(dialog.getByRole('radio', { name: 'Every day at' })).toHaveCount(0)
+    await expect(dialog.getByRole('combobox', { name: 'Time zone', exact: true })).toHaveCount(0)
+    await expect(dialog.getByText('Next runs', { exact: true })).toHaveCount(0)
+
+    const create = dialog.getByRole('button', { name: 'Create schedule' })
+    const tables = dialog.getByRole('textbox', { name: 'Tables, one per line (catalog.schema.table)' })
+    await tables.fill('trips')
+    await expect(dialog.getByText('Name 1 to 10 tables as catalog.schema.table, one per line.')).toBeVisible()
+    await expect(create).toBeDisabled()
+    await tables.fill(Array.from({ length: 11 }, (_value, index) => `lakehouse.bronze.t${index}`).join('\n'))
+    await expect(create).toBeDisabled()
+    await tables.fill('lakehouse.bronze.trips\nlakehouse.silver.bookings')
+    await expect(create).toBeEnabled()
+    await dialog.getByRole('combobox', { name: 'Start when', exact: true }).selectOption('any')
+    await create.click()
+
+    await expect.poll(() => posted).not.toBeNull()
+    expect(posted).toEqual({
+      name: 'on-update',
+      ownerGroup: 'analytics',
+      sql: 'select 1',
+      schedule: null,
+      triggers: [{ tablesUpdated: ['lakehouse.bronze.trips', 'lakehouse.silver.bookings'], mode: 'any' }],
+      params: {},
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      notify: { onFailure: [], onSuccess: [], onRecovered: [] },
+    })
+    await context.close()
+  })
+
+  test('edit mode starts in table mode and keeps the trigger (#66)', async ({ browser }) => {
+    const stored = pipeline({
+      name: 'on-update',
+      schedule: null,
+      triggers: [{ tablesUpdated: ['lakehouse.bronze.trips'], mode: 'all' }],
+    })
+    const { context, page, requests } = await open(browser, {
+      start: `/pipelines/${NS}/on-update`,
+      detail: { ...stored, runs: [], params: {}, retries: null },
+      write: (route, path, method) => {
+        if (path !== `/api/pipelines/${NS}/on-update` || method !== 'PUT') return false
+        json(route, stored)
+        return true
+      },
+    })
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
+    await expect(dialog.getByRole('checkbox', { name: 'When these tables are updated' })).toBeChecked()
+    await expect(dialog.getByRole('textbox', { name: 'Tables, one per line (catalog.schema.table)' }))
+      .toHaveValue('lakehouse.bronze.trips')
+    await expect(dialog.getByRole('combobox', { name: 'Time zone', exact: true })).toHaveCount(0)
+
+    // Saving without a change keeps the trigger instead of turning the pipeline to on demand.
+    await dialog.getByRole('button', { name: 'Save schedule' }).click()
+    const puts = requests.filter((request) => request.method === 'PUT')
+    await expect.poll(() => puts.length).toBe(1)
+    const put = JSON.parse(puts[0].body ?? '{}') as Record<string, unknown>
+    expect(put.schedule).toBeNull()
+    expect(put.triggers).toEqual([{ tablesUpdated: ['lakehouse.bronze.trips'], mode: 'all' }])
     await context.close()
   })
 })
@@ -3670,6 +3751,7 @@ test.describe('schedule options', () => {
       ownerGroup: 'analytics',
       sql: "select * from t where ds = '${params.days}'",
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      triggers: [],
       params: { days: '2026-10-20' },
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
@@ -3899,6 +3981,7 @@ test.describe('schedule options', () => {
     expect(puts).toEqual([{
       sql: 'select 1',
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      triggers: [],
       params: { days: '1', region: 'us' },
       options: { retries: 2, backoffMinutes: 10, timeoutMinutes: 360, concurrency: 'Allow' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
@@ -4246,12 +4329,13 @@ test.describe('schedule notebook', () => {
         connection: null,
       },
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      triggers: [],
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
     })
     // Exactly one of the two: the notebook, and no statement at all.
     expect(Object.keys(posted as Record<string, unknown>).sort())
-      .toEqual(['name', 'notebook', 'notify', 'options', 'ownerGroup', 'schedule'])
+      .toEqual(['name', 'notebook', 'notify', 'options', 'ownerGroup', 'schedule', 'triggers'])
     await context.close()
   })
 
@@ -4286,6 +4370,7 @@ test.describe('schedule notebook', () => {
     expect(first).toEqual([{
       notebook: { name: 'smoke.ipynb', objectVersion: V2, params: { days: '9' }, connection: null },
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      triggers: [],
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
       notify: { onFailure: [], onSuccess: [], onRecovered: [] },
     }])

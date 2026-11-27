@@ -93,13 +93,15 @@ test('a ticked destination is sent as notify.onFailure with the rest of the sche
   await page.getByRole('button', { name: 'Edit schedule' }).click()
   const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
   await expect(dialog).toBeVisible()
-  // Native `<details>`, closed by default: the destinations are not on screen yet.
-  await expect(dialog.getByRole('checkbox')).toHaveCount(0)
+  // Native `<details>`, closed by default: the destinations are not on screen yet. The "When
+  // these tables are updated" box (#66) sits outside it, so count inside the details.
+  const advanced = dialog.locator('details')
+  await expect(advanced.getByRole('checkbox')).toHaveCount(0)
   await dialog.getByText('Advanced', { exact: true }).click()
 
   // One group of checkboxes per ending, so the same destination name appears three times.
   const fails = dialog.getByRole('group', { name: 'When it fails' })
-  await expect(dialog.getByRole('checkbox')).toHaveCount(6)
+  await expect(advanced.getByRole('checkbox')).toHaveCount(6)
   // Only the pipeline's own group is listed.
   await expect(fails.getByLabel('on-call (webhook)')).toBeVisible()
   await expect(fails.getByLabel('data-team (email)')).toBeVisible()
@@ -112,6 +114,7 @@ test('a ticked destination is sent as notify.onFailure with the rest of the sche
   expect(puts()).toEqual({
     sql: 'select 1',
     schedule: { cron: '0 2 * * *', timezone: 'Europe/Berlin' },
+    triggers: [],
     params: {},
     options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
     notify: { onFailure: ['on-call'], onSuccess: [], onRecovered: [] },
@@ -132,6 +135,7 @@ test('a destination ticked for successes is sent as notify.onSuccess', async ({ 
   expect(puts()).toEqual({
     sql: 'select 1',
     schedule: { cron: '0 2 * * *', timezone: 'Europe/Berlin' },
+    triggers: [],
     params: {},
     options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
     notify: { onFailure: [], onSuccess: ['on-call'], onRecovered: [] },
