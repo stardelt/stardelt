@@ -152,9 +152,15 @@ PUBLISH_VALUES = ("direct", "wap")
 PUBLISH_BAD = "publish must be direct or wap (found `{publish}`)"
 WRITES_NOT_TABLE = "task `{task}` writes `{table}`, which is not catalog.schema.table"
 WRITES_ONLY_NOTEBOOK = (
-    "task `{task}` cannot write a table: only a spark-pipeline or notebook task declares writes"
+    "task `{task}` cannot write a table: only a sql, notebook or spark-pipeline task declares writes"
 )
 WAP_NEEDS_WRITER = "publish: wap needs a task that writes at least one table"
+# `wap-publish` moves `main` from the audit branch of every table in `writes`, and a `sql` task
+# writes `main` directly: its table would be rolled back to the branch's snapshot.
+WAP_SQL_WRITES = (
+    "publish: wap moves main from the audit branch, so a sql task cannot declare writes: "
+    "only a notebook or spark-pipeline task writes under wap"
+)
 WAP_PLACEHOLDER_NEEDS_ONE_TABLE = (
     "${{table}} names the audit branch of one table, and this pipeline writes {count}: "
     "name the table in the check, or split the pipeline"
@@ -457,8 +463,12 @@ def plan(
                     f"task `{task.name}` depends on `{dep}`, which is not another task of this pipeline"
                 )
     _reject_cycles(tasks)
-    if publish == "wap" and not any(task.writes for task in tasks):
+    if publish == "wap" and not any(
+        task.writes for task in tasks if task.kind in ("notebook", "spark-pipeline")
+    ):
         raise PlanError(WAP_NEEDS_WRITER)
+    if publish == "wap" and any(task.writes for task in tasks if task.kind == "sql"):
+        raise PlanError(WAP_SQL_WRITES)
 
     schedule = spec.get("schedule") or {}
     raw_triggers = spec.get("triggers") or []
@@ -655,10 +665,10 @@ def refuse_unrunnable(p: PipelinePlan) -> None:
 def _writes(task_name: str, kind: str, raw) -> tuple[str, ...]:
     """The tables a task declares it writes, or a `PlanError`.
 
-    Only a `notebook` or `spark-pipeline` task writes a table, and every table is
+    Only a `sql`, `notebook` or `spark-pipeline` task writes a table, and every table is
     `catalog.schema.table`.
     """
-    if kind not in ("notebook", "spark-pipeline"):
+    if kind not in ("sql", "notebook", "spark-pipeline"):
         raise PlanError(WRITES_ONLY_NOTEBOOK.format(task=task_name))
     if not isinstance(raw, list):
         raise PlanError(WRITES_NOT_TABLE.format(task=task_name, table=raw))

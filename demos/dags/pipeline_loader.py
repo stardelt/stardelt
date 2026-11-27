@@ -477,6 +477,10 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
                 "provenance": provenance,
             },
             executor_config=executor_config,
+            # A sql task's declared writes raise the asset event when the statement succeeded; under
+            # `wap` the table changes at `wap-publish`, which carries the outlets (the plan refuses a
+            # sql writer on a `wap` pipeline).
+            outlets=[] if p.publish == "wap" else [_asset(table) for table in t.writes],
             dag=dag,
         )
     for t in p.tasks:
