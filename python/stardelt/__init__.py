@@ -703,7 +703,7 @@ SPARK_TIPS = (
     "instead of df.cache() never released: df.unpersist() when done; cache only what several actions reuse "
     "(cached blocks occupy executor memory, 1 GiB each, and are not freed by themselves)",
     "instead of pd.read_csv(chunksize=250_000) then spark.createDataFrame(chunk) + saveAsTable(append) per chunk: chunks of at most 20_000 rows (about 1 MiB per task), "
-    "finished chunk numbers in a small table so a restart can resume, and see platform#378 for the planned loader "
+    "finished chunk numbers in a small table so a restart can resume, and see stardelt/stardelt#52 for the planned loader "
     "(measured 2026-10-21: 250_000 rows = tasks of 11 MiB, 305 warnings in 3 h, driver OOMKilled)",
     "instead of df.count() repeated to \"check\": run it once, keep the number "
     "(each action is a job)",
@@ -953,8 +953,8 @@ def _session(app_name="stardelt-notebook", cluster=None):
     ``s3://``); private buckets and the platform's own storage are not. The token is
     never printed or returned.
 
-    Keep the shared driver small: see ``stardelt.spark_tips()`` for the patterns
-    that do (the cheat sheet is also in the helper's README).
+    Keep the shared driver small: the patterns are in the notebook guide,
+    https://stardelt.io/docs/guides/performance .
     """
     if not _spark_allowed():
         _platform_only("stardelt.spark")  # raises the same "connect VS Code to your workspace" sentence
