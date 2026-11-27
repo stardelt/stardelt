@@ -59,6 +59,43 @@ test('Stop flips the button to Resume, and a reload keeps it', async ({ page }) 
   await expect(page.getByRole('button', { name: 'Resume orders' })).toBeVisible()
 })
 
+test('Delete asks once, says the topic stays, and goes back to the list', async ({ page }) => {
+  const deletes: string[] = []
+  await page.route('**/api/streams/stardelt/orders', (route) => {
+    deletes.push(route.request().method())
+    return route.fulfill({ status: 204, body: '' })
+  })
+  await page.route('**/api/streams', (route) => json(route, { streams: [STREAM] }))
+
+  await page.goto('/streams/stardelt/orders')
+  await page.getByRole('button', { name: 'Delete orders' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText('Its Kafka topic and the messages in it stay.')).toBeVisible()
+
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
+
+  await expect(page).toHaveURL(/\/streams$/)
+  expect(deletes).toEqual(['DELETE'])
+})
+
+test('a refused Delete keeps the dialog open and shows the sentence', async ({ page }) => {
+  await page.route('**/api/streams/stardelt/orders', (route) =>
+    json(route, { error: 'this stream belongs to another group' }, 403),
+  )
+  await page.route('**/api/streams', (route) => json(route, { streams: [STREAM] }))
+
+  await page.goto('/streams/stardelt/orders')
+  await page.getByRole('button', { name: 'Delete orders' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
+
+  await expect(dialog.getByText('this stream belongs to another group')).toBeVisible()
+  await expect(dialog.getByText('Its Kafka topic and the messages in it stay.')).toBeVisible()
+  await expect(page).toHaveURL(/\/streams\/stardelt\/orders$/)
+})
+
 test('a stream the caller cannot see says it does not exist', async ({ page }) => {
   await page.route('**/api/streams', (route) => json(route, { streams: [] }))
 

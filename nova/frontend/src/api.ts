@@ -1457,6 +1457,9 @@ export const api = {
   /** Create or update one stream as its owner group (`PUT /api/streams/{ns}/{name}`). */
   saveStream: (namespace: string, body: StreamWriteBody) =>
     jput<StreamView>(`/api/streams/${seg(namespace)}/${seg(body.name)}`, body),
+  /** Delete one stream the caller's group owns; the Kafka topic and its messages stay. */
+  deleteStream: (namespace: string, name: string) =>
+    jdel(`/api/streams/${seg(namespace)}/${seg(name)}`),
   /** The Spark clusters this caller may use (internal#161). */
   compute:        ()                            => jget<{ clusters: ComputeCluster[] }>('/api/compute'),
   startCompute:   (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/start`, {}),

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useId, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, ApiError, errorMessage, type StreamView } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
@@ -46,6 +47,63 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
       <dt className="label">{label}</dt>
       <dd className="mt-0.5 break-words">{children}</dd>
     </div>
+  )
+}
+
+/** A native `<dialog>`, like `DeleteDestinationDialog`: the browser holds the focus and Escape cancels. */
+function DeleteStreamDialog({ stream, onClose, onDeleted }: {
+  stream: StreamView
+  onClose: () => void
+  onDeleted: () => void
+}) {
+  const titleId = useId()
+  const dialog = useRef<HTMLDialogElement>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const element = dialog.current
+    if (!element) return
+    if (!element.open) element.showModal()
+    return () => {
+      if (element.open) element.close()
+    }
+  }, [])
+
+  async function remove() {
+    setDeleting(true)
+    setError(null)
+    try {
+      await api.deleteStream(stream.namespace, stream.name)
+      onDeleted()
+    } catch (e) {
+      setError(errorMessage(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <dialog
+      ref={dialog}
+      aria-labelledby={titleId}
+      onCancel={(event) => { event.preventDefault(); onClose() }}
+      className="m-auto w-[min(30rem,calc(100vw_-_2rem))] max-w-none rounded-[14px] border border-border bg-bg-elev p-0 text-text shadow-2xl backdrop:bg-black/60"
+    >
+      <div className="space-y-3 p-5">
+        <h2 id={titleId} className="text-lg font-semibold break-words">Delete “{stream.name}”?</h2>
+        <p className="text-sm text-text-dim">
+          Nova deletes the stream. Its Kafka topic and the messages in it stay.
+        </p>
+        {error && <p role="alert" className="text-sm text-bad break-words">{error}</p>}
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn-primary" disabled={deleting} onClick={() => void remove()}>
+            {deleting ? 'Deleting…' : 'Delete'}
+          </button>
+        </div>
+      </div>
+    </dialog>
   )
 }
 
@@ -106,6 +164,8 @@ function SinkFacts({ stream }: { stream: StreamView }) {
 export default function StreamDetail() {
   const { namespace = '', name = '' } = useParams()
   const qc = useQueryClient()
+  const navigate = useNavigate()
+  const [deleting, setDeleting] = useState(false)
   const streams = useQuery({ queryKey: ['streams'], queryFn: api.streams, refetchInterval: 15_000 })
   const mutation = useMutation({
     mutationFn: ({ s, stopped }: { s: StreamView; stopped: boolean }) =>
@@ -186,6 +246,14 @@ export default function StreamDetail() {
           >
             {stream.stopped ? 'Resume' : 'Stop'}
           </button>
+          <button
+            type="button"
+            aria-label={`Delete ${stream.name}`}
+            className="btn-ghost py-1.5 text-sm text-bad"
+            onClick={() => setDeleting(true)}
+          >
+            Delete
+          </button>
         </div>
       </header>
 
@@ -224,6 +292,18 @@ export default function StreamDetail() {
           <span className="text-bad">{stream.last_error ?? '—'}</span>
         </Fact>
       </dl>
+
+      {deleting && (
+        <DeleteStreamDialog
+          stream={stream}
+          onClose={() => setDeleting(false)}
+          onDeleted={() => {
+            setDeleting(false)
+            void qc.invalidateQueries({ queryKey: ['streams'] })
+            navigate('/streams')
+          }}
+        />
+      )}
     </div>
   )
 }
