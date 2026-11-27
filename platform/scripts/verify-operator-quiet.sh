@@ -30,7 +30,8 @@
 # controller and its before → after count named on the ✗ line), 3 UNVERIFIED (an object
 # changed inside the window, so the window was not idle, no kubectl, no operator pod, the metrics
 # endpoint answers nothing, or has neither its series nor its `# TYPE` line, kubectl top says
-# the Metrics API is not available, or the kubelet stats summary cannot be read — the check
+# the Metrics API is not available, or the kubelet stats summary cannot be read, an object list
+# failed inside a window — the check
 # proved nothing and must not be read as PASS).
 # Needs: kubectl, python3.
 set -euo pipefail
@@ -163,10 +164,12 @@ total_objects=0
 per_kind=""
 changed_lines=""
 for kind in "${KINDS[@]}"; do
-  if [ -f "$tmp/one/$kind.failed" ]; then
-    note "$kind: $(sed -n '1p' "$tmp/one/$kind.failed")"
-    continue
-  fi
+  for snap in one two; do
+    if [ -f "$tmp/$snap/$kind.failed" ]; then
+      echo "verify-operator-quiet: UNVERIFIED (cannot list $kind in $NS: $(sed -n '1p' "$tmp/$snap/$kind.failed"))"
+      exit 3
+    fi
+  done
   count="$(wc -l < "$tmp/one/$kind" | tr -d ' ')"
   if [ "$count" -eq 0 ]; then continue; fi
   total_objects=$((total_objects + count))

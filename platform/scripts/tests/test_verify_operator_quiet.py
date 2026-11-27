@@ -80,6 +80,23 @@ fi
 case "$command_rest" in
   pods) cat "$dir/pods.txt" ;;
   pod) echo node-1 ;;
+  catalogs)
+    n=$(( $(cat "$dir/catalog_calls" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$dir/catalog_calls"
+    if [ -f "$dir/fail_catalog_after" ] && [ "$n" -gt "$(cat "$dir/fail_catalog_after")" ]; then
+      echo "Error from server (ServiceUnavailable): the server is currently unable to handle the request" >&2
+      exit 1
+    fi
+    # catalogs counts into the shared objects counter too: only the first kind of the first
+    # snapshot reads objects.txt, so a test that writes objects_second.txt sees one change.
+    m=$(( $(cat "$dir/objects_calls" 2>/dev/null || echo 0) + 1 ))
+    echo "$m" > "$dir/objects_calls"
+    if [ -f "$dir/objects_second.txt" ] && [ "$m" -gt 1 ]; then
+      cat "$dir/objects_second.txt"
+    else
+      cat "$dir/objects.txt"
+    fi
+    ;;
   *)
     n=$(( $(cat "$dir/objects_calls" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$dir/objects_calls"
@@ -216,6 +233,16 @@ class OperatorQuietTest(unittest.TestCase):
         self.assertIn("✓ 0 reconciles", result.stdout)
         self.assertIn("✓ no status write (counter 0 → 0)", result.stdout)
         self.assertNotIn("UNVERIFIED", result.stdout)
+
+    def test_a_failed_second_object_list_is_unverified(self):
+        # The API server can fail between the two snapshots; the row must read "not measured",
+        # not crash (#1341's distinction).
+        (self.dir / "fail_catalog_after").write_text("1")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("UNVERIFIED (cannot list catalogs in stardelt:", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("awk:", result.stderr)
 
 
 if __name__ == "__main__":
