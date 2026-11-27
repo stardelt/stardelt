@@ -47,8 +47,8 @@
 | `catalog_token.rs` | Core & identity | 287 | 502 | 0 | OIDC provider |
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
+| `catalog_doc_store.rs` | Catalog | 242 | 209 | 0 | PostgreSQL state store |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
-| `catalog_doc_store.rs` | Catalog | 217 | 209 | 0 | PostgreSQL state store |
 | `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
 | `model_usage.rs` | AI (Ask, MCP, models) | 186 | 93 | 1 | PostgreSQL state store |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
@@ -68,9 +68,9 @@
 | `session_store.rs` | Core & identity | 104 | 70 | 0 | PostgreSQL state store |
 | `seal.rs` | Core & identity | 93 | 69 | 0 | - |
 | `metrics.rs` | Core & identity | 90 | 32 | 1 | - |
-| `catalog_products.rs` | Catalog | 75 | 80 | 1 | - |
+| `catalog_products.rs` | Catalog | 75 | 92 | 1 | - |
 | `api_json.rs` | Core & identity | 60 | 90 | 0 | - |
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **51391** | **44925** | **168** | |
+| **total (72 files)** | | **51416** | **44937** | **168** | |
