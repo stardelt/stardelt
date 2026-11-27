@@ -79,6 +79,9 @@ pub struct QueryLogRecord {
     /// Lower-case hex SHA-256 of the complete statement after redaction, so the hash of a
     /// catalog statement cannot be used to guess its password.
     pub sql_hash: String,
+    /// sha256 of [`fingerprint`]: the statement's shape, which two runs of one query share
+    /// even when their literals differ.
+    pub sql_fingerprint: String,
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
@@ -349,6 +352,16 @@ pub fn redact_catalog_secrets(sql: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// A statement's shape: every string literal becomes `'?'` and every run of whitespace one
+/// space ([`crate::query_log::redact_literals`]). Numbers are left as they are: stripping
+/// them would merge `LIMIT 10` with `LIMIT 10000`.
+pub fn fingerprint(sql: &str) -> String {
+    crate::query_log::redact_literals(sql)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Parse the body of one `POST` from the engine's event listener.
 pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
     let event: Event = serde_json::from_slice(body).map_err(|e| ParseError(e.to_string()))?;
@@ -400,6 +413,7 @@ pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
         query_type: event.context.query_type,
         resource_group: event.context.resource_group_id,
         sql_hash: hex_sha256(&sql),
+        sql_fingerprint: hex_sha256(&fingerprint(&sql)),
         sql_text: cut(&sql, MAX_SQL_BYTES),
         created_at: event.create_time,
         started_at: event.execution_start_time,
@@ -811,5 +825,32 @@ mod tests {
             parse(PROFILE.as_bytes()).unwrap().resource_group,
             ["global"]
         );
+    }
+
+    fn record_for(sql: &str) -> QueryLogRecord {
+        let body = serde_json::json!({
+            "createTime": "2026-10-19T11:33:25.058999857Z",
+            "context": { "user": "alice" },
+            "metadata": { "queryId": "q1", "query": sql }
+        })
+        .to_string();
+        parse(body.as_bytes()).expect("a created event")
+    }
+
+    #[test]
+    fn the_fingerprint_groups_one_shape_and_keeps_different_shapes_apart() {
+        let paid = record_for("select * from orders where status = 'paid'");
+        let refunded = record_for("select * from orders where status = 'refunded'");
+        assert_eq!(paid.sql_fingerprint, refunded.sql_fingerprint);
+        assert_ne!(
+            paid.sql_hash, refunded.sql_hash,
+            "the hash keeps the literals"
+        );
+
+        let narrower = record_for("select * from orders where status = 'paid' and amount > 10");
+        assert_ne!(paid.sql_fingerprint, narrower.sql_fingerprint);
+
+        let spread = record_for("select *\n  from orders where status = 'paid'");
+        assert_eq!(paid.sql_fingerprint, spread.sql_fingerprint);
     }
 }

@@ -9510,6 +9510,88 @@
         }
       }
     },
+    "/api/query-log/repeated": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The statements the caller runs repeatedly, worst first (stardelt#38): the last 30 days of FINISHED queries, grouped by their shape (string literals and whitespace do not split a group; numeric literals do), at least 2 runs per group, ordered by total execution time. `scope` is `mine` (default), `team` (the service principals the caller's groups own) or `all` (administrators only); `limit` is 1 to 100, default 20. The answer carries one sentence about the supported acceleration path — a `sql` task with `CREATE OR REPLACE TABLE … AS SELECT …` in a scheduled pipeline. Nothing is created or changed.",
+        "operationId": "query_log_repeated",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "mine (default), team, or all for administrators",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many groups, 1 to 100 (default 20)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The repeated statements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepeatedQueries"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "scope or limit is not one of the accepted values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The all scope is for administrators",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/query-log/usage": {
       "get": {
         "tags": [
@@ -17827,6 +17909,67 @@
           "accepted": {
             "type": "boolean",
             "description": "Always `true`: a `202` is the acceptance, and the round has already started."
+          }
+        }
+      },
+      "RepeatedQueries": {
+        "type": "object",
+        "required": [
+          "statements",
+          "suggestion"
+        ],
+        "properties": {
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepeatedStatement"
+            }
+          },
+          "suggestion": {
+            "type": "string",
+            "description": "The supported acceleration path; the same sentence for the API, the CLI and MCP."
+          }
+        }
+      },
+      "RepeatedStatement": {
+        "type": "object",
+        "required": [
+          "sqlFingerprint",
+          "sql",
+          "runs"
+        ],
+        "properties": {
+          "averageMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "maxMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sql": {
+            "type": "string",
+            "description": "The most recent run's statement."
+          },
+          "sqlFingerprint": {
+            "type": "string"
+          },
+          "totalMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },
