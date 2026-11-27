@@ -36,8 +36,8 @@ grep -qF -e 'sm.add_role("stardelt-member")' "$file" || fail "createUserJob must
   || fail "stardelt-member and stardelt-nova-operator must be built from the permissions of Viewer"
 [ "$(printf '%s\n' "$block" | grep -cF -e 'GLOBAL = {("can_read", "DAGs"), ("can_read", "DAG Runs")}')" -eq 1 ] \
   || fail "stardelt-member must not hold the global read on DAGs and DAG Runs"
-[ "$(printf '%s\n' "$block" | grep -cF -e 'WRITE = {("can_edit", "DAGs"), ("can_create", "DAG Runs"), ("can_edit", "DAG Runs")}')" -eq 1 ] \
-  || fail "stardelt-nova-operator must hold exactly can_edit DAGs, can_create and can_edit DAG Runs"
+[ "$(printf '%s\n' "$block" | grep -cF -e 'WRITE = {("can_edit", "DAGs"), ("can_create", "DAG Runs"), ("can_edit", "DAG Runs"), ("can_create", "Assets")}')" -eq 1 ] \
+  || fail "stardelt-nova-operator must hold exactly can_edit DAGs, can_create and can_edit DAG Runs, can_create Assets"
 printf '%s\n' "$block" | grep -qF -e 'sm.add_permission_to_role(op, permission)' \
   || fail "stardelt-nova-operator must inherit Viewer's permissions"
 printf '%s\n' "$block" | grep -qF -e 'nova.roles = [op]' || fail "nova-api must hold only stardelt-nova-operator"
