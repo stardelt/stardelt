@@ -577,6 +577,17 @@ def test_publish_wap_accepts_a_spark_pipeline_task():
     assert str(error.value) == "publish: wap needs a task that writes at least one table"
 
 
+def test_publish_wap_refuses_a_sql_task_that_declares_writes():
+    # `wap-publish` moves `main` from the audit branch of every declared write, and a sql task
+    # writes `main` directly: the pipeline would roll its own table back.
+    with pytest.raises(PlanError) as error:
+        plan(*owned(spark(), {**sql("a"), "writes": ["m.b.t"]}, publish="wap"))
+    assert str(error.value) == (
+        "publish: wap moves main from the audit branch, so a sql task cannot declare writes: "
+        "only a notebook or spark-pipeline task writes under wap"
+    )
+
+
 def test_a_sql_task_may_declare_the_tables_it_writes():
     p = plan(*owned({**sql("load"), "writes": ["silver.shop.orders"]}))
     (load,) = p.tasks

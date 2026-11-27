@@ -375,6 +375,8 @@ spec:
               rule: '!has(self.publish) || self.publish != ''wap'' || self.tasks.exists(t, t.kind == ''quality'' && has(t.checks) && size(t.checks) > 0)'
             - message: 'publish: wap needs a task that writes at least one table'
               rule: '!has(self.publish) || self.publish != ''wap'' || self.tasks.exists(t, (t.kind == ''notebook'' || t.kind == ''spark-pipeline'') && has(t.writes) && size(t.writes) > 0)'
+            - message: 'publish: wap moves main from the audit branch, so a sql task cannot declare writes: only a notebook or spark-pipeline task writes under wap'
+              rule: '!has(self.publish) || self.publish != ''wap'' || self.tasks.all(t, t.kind != ''sql'' || !has(t.writes) || size(t.writes) == 0)'
             - message: 'notify needs an ownerGroup: only a pipeline''s owner group can name destinations'
               rule: '!has(self.notify) || has(self.ownerGroup)'
             - message: a pipeline has spec.schedule or spec.triggers, not both

@@ -1435,6 +1435,10 @@ pub enum PipelineConcurrency {
         "message": "publish: wap needs a task that writes at least one table"
     },
     {
+        "rule": "!has(self.publish) || self.publish != 'wap' || self.tasks.all(t, t.kind != 'sql' || !has(t.writes) || size(t.writes) == 0)",
+        "message": "publish: wap moves main from the audit branch, so a sql task cannot declare writes: only a notebook or spark-pipeline task writes under wap"
+    },
+    {
         "rule": "!has(self.notify) || has(self.ownerGroup)",
         "message": "notify needs an ownerGroup: only a pipeline's owner group can name destinations"
     },
@@ -1738,6 +1742,18 @@ impl PipelineSpec {
             })
         {
             return Err("publish: wap needs a task that writes at least one table".to_string());
+        }
+        if self.publish == PipelinePublish::Wap
+            && self
+                .tasks
+                .iter()
+                .any(|t| t.kind == TaskKind::Sql && !t.writes.is_empty())
+        {
+            return Err(
+                "publish: wap moves main from the audit branch, so a sql task cannot declare writes: \
+                 only a notebook or spark-pipeline task writes under wap"
+                    .to_string(),
+            );
         }
         if let Some(notify) = &self.notify {
             if self.owner_group.is_none() {
@@ -5207,6 +5223,27 @@ mod tests {
         assert_eq!(
             spec.validate().unwrap_err(),
             "publish: wap needs a task that writes at least one table"
+        );
+    }
+
+    #[test]
+    fn a_sql_task_cannot_write_under_wap() {
+        let mut writer = notebook_task("x.ipynb", "v1");
+        writer.writes = vec!["mobility.other.people".to_string()];
+        let mut load = task("load", TaskKind::Sql, &[]);
+        load.writes = vec!["mobility.silver.trips".to_string()];
+        let mut check = task("check", TaskKind::Quality, &["load"]);
+        check.checks = vec![QualityCheck {
+            name: "c".into(),
+            sql: "SELECT 1".into(),
+            severity: QualitySeverity::Warn,
+        }];
+        let mut spec = spec_of(vec![writer, load, check]);
+        spec.publish = PipelinePublish::Wap;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "publish: wap moves main from the audit branch, so a sql task cannot declare writes: \
+             only a notebook or spark-pipeline task writes under wap"
         );
     }
 

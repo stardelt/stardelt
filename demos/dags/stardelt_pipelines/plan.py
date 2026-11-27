@@ -155,6 +155,12 @@ WRITES_ONLY_NOTEBOOK = (
     "task `{task}` cannot write a table: only a sql, notebook or spark-pipeline task declares writes"
 )
 WAP_NEEDS_WRITER = "publish: wap needs a task that writes at least one table"
+# `wap-publish` moves `main` from the audit branch of every table in `writes`, and a `sql` task
+# writes `main` directly: its table would be rolled back to the branch's snapshot.
+WAP_SQL_WRITES = (
+    "publish: wap moves main from the audit branch, so a sql task cannot declare writes: "
+    "only a notebook or spark-pipeline task writes under wap"
+)
 WAP_PLACEHOLDER_NEEDS_ONE_TABLE = (
     "${{table}} names the audit branch of one table, and this pipeline writes {count}: "
     "name the table in the check, or split the pipeline"
@@ -461,6 +467,8 @@ def plan(
         task.writes for task in tasks if task.kind in ("notebook", "spark-pipeline")
     ):
         raise PlanError(WAP_NEEDS_WRITER)
+    if publish == "wap" and any(task.writes for task in tasks if task.kind == "sql"):
+        raise PlanError(WAP_SQL_WRITES)
 
     schedule = spec.get("schedule") or {}
     raw_triggers = spec.get("triggers") or []
