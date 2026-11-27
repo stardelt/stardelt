@@ -1046,6 +1046,48 @@
           "commands": []
         }
       ]
+    },
+    {
+      "name": "evals",
+      "help": "the catalog's evals: a question with a known answer, run them or list them",
+      "arguments": [],
+      "options": [],
+      "commands": [
+        {
+          "name": "list",
+          "help": "the stored evals of a catalog",
+          "arguments": [],
+          "options": [
+            {
+              "flags": [
+                "--catalog"
+              ],
+              "help": "catalog to read; omitted, the default one"
+            }
+          ],
+          "commands": []
+        },
+        {
+          "name": "run",
+          "help": "ask every eval, run its answer read-only and record pass or fail",
+          "arguments": [],
+          "options": [
+            {
+              "flags": [
+                "--catalog"
+              ],
+              "help": "catalog to run; omitted, the default one"
+            },
+            {
+              "flags": [
+                "--only"
+              ],
+              "help": "run one eval by id"
+            }
+          ],
+          "commands": []
+        }
+      ]
     }
   ]
 }

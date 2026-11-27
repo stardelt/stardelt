@@ -271,6 +271,13 @@ def _parser():
     into.add_argument("--target", required=True, metavar="STAGE", help="the stage the import is for (dev, prod, …)")
     into.add_argument("--commit", default="", metavar="SHA", help="the commit the bundle was read at, for the provenance stamp")
     into.add_argument("--overwrite", action="store_true", help="replace a dashboard of the same name")
+    evals = commands.add_parser("evals", help="the catalog's evals: a question with a known answer, run them or list them")
+    evals_commands = evals.add_subparsers(dest="evals_command", required=True)
+    evals_list = evals_commands.add_parser("list", help="the stored evals of a catalog")
+    evals_list.add_argument("--catalog", required=False, help="catalog to read; omitted, the default one")
+    evals_run = evals_commands.add_parser("run", help="ask every eval, run its answer read-only and record pass or fail")
+    evals_run.add_argument("--catalog", required=False, help="catalog to run; omitted, the default one")
+    evals_run.add_argument("--only", type=int, help="run one eval by id")
     return parser
 
 
@@ -662,6 +669,21 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                     f"{answer['catalog']}.{answer['namespace']}.{answer['table']}\n"
                 )
             return OK
+        if args.command == "evals":
+            from stardelt import evals
+
+            if args.evals_command == "list":
+                stored = evals.list_evals(nova, args.catalog)
+                stdout.write(_table(["id", "question", "expected"], [
+                    [ev["id"], ev["question"], json.dumps(ev["expected"], ensure_ascii=False)] for ev in stored
+                ]))
+                return OK
+            results = evals.run(nova, args.catalog, only=args.only)
+            stdout.write(_table(["Q", "Verdict", "Reason"], [
+                [ev["question"], "PASS" if row.get("passed") else "FAIL", row.get("reason") or ""]
+                for ev, row in results
+            ]))
+            return 1 if any(not row.get("passed") for _, row in results) else OK
         if args.command == "lineage":
             if args.depth < 1 or args.depth > 5 or args.days < 1 or args.days > 365:
                 stderr.write("stardelt: --depth is 1 to 5 and --days is 1 to 365\n")
