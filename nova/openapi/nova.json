@@ -1382,7 +1382,7 @@
           "public"
         ],
         "summary": "`GET /api/catalog/evals` — the catalog's evals, in id order.",
-        "description": "The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.",
+        "description": "The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. Each eval carries its newest run as lastRun (null when it never ran). `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.",
         "operationId": "catalog_eval_list",
         "parameters": [
           {
@@ -1403,7 +1403,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Eval"
+                    "$ref": "#/components/schemas/EvalWithLastRun"
                   }
                 }
               }
@@ -15683,6 +15683,37 @@
           }
         }
       },
+      "EvalLastRun": {
+        "type": "object",
+        "description": "The newest run of an eval, as `GET /api/catalog/evals` returns it.",
+        "required": [
+          "id",
+          "passed",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When it was posted, RFC 3339."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The run's id."
+          },
+          "passed": {
+            "type": "boolean",
+            "description": "Whether that answer was the expected one."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed; absent when it passed."
+          }
+        }
+      },
       "EvalRun": {
         "type": "object",
         "description": "One posted answer and its verdict, as the API returns it.",
@@ -15750,6 +15781,49 @@
             ],
             "format": "int64",
             "description": "The tokens the model call used, if the runner counted them."
+          }
+        }
+      },
+      "EvalWithLastRun": {
+        "type": "object",
+        "description": "One eval with its newest run; `lastRun` is `null` when the question never ran.",
+        "required": [
+          "id",
+          "ownerGroup",
+          "question",
+          "expected",
+          "createdBy",
+          "createdAt",
+          "lastRun"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string"
+          },
+          "createdBy": {
+            "type": "string"
+          },
+          "expected": {},
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastRun": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EvalLastRun",
+                "description": "The newest run; serde always writes the key, `null` when the question never ran."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ownerGroup": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
           }
         }
       },
