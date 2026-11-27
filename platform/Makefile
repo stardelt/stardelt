@@ -359,6 +359,10 @@ perf-report: _context ## One table per perf workload, newest run of each (#53)
 verify-cli: _context ## The shipped CLI as the visitor: whoami, a query, the bundle, the skill, the history
 	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-cli.sh # the shipped CLI as demo
 
+.PHONY: verify-evals
+verify-evals: _context ## Evals end to end as the visitor: a value eval is stored, judged pass and fail, scoped, and deleted
+	@NOVA=$(STARDELT_NOVA_URL) ISSUER=$(ISSUER) bash scripts/verify-evals.sh
+
 .PHONY: verify-ask
 verify-ask: _context ## Ask answers end to end: a stub ModelEndpoint is probed Ready, and one question comes back as checked SQL
 	@NAMESPACE=$(NAMESPACE) bash scripts/verify-ask.sh
