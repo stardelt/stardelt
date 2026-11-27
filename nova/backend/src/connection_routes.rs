@@ -2151,6 +2151,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_an_mlflow_without_a_secret_writes_no_keys() {
+        let (store, fake) = fake::start().await;
+        let (resources, items) = memory();
+        let alice = who("sub-alice", &["analytics"], false);
+        let req = body(json!({
+            "type": "mlflow",
+            "config": { "trackingUrl": "https://mlflow.example.com" },
+            "secret": {},
+        }));
+
+        let (status, view) =
+            create_connection(&store, Some(&resources), &alice, &Secret::new("good"), req)
+                .await
+                .expect("a type that needs no secret field may carry an empty one");
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(view.secret_keys.is_empty(), "{:?}", view.secret_keys);
+        let path = "connections/group/analytics/crm-db";
+        let custom = &fake.lock().unwrap().custom[path];
+        assert_eq!(custom["type"], "mlflow");
+        assert_eq!(custom["config.trackingUrl"], "https://mlflow.example.com");
+        assert!(
+            !custom.contains_key("keys"),
+            "an empty secret writes no keys value: {custom:?}"
+        );
+        let item = items.lock().unwrap();
+        let spec = &item.values().next().expect("the resource is written")["spec"];
+        assert!(
+            spec.get("secret").is_none(),
+            "a connection whose type needs no field carries no secret block: {spec}"
+        );
+    }
+
+    #[tokio::test]
     async fn create_group_rolls_the_store_back_when_the_resource_exists() {
         let (store, fake) = fake::start().await;
         let (resources, items) = memory();
