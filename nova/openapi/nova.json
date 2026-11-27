@@ -6130,6 +6130,98 @@
       }
     },
     "/api/evals/{id}": {
+      "put": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`PUT /api/evals/{id}` — correct a question or its known answer, `200` with the row.",
+        "description": "Correct one eval's question and known answer in place; the runs of `GET /api/evals/{id}/runs` stay. Both fields are required and are checked exactly as `POST /api/catalog/evals` checks them. Only a member of its owner group or an administrator may correct it; the catalog and the owner group do not change.",
+        "operationId": "eval_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The eval's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEval"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Eval"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The question or the expected answer is not in the accepted shape",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only a member of the owner group or an administrator may correct an eval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such eval, or the id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "public"
@@ -20994,6 +21086,23 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "UpdateEval": {
+        "type": "object",
+        "description": "`PUT /api/evals/{id}` body: the two fields a supervisor corrects.",
+        "required": [
+          "question",
+          "expected"
+        ],
+        "properties": {
+          "expected": {
+            "description": "The known answer, in the same three shapes `NewEval` takes."
+          },
+          "question": {
+            "type": "string",
+            "description": "The question, 1 to 500 characters."
           }
         }
       },

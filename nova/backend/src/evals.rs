@@ -170,6 +170,17 @@ pub struct NewEval {
     pub expected: serde_json::Value,
 }
 
+/// `PUT /api/evals/{id}` body: the two fields a supervisor corrects.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateEval {
+    /// The question, 1 to 500 characters.
+    pub question: String,
+    /// The known answer, in the same three shapes `NewEval` takes.
+    #[schema(value_type = serde_json::Value)]
+    pub expected: serde_json::Value,
+}
+
 /// The columns [`EvalRun`] reads; the timestamp as RFC 3339 in UTC.
 const RUN_COLUMNS: &str = "id, eval_id, passed, reason, sql, model, endpoint, tokens, created_by, \
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
@@ -627,6 +638,84 @@ pub async fn delete(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(_) => no_such_eval(),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// `PUT /api/evals/{id}` — correct a question or its known answer, `200` with the row.
+#[utoipa::path(
+    put,
+    operation_id = "eval_update",
+    path = "/api/evals/{id}",
+    tag = "public",
+    description = "Correct one eval's question and known answer in place; the runs of `GET /api/evals/{id}/runs` stay. Both fields are required and are checked exactly as `POST /api/catalog/evals` checks them. Only a member of its owner group or an administrator may correct it; the catalog and the owner group do not change.",
+    params(("id" = i64, Path, description = "The eval's id")),
+    request_body = UpdateEval,
+    responses(
+        (status = 200, description = "The updated row", body = Eval),
+        (status = 400, description = "The question or the expected answer is not in the accepted shape", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only a member of the owner group or an administrator may correct an eval", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such eval, or the id is not a number", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn update(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateEval>,
+) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return no_such_eval();
+    };
+    let question = req.question.trim().to_string();
+    if !(1..=MAX_QUESTION_CHARS).contains(&question.chars().count()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "question must be 1 to 500 characters",
+        );
+    }
+    if let Err(message) = validate_expected(&req.expected) {
+        return error(StatusCode::BAD_REQUEST, &message);
+    }
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let row = match sqlx::query_as::<_, EvalRef>("SELECT owner_group FROM eval WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return no_such_eval(),
+        Err(e) => return store_failed(e),
+    };
+    let caller = caller.as_ref().map(|c| &c.0);
+    if !member_of(&row.owner_group, caller) {
+        return error(StatusCode::FORBIDDEN, NOT_YOURS);
+    }
+    let sub = crate::catalog_docs::caller_identity(&s, caller).sub;
+    let sql = format!(
+        "UPDATE eval SET question = $2, expected = $3 WHERE id = $1 RETURNING {ROW_COLUMNS}"
+    );
+    match sqlx::query_as::<_, Eval>(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(&question)
+        .bind(&req.expected)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(row)) => {
+            tracing::info!(
+                target: "audit",
+                sub = %sub,
+                id = row.id,
+                "eval updated",
+            );
+            Json(row).into_response()
+        }
+        Ok(None) => no_such_eval(),
         Err(e) => store_failed(e),
     }
 }

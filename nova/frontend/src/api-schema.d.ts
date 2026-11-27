@@ -1128,7 +1128,11 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put?: never;
+        /**
+         * `PUT /api/evals/{id}` — correct a question or its known answer, `200` with the row.
+         * @description Correct one eval's question and known answer in place; the runs of `GET /api/evals/{id}/runs` stay. Both fields are required and are checked exactly as `POST /api/catalog/evals` checks them. Only a member of its owner group or an administrator may correct it; the catalog and the owner group do not change.
+         */
+        put: operations["eval_update"];
         post?: never;
         /**
          * `DELETE /api/evals/{id}` — `204`; `404` when the id is not a row.
@@ -5531,6 +5535,13 @@ export interface components {
         TriggerView: {
             mode: string;
             tablesUpdated: string[];
+        };
+        /** @description `PUT /api/evals/{id}` body: the two fields a supervisor corrects. */
+        UpdateEval: {
+            /** @description The known answer, in the same three shapes `NewEval` takes. */
+            expected: unknown;
+            /** @description The question, 1 to 500 characters. */
+            question: string;
         };
         /**
          * @description `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
@@ -10683,6 +10694,78 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    eval_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The eval's id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEval"];
+            };
+        };
+        responses: {
+            /** @description The updated row */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Eval"];
+                };
+            };
+            /** @description The question or the expected answer is not in the accepted shape */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Only a member of the owner group or an administrator may correct an eval */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such eval, or the id is not a number */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
