@@ -14103,6 +14103,16 @@
             },
             "description": "A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement, a\npinned notebook, a dbt run or SQL checks, with dependencies. Exclusive with `sql` and\n`notebook`."
           },
+          "triggers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TriggerRequest"
+            },
+            "description": "Tables whose update starts the run (`spec.triggers`). At most one entry, 1 to 10\ntables, and not together with `schedule`; omitted means none."
+          },
           "viewers": {
             "type": [
               "array",
@@ -16718,6 +16728,7 @@
           "namespace",
           "canRun",
           "canEdit",
+          "triggers",
           "paused",
           "loaded",
           "state",
@@ -16825,6 +16836,13 @@
             "items": {
               "$ref": "#/components/schemas/TaskSpecView"
             }
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriggerView"
+            },
+            "description": "`spec.triggers` as data: the tables and whether all or any starts a run."
           }
         }
       },
@@ -19492,6 +19510,43 @@
           }
         }
       },
+      "TriggerRequest": {
+        "type": "object",
+        "description": "One `spec.triggers` entry: the tables whose update starts a run, and whether every one\nor any one must update. The CRD allows one entry today (#66, #2014).",
+        "properties": {
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tablesUpdated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TriggerView": {
+        "type": "object",
+        "description": "One `spec.triggers` entry as the pages read it.",
+        "required": [
+          "tablesUpdated",
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "tablesUpdated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "UpdatePipelineRequest": {
         "type": "object",
         "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters\nand the options — or, for a notebook pipeline, the notebook, its version and its parameters.\nEvery other field of the resource stays as it is, and what the pipeline runs never changes\nkind.",
@@ -19599,6 +19654,16 @@
               "$ref": "#/components/schemas/PipelineTaskRequest"
             },
             "description": "A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement, a\npinned notebook, a dbt run or SQL checks, with dependencies. Exclusive with `sql` and\n`notebook`."
+          },
+          "triggers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TriggerRequest"
+            },
+            "description": "Tables whose update starts the run (`spec.triggers`). At most one entry, 1 to 10\ntables, and not together with `schedule`; omitted means none."
           },
           "viewers": {
             "type": [

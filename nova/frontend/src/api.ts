@@ -529,6 +529,9 @@ export type NotebookUsageResponse = Schema<'NotebookUsageResponse'>
 /** A cron and its IANA zone, as `POST`/`PUT /api/pipelines` carries them. */
 export type ScheduleSpec = { cron: string; timezone: string }
 
+/** One `spec.triggers` entry: the tables whose update starts the pipeline, and all|any. */
+export type TriggerView = { tablesUpdated: string[]; mode: 'all' | 'any' | string }
+
 /**
  * The advanced options of a schedule (stardelt-nova#223). Every field is optional in a request:
  * an omitted one keeps its default (one retry, five minutes between retries, a two-hour time
@@ -725,6 +728,8 @@ export type PipelineView = {
   canEdit: boolean
   /** The cron, with the time zone in parentheses when the resource has one. */
   schedule: string | null
+  /** `spec.triggers` as data: the tables and whether all or any starts a run. */
+  triggers: TriggerView[]
   paused: boolean
   /** False while the scheduler has no DAG for the resource yet. */
   loaded: boolean
