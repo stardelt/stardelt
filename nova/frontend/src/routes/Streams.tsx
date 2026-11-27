@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { api, errorMessage, type StreamView } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
@@ -130,7 +131,12 @@ export default function Streams() {
                 {streams.data.streams.map((s) => (
                   <tr key={s.namespace + '/' + s.name} className="border-b border-border/60 align-top">
                     <td className="py-2 pr-3">
-                      <span className="font-mono">{s.name}</span>
+                      <Link
+                        to={`/streams/${s.namespace}/${s.name}`}
+                        className="font-mono underline break-words"
+                      >
+                        {s.name}
+                      </Link>
                       <div className="text-text-dim text-xs">{s.owner_group}</div>
                     </td>
                     <td className="py-2 pr-3">
