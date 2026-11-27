@@ -1001,7 +1001,7 @@ pub async fn reconcile_spark_cluster(
 
     let mut message = message;
     if phase == "Starting"
-        && let (Some(pod), Some(name)) = (pod.as_ref(), server_pod.as_deref())
+        && let (Some(pod), Some(server_pod_name)) = (pod.as_ref(), server_pod.as_deref())
         && let Some(code) = dead_driver(pod, k8s_openapi::jiff::Timestamp::now())
     {
         match connects
@@ -1012,7 +1012,7 @@ pub async fn reconcile_spark_cluster(
             _ => {}
         }
         message = Some(format!(
-            "the server pod {name} exited with {code}; recreating the server"
+            "the server pod {server_pod_name} exited with {code}; recreating the server"
         ));
     }
 
