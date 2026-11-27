@@ -419,6 +419,10 @@ spike-materialized-views: _context ## Can Trino create, refresh and query a mate
 spike-refresh-table: _context ## A scheduled CREATE OR REPLACE / DELETE + INSERT refresh: its cost, atomicity and grants (#32)
 	@bash scripts/spike-refresh-table.sh
 
+.PHONY: spike-point-in-time-join
+spike-point-in-time-join: _context ## Does Trino 484 join features as of each event, and what does it cost? (#41)
+	@bash scripts/spike-point-in-time-join.sh
+
 .PHONY: spike-superset-dashboards
 spike-superset-dashboards: _context ## Measure Superset's dashboard export/import API (#115)
 	@bash scripts/spike-superset-dashboards.sh
