@@ -29,16 +29,18 @@ const runningStream = {
   run_as: null,
 }
 
-test('empty /api/streams shows the empty state and no button', async ({ page }) => {
+test('empty /api/streams shows the empty state and the create button', async ({ page }) => {
   await page.route('**/api/**', (r) => {
     const path = new URL(r.request().url()).pathname
     if (path === '/api/me') return json(r, me)
-    if (path === '/api/streams') return json(r, { streams: [] })
+    if (path === '/api/streams') return json(r, { namespace: 'stardelt', streams: [] })
     return json(r, {})
   })
   await page.goto('/streams')
   await expect(page.locator('main').getByText('No streams yet')).toBeVisible()
-  await expect(page.locator('main').getByRole('button')).toHaveCount(0)
+  // The page creates its own streams now (#1977); only the create action is offered.
+  await expect(page.locator('main').getByRole('button', { name: 'New stream' })).toBeVisible()
+  await expect(page.locator('main').getByRole('button')).toHaveCount(1)
 })
 
 test('Stop sends PATCH and the button becomes Resume after success', async ({ page }) => {
@@ -49,7 +51,7 @@ test('Stop sends PATCH and the button becomes Resume after success', async ({ pa
     const path = new URL(req.url()).pathname
     if (path === '/api/me') return json(r, me)
     if (path === '/api/streams' && req.method() === 'GET') {
-      return json(r, { streams: [{ ...runningStream, stopped }] })
+      return json(r, { namespace: 'stardelt', streams: [{ ...runningStream, stopped }] })
     }
     if (path === '/api/streams/stardelt/demo' && req.method() === 'PATCH') {
       patchBody = req.postDataJSON()

@@ -76,10 +76,10 @@ flowchart LR
   fe_admin -->|3| be_pipelines_delivery
   fe_admin -->|4| be_platform_view
   fe_admin -->|1| be_sql_query_log
-  fe_build -->|1| be_catalog
-  fe_build -->|3| be_connections
+  fe_build -->|2| be_catalog
+  fe_build -->|4| be_connections
   fe_build -->|13| be_notebooks_compute
-  fe_build -->|20| be_pipelines_delivery
+  fe_build -->|23| be_pipelines_delivery
   fe_build -->|1| be_platform_view
   fe_build -->|3| be_sql_query_log
   fe_detail_pages -->|2| be_core_identity
