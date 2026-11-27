@@ -335,6 +335,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalog/evals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalog/evals` — the catalog's evals, in id order.
+         * @description The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.
+         */
+        get: operations["catalog_eval_list"];
+        put?: never;
+        /**
+         * `POST /api/catalog/evals` — `201` with the stored row.
+         * @description Store one eval: a question (1 to 500 characters) and its known answer, `{"kind":"rows","rows":[[…],…]}` (1 to 100 rows of 1 to 50 scalars, a string at most 500 characters), `{"kind":"value","value":<scalar>}`, or `{"kind":"uses","tables":["namespace.table", …]}` (1 to 10 names). Only a member of `ownerGroup` or an administrator may write one; the caller is recorded as `createdBy`. The eval is stored, never executed. There is no update route: changing an eval is delete and create. `?catalog=` picks the catalog.
+         */
+        post: operations["catalog_eval_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalog/health": {
         parameters: {
             query?: never;
@@ -1091,6 +1115,26 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/evals/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/evals/{id}` — `204`; `404` when the id is not a row.
+         * @description Remove one eval. Only a member of its owner group or an administrator may delete it; the eval was stored, never executed.
+         */
+        delete: operations["eval_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3543,6 +3587,21 @@ export interface components {
             /** @description Human-readable sentence. Never contains tokens, URLs or stack traces. */
             error: string;
         };
+        /** @description One eval as the API returns it. */
+        Eval: {
+            /** @description When it was written, RFC 3339. */
+            createdAt: string;
+            /** @description The `sub` of the person who wrote the eval. */
+            createdBy: string;
+            /** @description The known answer: `{"kind":"rows",…}`, `{"kind":"value",…}` or `{"kind":"uses",…}`. */
+            expected: unknown;
+            /** Format: int64 */
+            id: number;
+            /** @description The group that owns the eval; only its members and administrators may change it. */
+            ownerGroup: string;
+            /** @description The question a person asks, in words, 1 to 500 characters. */
+            question: string;
+        };
         /** @description One label/value pair about an app, as Nova can honestly observe it. */
         Fact: {
             label: string;
@@ -3980,6 +4039,15 @@ export interface components {
             name: string;
             owner_group: string;
             viewers?: string[];
+        };
+        /** @description `POST /api/catalog/evals` body. */
+        NewEval: {
+            /** @description The known answer: `{"kind":"rows",…}`, `{"kind":"value",…}` or `{"kind":"uses",…}`. */
+            expected: unknown;
+            /** @description The group that owns the eval. */
+            ownerGroup: string;
+            /** @description The question, 1 to 500 characters. */
+            question: string;
         };
         /** @description `POST /api/catalog/tables/{ns}/{tbl}/metrics` body. */
         NewMetricDefinition: {
@@ -6742,6 +6810,164 @@ export interface operations {
                 };
             };
             /** @description A catalog the engine lists has no warehouse */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    catalog_eval_list: {
+        parameters: {
+            query?: {
+                /** @description Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used. */
+                catalog?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The catalog's evals, in id order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Eval"][];
+                };
+            };
+            /** @description The catalog name is invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may not browse that catalog */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such catalog */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The catalog is not reachable or did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    catalog_eval_create: {
+        parameters: {
+            query?: {
+                /** @description Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used. */
+                catalog?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewEval"];
+            };
+        };
+        responses: {
+            /** @description The stored row */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Eval"];
+                };
+            };
+            /** @description The question, the owner group or the expected answer is not in the accepted shape, or the catalog name is invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may not browse that catalog, or only a member of the owner group or an administrator may write an eval */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such catalog */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The catalog is not reachable or did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -10339,6 +10565,63 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    eval_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The eval's id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Only a member of the owner group or an administrator may delete an eval */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such eval, or the id is not a number */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

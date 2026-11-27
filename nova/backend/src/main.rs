@@ -117,6 +117,7 @@ mod db;
 mod destinations;
 mod embed;
 mod error;
+mod evals;
 mod jobs;
 mod lineage_api;
 mod lineage_event;
@@ -803,6 +804,9 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
         .route("/catalog/search", get(catalog_search::search))
         .route("/catalog/products", get(catalog_products::list))
+        // A question with a known answer, kept as catalog context (#125 slice 1).
+        .route("/catalog/evals", get(evals::list).post(evals::create))
+        .route("/evals/{id}", delete(evals::delete))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route(
             "/catalog/tables/{ns}/{tbl}/documentation",

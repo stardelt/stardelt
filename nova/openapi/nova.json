@@ -1365,6 +1365,203 @@
         }
       }
     },
+    "/api/catalog/evals": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/catalog/evals` — the catalog's evals, in id order.",
+        "description": "The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.",
+        "operationId": "catalog_eval_list",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The catalog's evals, in id order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Eval"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/catalog/evals` — `201` with the stored row.",
+        "description": "Store one eval: a question (1 to 500 characters) and its known answer, `{\"kind\":\"rows\",\"rows\":[[…],…]}` (1 to 100 rows of 1 to 50 scalars, a string at most 500 characters), `{\"kind\":\"value\",\"value\":<scalar>}`, or `{\"kind\":\"uses\",\"tables\":[\"namespace.table\", …]}` (1 to 10 names). Only a member of `ownerGroup` or an administrator may write one; the caller is recorded as `createdBy`. The eval is stored, never executed. There is no update route: changing an eval is delete and create. `?catalog=` picks the catalog.",
+        "operationId": "catalog_eval_create",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEval"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Eval"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The question, the owner group or the expected answer is not in the accepted shape, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog, or only a member of the owner group or an administrator may write an eval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/health": {
       "get": {
         "tags": [
@@ -5910,6 +6107,73 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/evals/{id}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/evals/{id}` — `204`; `404` when the id is not a row.",
+        "description": "Remove one eval. Only a member of its owner group or an administrator may delete it; the eval was stored, never executed.",
+        "operationId": "eval_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The eval's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only a member of the owner group or an administrator may delete an eval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such eval, or the id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -15193,6 +15457,43 @@
           }
         }
       },
+      "Eval": {
+        "type": "object",
+        "description": "One eval as the API returns it.",
+        "required": [
+          "id",
+          "ownerGroup",
+          "question",
+          "expected",
+          "createdBy",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "description": "When it was written, RFC 3339."
+          },
+          "createdBy": {
+            "type": "string",
+            "description": "The `sub` of the person who wrote the eval."
+          },
+          "expected": {
+            "description": "The known answer: `{\"kind\":\"rows\",…}`, `{\"kind\":\"value\",…}` or `{\"kind\":\"uses\",…}`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ownerGroup": {
+            "type": "string",
+            "description": "The group that owns the eval; only its members and administrators may change it."
+          },
+          "question": {
+            "type": "string",
+            "description": "The question a person asks, in words, 1 to 500 characters."
+          }
+        }
+      },
       "Fact": {
         "type": "object",
         "description": "One label/value pair about an app, as Nova can honestly observe it.",
@@ -16419,6 +16720,28 @@
           }
         },
         "additionalProperties": false
+      },
+      "NewEval": {
+        "type": "object",
+        "description": "`POST /api/catalog/evals` body.",
+        "required": [
+          "ownerGroup",
+          "question",
+          "expected"
+        ],
+        "properties": {
+          "expected": {
+            "description": "The known answer: `{\"kind\":\"rows\",…}`, `{\"kind\":\"value\",…}` or `{\"kind\":\"uses\",…}`."
+          },
+          "ownerGroup": {
+            "type": "string",
+            "description": "The group that owns the eval."
+          },
+          "question": {
+            "type": "string",
+            "description": "The question, 1 to 500 characters."
+          }
+        }
       },
       "NewMetricDefinition": {
         "type": "object",

@@ -5,6 +5,7 @@ DELETE	/api/connections/group/{group}/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/managed/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/personal/{name}	connection_routes	main	signed-in
 DELETE	/api/destinations/{id}	destinations	main	signed-in
+DELETE	/api/evals/{id}	evals	main	signed-in
 DELETE	/api/metrics/{id}	metric_definitions	main	signed-in
 DELETE	/api/notebooks/{group}/{name}	notebooks	notebooks	signed-in
 DELETE	/api/pipelines/{namespace}/{name}	pipelines	pipelines	signed-in
@@ -31,6 +32,7 @@ GET	/api/auth/callback	auth	auth	sign-in
 GET	/api/auth/config	auth	auth	sign-in
 GET	/api/auth/login	auth	auth	sign-in
 GET	/api/catalog/catalogs	catalog	main	signed-in
+GET	/api/catalog/evals	evals	main	signed-in
 GET	/api/catalog/health	catalog_docs	main	signed-in
 GET	/api/catalog/metrics	catalog_metrics	main	signed-in
 GET	/api/catalog/namespaces	catalog	main	signed-in
@@ -103,6 +105,7 @@ POST	/api/admin/teams	admin_catalogs	main	admin
 POST	/api/ask	ask	main	signed-in
 POST	/api/ask/feedback	ask	main	signed-in
 POST	/api/auth/logout	auth	auth	sign-in
+POST	/api/catalog/evals	evals	main	signed-in
 POST	/api/catalog/metrics/refresh	catalog_metrics	main	admin
 POST	/api/catalog/namespaces	catalog	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/metrics	metric_definitions	main	signed-in
