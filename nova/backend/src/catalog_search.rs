@@ -304,15 +304,17 @@ pub async fn search(
         .into_response()
 }
 
-/// Ask's fallback: the tables of the default catalog that share at least one word with
-/// `words`, best first — most words matched, then `namespace`, then `table`; at most `limit`.
+/// Ask's fallback: the tables of the catalog `requested` names (the default one when it is
+/// `None`) that share at least one word with `words`, best first — most words matched, then
+/// `namespace`, then `table`; at most `limit`.
 pub(crate) async fn search_any_word(
     s: &Arc<AppState>,
     caller: Option<&auth::Principal>,
+    requested: Option<&str>,
     words: &[String],
     limit: usize,
 ) -> Result<Vec<SearchMatch>, String> {
-    let (catalog, id) = catalog_scope(s, caller, None)
+    let (catalog, id) = catalog_scope(s, caller, requested)
         .await
         .map_err(|_| "the catalog did not answer".to_string())?;
     let namespaces = get_json(s, &format!("/catalog/v1/{id}/namespaces"))
@@ -647,7 +649,7 @@ mod tests {
             .split_whitespace()
             .map(str::to_lowercase)
             .collect();
-        let found = search_any_word(&state(&base), None, &words, 5)
+        let found = search_any_word(&state(&base), None, None, &words, 5)
             .await
             .expect("the catalog answers");
         let names: Vec<String> = found
@@ -666,7 +668,7 @@ mod tests {
             .split_whitespace()
             .map(str::to_lowercase)
             .collect();
-        let found = search_any_word(&state(&base), None, &words, 5)
+        let found = search_any_word(&state(&base), None, None, &words, 5)
             .await
             .expect("the catalog answers");
         assert_eq!(found[0].namespace, "finance_raw");
@@ -677,10 +679,60 @@ mod tests {
     async fn a_question_with_no_shared_word_finds_nothing() {
         let (base, _) = serve(LAYOUT, false).await;
         let words = vec!["how".to_string(), "many".to_string()];
-        let found = search_any_word(&state(&base), None, &words, 5)
+        let found = search_any_word(&state(&base), None, None, &words, 5)
             .await
             .expect("the catalog answers");
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[tokio::test]
+    async fn a_named_catalog_is_searched_by_any_word() {
+        let (base, _) = serve(LAYOUT, false).await;
+        let state = state(&base);
+        state.catalog_access.lock().unwrap().insert(
+            "alice".into(),
+            (
+                std::time::Instant::now(),
+                std::collections::BTreeSet::from(["warehouse".to_string(), "finance".to_string()]),
+            ),
+        );
+        let who = caller("alice");
+        let words: Vec<String> = "trips by month"
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let named = search_any_word(&state, Some(&who), Some("finance"), &words, 5)
+            .await
+            .expect("the catalog answers");
+        assert!(!named.is_empty(), "{named:?}");
+        assert!(named.iter().all(|m| m.catalog == "finance"), "{named:?}");
+        let default = search_any_word(&state, Some(&who), None, &words, 5)
+            .await
+            .expect("the catalog answers");
+        assert_eq!(default[0].catalog, "warehouse", "{default:?}");
+        assert!(
+            search_any_word(&state, Some(&who), Some("Bad_Name"), &words, 5)
+                .await
+                .is_err()
+        );
+    }
+
+    fn caller(sub: &str) -> crate::auth::Principal {
+        crate::auth::Principal {
+            identity: crate::auth::Identity {
+                sub: sub.into(),
+                display_name: sub.into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: false,
+            },
+            via: "session",
+            access_token: None,
+            client_id: None,
+        }
     }
 
     fn documentation(

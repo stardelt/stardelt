@@ -541,6 +541,7 @@ pub(crate) async fn ask(
         match crate::catalog_search::search_any_word(
             &state,
             caller.as_ref().map(|c| &c.0),
+            params.catalog.as_deref(),
             &words,
             CANDIDATES,
         )
