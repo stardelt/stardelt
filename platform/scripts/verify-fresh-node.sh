@@ -96,7 +96,7 @@ forward_result() { # <label> <service> <rc>
 # failed) or 3 (a check could not be made). `upgrade` and `delete` call this again after their
 # step, so there is one definition of "the platform is up".
 readiness() { # <soft>: return 3 on a doubt instead of exiting (the `product` phase keeps going)
-  local soft="${1:-0}"
+  local soft="${1:-0}" domain cert_msg cert_rc
   status=0
 
   # 1. tools and context
@@ -290,6 +290,24 @@ readiness() { # <soft>: return 3 on a doubt instead of exiting (the `product` ph
     else
       bad keycloak "\"realm stardelt does not answer: ${body:-nothing}\""
     fi
+  fi
+
+  # 11. the ingress serves a certificate a client trusts for the identity provider's name
+  domain="${BASE_DOMAIN:-}"
+  if [ -z "$domain" ]; then
+    domain="$(kubectl -n "$NAMESPACE" get platforminstance "$PLATFORM_INSTANCE" \
+      -o jsonpath='{.spec.baseDomain}' 2>/dev/null || true)"
+  fi
+  if [ -z "$domain" ]; then
+    note certificate '"no baseDomain to check"'
+  else
+    cert_rc=0
+    cert_msg="$(bash "$(dirname "${BASH_SOURCE[0]}")/check-ingress-certificate.sh" "id.${domain}" 2>&1)" || cert_rc=$?
+    case "$cert_rc" in
+      0) ok certificate "$cert_msg" ;;
+      1) bad certificate "\"${cert_msg}\"" ;;
+      *) unknown certificate "\"${cert_msg}\"" ;;
+    esac
   fi
 
   return "$status"
