@@ -334,17 +334,49 @@ fn same_scalar(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     a == b
 }
 
-/// Whether `sql` names `table` as a whole `namespace.table` token: the character before and
-/// after the match is not one of `A-Za-z0-9_.`. Both sides compare lower-cased.
+/// Whether `sql` names `table` as a whole token: the table itself, a quoted
+/// `"namespace"."table"`, or a catalog-qualified `catalog.namespace.table` whose last
+/// two parts are the table. Quotes and backticks are removed first, so the `"` of an
+/// identifier does not split it; a longer name (`orders_archive` for `orders`) still
+/// does not match. Both sides compare lower-cased.
 fn names_table(sql: &str, table: &str) -> bool {
     /// One maximal run of `A-Za-z0-9_.`; every other character is a separator.
     fn token(ch: char) -> bool {
         ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'
     }
     let table = table.to_lowercase();
-    sql.to_lowercase()
+    let qualified = format!(".{table}");
+    let unquoted: String = sql
+        .to_lowercase()
+        .chars()
+        .filter(|ch| *ch != '"' && *ch != '`')
+        .collect();
+    unquoted
         .split(|ch: char| !token(ch))
-        .any(|run| run == table)
+        .any(|run| run == table || run.ends_with(&qualified))
+}
+
+/// One cell as text, for comparing two rows: numbers by value (`10` and `10.0` are
+/// equal), anything else exactly as JSON writes it.
+fn canonical_cell(cell: &serde_json::Value) -> String {
+    match cell.as_f64() {
+        Some(number) => format!("{number}"),
+        None => cell.to_string(),
+    }
+}
+
+/// A table of rows in a canonical order: the multiset comparison of two answers, with
+/// every cell compared as a value.
+fn canonical_rows<'a, I>(rows: I) -> Vec<Vec<String>>
+where
+    I: IntoIterator<Item = &'a [serde_json::Value]>,
+{
+    let mut out: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|cells| cells.iter().map(canonical_cell).collect())
+        .collect();
+    out.sort();
+    out
 }
 
 /// Whether `answer` is the expected answer; `Err` carries the sentence the page shows.
@@ -375,24 +407,17 @@ fn verdict(expected: &serde_json::Value, answer: &NewEvalRun) -> Result<(), Stri
             }
         }
         Some("rows") => {
-            let wanted = object
+            let wanted: Vec<&[serde_json::Value]> = object
                 .and_then(|o| o.get("rows"))
                 .and_then(|rows| rows.as_array())
-                .cloned()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| row.as_array().map(|cells| cells.as_slice()).unwrap_or(&[]))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let mut wanted: Vec<String> = wanted
-                .iter()
-                .map(serde_json::to_string)
-                .collect::<Result<_, _>>()
-                .map_err(|_| ROWS_DIFFER.to_string())?;
-            let mut got: Vec<String> = rows
-                .iter()
-                .map(serde_json::to_string)
-                .collect::<Result<_, _>>()
-                .map_err(|_| ROWS_DIFFER.to_string())?;
-            wanted.sort_unstable();
-            got.sort_unstable();
-            if wanted == got {
+            let got: Vec<&[serde_json::Value]> = rows.iter().map(|row| row.as_slice()).collect();
+            if canonical_rows(wanted) == canonical_rows(got) {
                 Ok(())
             } else {
                 Err(ROWS_DIFFER.into())
@@ -996,6 +1021,52 @@ mod tests {
             Err(NO_SQL.into()),
             "an answer without sql cannot show that it uses the table"
         );
+    }
+
+    #[test]
+    fn a_number_is_equal_however_it_is_written() {
+        let expected = serde_json::json!({"kind": "rows", "rows": [[10, "shop"]]});
+        let mut run = answer(Some(vec![vec![
+            serde_json::json!(10.0),
+            serde_json::json!("shop"),
+        ]]));
+        run.sql = None;
+        assert_eq!(verdict(&expected, &run), Ok(()));
+        let mut wrong = answer(Some(vec![vec![
+            serde_json::json!(11.0),
+            serde_json::json!("shop"),
+        ]]));
+        wrong.sql = None;
+        assert!(verdict(&expected, &wrong).is_err());
+    }
+
+    #[test]
+    fn a_quoted_table_name_is_the_same_table() {
+        assert!(names_table(
+            r#"SELECT * FROM "shop"."orders""#,
+            "shop.orders"
+        ));
+        assert!(names_table("SELECT * FROM `shop`.`orders`", "shop.orders"));
+        assert!(!names_table(
+            r#"SELECT * FROM "shop"."orders_archive""#,
+            "shop.orders"
+        ));
+    }
+
+    #[test]
+    fn a_fully_qualified_name_names_the_table() {
+        assert!(names_table(
+            "SELECT * FROM playground.shop.orders",
+            "shop.orders"
+        ));
+        assert!(names_table(
+            r#"SELECT * FROM "playground"."shop"."orders" o"#,
+            "shop.orders"
+        ));
+        assert!(!names_table(
+            "SELECT * FROM other_shop.orders",
+            "shop.orders"
+        ));
     }
 
     #[test]
