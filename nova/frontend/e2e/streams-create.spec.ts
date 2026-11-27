@@ -138,3 +138,43 @@ test('a refusal sentence is shown and nothing is written (#1977)', async ({ page
   await expect(dialog).toBeVisible()
   expect(puts).toBe(0)
 })
+
+test('the dialog refuses a sink table that does not exist (#2009)', async ({ page }) => {
+  let puts = 0
+
+  await page.route('**/api/**', (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/me') return json(route, me)
+    if (path === '/api/streams' && request.method() === 'GET') {
+      return json(route, { namespace: 'stardelt', streams: [] })
+    }
+    if (path === '/api/pipelines/principals') return json(route, principals)
+    if (path === '/api/catalog/catalogs') return json(route, catalogs)
+    if (path === '/api/connections') return json(route, { connections: [], store: true })
+    if (path === '/api/catalog/tables/shop/orders/history') {
+      return json(route, { error: 'no such table' }, 404)
+    }
+    if (request.method() === 'PUT') {
+      puts += 1
+      return json(route, savedStream)
+    }
+    return json(route, {})
+  })
+
+  await page.goto('/streams')
+  await page.getByRole('button', { name: 'New stream' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Name', { exact: true }).fill('orders')
+  await dialog.getByLabel('Owner group', { exact: true }).selectOption('shop')
+  await dialog.getByLabel('Topic', { exact: true }).fill('orders.created')
+  await dialog.getByLabel('Catalog', { exact: true }).selectOption('gold')
+  await dialog.getByLabel('Table', { exact: true }).fill('shop.orders')
+  await dialog.getByRole('button', { name: 'Create stream' }).click()
+
+  await expect(
+    dialog.getByRole('alert').getByText('the sink table gold.shop.orders does not exist'),
+  ).toBeVisible()
+  await expect(dialog).toBeVisible()
+  expect(puts).toBe(0)
+})
