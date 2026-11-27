@@ -39,7 +39,7 @@ flowchart LR
     fe_build[&quot;Build&lt;br/&gt;&lt;small&gt;Notebooks, Pipelines, Runs, Streams, Compute, Connections, Destinations, Data&lt;/small&gt;&quot;]
     fe_share[&quot;Share&lt;br/&gt;&lt;small&gt;Dashboards&lt;/small&gt;&quot;]
     fe_admin[&quot;Admin&lt;br/&gt;&lt;small&gt;AgentCalls, Models, AdminCatalogs, Platform, Settings, Deployments&lt;/small&gt;&quot;]
-    fe_detail_pages[&quot;Detail pages&lt;br/&gt;&lt;small&gt;AppDetail, DeploymentDetail, NotFound, NotebookDetail, PipelineDetail, Preferences, Profile, Report, RunDetail, RunNotebook&lt;/small&gt;&quot;]
+    fe_detail_pages[&quot;Detail pages&lt;br/&gt;&lt;small&gt;AppDetail, DeploymentDetail, NotFound, NotebookDetail, PipelineDetail, Preferences, Profile, Report, RunDetail, RunNotebook, StreamDetail&lt;/small&gt;&quot;]
   end
   subgraph BE[&quot;backend/src (axum): areas and modules, production lines&quot;]
     direction TB
@@ -83,7 +83,7 @@ flowchart LR
   fe_build --&gt;|3| be_sql_query_log
   fe_detail_pages --&gt;|2| be_core_identity
   fe_detail_pages --&gt;|4| be_notebooks_compute
-  fe_detail_pages --&gt;|36| be_pipelines_delivery
+  fe_detail_pages --&gt;|38| be_pipelines_delivery
   fe_detail_pages --&gt;|2| be_platform_view
   fe_detail_pages --&gt;|2| be_sql_query_log
   fe_explore --&gt;|23| be_catalog

@@ -14,6 +14,7 @@ import RunDetail from './routes/RunDetail'
 import RunNotebook from './routes/RunNotebook'
 import Report from './routes/Report'
 import Streams from './routes/Streams'
+import StreamDetail from './routes/StreamDetail'
 import Compute from './routes/Compute'
 import Deployments from './routes/Deployments'
 import DeploymentDetail from './routes/DeploymentDetail'
@@ -50,6 +51,7 @@ export default function App() {
         <Route path="/reports/:namespace/:name" element={<Report />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/streams" element={<Streams />} />
+        <Route path="/streams/:namespace/:name" element={<StreamDetail />} />
         <Route path="/compute" element={<Compute />} />
         <Route path="/deployments" element={<Deployments />} />
         <Route path="/deployments/:id" element={<DeploymentDetail />} />
