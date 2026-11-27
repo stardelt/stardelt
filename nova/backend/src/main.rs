@@ -105,6 +105,7 @@ mod catalog;
 mod catalog_doc_store;
 mod catalog_docs;
 mod catalog_metrics;
+mod catalog_products;
 mod catalog_search;
 mod catalog_token;
 mod cluster;
@@ -800,6 +801,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/samples/{name}", post(samples::load))
         .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
         .route("/catalog/search", get(catalog_search::search))
+        .route("/catalog/products", get(catalog_products::list))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route(
             "/catalog/tables/{ns}/{tbl}/documentation",

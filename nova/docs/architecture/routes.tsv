@@ -34,6 +34,7 @@ GET	/api/catalog/health	catalog_docs	main	signed-in
 GET	/api/catalog/metrics	catalog_metrics	main	signed-in
 GET	/api/catalog/namespaces	catalog	main	signed-in
 GET	/api/catalog/namespaces/{ns}/tables	catalog	main	signed-in
+GET	/api/catalog/products	catalog_products	main	signed-in
 GET	/api/catalog/search	catalog_search	main	signed-in
 GET	/api/catalog/tables/{ns}/{tbl}	catalog	main	signed-in
 GET	/api/catalog/tables/{ns}/{tbl}/documentation	catalog_docs	main	signed-in
