@@ -93,6 +93,7 @@ spec:
                 - s3
                 - kafka
                 - sftp
+                - mlflow
                 - generic
                 type: string
               usableBy:
@@ -141,6 +142,8 @@ spec:
               rule: self.type != 'sftp' || (has(self.config) && 'host' in self.config && has(self.secret) && 'user' in self.secret.keys && ('password' in self.secret.keys || 'privateKey' in self.secret.keys))
             - message: a kafka connection needs config.bootstrapServers
               rule: self.type != 'kafka' || (has(self.config) && 'bootstrapServers' in self.config)
+            - message: an mlflow connection needs the setting trackingUrl
+              rule: self.type != 'mlflow' || (has(self.config) && 'trackingUrl' in self.config)
           status:
             nullable: true
             properties:
