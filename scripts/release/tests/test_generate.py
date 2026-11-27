@@ -134,6 +134,10 @@ class UpstreamPinsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             generate.upstream_pins(self.KEYCLOAK, "")
 
+    def test_a_duplicated_constant_exits(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate.upstream_pins(self.KEYCLOAK + self.KEYCLOAK, self.PG_DUMP)
+
 
 class VersionsYamlTest(unittest.TestCase):
     def test_header_images_and_version(self) -> None:
