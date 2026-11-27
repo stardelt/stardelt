@@ -278,7 +278,7 @@ def _stream_row(obj):
         _spec(obj).get("ownerGroup") or DASH,
         _viewers(obj),
         status.get("phase") or DASH,
-        status.get("lastCheckpointAt") or DASH,
+        status.get("lastSubmittedAt") or DASH,
     ]
 
 
@@ -300,7 +300,7 @@ def render(pipelines, streams, clusters, runs=None) -> str:
     )
     lines += ["", "## Stream apps"]
     lines += _table(
-        ["stream", "owner", "viewers", "phase", "last checkpoint"],
+        ["stream", "owner", "viewers", "phase", "last submitted"],
         [_stream_row(obj) for obj in sorted(streams, key=by_name)],
     )
     lines += ["", "## Spark clusters"]

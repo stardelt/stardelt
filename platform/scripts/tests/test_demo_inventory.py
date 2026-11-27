@@ -45,13 +45,13 @@ def pipeline(
     }
 
 
-def stream(name, owner_group="demo", viewers=None, phase="Running", checkpoint="2026-11-19T10:00:00Z"):
+def stream(name, owner_group="demo", viewers=None, phase="Running", submitted="2026-11-19T10:00:00Z"):
     spec = {"ownerGroup": owner_group} if owner_group is not None else {}
     if viewers is not None:
         spec["viewers"] = viewers
     status = {"phase": phase}
-    if checkpoint is not None:
-        status["lastCheckpointAt"] = checkpoint
+    if submitted is not None:
+        status["lastSubmittedAt"] = submitted
     return {"metadata": {"name": name}, "spec": spec, "status": status}
 
 
@@ -103,25 +103,25 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(text.splitlines()[-1].startswith("Total: 2 pipelines, 0 streams, 0 clusters."))
 
     def test_stream_and_cluster_rows(self):
-        """When: one stream with a checkpoint and one cluster owned by a group. Then: the
-        checkpoint and the owner group land in their cells and the counts are right."""
+        """When: one stream with a submission time and one cluster owned by a group. Then: the
+        submission time and the owner group land in their cells and the counts are right."""
         text = demo_inventory.render(
             [],
             [stream("orders", viewers=["analysts"], phase="Running")],
             [cluster("lab", viewers=["analysts"], phase="Stopped")],
         )
-        self.assertIn("| stream | owner | viewers | phase | last checkpoint |", text)
+        self.assertIn("| stream | owner | viewers | phase | last submitted |", text)
         self.assertIn("| orders | demo | analysts | Running | 2026-11-19T10:00:00Z |", text)
         self.assertIn("| cluster | owner | viewers | phase |", text)
         self.assertIn("| lab | demo | analysts | Stopped |", text)
         self.assertTrue(text.endswith("Total: 0 pipelines, 1 streams, 1 clusters."))
 
-    def test_missing_owner_and_checkpoint_render_a_dash(self):
-        """When: no `ownerGroup`, no cluster owner group (a user instead), no checkpoint.
+    def test_missing_owner_and_submission_render_a_dash(self):
+        """When: no `ownerGroup`, no cluster owner group (a user instead), no submission time.
         Then: every empty cell is `—`, never `None`."""
         text = demo_inventory.render(
             [pipeline("anon", owner_group=None)],
-            [stream("silent", owner_group=None, checkpoint=None)],
+            [stream("silent", owner_group=None, submitted=None)],
             [cluster("solo", group=None, user="maddin")],
         )
         self.assertIn("| anon | — | on demand | — | never | sql |", text)
