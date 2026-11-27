@@ -61,6 +61,24 @@
       "query_params": [],
       "body": false
     },
+    "catalog_eval_create": {
+      "method": "POST",
+      "path": "/api/catalog/evals",
+      "path_params": [],
+      "query_params": [
+        "catalog"
+      ],
+      "body": true
+    },
+    "catalog_eval_list": {
+      "method": "GET",
+      "path": "/api/catalog/evals",
+      "path_params": [],
+      "query_params": [
+        "catalog"
+      ],
+      "body": false
+    },
     "catalog_health_list": {
       "method": "GET",
       "path": "/api/catalog/health",
@@ -348,6 +366,15 @@
     "destinations_test": {
       "method": "POST",
       "path": "/api/destinations/{id}/test",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "eval_delete": {
+      "method": "DELETE",
+      "path": "/api/evals/{id}",
       "path_params": [
         "id"
       ],
