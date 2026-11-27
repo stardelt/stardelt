@@ -126,6 +126,12 @@ class ReleaseSigningTest(unittest.TestCase):
             "an image is signed only after its release tag points at the digest",
         )
 
+    def test_the_upstream_images_are_neither_retagged_nor_signed(self) -> None:
+        # #2189: versions.yaml names the third-party images too; only what stardelt builds gets
+        # the v0.0.N tag and a signature.
+        self.assertIn("'/source: upstream}/!s/", self.text)
+        self.assertIn("expected 3 upstream images", self.text)
+
     def test_every_pushed_image_carries_an_sbom(self) -> None:
         workflows = ROOT / ".github" / "workflows"
         for name, pushes in self.IMAGE_WORKFLOWS.items():
