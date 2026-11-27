@@ -8,7 +8,14 @@ Tables:
 - `shared.gold.pegelonline_station_latest` (latest measurement per `(station_uuid, timeseries)`)
 - `shared.gold.pegelonline_station_hourly` (hourly averages/min/max per gauge/timeseries)
 - `shared.gold.pegelonline_levels_v1` (a view over `pegelonline_station_latest`; the stable
-  name of the data product — readers are granted this, not the tables behind it)
+  name of the data product — a reader's query names this and keeps working when the tables under
+  it change)
+
+Who may read it: grants are per **catalog** today, not per table or view — a group with `select`
+on `shared` reads the view and every other table in that catalog. Table- and schema-level grants
+do not exist yet, so the example grants nothing of its own: `shared` grants
+`browse`/`select`/`write`/`create` to `stardelt-users` (see `spec.grants` on the `Catalog`
+resource), and the view is the name a query uses, not a permission boundary.
 
 ## Setup
 
