@@ -397,14 +397,16 @@ mod fake_airflow {
             .get("limit")
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
-        let page: Vec<Value> = runs.iter().take(limit).cloned().collect();
+        let mut page: Vec<Value> = runs.clone();
+        page.sort_by(|a, b| b["run_after"].as_str().cmp(&a["run_after"].as_str()));
+        page.truncate(limit);
         Ok(Json(
             json!({ "dag_runs": page, "total_entries": runs.len() }),
         ))
     }
 
     /// Airflow 3.2.2's `POST /api/v2/dags/~/dagRuns/list`: the runs of `dag_ids`, newest
-    /// `start_date` first, at most `page_limit` (default 100) in total, each with its `dag_id`.
+    /// `run_after` first, at most `page_limit` (default 100) in total, each with its `dag_id`.
     async fn runs_batch(
         State(state): State<Shared>,
         OriginalUri(uri): OriginalUri,
@@ -452,7 +454,7 @@ mod fake_airflow {
                 })
             })
             .collect();
-        runs.sort_by(|a, b| b["start_date"].as_str().cmp(&a["start_date"].as_str()));
+        runs.sort_by(|a, b| b["run_after"].as_str().cmp(&a["run_after"].as_str()));
         let total = runs.len();
         runs.truncate(limit);
         Ok(Json(json!({ "dag_runs": runs, "total_entries": total })))
@@ -2094,6 +2096,70 @@ async fn a_failing_last_run_call_does_not_fail_the_list() {
     assert_eq!(smoke.state, "succeeded");
     assert_eq!(other.last_run, None, "the failed call leaves lastRun empty");
     assert_eq!(other.state, "idle");
+}
+
+/// #1969: a backfill created for an old interval that never started has `start_date: null`.
+/// Airflow sorts it first under `-start_date`, so Nova called it the last run; `-run_after`
+/// puts the run that actually ran newest — in the batch listing and in the single-DAG fallback.
+#[tokio::test]
+async fn an_unstarted_backfill_is_not_the_last_run() {
+    fn runs_of_the_dag() -> Vec<Value> {
+        let mut backfill = run("backfill__2026-10-04T02:00:00+00:00", "failed");
+        backfill["run_type"] = json!("backfill");
+        backfill["logical_date"] = json!("2026-10-04T02:00:00Z");
+        backfill["run_after"] = json!("2026-10-04T02:00:00Z");
+        backfill["start_date"] = Value::Null;
+        backfill["end_date"] = Value::Null;
+        let mut scheduled = run("scheduled__2026-11-26T03:00:00+00:00", "success");
+        scheduled["run_type"] = json!("scheduled");
+        scheduled["logical_date"] = json!("2026-11-26T03:00:00Z");
+        scheduled["run_after"] = json!("2026-11-26T03:00:00Z");
+        scheduled["start_date"] = json!("2026-11-26T03:00:00.365606Z");
+        scheduled["end_date"] = json!("2026-11-26T03:02:02.979050Z");
+        vec![backfill, scheduled]
+    }
+
+    let resources = memory(&[("shop-dbt", resource("shop-dbt", Some("analytics")))]);
+    let (airflow, fake) = fake_airflow::start().await;
+    {
+        let mut fake = fake.lock().unwrap();
+        fake.dags.push(dag("stardelt__shop-dbt"));
+        fake.runs
+            .insert("stardelt__shop-dbt".into(), runs_of_the_dag());
+    }
+    let caller = who("sub-ada", &["analytics"], false);
+
+    // The batch listing: the first row of a DAG is its last run.
+    let answer = list_pipelines(Some(&resources), Some(&airflow), &caller)
+        .await
+        .expect("the list succeeds");
+    let last = answer.pipelines[0].last_run.as_ref().expect("a last run");
+    assert_eq!(last.run_id, "scheduled__2026-11-26T03:00:00+00:00");
+    assert_eq!(last.state, "success");
+    let body = fake
+        .lock()
+        .unwrap()
+        .batch_bodies
+        .last()
+        .cloned()
+        .expect("one batch listing");
+    assert_eq!(body["order_by"], json!("-run_after"));
+
+    // The fallback: a failing batch listing reads each DAG with `runs(dag_id, 1)`.
+    fake.lock().unwrap().fail_batch = true;
+    fake.lock().unwrap().calls.clear();
+    let answer = list_pipelines(Some(&resources), Some(&airflow), &caller)
+        .await
+        .expect("the list succeeds");
+    let last = answer.pipelines[0].last_run.as_ref().expect("a last run");
+    assert_eq!(last.run_id, "scheduled__2026-11-26T03:00:00+00:00");
+    let calls = fake.lock().unwrap().calls.clone();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.contains("dagRuns?order_by=-run_after")),
+        "the single-DAG fallback asks the same order: {calls:?}"
+    );
 }
 
 // -----------------------------------------------------------------------
