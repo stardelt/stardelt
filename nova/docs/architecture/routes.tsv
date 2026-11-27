@@ -5,6 +5,7 @@ DELETE	/api/connections/group/{group}/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/managed/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/personal/{name}	connection_routes	main	signed-in
 DELETE	/api/destinations/{id}	destinations	main	signed-in
+DELETE	/api/metrics/{id}	metric_definitions	main	signed-in
 DELETE	/api/notebooks/{group}/{name}	notebooks	notebooks	signed-in
 DELETE	/api/pipelines/{namespace}/{name}	pipelines	pipelines	signed-in
 DELETE	/api/pipelines/{namespace}/{name}/backfills/{id}	pipelines	pipelines	signed-in
@@ -40,6 +41,7 @@ GET	/api/catalog/tables/{ns}/{tbl}	catalog	main	signed-in
 GET	/api/catalog/tables/{ns}/{tbl}/documentation	catalog_docs	main	signed-in
 GET	/api/catalog/tables/{ns}/{tbl}/health	catalog_docs	main	signed-in
 GET	/api/catalog/tables/{ns}/{tbl}/history	catalog	main	signed-in
+GET	/api/catalog/tables/{ns}/{tbl}/metrics	metric_definitions	main	signed-in
 GET	/api/catalog/tables/{ns}/{tbl}/verified-queries	verified_queries	main	signed-in
 GET	/api/catalog/warehouse	catalog	main	signed-in
 GET	/api/compute	compute	main	signed-in
@@ -103,6 +105,7 @@ POST	/api/ask/feedback	ask	main	signed-in
 POST	/api/auth/logout	auth	auth	sign-in
 POST	/api/catalog/metrics/refresh	catalog_metrics	main	admin
 POST	/api/catalog/namespaces	catalog	main	signed-in
+POST	/api/catalog/tables/{ns}/{tbl}/metrics	metric_definitions	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/rollback	catalog	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/verified-queries	verified_queries	main	signed-in
 POST	/api/catalog/tables/{ns}/{tbl}/verified-queries/check	verified_queries	main	signed-in

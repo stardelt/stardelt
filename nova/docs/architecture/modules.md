@@ -2,12 +2,12 @@
 | module | area | production lines | test lines | routes | talks to |
 |---|---|---:|---:|---:|---|
 | `pipelines.rs` ⚠ | Pipelines & delivery | 9033 | 12254 | 26 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store, S3 (SeaweedFS), Trino |
-| `catalog_docs.rs` ⚠ | Catalog | 2624 | 1911 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
+| `catalog_docs.rs` ⚠ | Catalog | 2589 | 1886 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `auth.rs` ⚠ | Core & identity | 2544 | 2316 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
+| `main.rs` | Core & identity | 1498 | 1617 | 3 | - |
 | `query_log_api.rs` | SQL & query log | 1492 | 320 | 6 | Kubernetes API (CRDs), PostgreSQL state store |
-| `main.rs` | Core & identity | 1490 | 1617 | 3 | - |
 | `mcp.rs` | AI (Ask, MCP, models) | 1428 | 1270 | 4 | Airflow REST, Trino |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -32,10 +32,11 @@
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_collector.rs` | SQL & query log | 549 | 580 | 3 | Kubernetes API (CRDs), PostgreSQL state store |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
+| `openapi.rs` | Core & identity | 477 | 688 | 1 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
-| `openapi.rs` | Core & identity | 472 | 688 | 1 | - |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
+| `metric_definitions.rs` | Catalog | 398 | 69 | 3 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
 | `catalog_search.rs` | Catalog | 351 | 417 | 1 | Lakekeeper (Iceberg REST) |
@@ -71,4 +72,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (70 files)** | | **50387** | **44692** | **162** | |
+| **total (71 files)** | | **50763** | **44736** | **165** | |
