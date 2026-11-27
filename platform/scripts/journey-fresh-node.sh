@@ -58,6 +58,7 @@ cleanup() {
   fi
   if [ "$KEEP" != 1 ] && command -v kubectl >/dev/null 2>&1; then
     kubectl -n "$NAMESPACE" delete "serviceprincipal/${PRINCIPAL}" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n "$NAMESPACE" delete "serviceprincipal/pipeline-${GROUP}" --ignore-not-found >/dev/null 2>&1 || true
     kubectl -n "$NAMESPACE" delete catalog/journey --ignore-not-found >/dev/null 2>&1 || true
     NAMESPACE="$NAMESPACE" KIND=service NAME="journey-outsider" YES=1 \
       bash "$PLATFORM_DIR/scripts/keycloak-sync-principal.sh" --delete >/dev/null 2>&1 || true
@@ -234,6 +235,26 @@ phase_write() {
   local schema table rows
   if ! command -v kubectl >/dev/null 2>&1 || [ ! -s "$tmp/access-token" ]; then
     unknown write '"the write needs J1 (kubectl and the principal token)"'
+    return 0
+  fi
+  # The catalog's maintenance job runs as `pipeline-<owner group>`; without it the Catalog
+  # stays not-CatalogReady (`MaintenanceReady=False`). Same shape as demo-access.sh.
+  if ! kubectl -n "$NAMESPACE" apply -f - >/dev/null 2>"$tmp/principal.err" <<EOF
+apiVersion: stardelt.io/v1alpha1
+kind: ServicePrincipal
+metadata:
+  name: pipeline-${GROUP}
+spec:
+  ownerGroup: ${GROUP}
+  purpose: pipeline
+  audiences: [trino, lakekeeper]
+EOF
+  then
+    bad write "\"the maintenance principal was refused: $(head -c 200 "$tmp/principal.err")\""
+    return 0
+  fi
+  if ! kubectl -n "$NAMESPACE" wait --for=condition=Ready "serviceprincipal/pipeline-${GROUP}" --timeout=120s >/dev/null 2>&1; then
+    bad write "\"serviceprincipal/pipeline-${GROUP} is not Ready: $(kubectl -n "$NAMESPACE" get "serviceprincipal/pipeline-${GROUP}" -o jsonpath='{.status.conditions[0].message}' 2>/dev/null)\""
     return 0
   fi
   if ! kubectl -n "$NAMESPACE" apply -f - >/dev/null 2>"$tmp/catalog.err" <<EOF

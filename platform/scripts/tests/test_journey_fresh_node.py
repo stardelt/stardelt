@@ -128,5 +128,26 @@ class TrinoSql(unittest.TestCase):
         self.assertIn("no rows and no nextUri", done.stderr)
 
 
+class MaintenancePrincipal(unittest.TestCase):
+    """The write phase creates the owner group's `pipeline-<group>` principal (#2196 J3)."""
+
+    def test_the_write_phase_creates_the_groups_pipeline_principal(self):
+        text = SCRIPT.read_text()
+        blocks = re.findall(r"<<EOF\n(.*?)\nEOF\n", text, re.S)
+        principals = [block for block in blocks if "kind: ServicePrincipal" in block]
+        self.assertEqual(
+            len(principals),
+            2,
+            "J1's principal and the maintenance principal are the two the run creates",
+        )
+        maintenance = [block for block in principals if "pipeline-${GROUP}" in block]
+        self.assertEqual(len(maintenance), 1)
+        block = maintenance[0]
+        self.assertIn("ownerGroup: ${GROUP}", block)
+        self.assertIn("purpose: pipeline", block)
+        self.assertIn("audiences: [trino, lakekeeper]", block)
+        self.assertIn('delete "serviceprincipal/pipeline-${GROUP}"', text)
+
+
 if __name__ == "__main__":
     unittest.main()
