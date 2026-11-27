@@ -35,7 +35,7 @@ flowchart LR
   agents([&quot;Agents and CLI: MCP, REST, SDK&quot;])
   subgraph FE[&quot;frontend/src (pages by nav group)&quot;]
     direction TB
-    fe_explore[&quot;Explore&lt;br/&gt;&lt;small&gt;Overview, Catalog, Query, QueryLog, Lineage&lt;/small&gt;&quot;]
+    fe_explore[&quot;Explore&lt;br/&gt;&lt;small&gt;Overview, Catalog, Query, QueryLog, Accelerations, Lineage&lt;/small&gt;&quot;]
     fe_build[&quot;Build&lt;br/&gt;&lt;small&gt;Notebooks, Pipelines, Runs, Streams, Compute, Connections, Destinations, Data&lt;/small&gt;&quot;]
     fe_share[&quot;Share&lt;br/&gt;&lt;small&gt;Dashboards&lt;/small&gt;&quot;]
     fe_admin[&quot;Admin&lt;br/&gt;&lt;small&gt;AgentCalls, Models, AdminCatalogs, Platform, Settings, Deployments&lt;/small&gt;&quot;]
@@ -93,7 +93,7 @@ flowchart LR
   fe_explore --&gt;|2| be_notebooks_compute
   fe_explore --&gt;|8| be_pipelines_delivery
   fe_explore --&gt;|1| be_platform_view
-  fe_explore --&gt;|13| be_sql_query_log
+  fe_explore --&gt;|14| be_sql_query_log
   fe_share --&gt;|1| be_platform_view
   be_ai_ask_mcp_models -.-&gt;|1| x_airflow
   be_ai_ask_mcp_models -.-&gt;|3| x_k8s
@@ -184,7 +184,7 @@ sequenceDiagram
   connection_routes.rs 1949
 F-size frontend files over 800 lines: 7
   api-schema.d.ts 14998
-  api.ts 1667
+  api.ts 1682
   components/ScheduleDialog.tsx 1512
   routes/AdminCatalogs.tsx 1189
   components/ConnectionDialogs.tsx 1167

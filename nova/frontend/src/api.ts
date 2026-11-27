@@ -1230,6 +1230,19 @@ export type QueryHistoryRun = {
 /** `GET /api/query-log/{id}/history` */
 export type QueryHistory = Schema<'QueryHistory'>
 
+/** One shape a person ran at least twice in the last 30 days (#38), worst first. */
+export type RepeatedStatement = {
+  sqlFingerprint: string
+  sql: string
+  runs: number
+  totalMs: number | null
+  averageMs: number | null
+  maxMs: number | null
+}
+
+/** `GET /api/query-log/repeated` — the repeated statements and the supported path. */
+export type RepeatedQueries = { statements: RepeatedStatement[]; suggestion: string }
+
 export type QueryLogParams = {
   scope: 'mine' | 'team' | 'all'
   state?: string
@@ -1457,6 +1470,8 @@ export const api = {
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
+  repeatedQueries: (scope: 'mine' | 'team' = 'mine', limit = 20) =>
+    jget<RepeatedQueries>(`/api/query-log/repeated?scope=${scope}&limit=${limit}`),
   queryUsage:   (p: { scope: 'mine' | 'team' | 'all'; by: UsagePage['by']; from: number }) =>
     jget<UsagePage>(queryUsageUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),

@@ -36,7 +36,7 @@ flowchart LR
   agents(["Agents and CLI: MCP, REST, SDK"])
   subgraph FE["frontend/src (pages by nav group)"]
     direction TB
-    fe_explore["Explore<br/><small>Overview, Catalog, Query, QueryLog, Lineage</small>"]
+    fe_explore["Explore<br/><small>Overview, Catalog, Query, QueryLog, Accelerations, Lineage</small>"]
     fe_build["Build<br/><small>Notebooks, Pipelines, Runs, Streams, Compute, Connections, Destinations, Data</small>"]
     fe_share["Share<br/><small>Dashboards</small>"]
     fe_admin["Admin<br/><small>AgentCalls, Models, AdminCatalogs, Platform, Settings, Deployments</small>"]
@@ -94,7 +94,7 @@ flowchart LR
   fe_explore -->|2| be_notebooks_compute
   fe_explore -->|8| be_pipelines_delivery
   fe_explore -->|1| be_platform_view
-  fe_explore -->|13| be_sql_query_log
+  fe_explore -->|14| be_sql_query_log
   fe_share -->|1| be_platform_view
   be_ai_ask_mcp_models -.->|1| x_airflow
   be_ai_ask_mcp_models -.->|3| x_k8s

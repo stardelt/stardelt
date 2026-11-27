@@ -19,6 +19,7 @@ import Compute from './routes/Compute'
 import Deployments from './routes/Deployments'
 import DeploymentDetail from './routes/DeploymentDetail'
 import QueryLog from './routes/QueryLog'
+import Accelerations from './routes/Accelerations'
 import AppDetail from './routes/AppDetail'
 import AdminCatalogs from './routes/AdminCatalogs'
 import AgentCalls from './routes/AgentCalls'
@@ -56,6 +57,7 @@ export default function App() {
         <Route path="/deployments" element={<Deployments />} />
         <Route path="/deployments/:id" element={<DeploymentDetail />} />
         <Route path="/queries"    element={<QueryLog   />} />
+        <Route path="/accelerations" element={<Accelerations />} />
         <Route path="/apps"       element={<Navigate to="/platform" replace />} />
         <Route path="/apps/:id"   element={<RequireAdmin><AppDetail /></RequireAdmin>} />
         <Route path="/platform"   element={<RequireAdmin><Platform  /></RequireAdmin>} />
