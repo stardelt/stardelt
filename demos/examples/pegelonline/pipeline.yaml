@@ -89,7 +89,8 @@ spec:
             HAVING count(*) > 1
         - name: value_in_range
           sql: |
-            SELECT station_uuid, timeseries, measurement_value
+            SELECT station_uuid, timeseries, measurement_value, unit
             FROM shared.gold.pegelonline_station_latest
-            WHERE measurement_value IS NOT NULL
+            WHERE timeseries = 'W' AND unit = 'cm'
+              AND measurement_value IS NOT NULL
               AND (measurement_value < -1000 OR measurement_value > 10000)
