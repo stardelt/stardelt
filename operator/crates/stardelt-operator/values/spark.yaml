@@ -15,7 +15,6 @@ defaults: |
   spark.kubernetes.authenticate.executor.serviceAccountName spark-executor
   # The driver needs permission to create/delete executor pods and services; the Role
   # is bound to ServiceAccount spark-connect. RBAC is namespaced.
-  spark.kubernetes.driver.pod.name                       spark-connect
   spark.kubernetes.driver.label.app.kubernetes.io/name   spark-connect
   spark.kubernetes.executor.label.app.kubernetes.io/name spark-connect
   spark.kubernetes.executor.podNamePrefix                spark-connect-exec

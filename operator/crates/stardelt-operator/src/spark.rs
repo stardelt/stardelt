@@ -1322,6 +1322,9 @@ mod tests {
         );
         assert!(!conf.contains("__NAMESPACE__"));
         assert!(conf.contains("spark.connect.grpc.binding.port                         15002"));
+        // The server is a Deployment, so its pod is `spark-connect-<hash>`: naming a driver pod
+        // makes Spark look for a pod called `spark-connect` and abort at start (fresh node, #263).
+        assert!(!conf.contains("spark.kubernetes.driver.pod.name"));
     }
 
     #[test]
