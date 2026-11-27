@@ -1638,11 +1638,15 @@ async fn checked_tasks(
                 format!("task `{}` cannot depend on itself", task.name),
             ));
         }
-        if !task.writes.is_empty() && task.spark_pipeline.is_none() && task.notebook.is_none() {
+        if !task.writes.is_empty()
+            && task.sql.is_empty()
+            && task.spark_pipeline.is_none()
+            && task.notebook.is_none()
+        {
             return Err(refused(
                 "task-writes",
                 format!(
-                    "task `{}` cannot write a table: only a spark-pipeline or notebook task declares writes",
+                    "task `{}` cannot write a table: only a sql, notebook or spark-pipeline task declares writes",
                     task.name
                 ),
             ));
@@ -1746,8 +1750,8 @@ async fn checked_tasks(
 }
 
 /// `publish: wap` moves `main` only after a `quality` task's checks passed, and only for the
-/// tables a `spark-pipeline` or `notebook` task writes: a body that asks for it without both is
-/// refused here, the same rule the CRD's CEL carries (#114).
+/// tables a `spark-pipeline` or `notebook` task writes, and never when a `sql` task writes: a
+/// body that asks for it without all of that is refused here, the same rules the CRD carries (#114).
 fn check_publish(
     publish: Option<Publish>,
     tasks: Option<&[PipelineTaskRequest]>,
@@ -1760,9 +1764,26 @@ fn check_publish(
             task.quality
                 .as_ref()
                 .is_some_and(|quality| !quality.checks.is_empty())
-        }) && tasks.iter().any(|task| !task.writes.is_empty())
+        }) && tasks.iter().any(|task| {
+            (task.spark_pipeline.is_some() || task.notebook.is_some()) && !task.writes.is_empty()
+        })
     });
     if ready {
+        // `wap-publish` moves `main` from the audit branch of every declared write, and a `sql`
+        // task writes `main` directly: its table would be rolled back to the branch snapshot.
+        if tasks.is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|task| !task.sql.is_empty() && !task.writes.is_empty())
+        }) {
+            return Err(ActionError::refused(
+                "publish",
+                Fail::new(
+                    StatusCode::BAD_REQUEST,
+                    "publish: wap moves main from the audit branch, so a sql task cannot declare writes: only a notebook or spark-pipeline task writes under wap",
+                ),
+            ));
+        }
         // `${table}` is ONE table's audit branch: the loader fills it in only when the pipeline
         // writes one table, so a second written table makes the check's pod fail at run time.
         let mut written = std::collections::BTreeSet::new();
@@ -2967,7 +2988,7 @@ pub struct PipelineTaskRequest {
     /// (#80): exactly one of the five.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spark_pipeline: Option<SparkPipelineRequest>,
-    /// The tables a `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`; at most 16.
+    /// The tables a `sql`, `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`; at most 16.
     /// `spec.publish: wap` audits exactly these tables (#114).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writes: Vec<String>,

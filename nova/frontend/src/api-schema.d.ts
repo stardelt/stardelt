@@ -4229,7 +4229,7 @@ export interface components {
              */
             sql?: string;
             /**
-             * @description The tables a `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`; at most 16.
+             * @description The tables a `sql`, `spark-pipeline` or `notebook` task writes, as `catalog.schema.table`; at most 16.
              *     `spec.publish: wap` audits exactly these tables (#114).
              */
             writes?: string[];

@@ -494,8 +494,12 @@ def _task_problems(where, tasks, files, root):
                 or not all(isinstance(table, str) and TABLE.match(table) for table in writes)
             ):
                 problems.append((at, "writes must be a list of at most 16 tables, each catalog.schema.table"))
-            elif "spark-pipeline" not in task and "notebook" not in task:
-                problems.append((at, "only a spark-pipeline or notebook task declares writes"))
+            elif not any(
+                kind in task for kind in ("sql", "sqlFile", "notebook", "spark-pipeline")
+            ):
+                problems.append(
+                    (at, "only a sql, notebook or spark-pipeline task declares writes")
+                )
         problems.extend(_notebook_problems(at, task.get("notebook"), files))
         depends = task.get("dependsOn", [])
         if not isinstance(depends, list) or not all(isinstance(d, str) for d in depends):
@@ -689,11 +693,26 @@ def validate(directory, target=None):
                     and bool(task["quality"].get("checks"))
                     for task in tasks
                 )
-                writes = any(isinstance(task, dict) and bool(task.get("writes")) for task in tasks)
+                writes = any(
+                    isinstance(task, dict)
+                    and bool(task.get("writes"))
+                    and ("spark-pipeline" in task or "notebook" in task)
+                    for task in tasks
+                )
                 if not (checked and writes):
                     problems.append(
                         (f"{relative} ({tname})",
                          "publish: wap needs a task list with a quality task that has a check and a spark-pipeline or notebook task with writes")
+                    )
+                elif any(
+                    isinstance(task, dict)
+                    and bool(task.get("writes"))
+                    and ("sql" in task or "sqlFile" in task)
+                    for task in tasks
+                ):
+                    problems.append(
+                        (f"{relative} ({tname})",
+                         "publish: wap moves main from the audit branch, so a sql task cannot declare writes: only a notebook or spark-pipeline task writes under wap")
                     )
             problems.extend(_wap_placeholder_problems(f"{relative} ({tname})", doc))
             if "dbt" in doc:
