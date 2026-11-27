@@ -208,6 +208,36 @@ def test_a_schedule_needs_both_cron_and_timezone_because_nova_refuses_it_otherwi
     assert bundle.validate(make(tmp_path, resources=resources))[0] == [], "a pipeline without a schedule runs on demand"
 
 
+def test_a_bundle_pipeline_carries_triggers_and_a_dev_copy_drops_them(tmp_path):
+    resources = {
+        "load.yaml": (
+            "name: load\nownerGroup: sales\nsql: select 1\ntriggers:\n"
+            "  - {tablesUpdated: [bronze.shop.orders]}\n"
+        )
+    }
+    problems, _, _ = bundle.validate(make(tmp_path, resources=resources))
+    assert problems == [], said(problems)
+    _, _, specs = bundle.render(make(tmp_path, resources=resources), "prod")
+    assert specs[0]["triggers"] == [{"tablesUpdated": ["bronze.shop.orders"]}]
+    _, _, dev = bundle.render(make(tmp_path, resources=resources), "dev", user="ada")
+    assert "triggers" not in dev[0], "a development copy must not fire on a production table"
+    _, _, preview = bundle.render(make(tmp_path, resources=resources), "prod", preview="pr-1")
+    assert "triggers" not in preview[0], "a preview must not fire"
+
+
+def test_a_trigger_needs_one_entry_tables_and_all_or_any(tmp_path):
+    cases = (
+        ("triggers: []", "triggers holds one entry today"),
+        ("triggers: [{tablesUpdated: [bronze]}]", "not catalog.schema.table"),
+        ("triggers: [{tablesUpdated: [bronze.shop.orders], mode: every}]", "mode must be all or any"),
+        ("triggers: [{tablesUpdated: [bronze.shop.orders]}]\nschedule: {cron: '0 3 * * *', timezone: UTC}", "not both"),
+    )
+    for body, message in cases:
+        resources = {"load.yaml": f"name: load\nownerGroup: sales\nsql: select 1\n{body}\n"}
+        problems, _, _ = bundle.validate(make(tmp_path, resources=resources))
+        assert message in said(problems), (body, said(problems))
+
+
 def test_init_refuses_a_bad_name_a_bad_group_and_an_existing_bundle_and_writes_nothing(tmp_path):
     for name, group, said in (("X", "shop", "the name must be"), ("shop-etl", "", "the group must be")):
         try:

@@ -20,7 +20,7 @@ from stardelt import api, apply, lineage, runs
 
 KEYS = {"bundle", "variables", "include", "files", "migrations", "requires", "targets"}
 KINDS = ("Pipeline", "StreamApp")
-PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish")
+PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish", "triggers")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
 PREVIEW = re.compile(r"^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$")
 TASK_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -563,6 +563,27 @@ def _credential_warnings(root, files):
     ]
 
 
+def _trigger_problems(where, doc):
+    """The loader's `spec.triggers` rules, offline: one entry, 1 to 10 tables, all|any."""
+    triggers = doc.get("triggers")
+    if triggers is None:
+        return []
+    if not isinstance(triggers, list) or len(triggers) != 1 or not isinstance(triggers[0], dict):
+        return [(where, "triggers holds one entry today")]
+    trigger = triggers[0]
+    if set(trigger) - {"tablesUpdated", "mode"}:
+        return [(where, "a trigger accepts only tablesUpdated and mode")]
+    tables = trigger.get("tablesUpdated")
+    if not isinstance(tables, list) or not 1 <= len(tables) <= 10:
+        return [(where, "a trigger needs at least one table in tablesUpdated")]
+    for table in tables:
+        if not isinstance(table, str) or not TABLE.match(table):
+            return [(where, f"trigger table {table!r} is not catalog.schema.table")]
+    if trigger.get("mode", "all") not in ("all", "any"):
+        return [(where, "mode must be all or any")]
+    return []
+
+
 def validate(directory, target=None):
     """Check the bundle in ``directory`` (and only ``target`` when given).
 
@@ -671,6 +692,11 @@ def validate(directory, target=None):
             ):
                 problems.append(
                     (f"{relative} ({tname})", "schedule needs both cron and timezone (an IANA zone such as Europe/Berlin)")
+                )
+            problems.extend(_trigger_problems(f"{relative} ({tname})", doc))
+            if "triggers" in doc and "schedule" in doc:
+                problems.append(
+                    (f"{relative} ({tname})", "a pipeline has schedule or triggers, not both")
                 )
             if doc.get("ownerGroup", owner) != owner:
                 problems.append((f"{relative} ({tname})", f"ownerGroup {doc['ownerGroup']!r} is not the bundle's group {owner!r}"))
@@ -801,11 +827,13 @@ def render(directory, target, user=None, preview=None):
             # so `_deployed` finds it by `preview` and a person's own dev pipelines never collide.
             doc["name"] = f"{preview}-{doc['name']}"
             doc.pop("schedule", None)   # a preview is a copy to look at; nothing may fire
+            doc.pop("triggers", None)
             if len(doc["name"]) > 40:
                 problems.append((where, f"the development name {doc['name']} is longer than 40 characters"))
         elif mode == "development":
             doc["name"] = f"dev-{_slug(user)}-{doc['name']}"
             doc.pop("schedule", None)
+            doc.pop("triggers", None)
             if len(doc["name"]) > 40:
                 problems.append((where, f"the development name {doc['name']} is longer than 40 characters"))
         specs.append(doc)
