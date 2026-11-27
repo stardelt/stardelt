@@ -53,6 +53,7 @@ GET	/api/deployments	deployments	deployments	signed-in
 GET	/api/deployments/{id}	deployments	deployments	signed-in
 GET	/api/destinations	destinations	main	signed-in
 GET	/api/embeds	apps	main	signed-in
+GET	/api/evals/{id}/runs	evals	main	signed-in
 GET	/api/health	main	main	public
 GET	/api/jobs	jobs	main	signed-in
 GET	/api/lineage	lineage_api	main	signed-in
@@ -125,6 +126,7 @@ POST	/api/deployments/plan	deployments	deployments	signed-in
 POST	/api/deployments/{id}/rollback	deployments	deployments	signed-in
 POST	/api/destinations	destinations	main	signed-in
 POST	/api/destinations/{id}/test	destinations	main	signed-in
+POST	/api/evals/{id}/runs	evals	main	signed-in
 POST	/api/ingest/upload	data	main	signed-in
 POST	/api/migrations/apply	migrations	migrations	signed-in
 POST	/api/migrations/approve	migrations	migrations	signed-in
