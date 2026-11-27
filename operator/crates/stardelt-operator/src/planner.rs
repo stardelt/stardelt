@@ -309,6 +309,7 @@ mod tests {
         PipelineSpec {
             tasks,
             schedule: None,
+            triggers: Vec::new(),
             run_as: None,
             owner_group: None,
             description: None,

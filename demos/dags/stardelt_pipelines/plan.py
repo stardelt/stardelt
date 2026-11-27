@@ -159,6 +159,19 @@ WAP_PLACEHOLDER_NEEDS_ONE_TABLE = (
     "${{table}} names the audit branch of one table, and this pipeline writes {count}: "
     "name the table in the check, or split the pipeline"
 )
+# `spec.triggers` (#66): the tables whose update starts a run. Airflow 3.2.2 has one schedule per
+# DAG, so a trigger and a cron exclude each other, and one trigger entry is all there is today.
+TRIGGERS_MAX_ONE = "a pipeline has one trigger today"
+TRIGGERS_NOT_A_LIST = "triggers must be a list"
+TRIGGERS_WITH_SCHEDULE = "a pipeline has spec.schedule or spec.triggers, not both"
+TRIGGER_NEEDS_TABLES = "a trigger needs at least one table in tablesUpdated"
+TRIGGER_ONLY_KEYS = "a trigger accepts only tablesUpdated and mode (found `{key}`)"
+TRIGGER_BAD_MODE = "mode must be `all` or `any`"
+TRIGGER_BAD_TABLE = "trigger table `{table}` is not catalog.schema.table"
+TRIGGER_SELF = (
+    "trigger table `{table}` is written by this pipeline: a pipeline cannot be "
+    "triggered by its own output"
+)
 
 
 class PlanError(ValueError):
@@ -171,6 +184,14 @@ class PrincipalRef:
 
     name: str
     secret_name: str
+
+
+@dataclass(frozen=True)
+class TriggerPlan:
+    """The tables whose update starts the pipeline, and whether every or any one counts."""
+
+    tables: tuple[str, ...]
+    mode: str  # "all" | "any"
 
 
 @dataclass(frozen=True)
@@ -226,6 +247,28 @@ class PipelinePlan:
     publish: str
     principal: PrincipalRef | None
     tasks: tuple[TaskPlan, ...]
+    trigger: TriggerPlan | None = None
+
+
+def _trigger(raw, written: set[str]) -> TriggerPlan:
+    """One `spec.triggers` entry, or a `PlanError`. Only tablesUpdated and mode exist."""
+    if not isinstance(raw, dict):
+        raise PlanError(TRIGGER_NEEDS_TABLES)
+    for key in raw:
+        if key not in ("tablesUpdated", "mode"):
+            raise PlanError(TRIGGER_ONLY_KEYS.format(key=key))
+    tables = raw.get("tablesUpdated")
+    if not isinstance(tables, list) or not 1 <= len(tables) <= 10:
+        raise PlanError(TRIGGER_NEEDS_TABLES)
+    for table in tables:
+        if not isinstance(table, str) or not wap.TABLE.match(table):
+            raise PlanError(TRIGGER_BAD_TABLE.format(table=table))
+        if table in written:
+            raise PlanError(TRIGGER_SELF.format(table=table))
+    mode = raw.get("mode") or "all"
+    if mode not in ("all", "any"):
+        raise PlanError(TRIGGER_BAD_MODE)
+    return TriggerPlan(tables=tuple(tables), mode=mode)
 
 
 def parse_duration(text: str | None, default: int | None) -> int | None:
@@ -240,6 +283,11 @@ def parse_duration(text: str | None, default: int | None) -> int | None:
 
 def dag_id(namespace: str, name: str) -> str:
     return f"{namespace}__{name}"
+
+
+def asset_uri(table: str) -> str:
+    """The Airflow asset uri of a table: `stardelt://<catalog>/<schema>/<table>`."""
+    return "stardelt://" + table.replace(".", "/")
 
 
 def plan(
@@ -413,6 +461,15 @@ def plan(
         raise PlanError(WAP_NEEDS_WRITER)
 
     schedule = spec.get("schedule") or {}
+    raw_triggers = spec.get("triggers") or []
+    if not isinstance(raw_triggers, list):
+        raise PlanError(TRIGGERS_NOT_A_LIST)
+    if len(raw_triggers) > 1:
+        raise PlanError(TRIGGERS_MAX_ONE)
+    if raw_triggers and schedule:
+        raise PlanError(TRIGGERS_WITH_SCHEDULE)
+    written = {table for task in tasks for table in task.writes}
+    trigger = _trigger(raw_triggers[0], written) if raw_triggers else None
     retries = spec.get("retries") or {}
     return PipelinePlan(
         dag_id=dag_id(namespace, name),
@@ -429,6 +486,7 @@ def plan(
         publish=publish,
         principal=_principal(spec, principals or {}),
         tasks=tuple(tasks),
+        trigger=trigger,
     )
 
 

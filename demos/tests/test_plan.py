@@ -4,6 +4,7 @@ import pytest
 from stardelt_pipelines.plan import (
     PlanError,
     PrincipalRef,
+    asset_uri,
     parse_duration,
     plan,
     refuse_unrunnable,
@@ -571,3 +572,47 @@ def test_publish_wap_accepts_a_spark_pipeline_task():
     with pytest.raises(PlanError) as error:
         plan(*owned(sql("a"), publish="wap"))
     assert str(error.value) == "publish: wap needs a task that writes at least one table"
+
+
+def test_a_table_trigger_is_planned_with_all_by_default():
+    p = plan(resource(tasks=[sql("a")], triggers=[{"tablesUpdated": ["m.b.t"]}]), "team")
+    assert p.trigger.tables == ("m.b.t",) and p.trigger.mode == "all"
+    assert p.cron is None
+
+
+def test_a_trigger_can_ask_for_any_table():
+    p = plan(
+        resource(tasks=[sql("a")], triggers=[{"tablesUpdated": ["m.b.a", "m.b.b"], "mode": "any"}]),
+        "team",
+    )
+    assert p.trigger.mode == "any" and len(p.trigger.tables) == 2
+
+
+@pytest.mark.parametrize(
+    "spec, message",
+    [
+        ({"schedule": {"cron": "0 3 * * *"}, "triggers": [{"tablesUpdated": ["m.b.t"]}]},
+         "not both"),
+        ({"triggers": [{"tablesUpdated": ["m.b.t"]}, {"tablesUpdated": ["m.b.u"]}]},
+         "one trigger today"),
+        ({"triggers": [{"tablesUpdated": []}]}, "at least one table"),
+        ({"triggers": [{"tablesUpdated": ["m.b"]}]}, "not catalog.schema.table"),
+        ({"triggers": [{"tablesUpdated": ["m.b.t"], "mode": "every"}]}, "`all` or `any`"),
+        ({"triggers": [{"tablesUpdated": ["m.b.t"], "where": "x"}]}, "only tablesUpdated and mode"),
+    ],
+)
+def test_a_bad_trigger_is_refused(spec, message):
+    with pytest.raises(PlanError, match=message):
+        plan(resource(tasks=[sql("a")], **spec), "team")
+
+
+def test_a_pipeline_cannot_trigger_on_its_own_output():
+    writing = {"name": "load", "kind": "notebook", "writes": ["m.b.t"],
+               "config": {"notebook": "x.ipynb", "objectVersion": "v1"}}
+    with pytest.raises(PlanError, match="its own output"):
+        plan(resource(tasks=[writing], triggers=[{"tablesUpdated": ["m.b.t"]}],
+                      ownerGroup="g", runAs="pipeline-g"), "team", {"pipeline-g": principal("pipeline-g", "g")})
+
+
+def test_the_asset_uri_is_the_same_for_a_trigger_and_an_outlet():
+    assert asset_uri("mobility.bronze.trips") == "stardelt://mobility/bronze/trips"
