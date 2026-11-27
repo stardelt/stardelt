@@ -431,6 +431,10 @@ spike-task-pod-catalog-token: _context ## Measure which credential a notebook/db
 spike-superset-nova-identity: _context ## Which Superset user Nova acts as, and where its password lives (#115)
 	@bash scripts/spike-superset-nova-identity.sh
 
+.PHONY: spike-airflow-assets
+spike-airflow-assets: _context ## Airflow 3.2 assets: all/any schedules and an event posted as Nova's user (#66)
+	@NS=$(NAMESPACE) bash scripts/spike-airflow-assets.sh
+
 .PHONY: spike-airflow-backfill
 spike-airflow-backfill: _context ## Airflow 3's backfill API and a missed schedule under catchup=False (#117)
 	@NS=$(NAMESPACE) bash scripts/spike-airflow-backfill.sh
