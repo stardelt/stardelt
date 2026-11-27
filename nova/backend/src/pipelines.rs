@@ -3267,6 +3267,10 @@ pub struct PipelineDocument {
     /// The cron and its zone; a resource without a zone is `UTC`, as the loader reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<ScheduleRequest>,
+    /// Tables whose update starts a run (`spec.triggers`), at most one entry; left out when
+    /// the resource carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggers: Option<Vec<TriggerRequest>>,
     /// The values of `${params.<name>}`; left out when there are none.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
@@ -4899,6 +4903,12 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
                 None
             },
             schedule,
+            triggers: spec
+                .get("triggers")
+                .and_then(|triggers| {
+                    serde_json::from_value::<Vec<TriggerRequest>>(triggers.clone()).ok()
+                })
+                .filter(|triggers| !triggers.is_empty()),
             params: params_of(spec),
             options: options_of(spec),
             notify: notify_of(spec),

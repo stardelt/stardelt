@@ -2485,6 +2485,7 @@ test.describe('pipelines', () => {
     expect(JSON.parse(puts[0].body ?? '{}')).toEqual({
       sql: EDIT_SQL,
       schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' },
+      triggers: null,
       params: { day: '2026-11-01' }, options: EDIT_OPTIONS,
       resourceVersion: '7',
     })

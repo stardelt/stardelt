@@ -9,7 +9,7 @@ import type { CreatePipelineRequest, PipelineDocument, PipelineOptions, UpdatePi
  */
 
 /** The top-level keys of a pipeline document, the body of `POST /api/pipelines`. */
-export const DEFINITION_KEYS = ['name', 'ownerGroup', 'sql', 'notebook', 'tasks', 'schedule', 'params', 'options'] as const
+export const DEFINITION_KEYS = ['name', 'ownerGroup', 'description', 'sql', 'notebook', 'tasks', 'schedule', 'triggers', 'params', 'options', 'notify', 'viewers', 'publish'] as const
 
 /** A definition far larger than any statement Nova accepts is refused without being parsed. */
 export const MAX_DEFINITION_BYTES = 64 * 1024
@@ -20,6 +20,8 @@ export const CHANGE_WORDS: Record<string, string> = {
   notebook: 'the notebook',
   tasks: 'the tasks',
   schedule: 'the schedule',
+  description: 'the description',
+  triggers: 'the trigger',
   params: 'the parameters',
   options: 'the options',
   deployment: 'the deployment',
@@ -83,24 +85,34 @@ export function toValidateRequest(document: PipelineDocument): CreatePipelineReq
   return {
     name: document.name,
     ownerGroup: document.ownerGroup ?? '',
+    description: document.description,
     sql: document.sql,
     notebook: document.notebook,
     ...(document.tasks ? { tasks: document.tasks } : {}),
     schedule: document.schedule ?? null,
+    triggers: document.triggers,
     params: document.params,
     options: document.options as PipelineOptions | undefined,
+    notify: document.notify ?? undefined,
+    viewers: document.viewers,
+    publish: document.publish ?? undefined,
   }
 }
 
 /** The body of `PUT /api/pipelines/{namespace}/{name}`, with the version the editor read. */
 export function toUpdateRequest(document: PipelineDocument, resourceVersion: string | null): UpdatePipelineRequest {
   return {
+    description: document.description,
     sql: document.sql,
     notebook: document.notebook,
     ...(document.tasks ? { tasks: document.tasks } : {}),
     schedule: document.schedule ?? null,
+    triggers: document.triggers ?? null,
     params: document.params ?? {},
     options: document.options as PipelineOptions | undefined,
+    notify: document.notify ?? undefined,
+    viewers: document.viewers,
+    publish: document.publish ?? undefined,
     ...(resourceVersion ? { resourceVersion } : {}),
   }
 }
