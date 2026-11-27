@@ -447,6 +447,10 @@ spike-airflow-assets: _context ## Airflow 3.2 assets: all/any schedules and an e
 spike-airflow-backfill: _context ## Airflow 3's backfill API and a missed schedule under catchup=False (#117)
 	@NS=$(NAMESPACE) bash scripts/spike-airflow-backfill.sh
 
+.PHONY: spike-mlflow-auth
+spike-mlflow-auth: _context ## MLflow's sign-in options: basic auth, and the OIDC plugin against the realm (#40)
+	@bash scripts/spike-mlflow-auth.sh
+
 # verify-pins proves the live Nova image digest is the pin; this proves the document inside that
 # image is the one nova/openapi/nova.json carries at the commit the pin names (#951, #95).
 .PHONY: verify-contract
