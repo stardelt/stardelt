@@ -428,7 +428,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The data products of one catalog (#37): every documented table that carries `stardelt.lifecycle` (`draft`, `published` or `deprecated`), with its owner, domain, description and replacement. `?domain=` narrows to one domain, exactly and case-sensitively. The answer comes from Nova's documentation index, which is written on every documentation edit through Nova; an edit made directly in the catalog does not refresh it until the next Nova edit of that table. At most 500 products, in domain order (tables without a domain last), then namespace and table. */
+        /** @description The data products of one catalog (#37): every documented table that carries `stardelt.lifecycle` (`draft`, `published` or `deprecated`), with its owner, domain, description and replacement, with the number of distinct readers in the last 30 days (the query log; `0` when nobody read it). `?domain=` narrows to one domain, exactly and case-sensitively. The answer comes from Nova's documentation index, which is written on every documentation edit through Nova; an edit made directly in the catalog does not refresh it until the next Nova edit of that table. At most 500 products, in domain order (tables without a domain last), then namespace and table. */
         get: operations["catalog_products"];
         put?: never;
         post?: never;
@@ -3329,6 +3329,11 @@ export interface components {
             lifecycle: string;
             namespace: string;
             owner?: string | null;
+            /**
+             * Format: int64
+             * @description Distinct `<query_log.principal>` values that read this table in the last 30 days.
+             */
+            readers: number;
             /** @description `catalog.schema.table`, on a deprecated product. */
             replacedBy?: string | null;
             table: string;

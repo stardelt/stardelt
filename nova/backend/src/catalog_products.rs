@@ -36,7 +36,7 @@ pub struct DataProducts {
     operation_id = "catalog_products",
     path = "/api/catalog/products",
     tag = "public",
-    description = "The data products of one catalog (#37): every documented table that carries `stardelt.lifecycle` (`draft`, `published` or `deprecated`), with its owner, domain, description and replacement. `?domain=` narrows to one domain, exactly and case-sensitively. The answer comes from Nova's documentation index, which is written on every documentation edit through Nova; an edit made directly in the catalog does not refresh it until the next Nova edit of that table. At most 500 products, in domain order (tables without a domain last), then namespace and table.",
+    description = "The data products of one catalog (#37): every documented table that carries `stardelt.lifecycle` (`draft`, `published` or `deprecated`), with its owner, domain, description and replacement, with the number of distinct readers in the last 30 days (the query log; `0` when nobody read it). `?domain=` narrows to one domain, exactly and case-sensitively. The answer comes from Nova's documentation index, which is written on every documentation edit through Nova; an edit made directly in the catalog does not refresh it until the next Nova edit of that table. At most 500 products, in domain order (tables without a domain last), then namespace and table.",
     params(
         ("catalog" = Option<String>, Query, description = "The catalog to read; omitted, the default one"),
         ("domain" = Option<String>, Query, description = "Only products of this `stardelt.domain`"),
@@ -89,6 +89,7 @@ mod tests {
                 domain: Some("finance".into()),
                 lifecycle: "published".into(),
                 replaced_by: None,
+                readers: 2,
             }],
         };
         let json = serde_json::to_value(&answer).expect("the answer serializes");
@@ -98,6 +99,7 @@ mod tests {
         );
         assert_eq!(json["products"][0]["domain"], serde_json::json!("finance"));
         assert_eq!(json["products"][0]["replacedBy"], serde_json::Value::Null);
+        assert_eq!(json["products"][0]["readers"], serde_json::json!(2));
     }
 
     #[tokio::test]
@@ -135,6 +137,15 @@ mod tests {
             &docs(None, "ops"),
         )
         .await;
+        sqlx::query(
+            "INSERT INTO query_log (query_id, state, principal, sql_text, sql_hash, created_at, ended_at, tables_read)
+             VALUES ('read-1', 'FINISHED', 'demo', 'select 1', 'h1', now(), now(), ARRAY['gold.shop.orders']),
+                    ('read-2', 'FINISHED', 'pipeline-demo-shop', 'select 1', 'h2', now(), now(), ARRAY['gold.shop.orders']),
+                    ('read-3', 'FINISHED', 'demo', 'select 1', 'h3', now(), now(), ARRAY['gold.shop.tickets'])",
+        )
+        .execute(&pool)
+        .await
+        .expect("the query log accepts the reads");
         let found = crate::catalog_doc_store::products(&pool, "gold", None)
             .await
             .expect("the index reads");
@@ -147,6 +158,7 @@ mod tests {
             (found[0].table_name.as_str(), found[0].lifecycle.as_str()),
             ("orders", "published")
         );
+        assert_eq!(found[0].readers, 2, "both principals read the product");
         let finance = crate::catalog_doc_store::products(&pool, "gold", Some("finance"))
             .await
             .expect("the index reads");
