@@ -505,6 +505,26 @@ fn phase_and_message(
     )
 }
 
+/// How long a server pod must have been dead before its `SparkConnect` is recreated. A
+/// crash-looping driver restarts more often than this, so it is not recreated on every poll.
+pub const DRIVER_DEAD_GRACE_SECS: i64 = 300;
+
+/// The exit code of the server pod's container when that container has terminated and the pod
+/// has been dead for at least [`DRIVER_DEAD_GRACE_SECS`]; `None` while it runs, waits, or died
+/// recently.
+fn dead_driver(pod: &Pod, now: k8s_openapi::jiff::Timestamp) -> Option<i32> {
+    pod.status
+        .as_ref()?
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .find_map(|c| {
+            let terminated = c.state.as_ref()?.terminated.as_ref()?;
+            let finished = terminated.finished_at.as_ref()?.0.as_second();
+            (now.as_second() - finished >= DRIVER_DEAD_GRACE_SECS).then_some(terminated.exit_code)
+        })
+}
+
 /// How often a busy cluster refreshes `lastActivityAt`. Longer than the 60 s poll, so a
 /// running job does not cause a status write per minute forever.
 pub const IDLE_HEARTBEAT_SECS: i64 = 300;
@@ -979,6 +999,23 @@ pub async fn reconcile_spark_cluster(
     };
     let (phase, message) = phase_and_message(state.as_deref(), server_pod.as_deref(), pod.as_ref());
 
+    let mut message = message;
+    if phase == "Starting"
+        && let (Some(pod), Some(name)) = (pod.as_ref(), server_pod.as_deref())
+        && let Some(code) = dead_driver(pod, k8s_openapi::jiff::Timestamp::now())
+    {
+        match connects
+            .delete(&format!("spc-{name}"), &Default::default())
+            .await
+        {
+            Err(e) if !is_not_found(&e) => return Err(e),
+            _ => {}
+        }
+        message = Some(format!(
+            "the server pod {name} exited with {code}; recreating the server"
+        ));
+    }
+
     let endpoint =
         (phase == "Running").then(|| endpoint_for(server_name.as_deref(), &name, &namespace));
     let started_at = if phase == "Running" {
@@ -1328,6 +1365,36 @@ mod tests {
                 "state": {"waiting": {"reason": "CrashLoopBackOff"}},
             }],
         }))
+    }
+
+    fn terminated_pod(code: i32, finished_at: &str) -> Pod {
+        pod(json!({
+            "conditions": [],
+            "containerStatuses": [{
+                "name": "spark-kubernetes-driver",
+                "state": {"terminated": {"exitCode": code, "reason": "Error", "finishedAt": finished_at}},
+            }],
+        }))
+    }
+
+    #[test]
+    fn dead_driver_reports_a_killed_server_after_the_grace() {
+        let now: k8s_openapi::jiff::Timestamp = "2026-11-27T06:20:00Z".parse().unwrap();
+        assert_eq!(
+            dead_driver(&terminated_pod(137, "2026-11-27T06:08:20Z"), now),
+            Some(137)
+        );
+        assert_eq!(
+            dead_driver(&terminated_pod(1, "2026-11-27T06:18:00Z"), now),
+            None
+        );
+    }
+
+    #[test]
+    fn a_running_or_waiting_pod_is_not_dead() {
+        let now: k8s_openapi::jiff::Timestamp = "2026-11-27T06:20:00Z".parse().unwrap();
+        assert_eq!(dead_driver(&ready_pod(), now), None);
+        assert_eq!(dead_driver(&crashloop_pod(), now), None);
     }
 
     #[test]
