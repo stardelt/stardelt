@@ -2,6 +2,8 @@
 
 import io
 
+import yaml
+
 from stardelt import api, bundle, cli
 
 MANIFEST = """
@@ -26,7 +28,12 @@ class Nova:
     def __init__(self, guides):
         self.guides = guides  # {"catalog.ns.tbl": guide or None}
         self.owners = {}  # {"catalog.ns.tbl": owner or None}
+        self.metrics = {}  # {"catalog.ns.tbl": [definition, ...]}
         self.calls = []
+
+    @staticmethod
+    def key(path, query):
+        return f"{query['catalog']}.{path['ns']}.{path['tbl']}"
 
     def call(self, op, path=None, query=None, body=None, headers=None):
         self.calls.append((op, path, query, body))
@@ -39,10 +46,24 @@ class Nova:
             key = f"{query['catalog']}.{path['ns']}.{path['tbl']}"
             self.guides[key] = body["guide"]
             return None
+        if op == "metric_definitions_list":
+            return self.metrics.get(self.key(path, query), [])
+        if op == "metric_definitions_create":
+            rows = self.metrics.setdefault(self.key(path, query), [])
+            row = {"id": 100 + len(rows), **body}
+            rows.append(row)
+            return row
+        if op == "metric_definitions_delete":
+            for rows in self.metrics.values():
+                rows[:] = [row for row in rows if row["id"] != path["id"]]
+            return None
         raise AssertionError(op)
 
     def updates(self):
         return [call for call in self.calls if call[0] == "table_documentation_update"]
+
+    def metric_writes(self):
+        return [call for call in self.calls if call[0].startswith("metric_definitions_") and call[0] != "metric_definitions_list"]
 
 
 def make(tmp_path, tables=None, manifest=MANIFEST):
@@ -50,12 +71,8 @@ def make(tmp_path, tables=None, manifest=MANIFEST):
     tables = tables if tables is not None else [
         {"table": "bronze.shop.customers", "guide": "How orders join customers."},
     ]
-    block = "\ncontext:\n  tables:\n"
-    for entry in tables:
-        block += f"    - table: {entry['table']}\n      guide: {entry['guide']!r}\n"
-        for key, value in entry.items():
-            if key not in ("table", "guide"):
-                block += f"      {key}: {value}\n"
+    block = yaml.safe_dump({"tables": tables}, sort_keys=False, allow_unicode=True)
+    block = "\ncontext:\n" + "".join("  " + line for line in block.splitlines(keepends=True))
     (tmp_path / "bundle.yaml").write_text(manifest + block, encoding="utf-8")
     (tmp_path / "resources").mkdir(exist_ok=True)
     for name, text in {"load.yaml": LOAD, "nightly.yaml": NIGHTLY}.items():
@@ -181,7 +198,7 @@ def test_validate_refuses_a_duplicate_table_an_empty_guide_and_an_unknown_key(tm
     text = said(problems)
     assert "bronze.shop.customers is named twice" in text
     assert "context.tables[2].guide: must be a non-empty string" in text
-    assert "context.tables[3]: unknown key 'colour' (known: table, guide)" in text
+    assert "context.tables[3]: unknown key 'colour' (known: table, guide, metrics)" in text
 
 
 def test_validate_refuses_a_table_name_without_three_parts(tmp_path):
@@ -197,3 +214,92 @@ def test_a_bundle_without_a_context_block_is_refused_by_the_command(tmp_path):
     problems, rows = bundle.context(Nova({}), tmp_path)
     assert problems == [("context", "the bundle has no `context:` block")]
     assert rows == []
+
+
+METRICS = [
+    {
+        "name": "revenue",
+        "description": "Order revenue in euros.",
+        "expression": "sum(total_cents) / 100.0",
+        "timeColumn": "ordered_at",
+        "dimensions": ["country"],
+    }
+]
+
+
+def test_a_table_may_carry_metrics_and_no_guide(tmp_path):
+    directory = make(tmp_path, tables=[{"table": "bronze.shop.orders", "metrics": METRICS}])
+    nova = Nova({})
+    problems, rows = bundle.context(nova, directory)
+    assert problems == []
+    assert rows == [{"table": "bronze.shop.orders", "metric": "revenue", "action": "created"}]
+    assert nova.metric_writes() == [
+        ("metric_definitions_create", {"ns": "shop", "tbl": "orders"}, {"catalog": "bronze"}, METRICS[0]),
+    ]
+
+
+def test_a_matching_metric_answers_unchanged_and_writes_nothing(tmp_path):
+    directory = make(tmp_path, tables=[{"table": "bronze.shop.orders", "metrics": METRICS}])
+    nova = Nova({})
+    nova.metrics["bronze.shop.orders"] = [{"id": 7, **METRICS[0]}]
+    problems, rows = bundle.context(nova, directory)
+    assert problems == []
+    assert rows == [{"table": "bronze.shop.orders", "metric": "revenue", "action": "unchanged"}]
+    assert nova.metric_writes() == []
+
+
+def test_a_differing_metric_under_check_answers_would_replace_and_writes_nothing(tmp_path):
+    directory = make(tmp_path, tables=[{"table": "bronze.shop.orders", "metrics": METRICS}])
+    nova = Nova({})
+    nova.metrics["bronze.shop.orders"] = [{"id": 7, **METRICS[0], "expression": "sum(total_cents)"}]
+    problems, rows = bundle.context(nova, directory, check=True)
+    assert problems == []
+    assert rows == [{"table": "bronze.shop.orders", "metric": "revenue", "action": "would-replace"}]
+    assert nova.metric_writes() == []
+
+
+def test_a_differing_metric_is_deleted_and_created_again(tmp_path):
+    directory = make(tmp_path, tables=[{"table": "bronze.shop.orders", "metrics": METRICS}])
+    nova = Nova({})
+    nova.metrics["bronze.shop.orders"] = [{"id": 7, **METRICS[0], "expression": "sum(total_cents)"}]
+    problems, rows = bundle.context(nova, directory)
+    assert problems == []
+    assert rows == [{"table": "bronze.shop.orders", "metric": "revenue", "action": "replaced"}]
+    assert nova.metric_writes() == [
+        ("metric_definitions_delete", {"id": 7}, None, None),
+        ("metric_definitions_create", {"ns": "shop", "tbl": "orders"}, {"catalog": "bronze"}, METRICS[0]),
+    ]
+
+
+def test_the_command_exits_1_when_a_metric_differs_under_check(tmp_path, monkeypatch):
+    directory = make(tmp_path, tables=[{"table": "bronze.shop.orders", "metrics": METRICS}])
+    nova = Nova({})
+    nova.metrics["bronze.shop.orders"] = [{"id": 7, **METRICS[0], "description": "old words"}]
+    monkeypatch.setattr(api, "Client", lambda **kwargs: nova)
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.main(
+        ["bundle", "context", str(directory), "--check"],
+        environ={"STARDELT_NOVA_URL": "https://nova.example", "STARDELT_TOKEN": "t"},
+        stdout=out, stderr=err, session=object(),
+    )
+    assert code == 1
+    assert out.getvalue() == "bronze.shop.orders revenue  would-replace\n"
+    assert nova.metric_writes() == []
+
+
+def test_validate_refuses_a_bad_metric_and_names_the_row(tmp_path):
+    problems = bundle.validate(make(tmp_path, tables=[{"table": "bronze.shop.orders", "metrics": [
+        {"name": "Revenue", "description": "", "expression": "sum(total_cents);"},
+        {"name": "revenue", "description": "ok", "expression": "sum(total_cents)"},
+        {"name": "revenue", "description": "ok", "expression": "sum(total_cents)"},
+    ]}]))[0]
+    text = said(problems)
+    assert "context.tables[0].metrics[0].name: must start with a lower-case letter" in text
+    assert "context.tables[0].metrics[0].description: must be 1 to 500 characters" in text
+    assert "context.tables[0].metrics[0].expression: must be a SQL expression" in text
+    assert "context.tables[0].metrics[2].name: revenue is named twice in this table" in text
+
+
+def test_validate_refuses_a_context_row_with_neither_a_guide_nor_metrics(tmp_path):
+    problems = bundle.validate(make(tmp_path, tables=[{"table": "bronze.shop.orders"}]))[0]
+    assert "context.tables[0]: needs a `guide`, a `metrics` list, or both" in said(problems)

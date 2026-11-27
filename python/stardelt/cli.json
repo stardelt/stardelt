@@ -811,7 +811,7 @@
         },
         {
           "name": "context",
-          "help": "set the guides the bundle's context block names on its tables",
+          "help": "set the guides and metric definitions the bundle's context block names",
           "arguments": [
             {
               "name": "directory",
@@ -824,7 +824,7 @@
               "flags": [
                 "--check"
               ],
-              "help": "answer what would change, write nothing; exits 1 when a guide differs",
+              "help": "answer what would change, write nothing; exits 1 when anything differs",
               "flag": true
             }
           ],
