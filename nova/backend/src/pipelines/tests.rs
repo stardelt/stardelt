@@ -11980,3 +11980,44 @@ async fn pipelines_backfill_cancel_calls_airflows_cancel() {
     );
     assert_eq!(value["runs"][0]["date"], "2026-10-09T02:00:00Z");
 }
+
+#[test]
+fn a_table_trigger_is_shown_in_the_schedule_column() {
+    let one = serde_json::json!({"triggers": [{"tablesUpdated": ["mobility.bronze.trips"]}]});
+    assert_eq!(
+        trigger_of(&one).as_deref(),
+        Some("when mobility.bronze.trips is updated")
+    );
+
+    let all = serde_json::json!({"triggers": [
+        {"tablesUpdated": ["mobility.bronze.a", "mobility.bronze.b"], "mode": "all"}
+    ]});
+    assert_eq!(
+        trigger_of(&all).as_deref(),
+        Some("when all of mobility.bronze.a, mobility.bronze.b are updated")
+    );
+
+    let any = serde_json::json!({"triggers": [
+        {"tablesUpdated": ["mobility.bronze.a", "mobility.bronze.b"], "mode": "any"}
+    ]});
+    assert_eq!(
+        trigger_of(&any).as_deref(),
+        Some("when any of mobility.bronze.a, mobility.bronze.b is updated")
+    );
+
+    assert_eq!(trigger_of(&serde_json::json!({})), None);
+    assert_eq!(
+        trigger_of(&serde_json::json!({"triggers": [{"tablesUpdated": []}]})),
+        None
+    );
+
+    // A cron wins when a hand-written resource carries both (the CRD refuses it).
+    let both = serde_json::json!({
+        "schedule": {"cron": "0 3 * * *"},
+        "triggers": [{"tablesUpdated": ["mobility.bronze.trips"]}]
+    });
+    assert_eq!(
+        schedule_of(&both).or_else(|| trigger_of(&both)).as_deref(),
+        Some("0 3 * * *")
+    );
+}
