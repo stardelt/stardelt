@@ -47,7 +47,7 @@ fn prints_the_effective_values_for_every_profile() {
 }
 
 #[test]
-fn the_deprecated_names_print_their_replacement() {
+fn an_alias_prints_the_same_values_as_its_replacement() {
     // #62: `demo` is `starter`, `full` and `airgap` are `enterprise`.
     for (old, new) in [
         ("demo", "starter"),
