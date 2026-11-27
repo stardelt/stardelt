@@ -218,6 +218,8 @@ export type DataProducts = { catalog: string; products: DataProduct[] }
 
 /** An eval of one catalog (#125): a question with a known answer. */
 export type Eval = Schema<'Eval'>
+/** One eval with its newest run (#125 slice 5). */
+export type EvalWithLastRun = Schema<'EvalWithLastRun'>
 /** A `POST /api/catalog/evals` body. */
 export type NewEval = Schema<'NewEval'>
 
@@ -1493,7 +1495,7 @@ export const api = {
   },
   evals: (catalog?: string) => {
     const q = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
-    return jget<Eval[]>(`/api/catalog/evals${q}`)
+    return jget<EvalWithLastRun[]>(`/api/catalog/evals${q}`)
   },
   createEval: (body: NewEval) => jpost<Eval>('/api/catalog/evals', body),
   deleteEval: (id: number) => jdel(`/api/evals/${id}`),

@@ -85,6 +85,30 @@ const NO_SQL: &str = "the answer carried no SQL";
 const ROW_COLUMNS: &str = "id, owner_group, question, expected, created_by, \
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
+/// The list's query: every eval with its newest run, in one pass.
+const LIST_SQL: &str = "SELECT e.id, e.owner_group, e.question, e.expected, e.created_by, \
+    to_char(e.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at, \
+    r.id AS last_run_id, r.passed AS last_run_passed, r.reason AS last_run_reason, \
+    to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS last_run_created_at \
+    FROM eval e LEFT JOIN LATERAL ( \
+        SELECT id, passed, reason, created_at FROM eval_run WHERE eval_id = e.id ORDER BY id DESC LIMIT 1 \
+    ) r ON true WHERE e.catalog = $1 ORDER BY e.id";
+
+/// One row of [`LIST_SQL`], before it becomes an [`EvalWithLastRun`].
+#[derive(sqlx::FromRow)]
+struct EvalListRow {
+    id: i64,
+    owner_group: String,
+    question: String,
+    expected: serde_json::Value,
+    created_by: String,
+    created_at: String,
+    last_run_id: Option<i64>,
+    last_run_passed: Option<bool>,
+    last_run_reason: Option<String>,
+    last_run_created_at: Option<String>,
+}
+
 /// One eval as the API returns it.
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +125,36 @@ pub struct Eval {
     pub created_by: String,
     /// When it was written, RFC 3339.
     pub created_at: String,
+}
+
+/// The newest run of an eval, as `GET /api/catalog/evals` returns it.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalLastRun {
+    /// The run's id.
+    pub id: i64,
+    /// Whether that answer was the expected one.
+    pub passed: bool,
+    /// Why it failed; absent when it passed.
+    pub reason: Option<String>,
+    /// When it was posted, RFC 3339.
+    pub created_at: String,
+}
+
+/// One eval with its newest run; `lastRun` is `null` when the question never ran.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalWithLastRun {
+    pub id: i64,
+    pub owner_group: String,
+    pub question: String,
+    #[schema(value_type = serde_json::Value)]
+    pub expected: serde_json::Value,
+    pub created_by: String,
+    pub created_at: String,
+    /// The newest run; serde always writes the key, `null` when the question never ran.
+    #[schema(required = true)]
+    pub last_run: Option<EvalLastRun>,
 }
 
 /// `POST /api/catalog/evals` body.
@@ -381,10 +435,10 @@ fn no_such_eval() -> Response {
     operation_id = "catalog_eval_list",
     path = "/api/catalog/evals",
     tag = "public",
-    description = "The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.",
+    description = "The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. Each eval carries its newest run as lastRun (null when it never ran). `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.",
     params(crate::catalog::CatalogParam),
     responses(
-        (status = 200, description = "The catalog's evals, in id order", body = Vec<Eval>),
+        (status = 200, description = "The catalog's evals, in id order", body = Vec<EvalWithLastRun>),
         (status = 400, description = "The catalog name is invalid", body = crate::openapi::ErrorResponse),
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
@@ -407,13 +461,33 @@ pub async fn list(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    let sql = format!("SELECT {ROW_COLUMNS} FROM eval WHERE catalog = $1 ORDER BY id");
-    match sqlx::query_as::<_, Eval>(sqlx::AssertSqlSafe(sql))
+    match sqlx::query_as::<_, EvalListRow>(LIST_SQL)
         .bind(&name)
         .fetch_all(pool)
         .await
     {
-        Ok(rows) => Json(rows).into_response(),
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|row| EvalWithLastRun {
+                    id: row.id,
+                    owner_group: row.owner_group,
+                    question: row.question,
+                    expected: row.expected,
+                    created_by: row.created_by,
+                    created_at: row.created_at,
+                    last_run: match (row.last_run_id, row.last_run_passed) {
+                        (Some(id), Some(passed)) => Some(EvalLastRun {
+                            id,
+                            passed,
+                            reason: row.last_run_reason,
+                            created_at: row.last_run_created_at.unwrap_or_default(),
+                        }),
+                        _ => None,
+                    },
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => store_failed(e),
     }
 }

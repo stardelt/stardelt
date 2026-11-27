@@ -32,9 +32,8 @@ function describe(expected: unknown): string {
 }
 
 /**
- * Evals (#125 slice 4): the questions a catalog must always answer correctly, and the form
- * that adds one. The verdict column arrives with the run screen; this page lists the store
- * slice 1 writes.
+ * Evals (#125 slices 4 and 5): the questions a catalog must always answer correctly, the form
+ * that adds one, and each question's newest verdict with the catalog's score.
  */
 export default function Evals() {
   const [params] = useSearchParams()
@@ -110,6 +109,16 @@ export default function Evals() {
             Questions with a known answer. After a model, a guide or a schema changes, an eval
             run asks them again and says what changed.
           </p>
+          {(() => {
+            const ran = rows.filter((row) => row.lastRun !== null)
+            if (ran.length === 0) return null
+            const passed = ran.filter((row) => row.lastRun?.passed).length
+            return (
+              <p className="text-sm text-slate-600">
+                {passed} of {ran.length} passed
+              </p>
+            )
+          })()}
         </div>
         <div className="flex items-center gap-2">
           <CatalogSelect />
@@ -216,6 +225,7 @@ export default function Evals() {
                   <th scope="col" className="th px-5 py-2.5">Question</th>
                   <th scope="col" className="th px-3 py-2.5">Owner group</th>
                   <th scope="col" className="th px-3 py-2.5">Expected answer</th>
+                  <th scope="col" className="th px-3 py-2.5">Last run</th>
                   <th scope="col" className="th px-3 py-2.5">Written by</th>
                   <th scope="col" className="th px-3 py-2.5">Written</th>
                   <th scope="col" className="th px-3 py-2.5">
@@ -230,6 +240,17 @@ export default function Evals() {
                     <td className="td px-3 py-2.5 break-words">{row.ownerGroup}</td>
                     <td className="td px-3 py-2.5 break-all font-mono text-xs">
                       {describe(row.expected)}
+                    </td>
+                    <td className="td px-3 py-2.5">
+                      {row.lastRun === null ? (
+                        <span className="text-slate-500">not run yet</span>
+                      ) : row.lastRun.passed ? (
+                        <span className="text-green-700">passed</span>
+                      ) : (
+                        <span className="text-red-700">
+                          failed — {row.lastRun.reason ?? 'no reason'}
+                        </span>
+                      )}
                     </td>
                     <td className="td px-3 py-2.5 break-all text-text-dim">{row.createdBy}</td>
                     <td

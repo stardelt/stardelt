@@ -344,7 +344,7 @@ export interface paths {
         };
         /**
          * `GET /api/catalog/evals` — the catalog's evals, in id order.
-         * @description The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.
+         * @description The evals of one catalog: questions with a known answer, kept as catalog context. A question may appear twice. In id order. Each eval carries its newest run as lastRun (null when it never ran). `?catalog=` picks the catalog; the caller must be able to browse it, and without a state store the route answers 503.
          */
         get: operations["catalog_eval_list"];
         put?: never;
@@ -3626,6 +3626,20 @@ export interface components {
             /** @description The question a person asks, in words, 1 to 500 characters. */
             question: string;
         };
+        /** @description The newest run of an eval, as `GET /api/catalog/evals` returns it. */
+        EvalLastRun: {
+            /** @description When it was posted, RFC 3339. */
+            createdAt: string;
+            /**
+             * Format: int64
+             * @description The run's id.
+             */
+            id: number;
+            /** @description Whether that answer was the expected one. */
+            passed: boolean;
+            /** @description Why it failed; absent when it passed. */
+            reason?: string | null;
+        };
         /** @description One posted answer and its verdict, as the API returns it. */
         EvalRun: {
             /** @description When it was posted, RFC 3339. */
@@ -3654,6 +3668,17 @@ export interface components {
              * @description The tokens the model call used, if the runner counted them.
              */
             tokens?: number | null;
+        };
+        /** @description One eval with its newest run; `lastRun` is `null` when the question never ran. */
+        EvalWithLastRun: {
+            createdAt: string;
+            createdBy: string;
+            expected: unknown;
+            /** Format: int64 */
+            id: number;
+            lastRun: components["schemas"]["EvalLastRun"] | null;
+            ownerGroup: string;
+            question: string;
         };
         /** @description One label/value pair about an app, as Nova can honestly observe it. */
         Fact: {
@@ -6931,7 +6956,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Eval"][];
+                    "application/json": components["schemas"]["EvalWithLastRun"][];
                 };
             };
             /** @description The catalog name is invalid */

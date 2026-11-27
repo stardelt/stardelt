@@ -272,6 +272,8 @@ pub struct ErrorResponse {
         crate::catalog_docs::ColumnDescriptionUpdate,
         crate::verified_queries::VerifiedQuery,
         crate::evals::Eval,
+        crate::evals::EvalLastRun,
+        crate::evals::EvalWithLastRun,
         crate::evals::NewEval,
         crate::evals::EvalRun,
         crate::evals::NewEvalRun,
