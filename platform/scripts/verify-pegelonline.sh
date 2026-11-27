@@ -49,7 +49,7 @@ tasks = spec.get("tasks") or []
 print("tasks\t%d" % len(tasks))
 print("name\t%s" % (document.get("metadata") or {}).get("name", ""))
 for task in tasks:
-    if task.get("name") != "checks":
+    if task.get("kind") != "quality":
         continue
     for check in task.get("checks") or []:
         print("check\t%s\t%s" % (check.get("name", ""), json.dumps(check.get("sql", ""))))
