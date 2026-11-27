@@ -217,6 +217,14 @@ def _parser():
         "--format", choices=["text", "json"], default="text",
         help="text: sentences and one line per target (default); json: one object for machines",
     )
+    apply_context = package_commands.add_parser(
+        "context", help="set the guides the bundle's context block names on its tables"
+    )
+    apply_context.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    apply_context.add_argument(
+        "--check", action="store_true",
+        help="answer what would change, write nothing; exits 1 when a guide differs",
+    )
     history = commands.add_parser("deployments", help="read the deployment record: what each bundle deploy put on a stage")
     history_commands = history.add_subparsers(dest="deployments_command", required=True)
     listed = history_commands.add_parser("list", help="the newest recorded deploys you may see, newest first")
@@ -826,6 +834,15 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             if args.resources:
                 for document in row.get("resources") or []:
                     stdout.write(json.dumps(document, ensure_ascii=False) + "\n")
+            return OK
+        if args.command == "bundle" and args.bundle_command == "context":
+            problems, rows = bundle.context(nova, args.directory, check=args.check)
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            for row in rows:
+                stdout.write(f"{row['table']}  {row['action']}\n")
+            if problems or (args.check and any(row["action"] == "would-set" for row in rows)):
+                return ERROR
             return OK
         if args.command == "bundle":  # plan or deploy: they talk to Nova
             problems, results = bundle.deploy(

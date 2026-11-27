@@ -808,6 +808,27 @@
             }
           ],
           "commands": []
+        },
+        {
+          "name": "context",
+          "help": "set the guides the bundle's context block names on its tables",
+          "arguments": [
+            {
+              "name": "directory",
+              "help": "the bundle directory (default: the current one)",
+              "optional": true
+            }
+          ],
+          "options": [
+            {
+              "flags": [
+                "--check"
+              ],
+              "help": "answer what would change, write nothing; exits 1 when a guide differs",
+              "flag": true
+            }
+          ],
+          "commands": []
         }
       ]
     },

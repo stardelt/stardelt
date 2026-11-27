@@ -90,6 +90,28 @@
         }
       }
     },
+    "context": {
+      "description": "Guides the bundle sets on its tables; `stardelt bundle context` applies them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tables"],
+      "properties": {
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["table", "guide"],
+            "properties": {
+              "table": { "type": "string", "pattern": "^[^ .]+\\.[^ .]+\\.[^ .]+$" },
+              "guide": { "type": "string", "minLength": 1, "maxLength": 16000 }
+            }
+          }
+        }
+      }
+    },
     "requires": {
       "type": "object",
       "description": "what the stage must have before the bundle deploys",
