@@ -1822,6 +1822,77 @@
         }
       }
     },
+    "/api/catalog/products": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The data products of one catalog (#37): every documented table that carries `stardelt.lifecycle` (`draft`, `published` or `deprecated`), with its owner, domain, description and replacement. `?domain=` narrows to one domain, exactly and case-sensitively. The answer comes from Nova's documentation index, which is written on every documentation edit through Nova; an edit made directly in the catalog does not refresh it until the next Nova edit of that table. At most 500 products, in domain order (tables without a domain last), then namespace and table.",
+        "operationId": "catalog_products",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "The catalog to read; omitted, the default one",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "Only products of this `stardelt.domain`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The catalog's data products",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataProducts"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/search": {
       "get": {
         "tags": [
@@ -14235,6 +14306,70 @@
           "target": {
             "type": "string",
             "description": "The stage the import is for (`dev`, `prod`, …)."
+          }
+        }
+      },
+      "DataProduct": {
+        "type": "object",
+        "description": "One row of a catalog's data products (#37): a documented table with a lifecycle.",
+        "required": [
+          "namespace",
+          "table",
+          "lifecycle"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lifecycle": {
+            "type": "string",
+            "description": "`draft`, `published` or `deprecated`."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replacedBy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`catalog.schema.table`, on a deprecated product."
+          },
+          "table": {
+            "type": "string"
+          }
+        }
+      },
+      "DataProducts": {
+        "type": "object",
+        "required": [
+          "catalog",
+          "products"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DataProduct"
+            }
           }
         }
       },

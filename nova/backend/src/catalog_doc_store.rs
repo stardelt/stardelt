@@ -34,12 +34,14 @@ pub async fn record(
     let columns = serde_json::to_value(&doc.columns).unwrap_or(serde_json::json!([]));
     let result = sqlx::query(
         "INSERT INTO catalog_doc (catalog, namespace, table_name, description, tags, owner, \
-             domain, column_docs, search_text) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             domain, column_docs, search_text, lifecycle, replaced_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (catalog, namespace, table_name) DO UPDATE SET \
              description = EXCLUDED.description, tags = EXCLUDED.tags, owner = EXCLUDED.owner, \
              domain = EXCLUDED.domain, column_docs = EXCLUDED.column_docs, \
-             search_text = EXCLUDED.search_text, updated_at = now()",
+             search_text = EXCLUDED.search_text, \
+             lifecycle = EXCLUDED.lifecycle, replaced_by = EXCLUDED.replaced_by, \
+             updated_at = now()",
     )
     .bind(catalog)
     .bind(namespace)
@@ -50,6 +52,8 @@ pub async fn record(
     .bind(&doc.domain)
     .bind(&columns)
     .bind(search_text(namespace, table, doc))
+    .bind(&doc.lifecycle)
+    .bind(&doc.replaced_by)
     .execute(pool)
     .await;
     if let Err(e) = result {
@@ -173,6 +177,42 @@ pub fn row_matches(
     words
         .iter()
         .all(|word| row.search_text.contains(word.as_str()))
+}
+
+/// One row of a catalog's data products (#37): a documented table with a lifecycle.
+#[derive(Debug, serde::Serialize, sqlx::FromRow, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DataProduct {
+    pub namespace: String,
+    #[serde(rename = "table")]
+    pub table_name: String,
+    pub description: Option<String>,
+    pub owner: Option<String>,
+    pub domain: Option<String>,
+    /// `draft`, `published` or `deprecated`.
+    pub lifecycle: String,
+    /// `catalog.schema.table`, on a deprecated product.
+    pub replaced_by: Option<String>,
+}
+
+/// The products of one catalog, in domain order.
+pub async fn products(
+    pool: &PgPool,
+    catalog: &str,
+    domain: Option<&str>,
+) -> Result<Vec<DataProduct>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT namespace, table_name, description, owner, domain, lifecycle, replaced_by \
+         FROM catalog_doc \
+         WHERE catalog = $1 AND lifecycle IS NOT NULL \
+           AND ($2::text IS NULL OR domain = $2) \
+         ORDER BY domain NULLS LAST, namespace, table_name \
+         LIMIT 500",
+    )
+    .bind(catalog)
+    .bind(domain)
+    .fetch_all(pool)
+    .await
 }
 
 #[cfg(test)]

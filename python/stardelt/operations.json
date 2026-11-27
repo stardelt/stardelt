@@ -84,6 +84,16 @@
       "query_params": [],
       "body": false
     },
+    "catalog_products": {
+      "method": "GET",
+      "path": "/api/catalog/products",
+      "path_params": [],
+      "query_params": [
+        "catalog",
+        "domain"
+      ],
+      "body": false
+    },
     "catalog_search": {
       "method": "GET",
       "path": "/api/catalog/search",

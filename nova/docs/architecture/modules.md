@@ -7,7 +7,7 @@
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `query_log_api.rs` | SQL & query log | 1492 | 320 | 6 | Kubernetes API (CRDs), PostgreSQL state store |
-| `main.rs` | Core & identity | 1488 | 1617 | 3 | - |
+| `main.rs` | Core & identity | 1490 | 1617 | 3 | - |
 | `mcp.rs` | AI (Ask, MCP, models) | 1428 | 1270 | 4 | Airflow REST, Trino |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -33,7 +33,7 @@
 | `query_log_collector.rs` | SQL & query log | 549 | 580 | 3 | Kubernetes API (CRDs), PostgreSQL state store |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
-| `openapi.rs` | Core & identity | 469 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 472 | 688 | 1 | - |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
@@ -46,10 +46,10 @@
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
+| `catalog_doc_store.rs` | Catalog | 217 | 209 | 0 | PostgreSQL state store |
 | `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
-| `catalog_doc_store.rs` | Catalog | 177 | 209 | 0 | PostgreSQL state store |
 | `mcp_audit.rs` | AI (Ask, MCP, models) | 176 | 68 | 1 | PostgreSQL state store |
 | `query_hints.rs` | SQL & query log | 176 | 118 | 0 | - |
 | `user_settings.rs` | Core & identity | 173 | 14 | 3 | PostgreSQL state store |
@@ -66,8 +66,9 @@
 | `session_store.rs` | Core & identity | 104 | 70 | 0 | PostgreSQL state store |
 | `seal.rs` | Core & identity | 93 | 69 | 0 | - |
 | `metrics.rs` | Core & identity | 90 | 32 | 1 | - |
+| `catalog_products.rs` | Catalog | 75 | 80 | 1 | - |
 | `api_json.rs` | Core & identity | 60 | 90 | 0 | - |
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (69 files)** | | **50178** | **44550** | **161** | |
+| **total (70 files)** | | **50298** | **44630** | **162** | |

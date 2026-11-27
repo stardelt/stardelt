@@ -421,6 +421,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalog/products": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The data products of one catalog (#37): every documented table that carries `stardelt.lifecycle` (`draft`, `published` or `deprecated`), with its owner, domain, description and replacement. `?domain=` narrows to one domain, exactly and case-sensitively. The answer comes from Nova's documentation index, which is written on every documentation edit through Nova; an edit made directly in the catalog does not refresh it until the next Nova edit of that table. At most 500 products, in domain order (tables without a domain last), then namespace and table. */
+        get: operations["catalog_products"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalog/search": {
         parameters: {
             query?: never;
@@ -3259,6 +3276,22 @@ export interface components {
             ownerGroup: string;
             /** @description The stage the import is for (`dev`, `prod`, …). */
             target: string;
+        };
+        /** @description One row of a catalog's data products (#37): a documented table with a lifecycle. */
+        DataProduct: {
+            description?: string | null;
+            domain?: string | null;
+            /** @description `draft`, `published` or `deprecated`. */
+            lifecycle: string;
+            namespace: string;
+            owner?: string | null;
+            /** @description `catalog.schema.table`, on a deprecated product. */
+            replacedBy?: string | null;
+            table: string;
+        };
+        DataProducts: {
+            catalog: string;
+            products: components["schemas"]["DataProduct"][];
         };
         /**
          * @description What `/api/health` reports about the state store.
@@ -7005,6 +7038,58 @@ export interface operations {
             };
             /** @description The catalog or the engine is not reachable */
             502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    catalog_products: {
+        parameters: {
+            query?: {
+                /** @description The catalog to read; omitted, the default one */
+                catalog?: string;
+                /** @description Only products of this `stardelt.domain` */
+                domain?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The catalog's data products */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataProducts"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may not browse that catalog */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
