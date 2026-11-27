@@ -6,6 +6,7 @@ One section per release, newest first; the `## v<version>` section is what `gh r
 
 ### Breaking
 
+- `StreamApp.status.lastCheckpointAt` is gone: nothing wrote it, so no object and no page loses a value it had. The Streams page no longer shows a `Checkpoint` column and `GET /api/streams` no longer returns `last_checkpoint_at` (stardelt/stardelt#1979).
 - `PlatformInstance.spec.pillars.batch` and `PlatformInstance.spec.pillars.ml` are gone: the two fields were accepted and installed nothing. Airflow is the `pipelines` pillar, and the ML pillar has no implementation yet (stardelt/stardelt#1844).
 
 ## v0.0.4
