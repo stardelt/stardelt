@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, errorMessage, type StreamView, type StreamWriteBody } from '../api'
+import { api, ApiError, errorMessage, type StreamView, type StreamWriteBody } from '../api'
 
 /**
  * The create dialog of the Streams page (stardelt/stardelt#1977).
@@ -157,6 +157,21 @@ export function NewStreamDialog({
     setSubmitting(true)
     setError(null)
     setRefusals([])
+
+    const [sinkSchema, sinkTable] = table.trim().split('.')
+    try {
+      await api.tableHistory(sinkSchema, sinkTable, catalog)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        setRefusals([
+          `the sink table ${catalog}.${table.trim()} does not exist — create it with SQL before the stream can write to it`,
+        ])
+      } else {
+        setError(errorMessage(e))
+      }
+      setSubmitting(false)
+      return
+    }
 
     const prefixValue = checkpointPrefix.trim()
     const body: StreamWriteBody = {
