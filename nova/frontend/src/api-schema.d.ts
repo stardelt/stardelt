@@ -542,6 +542,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalog/tables/{ns}/{tbl}/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/catalog/tables/{ns}/{tbl}/metrics` — the table's, in `name` order.
+         * @description The metric definitions of one table: named numbers its owners declared over its columns, with the SQL expression that computes each, an optional time column and the dimensions it may be cut by. A definition is stored, never executed, by this API. In name order, no pagination: a table with more than 50 metrics is not a shape this milestone meets. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.
+         */
+        get: operations["metric_definitions_list"];
+        put?: never;
+        /**
+         * `POST /api/catalog/tables/{ns}/{tbl}/metrics` — `201` with the stored row.
+         * @description Declare one metric of this table: a name (lower-case letters, digits and underscores, at most 64), a description (1 to 500 characters), the SQL expression that computes it (at most 2000 characters, no semicolon and no comment), an optional time column and up to 10 distinct dimensions. The expression is stored, never executed: it is the owner's assertion. Only the owner group of the table and administrators may add one; the caller is recorded as `verifiedBy`. `?catalog=` picks the catalog.
+         */
+        post: operations["metric_definitions_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalog/tables/{ns}/{tbl}/rollback": {
         parameters: {
             query?: never;
@@ -1207,6 +1231,26 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/metrics/{id}` — `204`; `404` when the id is not a row.
+         * @description Remove one metric definition; it was stored, never executed. Only the owner group of its table and administrators may delete it.
+         */
+        delete: operations["metric_definitions_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3753,6 +3797,23 @@ export interface components {
             user: string;
             warehouse: string;
         };
+        /** @description One metric definition as the API returns it. */
+        MetricDefinition: {
+            description: string;
+            /** @description The columns the metric may be grouped by, in the order the owner wrote them. */
+            dimensions: string[];
+            /** @description A SQL expression over the table's columns, e.g. `sum(total_cents) / 100.0`. */
+            expression: string;
+            /** Format: int64 */
+            id: number;
+            name: string;
+            /** @description The column that carries the time the metric is counted over, or `null`. */
+            timeColumn?: string | null;
+            /** @description When it was written, RFC 3339. */
+            verifiedAt: string;
+            /** @description The `sub` of the person who wrote the definition. */
+            verifiedBy: string;
+        };
         /** @description `GET /api/catalog/metrics`: what is in each catalog the caller may browse. */
         MetricsResponse: {
             /**
@@ -3912,6 +3973,14 @@ export interface components {
             name: string;
             owner_group: string;
             viewers?: string[];
+        };
+        /** @description `POST /api/catalog/tables/{ns}/{tbl}/metrics` body. */
+        NewMetricDefinition: {
+            description: string;
+            dimensions?: string[];
+            expression: string;
+            name: string;
+            timeColumn?: string | null;
         };
         /** @description `POST /api/saved-queries` body. */
         NewSavedQuery: {
@@ -7711,6 +7780,174 @@ export interface operations {
             };
         };
     };
+    metric_definitions_list: {
+        parameters: {
+            query?: {
+                /** @description Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used. */
+                catalog?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Namespace (schema) name */
+                ns: string;
+                /** @description Table name */
+                tbl: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The table's metric definitions, in name order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetricDefinition"][];
+                };
+            };
+            /** @description A name is not a single path segment, or the catalog name is invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may not browse that catalog */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such catalog or no such table */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The catalog is not reachable or did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    metric_definitions_create: {
+        parameters: {
+            query?: {
+                /** @description Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used. */
+                catalog?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Namespace (schema) name */
+                ns: string;
+                /** @description Table name */
+                tbl: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewMetricDefinition"];
+            };
+        };
+        responses: {
+            /** @description The stored row */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetricDefinition"];
+                };
+            };
+            /** @description The name, description, expression, timeColumn or dimensions are not in the accepted shape, or the catalog name is invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller may not browse that catalog, or only the owner group and administrators may add a metric definition */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such catalog or no such table */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The catalog is not reachable or did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     table_rollback: {
         parameters: {
             query?: {
@@ -10400,6 +10637,72 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    metric_definitions_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The metric definition's id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Only the owner group and administrators may delete a metric definition */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such metric definition, or the id is not a number */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The catalog is not reachable or did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

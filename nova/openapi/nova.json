@@ -2766,6 +2766,239 @@
         }
       }
     },
+    "/api/catalog/tables/{ns}/{tbl}/metrics": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/catalog/tables/{ns}/{tbl}/metrics` — the table's, in `name` order.",
+        "description": "The metric definitions of one table: named numbers its owners declared over its columns, with the SQL expression that computes each, an optional time column and the dimensions it may be cut by. A definition is stored, never executed, by this API. In name order, no pagination: a table with more than 50 metrics is not a shape this milestone meets. A table the caller may not see answers what the documentation route answers. `?catalog=` picks the catalog.",
+        "operationId": "metric_definitions_list",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table's metric definitions, in name order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MetricDefinition"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is not a single path segment, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/catalog/tables/{ns}/{tbl}/metrics` — `201` with the stored row.",
+        "description": "Declare one metric of this table: a name (lower-case letters, digits and underscores, at most 64), a description (1 to 500 characters), the SQL expression that computes it (at most 2000 characters, no semicolon and no comment), an optional time column and up to 10 distinct dimensions. The expression is stored, never executed: it is the owner's assertion. Only the owner group of the table and administrators may add one; the caller is recorded as `verifiedBy`. `?catalog=` picks the catalog.",
+        "operationId": "metric_definitions_create",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewMetricDefinition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricDefinition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name, description, expression, timeColumn or dimensions are not in the accepted shape, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog, or only the owner group and administrators may add a metric definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/tables/{ns}/{tbl}/rollback": {
       "post": {
         "tags": [
@@ -6114,6 +6347,83 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/{id}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/metrics/{id}` — `204`; `404` when the id is not a row.",
+        "description": "Remove one metric definition; it was stored, never executed. Only the owner group of its table and administrators may delete it.",
+        "operationId": "metric_definitions_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The metric definition's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the owner group and administrators may delete a metric definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such metric definition, or the id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -15630,6 +15940,57 @@
           }
         }
       },
+      "MetricDefinition": {
+        "type": "object",
+        "description": "One metric definition as the API returns it.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "expression",
+          "dimensions",
+          "verifiedBy",
+          "verifiedAt"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The columns the metric may be grouped by, in the order the owner wrote them."
+          },
+          "expression": {
+            "type": "string",
+            "description": "A SQL expression over the table's columns, e.g. `sum(total_cents) / 100.0`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "timeColumn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The column that carries the time the metric is counted over, or `null`."
+          },
+          "verifiedAt": {
+            "type": "string",
+            "description": "When it was written, RFC 3339."
+          },
+          "verifiedBy": {
+            "type": "string",
+            "description": "The `sub` of the person who wrote the definition."
+          }
+        }
+      },
       "MetricsResponse": {
         "type": "object",
         "description": "`GET /api/catalog/metrics`: what is in each catalog the caller may browse.",
@@ -16034,6 +16395,38 @@
           }
         },
         "additionalProperties": false
+      },
+      "NewMetricDefinition": {
+        "type": "object",
+        "description": "`POST /api/catalog/tables/{ns}/{tbl}/metrics` body.",
+        "required": [
+          "name",
+          "description",
+          "expression"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expression": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "timeColumn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "NewSavedQuery": {
         "type": "object",

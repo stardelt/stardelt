@@ -123,6 +123,7 @@ mod lineage_event;
 mod lineage_store;
 mod mcp;
 mod mcp_audit;
+mod metric_definitions;
 mod metrics;
 mod migrations;
 mod model_calls;
@@ -822,6 +823,13 @@ fn api_router() -> Router<Arc<AppState>> {
             get(verified_queries::list).post(verified_queries::create),
         )
         .route("/verified-queries/{id}", delete(verified_queries::delete))
+        // A named number over one table, declared by its owners (#124, fourth context kind):
+        // stored, never executed by this API.
+        .route(
+            "/catalog/tables/{ns}/{tbl}/metrics",
+            get(metric_definitions::list).post(metric_definitions::create),
+        )
+        .route("/metrics/{id}", delete(metric_definitions::delete))
         // A known answer is a test of the data: run the query as the caller and compare
         // (nova#912 slice 1).
         .route(
