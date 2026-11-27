@@ -78,12 +78,14 @@ def run(host, environ, session, out, clock=time.time) -> int:
                 write(f"! sign-in: made for {creds['host']}, not {host}")
 
     # 5. who you are
+    client = None
     if failures:
         write("- identity: not checked (fix the lines above first)")
     else:
         chosen = token if token else (lambda: login.fresh_token(environ, session, clock))
+        client = api.Client(base_url=host, token=chosen, session=session)
         try:
-            me = api.Client(base_url=host, token=chosen, session=session).me()
+            me = client.me()
         except login.LoginError as err:
             write(f"✗ identity: {err}")
             failures += 1
@@ -101,6 +103,37 @@ def run(host, environ, session, out, clock=time.time) -> int:
                 f"✓ identity: {me.get('user', '?')} ({me.get('auth_mode', '?')}), "
                 f"warehouse {me.get('warehouse', '?')}"
             )
+
+    # 6. the assistant: the endpoint Ask would use, or why there is none
+    if client is None or failures:
+        write("- assistant: not checked (fix the lines above first)")
+    else:
+        try:
+            endpoints = client.model_endpoints()
+        except (api.StardeltApiError, requests.RequestException) as err:
+            write(f"! assistant: not read ({err})")
+        else:
+            ready = [
+                endpoint
+                for endpoint in endpoints
+                if "ask" in (endpoint.get("purposes") or [])
+                and endpoint.get("reachable") is True
+                and endpoint.get("jsonOutput") is True
+            ]
+            ready.sort(key=lambda endpoint: endpoint.get("name") or "")
+            if not ready:
+                write(
+                    "! assistant: off — no ModelEndpoint answers Ask; "
+                    "an administrator connects one (stardelt.io/docs/guides/models)"
+                )
+            else:
+                endpoint = ready[0]
+                where = (
+                    "cloud · prompts leave your cluster"
+                    if endpoint.get("location") == "cloud"
+                    else "on-premise · prompts stay here"
+                )
+                write(f"✓ assistant: {endpoint.get('name')} ({endpoint.get('model')}, {where})")
 
     if failures:
         write(f"stardelt doctor: {failures} check(s) failed")

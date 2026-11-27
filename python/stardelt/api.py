@@ -202,6 +202,10 @@ class Client:
         """``GET /api/me``: the signed-in person, as a dict."""
         return self._request("GET", "/api/me").json()
 
+    def model_endpoints(self):
+        """``GET /api/model-endpoints``: the models an administrator connected, as a list of dicts."""
+        return self._request("GET", "/api/model-endpoints").json()
+
     def query(self, sql):
         """``POST /api/query``: run one statement as the caller. Rows beyond Nova's cap are cut and ``truncated`` is true."""
         return QueryResult(self._request("POST", "/api/query", json={"sql": sql}).json())
