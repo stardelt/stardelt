@@ -695,6 +695,8 @@ mod tests {
             owner: Some(owner.into()),
             domain: Some(domain.into()),
             guide: None,
+            lifecycle: None,
+            replaced_by: None,
             columns: Vec::new(),
             can_edit: false,
             edit_rule: String::new(),
