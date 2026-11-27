@@ -82,6 +82,12 @@ export default function DataProducts() {
                 <th className="py-1 pr-3 font-medium">Description</th>
                 <th className="py-1 pr-3 font-medium">Owner</th>
                 <th className="py-1 pr-3 font-medium">Freshness</th>
+                <th
+                  className="py-1 pr-3 font-medium"
+                  title="Distinct people and services that read this table in the last 30 days"
+                >
+                  Readers
+                </th>
                 <th className="py-1 pr-3 font-medium">State</th>
               </tr>
             </thead>
@@ -114,6 +120,7 @@ export default function DataProducts() {
                         )
                       })()}
                     </td>
+                    <td className="py-2 pr-3 align-top text-text-dim">{p.readers}</td>
                     <td className="py-2 pr-3 align-top">
                       <span className={BADGE[p.lifecycle] ?? BADGE.draft}>{p.lifecycle}</span>
                       {p.lifecycle === 'deprecated' && p.replacedBy && (

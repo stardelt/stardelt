@@ -18,8 +18,8 @@ async function stub(page: import('@playwright/test').Page, failHealth = false) {
       return json(r, {
         catalog: 'warehouse',
         products: [
-          { namespace: 'shop', table: 'daily_revenue', description: 'Revenue per day', owner: 'demo', domain: 'finance', lifecycle: 'published', replacedBy: null },
-          { namespace: 'shop', table: 'orders_raw', description: null, owner: null, domain: null, lifecycle: 'draft', replacedBy: null },
+          { namespace: 'shop', table: 'daily_revenue', description: 'Revenue per day', owner: 'demo', domain: 'finance', lifecycle: 'published', replacedBy: null, readers: 5 },
+          { namespace: 'shop', table: 'orders_raw', description: null, owner: null, domain: null, lifecycle: 'draft', replacedBy: null, readers: 0 },
         ],
       })
     }
@@ -40,6 +40,8 @@ test('a data product shows its freshness, and one without a promise shows a dash
 
   const revenue = page.getByRole('row', { name: /shop\.daily_revenue/ })
   await expect(revenue.getByText('Late', { exact: true })).toBeVisible()
+  // Slice 7: the 5th cell is Readers (Table, Description, Owner, Freshness, Readers, State).
+  await expect(revenue.getByRole('cell').nth(4)).toHaveText('5')
   const orders = page.getByRole('row', { name: /shop\.orders_raw/ })
   // The 4th cell is Freshness (Table, Description, Owner, Freshness, State); the Owner cell
   // of this row is a dash too, so the cell is named by its position, not by the word alone.

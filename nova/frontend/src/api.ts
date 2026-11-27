@@ -210,6 +210,7 @@ export type DataProduct = {
   domain: string | null
   lifecycle: string
   replacedBy: string | null
+  readers: number
 }
 
 /** `GET /api/catalog/products` — the catalog's data products, in domain order. */

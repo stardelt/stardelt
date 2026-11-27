@@ -193,6 +193,8 @@ pub struct DataProduct {
     pub lifecycle: String,
     /// `catalog.schema.table`, on a deprecated product.
     pub replaced_by: Option<String>,
+    /// Distinct `<query_log.principal>` values that read this table in the last 30 days.
+    pub readers: i64,
 }
 
 /// The products of one catalog, in domain order.
@@ -201,8 +203,9 @@ pub async fn products(
     catalog: &str,
     domain: Option<&str>,
 ) -> Result<Vec<DataProduct>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT namespace, table_name, description, owner, domain, lifecycle, replaced_by \
+    let mut found: Vec<DataProduct> = sqlx::query_as(
+        "SELECT namespace, table_name, description, owner, domain, lifecycle, replaced_by, \
+                0::bigint AS readers \
          FROM catalog_doc \
          WHERE catalog = $1 AND lifecycle IS NOT NULL \
            AND ($2::text IS NULL OR domain = $2) \
@@ -212,7 +215,29 @@ pub async fn products(
     .bind(catalog)
     .bind(domain)
     .fetch_all(pool)
-    .await
+    .await?;
+    // One pass over the last 30 days, not one scan per product: the count is keyed by the same
+    // `catalog.schema.table` string the collector writes.
+    let readers: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT table_name, count(DISTINCT principal) \
+           FROM (SELECT principal, unnest(tables_read) AS table_name \
+                   FROM query_log \
+                  WHERE state = 'FINISHED' AND ended_at > now() - interval '30 days') reads \
+          GROUP BY table_name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let readers: std::collections::HashMap<String, i64> = readers.into_iter().collect();
+    for product in &mut found {
+        product.readers = readers
+            .get(&format!(
+                "{catalog}.{}.{}",
+                product.namespace, product.table_name
+            ))
+            .copied()
+            .unwrap_or(0);
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
