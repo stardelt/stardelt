@@ -40,7 +40,12 @@ const NO_TABLE: &str =
 /// The one sentence that says why Ask cannot answer: no endpoint, or no usable endpoint.
 const NO_ENDPOINT: &str =
     "no ask model is ready: connect a ModelEndpoint with purpose ask, and wait for its probe";
-const SYSTEM_PROMPT: &str = "You write one Trino SQL statement for a question about the tables you are given. Use only these tables, fully qualified as catalog.namespace.table, and only the columns their documentation lists; never invent a table or a column. You receive metadata only, never rows. Answer with one JSON object with exactly two fields: \"sql\" — one SELECT or WITH statement, no trailing semicolon — and \"sentence\" — one sentence of at most 200 characters saying what the statement answers. Never write DDL or DML, and never write EXPLAIN.";
+const SYSTEM_PROMPT: &str = "You write one Trino SQL statement for a question about the tables you are given. Use only these tables, fully qualified as catalog.namespace.table, and only the columns their documentation lists; never invent a table or a column. You receive metadata only, never rows. When an entry carries a verifiedQueries list and one of its questions matches the question, copy that query's shape — its tables, joins and filters — instead of writing a new one from scratch. Answer with one JSON object with exactly two fields: \"sql\" — one SELECT or WITH statement, no trailing semicolon — and \"sentence\" — one sentence of at most 200 characters saying what the statement answers. Never write DDL or DML, and never write EXPLAIN.";
+
+/// How many of a table's verified queries the model receives (newest first).
+const VERIFIED_QUERIES_IN_CONTEXT: usize = 5;
+/// Longest verified SQL kept in the context; a longer one is cut with `…`.
+const MAX_VERIFIED_SQL_CHARS: usize = 4000;
 
 /// `POST /api/ask` body.
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -114,7 +119,7 @@ fn ready_ask_endpoint(objects: &[Value]) -> Option<(String, Value)> {
 
 /// The context the model receives: one entry per candidate table, metadata only. A field
 /// the documentation does not have is `null`.
-fn context_of(candidates: &[AskTable], docs: &[Value]) -> Value {
+fn context_of(candidates: &[AskTable], docs: &[Value], verified: &[Value]) -> Value {
     let field = |doc: &Value, name: &str| doc.get(name).cloned().unwrap_or(Value::Null);
     let entries: Vec<Value> = candidates
         .iter()
@@ -128,7 +133,37 @@ fn context_of(candidates: &[AskTable], docs: &[Value]) -> Value {
                 "owner": field(doc, "owner"),
                 "domain": field(doc, "domain"),
                 "columns": field(doc, "columns"),
+                "verifiedQueries": verified
+                    .get(index)
+                    .map(verified_of)
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
             })
+        })
+        .collect();
+    Value::Array(entries)
+}
+
+/// What the model receives of one table's verified queries: question and SQL, newest first,
+/// at most [`VERIFIED_QUERIES_IN_CONTEXT`]. No expected rows and no author.
+fn verified_of(list: &Value) -> Value {
+    let rows = list.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let entries: Vec<Value> = rows
+        .iter()
+        .take(VERIFIED_QUERIES_IN_CONTEXT)
+        .filter_map(|row| {
+            let sql = row.get("sql")?.as_str()?;
+            let sql = if sql.chars().count() > MAX_VERIFIED_SQL_CHARS {
+                sql.chars()
+                    .take(MAX_VERIFIED_SQL_CHARS - 1)
+                    .collect::<String>()
+                    + "…"
+            } else {
+                sql.to_string()
+            };
+            Some(json!({
+                "question": row.get("question").cloned().unwrap_or(Value::Null),
+                "sql": sql,
+            }))
         })
         .collect();
     Value::Array(entries)
@@ -372,7 +407,7 @@ async fn check_statement(
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables only** — description, tags, owner, domain, column names and their descriptions — to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
@@ -544,7 +579,26 @@ pub(crate) async fn ask(
         });
     }
 
-    let context = context_of(&candidates, &docs);
+    let mut verified = Vec::with_capacity(candidates.len());
+    for table in &candidates {
+        let response = crate::verified_queries::list(
+            State(Arc::clone(&state)),
+            Path((table.namespace.clone(), table.table.clone())),
+            Query(crate::catalog::CatalogParam {
+                catalog: Some(table.catalog.clone()),
+            }),
+            caller.clone(),
+        )
+        .await;
+        let (status, body) = body_of(response).await;
+        verified.push(if status == StatusCode::OK {
+            body
+        } else {
+            Value::Null
+        });
+    }
+
+    let context = context_of(&candidates, &docs, &verified);
     let user_text = format!(
         "The question: {question}\n\nThe tables you may use, with their documentation:\n{context}"
     );
@@ -839,7 +893,7 @@ mod tests {
             }),
             Value::Null,
         ];
-        let context = context_of(&candidates, &docs);
+        let context = context_of(&candidates, &docs, &[]);
         assert_eq!(context[0]["name"], json!("warehouse.bronze.trips"));
         assert_eq!(context[0]["description"], json!("One row per trip"));
         assert_eq!(context[0]["tags"], json!(["raw", "gold"]));
@@ -851,6 +905,43 @@ mod tests {
         assert_eq!(context[1]["name"], json!("warehouse.bronze.zones"));
         assert_eq!(context[1]["description"], Value::Null);
         assert_eq!(context[1]["columns"], Value::Null);
+        assert_eq!(context[0]["verifiedQueries"], json!([]));
+    }
+
+    #[test]
+    fn the_context_carries_at_most_five_verified_queries_and_cuts_a_long_one() {
+        let candidates = vec![AskTable {
+            catalog: "warehouse".into(),
+            namespace: "bronze".into(),
+            table: "trips".into(),
+        }];
+        let rows: Vec<Value> = (0..7)
+            .map(|i| {
+                json!({
+                    "question": format!("question {i}"),
+                    "sql": if i == 0 {
+                        "x".repeat(MAX_VERIFIED_SQL_CHARS + 10)
+                    } else {
+                        format!("SELECT {i}")
+                    },
+                    "expected": [[1]],
+                    "verifiedBy": "demo",
+                })
+            })
+            .collect();
+        let context = context_of(&candidates, &[Value::Null], &[Value::Array(rows)]);
+        let sent = context[0]["verifiedQueries"].as_array().expect("a list");
+        assert_eq!(sent.len(), VERIFIED_QUERIES_IN_CONTEXT, "at most five");
+        assert_eq!(sent[0]["question"], json!("question 0"));
+        assert_eq!(sent[4]["sql"], json!("SELECT 4"), "newest five, in order");
+        let sql = sent[0]["sql"].as_str().expect("a string");
+        assert_eq!(sql.chars().count(), MAX_VERIFIED_SQL_CHARS, "cut with …");
+        assert!(sql.ends_with('…'));
+        assert_eq!(sent[0].get("expected"), None, "no rows are sent");
+        assert_eq!(sent[0].get("verifiedBy"), None, "no author is sent");
+        // A table whose read failed carries an empty list, not `null`.
+        let empty = context_of(&candidates, &[Value::Null], &[Value::Null]);
+        assert_eq!(empty[0]["verifiedQueries"], json!([]));
     }
 
     #[test]
