@@ -915,7 +915,7 @@ pub(crate) async fn put(
     operation_id = "streams_delete",
     path = "/api/streams/{namespace}/{name}",
     tag = "public",
-    description = "Delete one StreamApp that the caller's group owns. The stream's Kafka topic is not deleted; what a deletion does to it is the operator's decision. Answers 204 when the object is gone, including when it was already gone.",
+    description = "Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; a topic read through a `Connection`, or one another `KafkaTopic` manages, stays. Answers 204 when the object is gone, including when it was already gone.",
     params(
         ("namespace" = String, Path, description = "Namespace (must be the platform namespace)"),
         ("name" = String, Path, description = "StreamApp name"),

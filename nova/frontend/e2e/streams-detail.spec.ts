@@ -59,7 +59,7 @@ test('Stop flips the button to Resume, and a reload keeps it', async ({ page }) 
   await expect(page.getByRole('button', { name: 'Resume orders' })).toBeVisible()
 })
 
-test('Delete asks once, says the topic stays, and goes back to the list', async ({ page }) => {
+test('Delete asks once, says what happens to the topic, and goes back to the list', async ({ page }) => {
   const deletes: string[] = []
   await page.route('**/api/streams/stardelt/orders', (route) => {
     deletes.push(route.request().method())
@@ -71,7 +71,7 @@ test('Delete asks once, says the topic stays, and goes back to the list', async 
   await page.getByRole('button', { name: 'Delete orders' }).click()
 
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByText('Its Kafka topic and the messages in it stay.')).toBeVisible()
+  await expect(dialog.getByText('its Kafka topic and every message in it are deleted too')).toBeVisible()
 
   await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
 
@@ -92,7 +92,7 @@ test('a refused Delete keeps the dialog open and shows the sentence', async ({ p
   await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
 
   await expect(dialog.getByText('this stream belongs to another group')).toBeVisible()
-  await expect(dialog.getByText('Its Kafka topic and the messages in it stay.')).toBeVisible()
+  await expect(dialog.getByText('its Kafka topic and every message in it are deleted too')).toBeVisible()
   await expect(page).toHaveURL(/\/streams\/stardelt\/orders$/)
 })
 
