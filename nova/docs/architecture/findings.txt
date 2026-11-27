@@ -11,7 +11,7 @@ F-size frontend files over 800 lines: 7
   routes/AdminCatalogs.tsx 1189
   components/ConnectionDialogs.tsx 1167
   routes/Query.tsx 1110
-  routes/Catalog.tsx 1004
+  routes/Catalog.tsx 1032
 Undeclared .rs files (dead): none
 OpenAPI: served /api operations not in nova.json: 0
 OpenAPI: nova.json operations not served by a scanned router: 0
