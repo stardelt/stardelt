@@ -39,6 +39,14 @@ const titles: Record<string, string> = {
   '/profile': 'Profile',
 }
 
+/**
+ * Every page the sidebar links to has a tab title, without a second list to keep in step.
+ * `titles` stays for the pages that are not in the sidebar (preferences, profile).
+ */
+const navTitles: Record<string, string> = Object.fromEntries(
+  NAV_GROUPS.flatMap((group) => group.items.map((item) => [item.to, item.label])),
+)
+
 /** The app detail route carries its own id, so the header can be specific. */
 function titleFor(pathname: string): string {
   const app = pathname.match(/^\/apps\/([^/]+)$/)
@@ -58,7 +66,7 @@ function titleFor(pathname: string): string {
   const pipeline = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)$/)
   if (pipeline) return `${nameOf(pipeline[1])} · Pipelines`
   // Anything else that is not a known route is the catch-all, and says so.
-  return titles[pathname] ?? 'Not found'
+  return titles[pathname] ?? navTitles[pathname] ?? 'Not found'
 }
 
 function navClass({ isActive }: { isActive: boolean }) {
