@@ -248,7 +248,13 @@ def scan_frontend(fe: Path):
         chunk = block[m.end(): m.end() + (nxt.start() if nxt else 400)]
         lit = re.search(r"[`'](/api/[^`'?]*)", chunk)
         if lit:
-            api_paths[m.group(1)] = re.sub(r"\$\{[^}]*\}", "{}", lit.group(1))
+            path = lit.group(1)
+            # A query string is built in a variable (`const q = …`?…``, `const qs = … URLSearchParams …`)
+            # and appended as ${q}/${qs}; it names no route segment, so cut it before the template
+            # is matched (#2153).
+            for name in re.findall(r"\bconst (\w+)\s*=\s*[^\n]*?(?:URLSearchParams|`\?)", chunk):
+                path = path.replace("${" + name + "}", "")
+            api_paths[m.group(1)] = re.sub(r"\$\{[^}]*\}", "{}", path)
 
     # Which api functions each page uses: the page file plus the components it imports.
     page_calls = {}
