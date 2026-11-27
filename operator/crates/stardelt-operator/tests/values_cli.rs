@@ -47,6 +47,27 @@ fn prints_the_effective_values_for_every_profile() {
 }
 
 #[test]
+fn the_deprecated_names_print_their_replacement() {
+    // #62: `demo` is `starter`, `full` and `airgap` are `enterprise`.
+    for (old, new) in [
+        ("demo", "starter"),
+        ("full", "enterprise"),
+        ("airgap", "enterprise"),
+    ] {
+        for component in ["trino", "seaweedfs", "jupyterhub"] {
+            let old_output = run(&["values", component, old]);
+            let new_output = run(&["values", component, new]);
+            assert!(old_output.status.success(), "values {component} {old}");
+            assert!(new_output.status.success(), "values {component} {new}");
+            assert_eq!(
+                old_output.stdout, new_output.stdout,
+                "values {component} {old} differs from {new}"
+            );
+        }
+    }
+}
+
+#[test]
 fn an_unknown_component_prints_an_empty_document() {
     let output = run(&["values", "nope", "demo"]);
     assert!(output.status.success(), "unknown component is not an error");

@@ -174,6 +174,23 @@ mod tests {
     }
 
     #[test]
+    fn starter_and_enterprise_size_the_pool_like_their_old_names() {
+        // #62: `starter` is what `demo` was; `enterprise` is what `full` was.
+        assert_eq!(
+            node_pool("data", Profile::Starter).data["spec"]["storage"],
+            node_pool("data", Profile::Demo).data["spec"]["storage"]
+        );
+        assert_eq!(
+            node_pool("data", Profile::Enterprise).data["spec"]["storage"],
+            node_pool("data", Profile::Full).data["spec"]["storage"]
+        );
+        assert_eq!(
+            node_pool("data", Profile::Airgap).data["spec"]["storage"],
+            node_pool("data", Profile::Full).data["spec"]["storage"]
+        );
+    }
+
+    #[test]
     fn broker_listens_plain_inside_the_cluster() {
         let broker = broker("data");
         assert_eq!(
