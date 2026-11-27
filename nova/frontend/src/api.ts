@@ -201,6 +201,8 @@ export type TableDocsUpdate = {
   guide?: string | null
   lifecycle?: string | null
   replacedBy?: string | null
+  /** Replaces every column class; `null` removes them (#491). */
+  columnClasses?: Record<string, string> | null
 }
 
 /** One data product of a catalog (#37): a table with a `stardelt.lifecycle`. */
