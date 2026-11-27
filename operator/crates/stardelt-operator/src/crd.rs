@@ -521,6 +521,17 @@ pub struct IngressSettings {
     #[serde(default, rename = "className", skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 253))]
     pub class_name: Option<String>,
+    /// The namespace of the ingress controller that proxies the public names. Its pods may
+    /// reach the internal ports a NetworkPolicy guards (the Spark Connect fronts on 15002
+    /// and 25002). Absent: `traefik` when `className` is `traefik`, else `ingress-nginx`
+    /// (the assumption before this field existed).
+    #[serde(
+        default,
+        rename = "controllerNamespace",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(length(min = 1, max = 253))]
+    pub controller_namespace: Option<String>,
     /// Source ranges that may open a connection to the public endpoints
     /// (`stardelt-platform#427`). Empty = open to everyone. A non-empty list renders
     /// `nginx.ingress.kubernetes.io/whitelist-source-range` on every Ingress this operator
@@ -541,6 +552,20 @@ pub struct IngressSettings {
     /// the Gateway's listeners and their certificate references.
     #[serde(default)]
     pub tls: IngressTls,
+}
+
+impl IngressSettings {
+    /// The namespace whose ingress-controller pods may reach a NetworkPolicy-guarded
+    /// internal port. See `controllerNamespace`.
+    pub fn effective_controller_namespace(&self) -> &str {
+        if let Some(namespace) = &self.controller_namespace {
+            return namespace;
+        }
+        match self.class_name.as_deref() {
+            Some("traefik") => "traefik",
+            _ => "ingress-nginx",
+        }
+    }
 }
 
 /// TLS of the Ingress objects.
@@ -4518,6 +4543,19 @@ mod tests {
         assert!(spec.ingress.tls.enabled);
         assert_eq!(spec.ingress.tls.issuer.as_deref(), Some("letsencrypt"));
         assert_eq!(spec.ingress.tls.secret_name_template, "tls-{host}");
+    }
+
+    #[test]
+    fn the_ingress_controller_namespace_follows_the_class_name() {
+        let mut ingress = IngressSettings {
+            enabled: true,
+            ..IngressSettings::default()
+        };
+        assert_eq!(ingress.effective_controller_namespace(), "ingress-nginx");
+        ingress.class_name = Some("traefik".to_string());
+        assert_eq!(ingress.effective_controller_namespace(), "traefik");
+        ingress.controller_namespace = Some("kube-system".to_string());
+        assert_eq!(ingress.effective_controller_namespace(), "kube-system");
     }
 
     #[test]

@@ -959,7 +959,10 @@ pub async fn ensure_spark(
             if let Err(e) = apply::<NetworkPolicy>(
                 client,
                 namespace,
-                &spark_auth::network_policy(namespace),
+                &spark_auth::network_policy(
+                    namespace,
+                    instance.spec.ingress.effective_controller_namespace(),
+                ),
                 dry_run,
             )
             .await

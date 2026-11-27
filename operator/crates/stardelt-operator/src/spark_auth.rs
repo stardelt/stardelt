@@ -277,10 +277,10 @@ pub fn service(namespace: &str) -> Service {
     }
 }
 
-/// Who may reach the front: the ingress controller (the public name `spark.<base domain>`) and
-/// member notebook pods (the in-cluster path a later slice points the library at).
-pub fn network_policy(namespace: &str) -> NetworkPolicy {
-    let peer = |labels: &[(&str, &str)], namespace_selector: bool| NetworkPolicyPeer {
+/// Who may reach the front: the ingress controller's namespace (`spec.ingress.controllerNamespace`/
+/// `className`) and member notebook pods (the in-cluster path a later slice points the library at).
+pub fn network_policy(namespace: &str, controller_namespace: &str) -> NetworkPolicy {
+    let peer = |labels: &[(&str, &str)]| NetworkPolicyPeer {
         pod_selector: Some(LabelSelector {
             match_labels: Some(BTreeMap::from_iter(
                 labels
@@ -289,14 +289,18 @@ pub fn network_policy(namespace: &str) -> NetworkPolicy {
             )),
             ..LabelSelector::default()
         }),
-        namespace_selector: namespace_selector.then(|| LabelSelector {
+        namespace_selector: None,
+        ip_block: None::<IPBlock>,
+    };
+    let controller = |namespace: &str| NetworkPolicyPeer {
+        namespace_selector: Some(LabelSelector {
             match_labels: Some(BTreeMap::from([(
                 "kubernetes.io/metadata.name".to_string(),
-                "ingress-nginx".to_string(),
+                namespace.to_string(),
             )])),
             ..LabelSelector::default()
         }),
-        ip_block: None::<IPBlock>,
+        ..NetworkPolicyPeer::default()
     };
     NetworkPolicy {
         metadata: ObjectMeta {
@@ -313,8 +317,8 @@ pub fn network_policy(namespace: &str) -> NetworkPolicy {
             policy_types: Some(vec!["Ingress".to_string()]),
             ingress: Some(vec![NetworkPolicyIngressRule {
                 from: Some(vec![
-                    peer(&[], true),
-                    peer(&[("component", "singleuser-server")], false),
+                    controller(controller_namespace),
+                    peer(&[("component", "singleuser-server")]),
                 ]),
                 ports: Some(vec![NetworkPolicyPort {
                     port: Some(IntOrString::Int(PORT)),
@@ -462,7 +466,7 @@ mod tests {
             Some(IntOrString::String("connect".into()))
         );
 
-        let policy = network_policy("data");
+        let policy = network_policy("data", "traefik");
         assert_eq!(
             policy.metadata.name.as_deref(),
             Some("spark-connect-auth-ingress")
@@ -489,7 +493,7 @@ mod tests {
                 .match_labels
                 .as_ref()
                 .expect("labels")["kubernetes.io/metadata.name"],
-            "ingress-nginx"
+            "traefik"
         );
         assert_eq!(
             peers[1]

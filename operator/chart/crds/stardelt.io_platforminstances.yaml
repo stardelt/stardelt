@@ -306,6 +306,16 @@ spec:
                     minLength: 1
                     nullable: true
                     type: string
+                  controllerNamespace:
+                    description: |-
+                      The namespace of the ingress controller that proxies the public names. Its pods may
+                      reach the internal ports a NetworkPolicy guards (the Spark Connect fronts on 15002
+                      and 25002). Absent: `traefik` when `className` is `traefik`, else `ingress-nginx`
+                      (the assumption before this field existed).
+                    maxLength: 253
+                    minLength: 1
+                    nullable: true
+                    type: string
                   enabled:
                     default: false
                     description: |-
