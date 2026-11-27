@@ -216,8 +216,10 @@ pub fn validate_new(req: &NewConnection) -> Result<(), String> {
             ));
         }
     }
-    if req.secret.is_empty() || req.secret.len() > MAX_KEYS {
-        return Err(format!("secret needs 1 to {MAX_KEYS} fields"));
+    // A type that needs no secret field (kafka, mlflow, generic) may carry an empty one; the
+    // type's own rule below demands every field it needs.
+    if req.secret.len() > MAX_KEYS {
+        return Err(format!("secret needs at most {MAX_KEYS} fields"));
     }
     for (k, v) in &req.secret {
         if !key_ok(k) {
@@ -468,15 +470,19 @@ pub fn connection_resource(req: &NewConnection, namespace: &str) -> Option<Value
         Some(_) => req.secret_keys.iter().collect(),
         None => req.secret.keys().collect(),
     };
-    let mut secret = json!({ "keys": keys });
-    if let Some(path) = &req.remote_ref {
-        secret["remoteRef"] = json!(path);
-    }
     let mut spec = json!({
         "scope": match req.scope { Scope::Group => "group", Scope::Managed => "managed", Scope::Personal => return None },
         "type": req.kind,
-        "secret": secret,
     });
+    // The CRD requires `secret.keys` to hold 1 to 16 names: a connection whose type needs no
+    // field (mlflow without a token) carries no secret block, and the operator reports NoSecret.
+    if !keys.is_empty() {
+        let mut secret = json!({ "keys": keys });
+        if let Some(path) = &req.remote_ref {
+            secret["remoteRef"] = json!(path);
+        }
+        spec["secret"] = secret;
+    }
     if let Some(g) = &req.owner_group {
         spec["ownerGroup"] = json!(g);
     }
@@ -710,7 +716,6 @@ mod tests {
         assert!(bad(json!({ "name": "Crm" })).contains("name"));
         assert!(bad(json!({ "name": "a/b" })).contains("name"));
         assert!(bad(json!({ "type": "ftp" })).contains("type must be one of"));
-        assert!(bad(json!({ "secret": {} })).contains("1 to 16"));
         assert!(bad(json!({ "secret": { "user": "u", "password": "" } })).contains("empty"));
         assert!(
             bad(json!({ "secret": { "user": "u", "password": "x".repeat(4097) } }))
@@ -788,6 +793,8 @@ mod tests {
             json!({ "type": "sftp", "config": { "host": "h" }, "secret": { "user": "u", "privateKey": "k" } }),
             json!({ "type": "mlflow", "config": { "trackingUrl": "https://mlflow.example.com" }, "secret": { "token": "t" } }),
             json!({ "type": "generic", "config": {}, "secret": { "anything": "x" } }),
+            json!({ "type": "kafka", "config": { "bootstrapServers": "b:9092" }, "secret": {} }),
+            json!({ "type": "mlflow", "config": { "trackingUrl": "https://mlflow.example.com" }, "secret": {} }),
         ] {
             assert!(validate_new(&with(ok)).is_ok());
         }
@@ -908,6 +915,17 @@ mod tests {
         let cr = connection_resource(&managed, "stardelt").unwrap();
         assert_eq!(cr["spec"]["usableBy"], json!(["analytics"]));
         assert!(cr["spec"].get("ownerGroup").is_none());
+        let bare = with(json!({
+            "type": "mlflow",
+            "config": { "trackingUrl": "https://mlflow.example.com" },
+            "secret": {}
+        }));
+        let cr = connection_resource(&bare, "stardelt").unwrap();
+        assert!(
+            cr["spec"].get("secret").is_none(),
+            "a connection whose type needs no field carries no secret block: {}",
+            cr["spec"]
+        );
         assert!(
             connection_resource(
                 &with(json!({ "scope": "personal", "ownerGroup": null })),
