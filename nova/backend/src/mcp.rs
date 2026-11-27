@@ -1030,6 +1030,10 @@ async fn call_tool(
             }
         }
         "lineage_get" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let (catalog, schema, table) =
                 (argument("catalog"), argument("schema"), argument("table"));
             if catalog.is_none() || schema.is_none() || table.is_none() {
@@ -1062,6 +1066,10 @@ async fn call_tool(
             }
         }
         "table_documentation" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let ns = argument("namespace").unwrap_or_default();
             let tbl = argument("table").unwrap_or_default();
             let response = crate::catalog_docs::read(
@@ -1078,7 +1086,7 @@ async fn call_tool(
                 && let Some(pool) = state.db.as_ref()
                 && let Ok((catalog, _id)) = crate::catalog::catalog_scope(
                     state,
-                    Some(principal),
+                    Some(&principal),
                     argument("catalog").as_deref(),
                 )
                 .await
@@ -1096,6 +1104,10 @@ async fn call_tool(
             (status, agent_view(body))
         }
         "verified_queries" => {
+            let principal = match engine_caller(state, principal).await {
+                Ok(p) => p,
+                Err(e) => return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": e })),
+            };
             let ns = argument("namespace").unwrap_or_default();
             let tbl = argument("table").unwrap_or_default();
             let response = crate::verified_queries::list(
@@ -2429,6 +2441,66 @@ mod tests {
             text_of(&result).contains("the engine token could not be minted"),
             "{result}"
         );
+    }
+
+    /// The same for every other arm whose handler asks the engine to scope the catalog
+    /// (`allowed_catalogs` / `catalog_scope`): `lineage_get`, `table_documentation` and
+    /// `verified_queries` also mint the engine token first (#2185).
+    #[tokio::test]
+    async fn the_scope_arms_exchange_the_mcp_token_before_the_engine() {
+        async fn serve(app: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            format!("http://{addr}")
+        }
+        let idp = format!(
+            "{}/token",
+            serve(Router::new().route(
+                "/token",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_request"})),
+                    )
+                }),
+            ))
+            .await
+        );
+        let exchange = crate::token_exchange::TokenExchange::new(
+            reqwest::Client::new(),
+            crate::token_exchange::TokenExchangeConfig {
+                token_url: idp,
+                client_id: "nova".into(),
+                client_secret: Secret::new("client-secret"),
+                audience: "trino".into(),
+            },
+        );
+        let state = crate::router_tests::test_state_with_exchange("http://127.0.0.1:1", exchange);
+        let (app, _dir) = test_app_with_state(state, "mcp-exchange-scope-arms", Vec::new());
+        for (name, arguments) in [
+            (
+                "lineage_get",
+                json!({ "catalog": "playground", "schema": "s", "table": "t" }),
+            ),
+            (
+                "table_documentation",
+                json!({ "catalog": "playground", "namespace": "s", "table": "t" }),
+            ),
+            (
+                "verified_queries",
+                json!({ "catalog": "playground", "namespace": "s", "table": "t" }),
+            ),
+        ] {
+            let result = call(app.clone(), name, arguments).await;
+            assert_eq!(result["isError"], true, "{name}: {result}");
+            assert!(
+                text_of(&result).contains("the engine token could not be minted"),
+                "{name}: {result}"
+            );
+        }
     }
 
     #[tokio::test]
