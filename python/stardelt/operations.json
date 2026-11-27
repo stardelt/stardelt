@@ -381,6 +381,26 @@
       "query_params": [],
       "body": false
     },
+    "eval_run_create": {
+      "method": "POST",
+      "path": "/api/evals/{id}/runs",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": true
+    },
+    "eval_run_list": {
+      "method": "GET",
+      "path": "/api/evals/{id}/runs",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [
+        "limit"
+      ],
+      "body": false
+    },
     "health": {
       "method": "GET",
       "path": "/api/health",
