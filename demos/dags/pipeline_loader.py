@@ -371,6 +371,9 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
             op_kwargs={"tables": wap_tables},
             retries=0,
             executor_config=executor_config,
+            # Under `wap` the table changes only here, when `main` moves; the writer's asset would
+            # start a downstream pipeline on the old `main`.
+            outlets=[_asset(table) for table in wap_tables],
             dag=dag,
         )
     for t in p.tasks:
@@ -396,7 +399,9 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
                 connection_type=t.connection_type,
                 connection_config=t.connection_config,
                 wap=p.publish == "wap",
-                outlets=[_asset(table) for table in t.writes],
+                # Under `publish: wap` the write lands on a branch: the asset belongs to
+                # `wap-publish`, which is when the table changes for everyone else.
+                outlets=[] if p.publish == "wap" else [_asset(table) for table in t.writes],
                 namespace=namespace,
                 dag=dag,
             )
@@ -438,7 +443,9 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
                 # (`crd.rs::principal_client_id`: `sp-<name>`); the worker may `use` it (#1260).
                 principal_sa=f"sp-{p.principal.name}",
                 wap=p.publish == "wap",
-                outlets=[_asset(table) for table in t.writes],
+                # Under `publish: wap` the write lands on a branch: the asset belongs to
+                # `wap-publish`, which is when the table changes for everyone else.
+                outlets=[] if p.publish == "wap" else [_asset(table) for table in t.writes],
                 namespace=namespace,
                 dag=dag,
             )
