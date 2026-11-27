@@ -411,6 +411,10 @@ spike-trino-row-filters: _context ## Can the Trino OPA plugin apply row filters 
 spike-materialized-views: _context ## Can Trino create, refresh and query a materialized view on the Iceberg catalog? (#32)
 	@bash scripts/spike-materialized-views.sh
 
+.PHONY: spike-refresh-table
+spike-refresh-table: _context ## A scheduled CREATE OR REPLACE / DELETE + INSERT refresh: its cost, atomicity and grants (#32)
+	@bash scripts/spike-refresh-table.sh
+
 .PHONY: spike-superset-dashboards
 spike-superset-dashboards: _context ## Measure Superset's dashboard export/import API (#115)
 	@bash scripts/spike-superset-dashboards.sh
