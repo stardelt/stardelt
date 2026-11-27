@@ -6,9 +6,9 @@
 | `catalog_docs.rs` ⚠ | Catalog | 2484 | 1765 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2142 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
-| `main.rs` | Core & identity | 1487 | 1617 | 3 | - |
+| `query_log_api.rs` | SQL & query log | 1492 | 320 | 6 | Kubernetes API (CRDs), PostgreSQL state store |
+| `main.rs` | Core & identity | 1488 | 1617 | 3 | - |
 | `mcp.rs` | AI (Ask, MCP, models) | 1428 | 1270 | 4 | Airflow REST, Trino |
-| `query_log_api.rs` | SQL & query log | 1353 | 298 | 5 | Kubernetes API (CRDs), PostgreSQL state store |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `lineage_api.rs` | Lineage | 1175 | 443 | 4 | PostgreSQL state store |
@@ -30,10 +30,10 @@
 | `audit.rs` | Core & identity | 601 | 82 | 0 | - |
 | `model_probe.rs` | AI (Ask, MCP, models) | 601 | 341 | 0 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
-| `query_log_collector.rs` | SQL & query log | 549 | 578 | 3 | Kubernetes API (CRDs), PostgreSQL state store |
-| `query_log_event.rs` | SQL & query log | 535 | 280 | 0 | - |
+| `query_log_collector.rs` | SQL & query log | 549 | 580 | 3 | Kubernetes API (CRDs), PostgreSQL state store |
+| `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
-| `openapi.rs` | Core & identity | 466 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 469 | 688 | 1 | - |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
@@ -46,7 +46,7 @@
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
-| `query_log_store.rs` | SQL & query log | 189 | 182 | 0 | PostgreSQL state store |
+| `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
 | `catalog_doc_store.rs` | Catalog | 177 | 207 | 0 | PostgreSQL state store |
@@ -70,4 +70,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (69 files)** | | **49883** | **44248** | **160** | |
+| **total (69 files)** | | **50042** | **44299** | **161** | |

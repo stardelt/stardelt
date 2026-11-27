@@ -28,10 +28,10 @@ pub async fn upsert(pool: &PgPool, accepted: &Accepted) -> sqlx::Result<()> {
             schema_name, query_type, sql_text, sql_hash, created_at, started_at, ended_at, \
             queued_ms, planning_ms, execution_ms, wall_ms, cpu_ms, peak_memory_bytes, input_rows, \
             input_bytes, output_rows, output_bytes, written_rows, written_bytes, error_code, \
-            error_message, tables_read, tables_written) \
+            error_message, tables_read, tables_written, sql_fingerprint) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz, \
             $14::timestamptz, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, \
-            $29, $30) \
+            $29, $30, $31) \
          ON CONFLICT (query_id) DO UPDATE SET \
             warehouse = EXCLUDED.warehouse, state = EXCLUDED.state, principal = EXCLUDED.principal, \
             source = EXCLUDED.source, client_tags = EXCLUDED.client_tags, catalog = EXCLUDED.catalog, \
@@ -45,7 +45,8 @@ pub async fn upsert(pool: &PgPool, accepted: &Accepted) -> sqlx::Result<()> {
             output_bytes = EXCLUDED.output_bytes, written_rows = EXCLUDED.written_rows, \
             written_bytes = EXCLUDED.written_bytes, error_code = EXCLUDED.error_code, \
             error_message = EXCLUDED.error_message, tables_read = EXCLUDED.tables_read, \
-            tables_written = EXCLUDED.tables_written, updated_at = now() \
+            tables_written = EXCLUDED.tables_written, sql_fingerprint = EXCLUDED.sql_fingerprint, \
+            updated_at = now() \
          WHERE query_log.state = 'QUEUED' OR EXCLUDED.state <> 'QUEUED'",
     )
     .bind(&r.query_id)
@@ -78,6 +79,7 @@ pub async fn upsert(pool: &PgPool, accepted: &Accepted) -> sqlx::Result<()> {
     .bind(&r.error_message)
     .bind(&r.tables_read)
     .bind(&r.tables_written)
+    .bind(&r.sql_fingerprint)
     .execute(pool)
     .await?;
     Ok(())

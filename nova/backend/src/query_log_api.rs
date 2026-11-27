@@ -236,6 +236,29 @@ fn parse_params(raw: &HashMap<String, String>) -> Result<Params, String> {
     })
 }
 
+#[derive(Debug, PartialEq)]
+struct RepeatedParams {
+    scope: Scope,
+    limit: i64,
+}
+
+fn parse_repeated_params(raw: &HashMap<String, String>) -> Result<RepeatedParams, String> {
+    let scope = match raw.get("scope").map(String::as_str) {
+        None | Some("mine") => Scope::Mine,
+        Some("team") => Scope::Team,
+        Some("all") => Scope::All,
+        Some(_) => return Err("scope must be mine, team or all".into()),
+    };
+    let limit = match raw.get("limit") {
+        None => 20,
+        Some(value) => match value.parse::<i64>() {
+            Ok(n) if (1..=100).contains(&n) => n,
+            _ => return Err("limit must be a number from 1 to 100".into()),
+        },
+    };
+    Ok(RepeatedParams { scope, limit })
+}
+
 /// `created_at` in microseconds plus the id: the keyset position after the last item of a page.
 fn encode_cursor(created_us: i64, id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{created_us}:{id}"))
@@ -878,6 +901,122 @@ pub async fn usage(
     .into_response()
 }
 
+#[derive(Debug, Serialize, FromRow, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatedStatement {
+    pub sql_fingerprint: String,
+    /// The most recent run's statement.
+    #[serde(rename = "sql")]
+    #[schema(rename = "sql")]
+    pub sql: String,
+    pub runs: i64,
+    pub total_ms: Option<i64>,
+    pub average_ms: Option<i64>,
+    pub max_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatedQueries {
+    pub statements: Vec<RepeatedStatement>,
+    /// The supported acceleration path; the same sentence for the API, the CLI and MCP.
+    pub suggestion: String,
+}
+
+/// The supported acceleration path: #32 measured that the shipped catalog refuses
+/// materialized views, so a suggestion names the refresh-table pattern instead.
+const SUGGESTION: &str = "A statement you run repeatedly is a candidate for a table refreshed by a scheduled pipeline: a `sql` task with `CREATE OR REPLACE TABLE … AS SELECT …`, on the same schedule the query runs today (the shop example's 10_daily_revenue.sql is the pattern). Materialized views are refused by the shipped Iceberg REST catalog, so this page never creates one. Nothing is created or changed here.";
+
+#[utoipa::path(
+    get,
+    operation_id = "query_log_repeated",
+    path = "/api/query-log/repeated",
+    tag = "public",
+    description = "The statements the caller runs repeatedly, worst first (stardelt#38): the last 30 days of FINISHED queries, grouped by their shape (string literals and whitespace do not split a group; numeric literals do), at least 2 runs per group, ordered by total execution time. `scope` is `mine` (default), `team` (the service principals the caller's groups own) or `all` (administrators only); `limit` is 1 to 100, default 20. The answer carries one sentence about the supported acceleration path — a `sql` task with `CREATE OR REPLACE TABLE … AS SELECT …` in a scheduled pipeline. Nothing is created or changed.",
+    params(
+        ("scope" = Option<String>, Query, description = "mine (default), team, or all for administrators"),
+        ("limit" = Option<i64>, Query, description = "How many groups, 1 to 100 (default 20)"),
+    ),
+    responses(
+        (status = 200, description = "The repeated statements", body = RepeatedQueries),
+        (status = 400, description = "scope or limit is not one of the accepted values", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The all scope is for administrators", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn repeated(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Query(raw): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let who = Caller::of(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    let params = match parse_repeated_params(&raw) {
+        Ok(p) => p,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    if params.scope == Scope::All && !who.is_admin {
+        return error(StatusCode::FORBIDDEN, "the all scope is for administrators");
+    }
+    let owners = if params.scope == Scope::Team {
+        principal_owners(&s).await
+    } else {
+        HashMap::new()
+    };
+    if params.scope == Scope::Team && owners.is_empty() {
+        return Json(RepeatedQueries {
+            statements: Vec::new(),
+            suggestion: SUGGESTION.into(),
+        })
+        .into_response();
+    }
+
+    let mut q: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT sql_fingerprint, \
+            (array_agg(sql_text ORDER BY created_at DESC))[1] AS sql, \
+            count(*)::bigint AS runs, \
+            sum(execution_ms)::bigint AS total_ms, \
+            avg(execution_ms)::bigint AS average_ms, \
+            max(execution_ms)::bigint AS max_ms \
+         FROM query_log \
+         WHERE state = 'FINISHED' AND sql_fingerprint IS NOT NULL \
+           AND created_at > now() - interval '30 days'",
+    );
+    if params.scope == Scope::Mine {
+        q.push(" AND (principal = ")
+            .push_bind(who.username.clone())
+            .push(" OR principal = ")
+            .push_bind(who.sub.clone())
+            .push(")");
+    }
+    if params.scope == Scope::Team {
+        let subjects: Vec<String> = owners.keys().cloned().collect();
+        q.push(" AND principal = ANY(")
+            .push_bind(subjects)
+            .push(")");
+    }
+    q.push(
+        " GROUP BY sql_fingerprint HAVING count(*) >= 2 ORDER BY total_ms DESC NULLS LAST LIMIT ",
+    )
+    .push_bind(params.limit);
+
+    match q
+        .build_query_as::<RepeatedStatement>()
+        .fetch_all(pool)
+        .await
+    {
+        Ok(statements) => Json(RepeatedQueries {
+            statements,
+            suggestion: SUGGESTION.into(),
+        })
+        .into_response(),
+        Err(e) => store_failed(e),
+    }
+}
+
 /// The profile row's own fields the hints need: who ran it and how long it waited.
 #[derive(FromRow)]
 struct ProfileRow {
@@ -1462,6 +1601,28 @@ mod tests {
         let p = parse_params(&raw(&[])).unwrap();
         assert_eq!((p.scope, p.limit), (Scope::Mine, 50));
         assert!(p.state.is_none() && p.cursor.is_none() && p.search.is_none());
+    }
+
+    #[test]
+    fn repeated_params_default_to_mine_and_twenty() {
+        let p = parse_repeated_params(&HashMap::new()).expect("the defaults");
+        assert_eq!((p.scope, p.limit), (Scope::Mine, 20));
+        let mut raw = HashMap::new();
+        raw.insert("scope".into(), "team".into());
+        raw.insert("limit".into(), "5".into());
+        let p = parse_repeated_params(&raw).expect("the values");
+        assert_eq!((p.scope, p.limit), (Scope::Team, 5));
+        raw.insert("scope".into(), "everyone".into());
+        assert_eq!(
+            parse_repeated_params(&raw).unwrap_err(),
+            "scope must be mine, team or all"
+        );
+        raw.insert("scope".into(), "mine".into());
+        raw.insert("limit".into(), "0".into());
+        assert_eq!(
+            parse_repeated_params(&raw).unwrap_err(),
+            "limit must be a number from 1 to 100"
+        );
     }
 
     #[test]

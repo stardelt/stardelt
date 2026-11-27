@@ -876,6 +876,7 @@ fn api_router() -> Router<Arc<AppState>> {
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/usage", get(query_log_api::usage))
+        .route("/query-log/repeated", get(query_log_api::repeated))
         .route("/query-log/{id}", get(query_log_api::detail))
         .route("/query-log/{id}/profile", get(query_log_api::profile))
         .route("/query-log/{id}/history", get(query_log_api::history))

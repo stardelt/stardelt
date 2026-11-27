@@ -1800,6 +1800,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/query-log/repeated": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The statements the caller runs repeatedly, worst first (stardelt#38): the last 30 days of FINISHED queries, grouped by their shape (string literals and whitespace do not split a group; numeric literals do), at least 2 runs per group, ordered by total execution time. `scope` is `mine` (default), `team` (the service principals the caller's groups own) or `all` (administrators only); `limit` is 1 to 100, default 20. The answer carries one sentence about the supported acceleration path — a `sql` task with `CREATE OR REPLACE TABLE … AS SELECT …` in a scheduled pipeline. Nothing is created or changed. */
+        get: operations["query_log_repeated"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/query-log/usage": {
         parameters: {
             query?: never;
@@ -4627,6 +4644,24 @@ export interface components {
         RefreshAccepted: {
             /** @description Always `true`: a `202` is the acceptance, and the round has already started. */
             accepted: boolean;
+        };
+        RepeatedQueries: {
+            statements: components["schemas"]["RepeatedStatement"][];
+            /** @description The supported acceleration path; the same sentence for the API, the CLI and MCP. */
+            suggestion: string;
+        };
+        RepeatedStatement: {
+            /** Format: int64 */
+            averageMs?: number | null;
+            /** Format: int64 */
+            maxMs?: number | null;
+            /** Format: int64 */
+            runs: number;
+            /** @description The most recent run's statement. */
+            sql: string;
+            sqlFingerprint: string;
+            /** Format: int64 */
+            totalMs?: number | null;
         };
         Replicas: {
             /** Format: int32 */
@@ -12903,6 +12938,67 @@ export interface operations {
                 };
             };
             /** @description scope=all by somebody who is not an administrator */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    query_log_repeated: {
+        parameters: {
+            query?: {
+                /** @description mine (default), team, or all for administrators */
+                scope?: string;
+                /** @description How many groups, 1 to 100 (default 20) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The repeated statements */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepeatedQueries"];
+                };
+            };
+            /** @description scope or limit is not one of the accepted values */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The all scope is for administrators */
             403: {
                 headers: {
                     [name: string]: unknown;
