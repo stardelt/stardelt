@@ -525,6 +525,16 @@ fn dead_driver(pod: &Pod, now: k8s_openapi::jiff::Timestamp) -> Option<i32> {
         })
 }
 
+/// The `SparkConnect` a recreate deletes and the sentence the status carries. The target is
+/// the **cluster's** object (`spc-<cluster>`), never the server pod's: a pod name here deletes
+/// `spc-spc-<pod>`, answers 404 and recreates nothing (#2106).
+fn recreate_of(cluster: &str, server_pod: &str, code: i32) -> (String, String) {
+    (
+        format!("spc-{cluster}"),
+        format!("the server pod {server_pod} exited with {code}; recreating the server"),
+    )
+}
+
 /// How often a busy cluster refreshes `lastActivityAt`. Longer than the 60 s poll, so a
 /// running job does not cause a status write per minute forever.
 pub const IDLE_HEARTBEAT_SECS: i64 = 300;
@@ -1004,18 +1014,12 @@ pub async fn reconcile_spark_cluster(
         && let (Some(pod), Some(server_pod_name)) = (pod.as_ref(), server_pod.as_deref())
         && let Some(code) = dead_driver(pod, k8s_openapi::jiff::Timestamp::now())
     {
-        // The `SparkConnect` is `spc-<cluster>`, not `spc-<pod>`: the server pod is
-        // `spc-<cluster>-server` (#2090).
-        match connects
-            .delete(&format!("spc-{name}"), &Default::default())
-            .await
-        {
+        let (connect, sentence) = recreate_of(&name, server_pod_name, code);
+        match connects.delete(&connect, &Default::default()).await {
             Err(e) if !is_not_found(&e) => return Err(e),
             _ => {}
         }
-        message = Some(format!(
-            "the server pod {server_pod_name} exited with {code}; recreating the server"
-        ));
+        message = Some(sentence);
     }
 
     let endpoint =
@@ -1397,6 +1401,16 @@ mod tests {
         let now: k8s_openapi::jiff::Timestamp = "2026-11-27T06:20:00Z".parse().unwrap();
         assert_eq!(dead_driver(&ready_pod(), now), None);
         assert_eq!(dead_driver(&crashloop_pod(), now), None);
+    }
+
+    #[test]
+    fn a_recreate_deletes_the_clusters_connect_and_names_the_pod() {
+        let (connect, sentence) = recreate_of("demo", "spc-demo-server", 137);
+        assert_eq!(connect, "spc-demo");
+        assert_eq!(
+            sentence,
+            "the server pod spc-demo-server exited with 137; recreating the server"
+        );
     }
 
     #[test]
