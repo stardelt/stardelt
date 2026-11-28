@@ -268,7 +268,7 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/ask` — a question in, checked SQL out.
-         * @description A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like "only org domains" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.
+         * @description A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like "only org domains" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. `mode` is `agent` or `sql`; absent is `agent` when the endpoint that answers can use tools (its probe found tool calling, and Nova's MCP endpoint is on) and `sql` otherwise. In agent mode the model works with the platform's **read-only** MCP tools as the caller, holding the `stardelt:read` scope only: at most 8 model calls and 6 tool calls per question, every tool result cut at 8 000 characters, and the endpoint's `sendRows` decides whether a `sql_read` result reaches the model whole or as its columns and row count. The answer then carries `text` (the answer in words) and `steps` (the tool calls, with at most 50 rows of a `sql_read` for the panel); `sql` is the last statement it ran, and nothing is `EXPLAIN`-checked because the tools themselves are read-only. An explicit `agent` on a model that cannot use tools is a `400`. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.
          */
         post: operations["ask_answer"];
         delete?: never;
@@ -2845,12 +2845,18 @@ export interface components {
             error?: string | null;
             /** @description `passed`, `failed` or `not_run` */
             explain: string;
+            /** @description `agent` when the model used the read-only tools, `sql` for one checked statement. */
+            mode: string;
             model: string;
             /** @description One sentence saying what the statement answers, or why there is none. */
             sentence: string;
             /** @description The statement; `null` when no table matched, kept when the check failed. */
             sql?: string | null;
+            /** @description The tool calls an agent answer made, in order; empty for a `sql` answer. */
+            steps: components["schemas"]["AskStep"][];
             tables: components["schemas"]["AskTable"][];
+            /** @description The agent's answer in words; `null` for a `sql` answer. */
+            text?: string | null;
             /** @description The endpoints asked, in order: one, or two when auto mode fell back. */
             tried: string[];
         };
@@ -2900,9 +2906,25 @@ export interface components {
              *     that endpoint only, and is a `400` when it cannot answer Ask now.
              */
             endpoint?: string | null;
+            /**
+             * @description `agent` or `sql`. Absent means `agent` when the endpoint that answers can use tools
+             *     and Nova's MCP endpoint is on, and today's one-statement answer otherwise (D1).
+             */
+            mode?: string | null;
             previous?: components["schemas"]["AskPrevious"] | null;
             /** @description The question, in words, 1 to 2000 characters. */
             question: string;
+        };
+        /** @description One tool call an agent answer made, for the panel (D5). */
+        AskStep: {
+            /** @description The arguments it passed, as sent. */
+            arguments: Record<string, never>;
+            /** @description At most 50 rows of a `sql_read`, for the panel only; `null` for every other tool. */
+            rows?: unknown[][] | null;
+            /** @description One line for the step list, for example `sql_read: 12 rows`. */
+            summary: string;
+            /** @description The MCP tool the model called. */
+            tool: string;
         };
         /** @description One table the model was given. */
         AskTable: {
@@ -7001,7 +7023,7 @@ export interface operations {
                     "application/json": components["schemas"]["AskAnswer"];
                 };
             };
-            /** @description The question is empty or longer than 2000 characters, the previous turn's question, statement or table list breaks its limit, or `endpoint` names a `ModelEndpoint` that cannot answer Ask now */
+            /** @description The question is empty or longer than 2000 characters, the previous turn's question, statement or table list breaks its limit, `endpoint` names a `ModelEndpoint` that cannot answer Ask now, `mode` is neither `agent` nor `sql`, or `mode` is `agent` and the model cannot use tools */
             400: {
                 headers: {
                     [name: string]: unknown;

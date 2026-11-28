@@ -45,6 +45,9 @@ const NO_ENDPOINT: &str =
     "no ask model is ready: connect a ModelEndpoint with purpose ask, and wait for its probe";
 const SYSTEM_PROMPT: &str = "You write one Trino SQL statement for a question about the tables you are given. Use only these tables, fully qualified as catalog.namespace.table, and only the columns their documentation lists; never invent a table or a column. You receive metadata only, never rows. When an entry carries a verifiedQueries list and one of its questions matches the question, copy that query's shape — its tables, joins and filters — instead of writing a new one from scratch. When an entry carries a guide, follow it: it says how the table's values join, which rows to leave out and what its numbers mean. Answer with one JSON object with exactly two fields: \"sql\" — one SELECT or WITH statement, no trailing semicolon — and \"sentence\" — one sentence of at most 200 characters saying what the statement answers. Never write DDL or DML, and never write EXPLAIN.";
 
+/// The agent's system prompt: the model works with the read-only tools and answers in words.
+const AGENT_SYSTEM_PROMPT: &str = "You answer questions about the data the person may read, using the tools. Use the catalog and documentation tools to find tables, sql_read to look at data (read-only), and answer in words, naming the tables and numbers you used. Never invent a table, a column or a number.";
+
 /// How many of a table's verified queries the model receives (newest first).
 const VERIFIED_QUERIES_IN_CONTEXT: usize = 5;
 /// Longest verified SQL kept in the context; a longer one is cut with `…`.
@@ -67,6 +70,10 @@ pub(crate) struct AskRequest {
     /// that endpoint only, and is a `400` when it cannot answer Ask now.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// `agent` or `sql`. Absent means `agent` when the endpoint that answers can use tools
+    /// and Nova's MCP endpoint is on, and today's one-statement answer otherwise (D1).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// The answered turn a follow-up refines, as the panel sends it: the earlier question, the
@@ -117,6 +124,12 @@ pub(crate) struct AskAnswer {
     pub explain: String,
     /// Why the `EXPLAIN` check failed, when it did.
     pub error: Option<String>,
+    /// `agent` when the model used the read-only tools, `sql` for one checked statement.
+    pub mode: String,
+    /// The agent's answer in words; `null` for a `sql` answer.
+    pub text: Option<String>,
+    /// The tool calls an agent answer made, in order; empty for a `sql` answer.
+    pub steps: Vec<crate::ask_agent::AskStep>,
 }
 
 /// One conversation from a person's History.
@@ -408,6 +421,12 @@ struct Answered {
     sentence: String,
     explain: String,
     error: Option<String>,
+    /// `agent` or `sql`.
+    mode: &'static str,
+    /// The agent's answer in words; `None` on the `sql` path.
+    text: Option<String>,
+    /// The tool calls an agent answer made; empty on the `sql` path.
+    steps: Vec<crate::ask_agent::AskStep>,
 }
 
 /// True when an upstream refusal is a `5xx` or a `429` — the case another endpoint may
@@ -422,6 +441,7 @@ fn refusable_by_another(message: &str) -> bool {
 }
 
 /// Everything a chat call needs that does not change between the first call and the retry.
+#[derive(Clone)]
 struct Attempt<'a> {
     client: &'a reqwest::Client,
     pool: &'a sqlx::PgPool,
@@ -559,6 +579,362 @@ impl Attempt<'_> {
     }
 }
 
+/// What the agent's model closure shares with the handler that awaits it: the budget refusal
+/// (so a spent budget stays a `429`, never a `502`), and the last `model_call` row written.
+#[derive(Default)]
+struct AgentShared {
+    /// The refusal the person reads; set when the budget check said no.
+    refusal: Option<Response>,
+    /// The row the answer reports as `callId`.
+    last_call: Option<i64>,
+}
+
+/// One agent chat call: the budget check first, then the call and its own `model_call` row
+/// (D3). The endpoint's URL and key stay in the [`Attempt`], as on the `sql` path.
+async fn agent_model_call(
+    attempt: Attempt<'_>,
+    messages: Value,
+    with_tools: bool,
+    offered: &Value,
+    shared: &std::sync::Mutex<AgentShared>,
+) -> Result<crate::model_chat::Answer, crate::model_chat::ChatError> {
+    use crate::model_chat::ChatError;
+    if let Err(refusal) = crate::model_calls::check(
+        attempt.pool,
+        &crate::model_calls::quota_of(attempt.object),
+        attempt.group,
+        attempt.sub,
+    )
+    .await
+    {
+        if let Ok(mut state) = shared.lock() {
+            state.refusal = Some(crate::model_calls::refuse(&refusal));
+        }
+        // Never surfaces: the handler answers with the refusal from the slot above.
+        return Err(ChatError::Refused(String::new()));
+    }
+    let extra = if with_tools {
+        json!({ "tools": offered })
+    } else {
+        json!({})
+    };
+    let started = std::time::Instant::now();
+    let result = crate::model_chat::chat(
+        attempt.client,
+        &crate::model_chat::Chat {
+            base_url: attempt.url,
+            model: attempt.model,
+            key: attempt.key,
+            messages,
+            extra,
+        },
+    )
+    .await;
+    let call_id = match &result {
+        Ok(answer) => {
+            // A tool call carries no text; its row keeps the message so the call is visible.
+            let stored = (!answer.content.is_empty())
+                .then(|| answer.content.clone())
+                .or_else(|| serde_json::to_string(&answer.message).ok());
+            attempt
+                .record(
+                    "ok",
+                    answer.usage.as_ref(),
+                    stored.as_deref(),
+                    answer.latency_ms,
+                )
+                .await
+        }
+        Err(error) => {
+            let (outcome, sentence) = match error {
+                ChatError::Refused(sentence) => ("refused", sentence.clone()),
+                ChatError::Transport(sentence) => ("error", sentence.clone()),
+            };
+            attempt
+                .record(
+                    outcome,
+                    None,
+                    Some(&sentence),
+                    started.elapsed().as_millis() as u64,
+                )
+                .await
+        }
+    };
+    if let Ok(mut state) = shared.lock() {
+        state.last_call = call_id;
+    }
+    result
+}
+
+/// One `tools/call` answer as the value the model receives: the tool's structured body, or
+/// its sentence when the call failed.
+fn tool_value(body: &Value) -> Value {
+    let result = body.get("result").cloned().unwrap_or(Value::Null);
+    if result.get("isError") == Some(&Value::Bool(true)) {
+        let sentence = result
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or("the tool failed");
+        return json!({ "error": sentence });
+    }
+    if let Some(structured) = result.get("structuredContent") {
+        return structured.clone();
+    }
+    let text = result
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    serde_json::from_str(text).unwrap_or_else(|_| json!({ "text": text }))
+}
+
+/// The person the tools run as: the caller's own `Principal`, or dev mode's administrator.
+fn tool_principal(
+    caller: Option<&crate::auth::Principal>,
+    state: &AppState,
+) -> crate::auth::Principal {
+    match caller {
+        Some(caller) => caller.clone(),
+        None => crate::auth::Principal {
+            identity: crate::auth::Identity::dev_admin(&state.dev_user),
+            via: "session",
+            access_token: None,
+            client_id: None,
+        },
+    }
+}
+
+/// Everything the agent path needs that the handler already resolved (D1, D2, D6).
+struct AgentAsk<'a> {
+    state: &'a Arc<AppState>,
+    principal: Option<&'a crate::auth::Principal>,
+    pool: &'a sqlx::PgPool,
+    question: &'a str,
+    previous: Option<&'a AskPrevious>,
+    /// The endpoints the question may ask, in order: the named one, or the auto ranking.
+    endpoints: &'a [(String, Value)],
+    /// The MCP tool list (`mcp::tools()`): only its read-only entries are offered.
+    mcp_tools: &'a Value,
+    sub: &'a str,
+    group: Option<&'a str>,
+}
+
+/// Everything one agent question needs that does not change between its endpoints.
+struct AgentCall<'a> {
+    state: &'a Arc<AppState>,
+    principal: Option<&'a crate::auth::Principal>,
+    pool: &'a sqlx::PgPool,
+    client: &'a reqwest::Client,
+    sub: &'a str,
+    group: Option<&'a str>,
+    messages: &'a Value,
+    /// The OpenAI `tools` array: the endpoints' read-only menu.
+    offered: &'a Value,
+    /// What the rows store as the call's prompt.
+    prompt: &'a str,
+}
+
+impl AgentCall<'_> {
+    /// The answer one endpoint gives in agent mode, or the refusal another one may answer.
+    // The `Err` is the ready-made refusal this returns, as in `catalog_search::filter_value`.
+    #[allow(clippy::result_large_err)]
+    async fn one(&self, name: &str, object: &Value) -> Result<Answered, CallFailure> {
+        let model = endpoint_model(object);
+        let url = object
+            .pointer("/spec/url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if url.is_empty() || model.is_empty() {
+            return Err(CallFailure {
+                response: fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT),
+                retryable: true,
+            });
+        }
+        let key = crate::model_chat::key_for(name);
+        let attempt = Attempt {
+            client: self.client,
+            pool: self.pool,
+            object,
+            name,
+            model: &model,
+            url: &url,
+            key: key.as_deref(),
+            sub: self.sub,
+            group: self.group,
+            prompt: self.prompt,
+        };
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(AgentShared::default()));
+        let model_call = {
+            let shared = std::sync::Arc::clone(&shared);
+            let offered = self.offered.clone();
+            move |messages: Value, with_tools: bool| {
+                let shared = std::sync::Arc::clone(&shared);
+                let offered = offered.clone();
+                let attempt = attempt.clone();
+                async move { agent_model_call(attempt, messages, with_tools, &offered, &shared).await }
+            }
+        };
+        let state = Arc::clone(self.state);
+        let cfg = std::sync::Arc::new(
+            state
+                .mcp
+                .clone()
+                .expect("the handler checked Nova's MCP endpoint"),
+        );
+        let principal = tool_principal(self.principal, &state);
+        let tool_call = move |name: String, arguments: Value| {
+            let state = Arc::clone(&state);
+            let cfg = std::sync::Arc::clone(&cfg);
+            let principal = principal.clone();
+            async move {
+                let request = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": { "name": name, "arguments": arguments },
+                });
+                let facts = crate::auth::BearerFacts {
+                    scopes: vec![crate::mcp::READ_SCOPE.to_string()],
+                    client_id: None,
+                };
+                let response = crate::mcp::call_tool(
+                    &state,
+                    &cfg,
+                    &principal,
+                    &facts,
+                    Some(json!(1)),
+                    &request,
+                )
+                .await;
+                let (_, body) = body_of(response).await;
+                tool_value(&body)
+            }
+        };
+        let send_rows = crate::model_endpoints::row(object).send_rows;
+        let outcome = match crate::ask_agent::run(
+            model_call,
+            tool_call,
+            self.messages.clone(),
+            self.offered,
+            send_rows,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let refusal = shared
+                    .lock()
+                    .ok()
+                    .and_then(|mut state| state.refusal.take());
+                if let Some(response) = refusal {
+                    return Err(CallFailure {
+                        response,
+                        retryable: false,
+                    });
+                }
+                use crate::model_chat::ChatError;
+                let (sentence, retryable) = match &error {
+                    ChatError::Refused(sentence) => {
+                        (sentence.clone(), refusable_by_another(sentence))
+                    }
+                    ChatError::Transport(sentence) => (sentence.clone(), true),
+                };
+                return Err(CallFailure {
+                    response: fail(
+                        StatusCode::BAD_GATEWAY,
+                        format!("the model endpoint did not answer: {sentence}"),
+                    ),
+                    retryable,
+                });
+            }
+        };
+        let call_id = shared.lock().ok().and_then(|state| state.last_call);
+        let text = outcome.text;
+        let sentence = text
+            .as_deref()
+            .and_then(|text| text.lines().find(|line| !line.trim().is_empty()))
+            .map(|line| line.trim().to_string())
+            .unwrap_or_else(|| "the model answered without words".to_string());
+        Ok(Answered {
+            endpoint: name.to_string(),
+            model,
+            call_id,
+            sql: outcome.last_sql,
+            sentence,
+            explain: "not_run".to_string(),
+            error: None,
+            mode: "agent",
+            text,
+            steps: outcome.steps,
+        })
+    }
+}
+
+/// The agent path: the model works with the read-only tools and answers in words (D1–D6).
+async fn agent_ask(plan: AgentAsk<'_>) -> Response {
+    let Some(client) = crate::model_probe::http_client() else {
+        return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
+    };
+    let offered = crate::ask_agent::openai_tools(plan.mcp_tools);
+    let mut messages: Vec<Value> = vec![json!({
+        "role": "system",
+        "content": AGENT_SYSTEM_PROMPT,
+    })];
+    // D6: a follow-up is an earlier question/answer pair, as in stardelt/stardelt#2341.
+    if let Some(previous) = plan.previous {
+        messages.push(json!({"role": "user", "content": previous.question}));
+        messages.push(json!({"role": "assistant", "content": previous.sql}));
+    }
+    messages.push(json!({"role": "user", "content": plan.question}));
+    let messages = Value::Array(messages);
+    // A fallback endpoint that cannot use tools cannot do what this question asks for.
+    let endpoints: Vec<(String, Value)> = plan
+        .endpoints
+        .iter()
+        .take(FALLBACK_ENDPOINTS)
+        .filter(|(_, object)| crate::model_endpoints::row(object).tool_calling == Some(true))
+        .cloned()
+        .collect();
+    let asking = AgentCall {
+        state: plan.state,
+        principal: plan.principal,
+        pool: plan.pool,
+        client: &client,
+        sub: plan.sub,
+        group: plan.group,
+        messages: &messages,
+        offered: &offered,
+        prompt: plan.question,
+    };
+    let (answered, tried) = match ask_ranked(&endpoints, |index| {
+        let (name, object) = &endpoints[index];
+        let asking = &asking;
+        async move { asking.one(name, object).await }
+    })
+    .await
+    {
+        Ok(answer) => answer,
+        Err(response) => return response,
+    };
+    let body = AskAnswer {
+        endpoint: answered.endpoint,
+        model: answered.model,
+        tried,
+        call_id: answered.call_id,
+        sql: answered.sql,
+        sentence: answered.sentence,
+        tables: Vec::new(),
+        explain: answered.explain,
+        error: answered.error,
+        mode: answered.mode.to_string(),
+        text: answered.text,
+        steps: answered.steps,
+    };
+    record_conversation(plan.pool, plan.sub, plan.question, &body).await;
+    answer(body)
+}
+
 /// One question's attempt on one endpoint: the model call, `EXPLAIN` as the caller, and at
 /// most one correction. Everything that does not change between the endpoints is here.
 struct Asking<'a> {
@@ -624,6 +1000,9 @@ impl Asking<'_> {
                 sentence: first.sentence,
                 explain: "passed".to_string(),
                 error: None,
+                mode: "sql",
+                text: None,
+                steps: Vec::new(),
             });
         };
 
@@ -648,6 +1027,9 @@ impl Asking<'_> {
                     sentence: second.sentence,
                     explain: "passed".to_string(),
                     error: None,
+                    mode: "sql",
+                    text: None,
+                    steps: Vec::new(),
                 },
                 Err(second_error) => Answered {
                     endpoint: name.to_string(),
@@ -657,6 +1039,9 @@ impl Asking<'_> {
                     sentence: second.sentence,
                     explain: "failed".to_string(),
                     error: Some(second_error),
+                    mode: "sql",
+                    text: None,
+                    steps: Vec::new(),
                 },
             },
         )
@@ -691,6 +1076,21 @@ where
         }
     }
     Err(failure.unwrap_or_else(|| fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT)))
+}
+
+/// D1: whether one question is answered in agent mode. Absent means `agent` when the model
+/// can use tools and `sql` otherwise; an explicit `agent` on a model that cannot use tools
+/// is refused, because the question asked for something that model cannot do.
+fn ask_mode(requested: Option<&str>, can_use_tools: bool) -> Result<bool, &'static str> {
+    match requested {
+        Some("sql") => Ok(false),
+        Some("agent") if can_use_tools => Ok(true),
+        Some("agent") => {
+            Err("this model cannot use tools; send mode \"sql\" or choose another model")
+        }
+        Some(_) => Err("mode is agent or sql"),
+        None => Ok(can_use_tools),
+    }
 }
 
 /// The model's statement, through the MCP guard and then `EXPLAIN` — never run.
@@ -939,6 +1339,9 @@ fn no_table_answer(endpoint: String, model: String, tried: Vec<String>) -> AskAn
         tables: Vec::new(),
         explain: "not_run".to_string(),
         error: None,
+        mode: "sql".to_string(),
+        text: None,
+        steps: Vec::new(),
     }
 }
 
@@ -948,12 +1351,12 @@ fn no_table_answer(endpoint: String, model: String, tried: Vec<String>) -> AskAn
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. `mode` is `agent` or `sql`; absent is `agent` when the endpoint that answers can use tools (its probe found tool calling, and Nova's MCP endpoint is on) and `sql` otherwise. In agent mode the model works with the platform's **read-only** MCP tools as the caller, holding the `stardelt:read` scope only: at most 8 model calls and 6 tool calls per question, every tool result cut at 8 000 characters, and the endpoint's `sendRows` decides whether a `sql_read` result reaches the model whole or as its columns and row count. The answer then carries `text` (the answer in words) and `steps` (the tool calls, with at most 50 rows of a `sql_read` for the panel); `sql` is the last statement it ran, and nothing is `EXPLAIN`-checked because the tools themselves are read-only. An explicit `agent` on a model that cannot use tools is a `400`. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, every catalog the caller may browse")),
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
-        (status = 400, description = "The question is empty or longer than 2000 characters, the previous turn's question, statement or table list breaks its limit, or `endpoint` names a `ModelEndpoint` that cannot answer Ask now", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The question is empty or longer than 2000 characters, the previous turn's question, statement or table list breaks its limit, `endpoint` names a `ModelEndpoint` that cannot answer Ask now, `mode` is neither `agent` nor `sql`, or `mode` is `agent` and the model cannot use tools", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
         (status = 429, description = "The person's or their group's model budget is spent", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog, the cluster or the model endpoint did not answer", body = crate::openapi::ErrorResponse),
@@ -1041,6 +1444,31 @@ pub(crate) async fn ask(
     let group = caller
         .as_ref()
         .and_then(|caller| caller.0.identity.groups.first().cloned());
+
+    // D1: agent mode is the default when the endpoint that answers can use tools. Without
+    // Nova's MCP endpoint there are no tools to run, so the model cannot use them here.
+    let mcp_tools = state.mcp.as_ref().map(|_| crate::mcp::tools());
+    let can_use_tools =
+        mcp_tools.is_some() && crate::model_endpoints::row(first_object).tool_calling == Some(true);
+    let agent = match ask_mode(request.mode.as_deref(), can_use_tools) {
+        Ok(agent) => agent,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    if agent {
+        let tools = mcp_tools.expect("checked by can_use_tools");
+        return agent_ask(AgentAsk {
+            state: &state,
+            principal: caller.as_ref().map(|caller| &caller.0),
+            pool,
+            question: &question,
+            previous: request.previous.as_ref(),
+            endpoints: &endpoints,
+            mcp_tools: &tools,
+            sub: &sub,
+            group: group.as_deref(),
+        })
+        .await;
+    }
 
     // D1: a table the question names in full is a candidate first, whatever the search says.
     let named = qualified_names(&question);
@@ -1193,6 +1621,9 @@ pub(crate) async fn ask(
         tables: candidates,
         explain: answered.explain,
         error: answered.error,
+        mode: answered.mode.to_string(),
+        text: answered.text,
+        steps: answered.steps,
     };
     record_conversation(pool, &sub, &question, &body).await;
     answer(body)
@@ -1429,6 +1860,9 @@ mod tests {
             sentence: "One.".to_string(),
             explain: "passed".to_string(),
             error: None,
+            mode: "sql",
+            text: None,
+            steps: Vec::new(),
         }
     }
 
@@ -1522,6 +1956,22 @@ mod tests {
         .expect_err("the named endpoint's failure is the answer");
         assert_eq!(asked, vec!["b"], "no other endpoint is asked");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn agent_mode_is_the_default_only_when_the_model_can_use_tools() {
+        assert_eq!(ask_mode(None, true), Ok(true));
+        assert_eq!(ask_mode(None, false), Ok(false));
+        assert_eq!(ask_mode(Some("sql"), true), Ok(false), "`sql` is forced");
+        assert_eq!(ask_mode(Some("agent"), true), Ok(true));
+        assert!(
+            ask_mode(Some("agent"), false).is_err(),
+            "no tools, no agent"
+        );
+        assert!(
+            ask_mode(Some("chat"), true).is_err(),
+            "an unknown mode is refused"
+        );
     }
 
     #[test]
@@ -1641,6 +2091,9 @@ mod tests {
             }],
             explain: "not_run".into(),
             error: None,
+            mode: "sql".into(),
+            text: None,
+            steps: Vec::new(),
         };
         let value = serde_json::to_value(&answer).unwrap();
         assert_eq!(value["explain"], json!("not_run"));
@@ -1669,6 +2122,9 @@ mod tests {
             tables: vec![],
             explain: "passed".into(),
             error: None,
+            mode: "sql".into(),
+            text: None,
+            steps: Vec::new(),
         };
         let value = serde_json::to_value(&answer).unwrap();
         assert_eq!(value["callId"], Value::Null);
@@ -2146,6 +2602,9 @@ mod tests {
             tables: Vec::new(),
             explain: "passed".into(),
             error: None,
+            mode: "sql".into(),
+            text: None,
+            steps: Vec::new(),
         };
         // Twenty-one of alice's, then one of bob's.
         for number in 0..21 {

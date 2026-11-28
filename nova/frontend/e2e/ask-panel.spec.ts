@@ -46,6 +46,32 @@ const FAILED = {
   error: 'Table gold.shop.customer_ltv does not exist',
 }
 
+/**
+ * An agent answer (stardelt/stardelt#2365): the model used the read-only tools, answered in
+ * words, and the answer carries the steps it took and the last statement it ran.
+ */
+const AGENT_SQL = 'SELECT count(*) AS n\nFROM bronze.public_db.rnacentral_sequences'
+const AGENT = {
+  endpoint: 'lab', model: 'llama-3.3-70b', tried: ['lab'], callId: 44, sql: AGENT_SQL,
+  sentence: 'That table holds RNA sequences.',
+  tables: [], explain: 'not_run', error: null, mode: 'agent',
+  text: 'That table holds RNA sequences.\nIt held 12 rows when I looked.',
+  steps: [
+    {
+      tool: 'table_documentation',
+      arguments: { namespace: 'bronze.public_db', table: 'rnacentral_sequences' },
+      summary: 'table_documentation: bronze.public_db.rnacentral_sequences',
+      rows: null,
+    },
+    {
+      tool: 'sql_read',
+      arguments: { sql: AGENT_SQL },
+      summary: 'sql_read: 2 rows',
+      rows: [['id', 'name'], [1, 'URS00001'], [2, 'URS00002']],
+    },
+  ],
+}
+
 const HISTORY_SQL = "SELECT count(*) AS orders\nFROM lakehouse.staging.orders\nWHERE ordered_at >= current_date - INTERVAL '7' DAY"
 
 /** Two stored conversations, as `GET /api/ask/history` answers them: newest first. */
@@ -179,6 +205,39 @@ test('an answer renders its statement, its check line and its sources', async ({
   await page.getByRole('button', { name: 'Open in SQL editor' }).click()
   await expect(page).toHaveURL(/\/query\?/)
   expect(new URL(page.url()).searchParams.get('sql')).toBe(SQL)
+})
+
+test('an agent answer shows its words, its steps and its statement', async ({ page }) => {
+  await stub(page, { ask: (route) => json(route, AGENT) })
+  await view(page, 'dark', 1440, 900)
+  await ask(page, 'What is in bronze.public_db.rnacentral_sequences?')
+  const panel = page.locator('#ask-panel')
+
+  await expect(panel.getByText('It held 12 rows when I looked.')).toBeVisible()
+  await expect(panel.getByText('SQL only: this model cannot use tools.')).toHaveCount(0)
+  // The steps start folded; opening one shows the tool, its line and the rows it read.
+  const steps = panel.getByTestId('ask-steps')
+  await expect(steps).toHaveText('Steps (2)')
+  await expect(panel.getByText('sql_read: 2 rows')).toHaveCount(0)
+  await steps.click()
+  await expect(panel.getByText('table_documentation: bronze.public_db.rnacentral_sequences')).toBeVisible()
+  await expect(panel.getByText('sql_read: 2 rows')).toBeVisible()
+  await expect(panel.getByText('URS00002')).toBeVisible()
+
+  // The last statement the agent ran still opens in the editor.
+  await expect(page.getByTestId('ask-sql')).toHaveText(AGENT_SQL)
+  await panel.getByRole('button', { name: 'Open in SQL editor' }).click()
+  await expect(page).toHaveURL(/\/query\?/)
+  expect(new URL(page.url()).searchParams.get('sql')).toBe(AGENT_SQL)
+})
+
+test('a SQL-only answer says why it used no tools', async ({ page }) => {
+  await stub(page, { ask: (route) => json(route, { ...PASSED, mode: 'sql' }) })
+  await page.keyboard.press('Control+J')
+  await ask(page, 'How many customer rows did the shop read yesterday?')
+  const panel = page.locator('#ask-panel')
+  await expect(panel.getByText('SQL only: this model cannot use tools.')).toBeVisible()
+  await expect(panel.getByTestId('ask-sql')).toHaveText(SQL)
 })
 
 test('a failed check is honest, and the statement still opens in the editor', async ({ page }) => {
