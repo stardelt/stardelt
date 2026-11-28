@@ -292,6 +292,14 @@ def _parser():
     evals_run = evals_commands.add_parser("run", help="ask every eval, run its answer read-only and record pass or fail")
     evals_run.add_argument("--catalog", required=False, help="catalog to run; omitted, the default one")
     evals_run.add_argument("--only", type=int, help="run one eval by id")
+    classify = commands.add_parser("classify", help="suggest a data class for a table's unclassed columns")
+    classify_commands = classify.add_subparsers(dest="classify_command", required=True)
+    classify_columns = classify_commands.add_parser(
+        "columns", help="propose a class from each column's name; writes only with --apply"
+    )
+    classify_columns.add_argument("table", metavar="CATALOG.SCHEMA.TABLE", help="the table to scan")
+    classify_columns.add_argument("--apply", action="store_true", help="write the suggestions through the documentation update")
+    classify_columns.add_argument("--owner", metavar="GROUP", help="claim an ownerless table for this group (one of yours)")
     return parser
 
 
@@ -746,6 +754,17 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 return ERROR if not isinstance(err, ValueError) else USAGE
             stderr.write(f"stardelt: {dashboards.import_summary(args.folder, args.target, answer)}\n")
             return OK
+        if args.command == "classify":
+            from stardelt import classify as classification
+
+            problems, rows = classification.scan(nova, args.table, apply=args.apply, owner=args.owner)
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            for row in rows:
+                stdout.write(f"{row['column']}  {row['class']}  {row['action']}\n")
+            if not rows and not problems:
+                stderr.write("stardelt: nothing to propose; every column with a telling name already carries a class\n")
+            return ERROR if problems else OK
         if args.command == "apply":
             for spec in specs:
                 result = apply.apply(nova, spec, args.dry_run)
