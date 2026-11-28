@@ -66,6 +66,15 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
   })
   const schemas = namespaces.data?.namespaces ?? []
 
+  // The catalog's eval score (#125 point 4): the same rule the Evals page uses — the
+  // questions that have a run, passed over run. A catalog with no run yet shows nothing.
+  const evals = useQuery({ queryKey: ['evals', catalog.name], queryFn: () => api.evals(catalog.name) })
+  // A body that is not a list is an error like any other: the score line stays out and the
+  // page still shows its schemas.
+  const evalRows = Array.isArray(evals.data) ? evals.data : []
+  const evalRuns = evalRows.filter((row) => row.lastRun)
+  const evalPassed = evalRuns.filter((row) => row.lastRun?.passed).length
+
   /** Opens a schema. The tree reads the same params; the schema page follows in its own ticket. */
   const openSchema = (schema: string) => {
     const next = new URLSearchParams({ catalog: catalog.name, ns: schema })
@@ -87,6 +96,17 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
           <p className="text-text-mute text-sm">No description yet.</p>
         )}
       </header>
+
+      {evalRuns.length > 0 && (
+        <p className="text-sm">
+          <Link
+            className="text-accent hover:underline"
+            to={`/evals?catalog=${encodeURIComponent(catalog.name)}`}
+          >
+            {evalPassed} of {evalRuns.length} evals passed
+          </Link>
+        </p>
+      )}
 
       <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-x-6 gap-y-3 text-sm">
         <div>
