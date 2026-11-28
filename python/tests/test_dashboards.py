@@ -117,6 +117,20 @@ def test_a_second_export_removes_the_files_the_first_one_wrote(tmp_path):
     assert (out / "dashboards" / "Shop.yaml").is_file()
 
 
+def test_a_refused_re_export_keeps_the_previous_export(tmp_path):
+    """The empty-archive refusal writes nothing and removes nothing (the previous export stays)."""
+    out = tmp_path / "shop"
+    first = FakeNova(archive([member("metadata.yaml"), member("dashboards", "Shop.yaml")]))
+    dashboards.export(first, 42, out, "shop", "analytics")
+    stranger = FakeNova(archive([member("databases", "Trino_Gold.yaml")]))
+
+    with pytest.raises(dashboards.ExportError, match="no dashboards/"):
+        dashboards.export(stranger, 42, out, "shop", "analytics")
+
+    assert (out / "metadata.yaml").is_file()
+    assert (out / "dashboards" / "Shop.yaml").is_file()
+
+
 def test_an_export_leaves_files_that_are_not_part_of_an_export(tmp_path):
     """A README next to the export is the author's, not the exporter's."""
     out = tmp_path / "shop"
