@@ -2354,6 +2354,10 @@ mod tests {
             ),
             other => panic!("expected ForeignDashboard, got {other:?}"),
         }
+        assert!(
+            fake.lock().unwrap().import_body.is_empty(),
+            "a refused import writes nothing: the archive never reached Superset"
+        );
     }
 
     #[tokio::test]
@@ -2389,6 +2393,10 @@ mod tests {
             ),
             other => panic!("expected ForeignDashboard, got {other:?}"),
         }
+        assert!(
+            fake.lock().unwrap().import_body.is_empty(),
+            "a refused import writes nothing: the archive never reached Superset"
+        );
     }
 
     #[tokio::test]
