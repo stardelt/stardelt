@@ -439,6 +439,7 @@ def _build_dag(p, provenance: dict[str, str] | None = None) -> DAG:
                 writes=t.writes,
                 refresh=t.refresh,
                 full_refresh=t.full_refresh,
+                catalogs=t.spark_catalogs,
                 # The ServiceAccount the operator creates for the principal
                 # (`crd.rs::principal_client_id`: `sp-<name>`); the worker may `use` it (#1260).
                 principal_sa=f"sp-{p.principal.name}",

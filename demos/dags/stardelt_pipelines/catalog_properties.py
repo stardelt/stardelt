@@ -43,3 +43,31 @@ def catalog_properties(environ: Mapping[str, str]) -> dict[str, str]:
         properties["oauth2-server-uri"] = token_url
         properties["scope"] = "openid"
     return properties
+
+
+def spark_catalog_configuration(
+    catalogs: tuple[str, ...], catalog_uri: str, s3_endpoint: str
+) -> dict[str, str]:
+    """The `spark.sql.catalog.<name>.*` keys a Connect session needs, one block per catalog.
+
+    No credential belongs in this map: the task pod adds the principal's projected token per
+    catalog from the file it mounts, and the catalog vends short-lived storage credentials
+    (`vended-credentials`), so `s3.access-key-id` and `s3.secret-access-key` are absent.
+    """
+    configuration: dict[str, str] = {}
+    for name in catalogs:
+        configuration[f"spark.sql.catalog.{name}"] = "org.apache.iceberg.spark.SparkCatalog"
+        configuration[f"spark.sql.catalog.{name}.type"] = "rest"
+        configuration[f"spark.sql.catalog.{name}.rest-catalog-purge"] = "true"
+        configuration[f"spark.sql.catalog.{name}.uri"] = catalog_uri
+        configuration[f"spark.sql.catalog.{name}.warehouse"] = name
+        configuration[f"spark.sql.catalog.{name}.io-impl"] = (
+            "org.apache.iceberg.aws.s3.S3FileIO"
+        )
+        configuration[f"spark.sql.catalog.{name}.header.X-Iceberg-Access-Delegation"] = (
+            "vended-credentials"
+        )
+        configuration[f"spark.sql.catalog.{name}.s3.endpoint"] = s3_endpoint
+        configuration[f"spark.sql.catalog.{name}.s3.region"] = "us-east-1"
+        configuration[f"spark.sql.catalog.{name}.s3.path-style-access"] = "true"
+    return configuration

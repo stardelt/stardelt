@@ -1,6 +1,6 @@
 import pytest
 
-from stardelt_pipelines.catalog_properties import catalog_properties
+from stardelt_pipelines.catalog_properties import catalog_properties, spark_catalog_configuration
 
 BASE_ENV = {
     "CATALOG_URI": "https://lakekeeper.test/catalog",
@@ -46,3 +46,18 @@ def test_without_the_trio_the_properties_are_exactly_todays():
 )
 def test_a_partial_trio_is_treated_as_absent(partial):
     assert catalog_properties(BASE_ENV | partial) == BASE_PROPERTIES
+
+
+def test_spark_catalog_configuration_builds_a_block_per_catalog():
+    configuration = spark_catalog_configuration(
+        ("bronze", "silver"), "http://lakekeeper.test/catalog", "http://s3.test"
+    )
+    assert configuration["spark.sql.catalog.bronze"] == (
+        "org.apache.iceberg.spark.SparkCatalog"
+    )
+    assert configuration["spark.sql.catalog.bronze.type"] == "rest"
+    assert configuration["spark.sql.catalog.bronze.uri"] == "http://lakekeeper.test/catalog"
+    assert configuration["spark.sql.catalog.bronze.warehouse"] == "bronze"
+    assert configuration["spark.sql.catalog.silver.warehouse"] == "silver"
+    assert not any("access-key" in key for key in configuration)
+    assert not any(key.endswith(".token") for key in configuration)

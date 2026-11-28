@@ -478,7 +478,25 @@ def test_plan_accepts_a_spark_pipeline_task():
     assert dict(build.graph)["spark-pipeline.yml"] == GRAPH
     assert build.refresh == "full"
     assert build.full_refresh == ("range_ten",)
+    assert build.spark_catalogs == ("playground",)
     assert build.writes == ("playground.scratch.range_ten",)
+
+
+def test_a_spark_pipeline_graph_names_every_catalog_it_configures():
+    graph = GRAPH.replace(
+        "  spark.sql.catalog.playground.type: rest\n",
+        "  spark.sql.catalog.playground.type: rest\n"
+        "  spark.sql.catalog.bronze.type: rest\n",
+    )
+    p = plan(
+        *owned(
+            spark(
+                files={"spark-pipeline.yml": graph, "sql/range_ten.sql": "SELECT 1"}
+            )
+        )
+    )
+    (build,) = p.tasks
+    assert build.spark_catalogs == ("bronze", "playground")
 
 
 def test_plan_refuses_a_libraries_entry_without_a_glob():
