@@ -8,9 +8,9 @@
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `ask.rs` ⚠ | AI (Ask, MCP, models) | 1768 | 900 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `query_log_api.rs` ⚠ | SQL & query log | 1729 | 413 | 7 | Kubernetes API (CRDs), PostgreSQL state store |
+| `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1644 | 1527 | 4 | Airflow REST, Trino |
 | `superset.rs` ⚠ | Pipelines & delivery | 1579 | 1372 | 5 | Superset |
 | `main.rs` ⚠ | Core & identity | 1533 | 1620 | 3 | - |
-| `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1515 | 1409 | 4 | Airflow REST, Trino |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `deployments.rs` | Pipelines & delivery | 1179 | 829 | 5 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
@@ -76,4 +76,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (75 files)** | | **55164** | **47770** | **177** | |
+| **total (75 files)** | | **55293** | **47888** | **177** | |
