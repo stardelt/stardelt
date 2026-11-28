@@ -5908,8 +5908,8 @@ mod tests {
                 .expect("a status");
         assert_eq!(status.name, "superset-secrets");
         assert!(status.ready, "{status:?}");
-        assert_eq!(status.message.as_deref(), Some("ready: created 2 / kept 0"));
-        assert_eq!(patch_count(&requests), 2);
+        assert_eq!(status.message.as_deref(), Some("ready: created 3 / kept 0"));
+        assert_eq!(patch_count(&requests), 3);
     }
 
     #[tokio::test]
