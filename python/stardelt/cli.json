@@ -831,6 +831,27 @@
           "commands": []
         },
         {
+          "name": "evals",
+          "help": "create or correct the bundle's `evals:` questions in their catalog",
+          "arguments": [
+            {
+              "name": "directory",
+              "help": "the bundle directory (default: the current one)",
+              "optional": true
+            }
+          ],
+          "options": [
+            {
+              "flags": [
+                "--check"
+              ],
+              "help": "answer what would change, write nothing; exits 1 when anything differs",
+              "flag": true
+            }
+          ],
+          "commands": []
+        },
+        {
           "name": "dashboards",
           "help": "import the bundle's `dashboards:` folders for one target",
           "arguments": [

@@ -225,6 +225,14 @@ def _parser():
         "--check", action="store_true",
         help="answer what would change, write nothing; exits 1 when anything differs",
     )
+    apply_evals = package_commands.add_parser(
+        "evals", help="create or correct the bundle's `evals:` questions in their catalog"
+    )
+    apply_evals.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    apply_evals.add_argument(
+        "--check", action="store_true",
+        help="answer what would change, write nothing; exits 1 when anything differs",
+    )
     import_dashboards = package_commands.add_parser(
         "dashboards", help="import the bundle's `dashboards:` folders for one target"
     )
@@ -851,6 +859,15 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             for row in rows:
                 subject = row["table"] + (f" {row['metric']}" if row.get("metric") else "")
                 stdout.write(f"{subject}  {row['action']}\n")
+            if problems or (args.check and any(row["action"].startswith("would-") for row in rows)):
+                return ERROR
+            return OK
+        if args.command == "bundle" and args.bundle_command == "evals":
+            problems, rows = bundle.apply_evals(nova, args.directory, check=args.check)
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            for row in rows:
+                stdout.write(f"{row['question']}  {row['action']}\n")
             if problems or (args.check and any(row["action"].startswith("would-") for row in rows)):
                 return ERROR
             return OK
