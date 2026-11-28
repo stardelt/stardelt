@@ -52,9 +52,46 @@ def test_a_refused_second_page_names_the_cursor_and_keeps_the_first_page(tmp_pat
         FakeResponse(status=403, payload={"error": "this view is for platform administrators"}),
     )
     assert code == 1
-    assert "1 rows were written; continue with --cursor C1" in err
+    assert f"1 rows were written to {path}; continue with --cursor C1" in err
     assert "this view is for platform administrators" in err
     assert out == ""
     assert [json.loads(line)["id"] for line in path.read_text(encoding="utf-8").splitlines()] == [
         "a",
+    ]
+
+
+def test_a_cursor_continues_in_the_same_file(tmp_path):
+    path = tmp_path / "query-log.jsonl"
+    code, out, err, session = run(
+        ["query-log", "export", "--out", str(path), "--limit", "1"],
+        FakeResponse(payload={"rows": [{"id": "a"}], "nextCursor": "C1"}),
+        FakeResponse(status=403, payload={"error": "this view is for platform administrators"}),
+    )
+    assert code == 1
+    assert "1 rows were written to " + str(path) in err
+
+    code, out, err, session = run(
+        ["query-log", "export", "--out", str(path), "--cursor", "C1"],
+        FakeResponse(payload={"rows": [{"id": "b"}], "nextCursor": None}),
+    )
+    assert code == 0, err
+    assert json.loads(out) == {"rows": 1, "nextCursor": None}
+    assert [json.loads(line)["id"] for line in path.read_text(encoding="utf-8").splitlines()] == [
+        "a",
+        "b",
+    ]
+
+
+def test_append_adds_rows_to_an_existing_file(tmp_path):
+    path = tmp_path / "query-log.jsonl"
+    path.write_text(json.dumps({"id": "old"}) + "\n", encoding="utf-8")
+    code, out, err, session = run(
+        ["query-log", "export", "--out", str(path), "--append"],
+        FakeResponse(payload={"rows": [{"id": "new"}], "nextCursor": None}),
+    )
+    assert code == 0, err
+    assert json.loads(out) == {"rows": 1, "nextCursor": None}
+    assert [json.loads(line)["id"] for line in path.read_text(encoding="utf-8").splitlines()] == [
+        "old",
+        "new",
     ]

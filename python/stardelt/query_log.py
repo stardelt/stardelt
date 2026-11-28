@@ -9,10 +9,11 @@ class ExportError(RuntimeError):
     """The export stopped; the message names the file and the cursor to continue from."""
 
 
-def export(nova, out, *, from_ms=None, cursor=None, limit=None):
+def export(nova, out, *, from_ms=None, cursor=None, limit=None, out_path=None):
     """Page through ``query_log_export`` and write one JSON object per row.
 
-    ``out`` is a text file opened by the caller. Answers ``{"rows": <written>,
+    ``out`` is a text file opened by the caller; ``out_path`` is that file's name, so
+    the failure sentence can say where the rows went. Answers ``{"rows": <written>,
     "nextCursor": <cursor or None>}``. A request that fails raises ``ExportError``
     naming how many rows were written and the cursor of the next page, so the run can
     continue with ``--cursor``.
@@ -29,9 +30,9 @@ def export(nova, out, *, from_ms=None, cursor=None, limit=None):
         try:
             page = nova.call("query_log_export", query=query) or {}
         except api.StardeltApiError as err:
-            raise ExportError(
-                f"{written} rows were written; continue with --cursor {cursor}: {err}"
-            ) from err
+            where = f" to {out_path}" if out_path else ""
+            reach = f"continue with --cursor {cursor}" if cursor else "restart with --from"
+            raise ExportError(f"{written} rows were written{where}; {reach}: {err}") from err
         rows = page.get("rows") or []
         for row in rows:
             out.write(json.dumps(row, ensure_ascii=False) + "\n")

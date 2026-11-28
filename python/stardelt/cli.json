@@ -1175,7 +1175,7 @@
               "flags": [
                 "--out"
               ],
-              "help": "the file to write; overwritten",
+              "help": "the file to write; --cursor and --append add to it, otherwise it is replaced",
               "required": true
             },
             {
@@ -1189,6 +1189,13 @@
                 "--cursor"
               ],
               "help": "the nextCursor a previous, interrupted export named"
+            },
+            {
+              "flags": [
+                "--append"
+              ],
+              "help": "add the rows to the file instead of replacing it",
+              "flag": true
             },
             {
               "flags": [
