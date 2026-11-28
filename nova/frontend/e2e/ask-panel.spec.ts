@@ -421,7 +421,7 @@ const agentAnswer = (text: string) => ({
 
 test('an agent answer renders bold, lists and tables', async ({ page }) => {
   await stub(page, {
-    ask: (route) => json(route, agentAnswer('**shop-3-gold** failed\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |')),
+    ask: (route) => json(route, agentAnswer('**shop-3-gold** failed\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n[the docs](https://example.com/guide)')),
   })
   await page.keyboard.press('Control+J')
   const panel = page.locator('#ask-panel')
@@ -430,6 +430,12 @@ test('an agent answer renders bold, lists and tables', async ({ page }) => {
   await expect(panel.locator('strong', { hasText: 'shop-3-gold' })).toHaveText('shop-3-gold')
   await expect(panel.locator('li')).toHaveCount(2)
   await expect(panel.locator('table')).toHaveCount(1)
+  // A web link is drawn as a link, and it opens in a new tab without a handle on this page.
+  const link = panel.getByRole('link', { name: 'the docs' })
+  await expect(link).toHaveAttribute('href', 'https://example.com/guide')
+  await expect(link).toHaveAttribute('target', '_blank')
+  await expect(link).toHaveAttribute('rel', /noopener/)
+  await expect(link).toHaveAttribute('rel', /noreferrer/)
   await expect(panel).not.toContainText('**')
 })
 
@@ -441,19 +447,24 @@ test('model HTML is shown as text', async ({ page }) => {
   const panel = page.locator('#ask-panel')
   await ask(page, 'Which shop pipelines failed?')
 
+  await expect(panel.getByText('<b>hi</b>')).toBeVisible()
   await expect(panel.locator('img')).toHaveCount(0)
   await expect(panel.locator('b')).toHaveCount(0)
-  await expect(panel.getByText('<b>hi</b>')).toBeVisible()
 })
 
 test('a javascript link is not a link', async ({ page }) => {
   await stub(page, {
-    ask: (route) => json(route, agentAnswer('[x](javascript:alert(1))')),
+    ask: (route) => json(route, agentAnswer(
+      '[x](javascript:alert(1))\n\n[p](//evil.example)\n\n[q](/\\evil.example)',
+    )),
   })
   await page.keyboard.press('Control+J')
   const panel = page.locator('#ask-panel')
   await ask(page, 'Which shop pipelines failed?')
 
-  await expect(panel.locator('a')).toHaveCount(0)
+  // Every unsafe target keeps its text; none of them becomes a link.
   await expect(panel.getByText('x', { exact: true })).toBeVisible()
+  await expect(panel.getByText('p', { exact: true })).toBeVisible()
+  await expect(panel.getByText('q', { exact: true })).toBeVisible()
+  await expect(panel.locator('a')).toHaveCount(0)
 })

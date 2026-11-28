@@ -14,7 +14,8 @@ import { TOKEN_CLASS } from '../sqlTokens'
 
 /** The link targets Nova draws: the web and its own site. Everything else is text. */
 function safeHref(href: string): string | null {
-  return /^(https?:\/\/|\/)/.test(href) ? href : null
+  // `//host` and `/\host` are protocol-relative to the browser, not site-relative.
+  return /^(https?:\/\/|\/(?![/\\]))/.test(href) ? href : null
 }
 
 /** One inline token as an element; unknown tokens keep their text. */
