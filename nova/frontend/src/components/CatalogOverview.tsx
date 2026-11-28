@@ -69,7 +69,7 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
   // The catalog's eval score (#125 point 4): the same rule the Evals page uses — the
   // questions that have a run, passed over run. A catalog with no run yet shows nothing.
   const evals = useQuery({ queryKey: ['evals', catalog.name], queryFn: () => api.evals(catalog.name) })
-  const evalRows = evals.data ?? []
+  const evalRows = Array.isArray(evals.data) ? evals.data : []
   const evalRuns = evalRows.filter((row) => row.lastRun)
   const evalPassed = evalRuns.filter((row) => row.lastRun?.passed).length
 
