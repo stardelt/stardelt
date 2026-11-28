@@ -386,6 +386,18 @@ export type ModelEndpoint = {
 /** One table an Ask answer was written for. */
 export type AskTable = Schema<'AskTable'>
 
+/** One tool call an agent answer made (`POST /api/ask` `steps`, stardelt/stardelt#2365). */
+export type AskStep = {
+  /** The MCP tool the model called. */
+  tool: string
+  /** The arguments it passed, as sent. */
+  arguments: unknown
+  /** One line for the step list, for example `sql_read: 12 rows`. */
+  summary: string
+  /** At most 50 rows of a `sql_read`, for this list only; absent or null for other tools. */
+  rows?: unknown[] | null
+}
+
 /** The answer of `POST /api/ask` (design #891 slice a). No rows ever, and the SQL is not run. */
 export type AskAnswer = {
   endpoint: string
@@ -401,6 +413,15 @@ export type AskAnswer = {
   error?: string | null
   /** The `model_call` row the answer's last call wrote; the vote's target. */
   callId?: number | null
+  /**
+   * `agent` when the model used the platform's read-only tools, `sql` for one checked
+   * statement. Absent only for a conversation rebuilt from History, which keeps no mode.
+   */
+  mode?: 'agent' | 'sql'
+  /** The agent's answer in words; `null` or absent for a `sql` answer. */
+  text?: string | null
+  /** The tool calls an agent answer made, in order. */
+  steps?: AskStep[]
 }
 
 /**
@@ -1695,12 +1716,17 @@ export const api = {
    * turn's tables and sends its statement to the model. `endpoint` names the `ModelEndpoint`;
    * omitted, auto mode ranks the ready ones (#2342).
    */
-  ask:          (question: string, catalog?: string, previous?: AskPrevious, endpoint?: string) => {
+  /**
+   * `mode` is left out by default: Nova answers in agent mode when the endpoint can use
+   * tools and in `sql` mode otherwise, and the answer says which (stardelt/stardelt#2365).
+   */
+  ask:          (question: string, catalog?: string, previous?: AskPrevious, endpoint?: string, mode?: 'agent' | 'sql') => {
     const qs = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
     return jpost<AskAnswer>(`/api/ask${qs}`, {
       question,
       ...(previous ? { previous } : {}),
       ...(endpoint ? { endpoint } : {}),
+      ...(mode ? { mode } : {}),
     })
   },
   /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */

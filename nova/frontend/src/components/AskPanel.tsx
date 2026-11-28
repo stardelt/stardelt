@@ -410,11 +410,17 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
 
       {answer && (
         <div className="card p-3 space-y-2 text-sm">
-          <p>{answer.sentence}</p>
+          {answer.mode === 'agent'
+            ? <p className="whitespace-pre-wrap">{answer.text ?? answer.sentence}</p>
+            : <p>{answer.sentence}</p>}
           <p className="text-xs text-text-mute">
             answered by {answer.model || answer.endpoint}
             {(answer.tried?.length ?? 0) > 1 && ` after ${answer.tried[0]} failed`}
           </p>
+          {answer.mode === 'sql' && (
+            <p className="text-xs text-text-mute">SQL only: this model cannot use tools.</p>
+          )}
+          {answer.mode === 'agent' && <Steps steps={answer.steps ?? []} />}
 
           {answer.sql !== null && (
             <>
@@ -534,4 +540,54 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
       )}
     </div>
   )
+}
+
+/** One tool call the agent made, as the step list draws it: a line, and its rows. */
+function Steps({ steps }: { steps: NonNullable<AskAnswer['steps']> }) {
+  const [open, setOpen] = useState(false)
+  if (steps.length === 0) return null
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        className="btn-ghost py-0.5 px-2 text-xs"
+        aria-expanded={open}
+        data-testid="ask-steps"
+        onClick={() => setOpen(value => !value)}
+      >Steps ({steps.length})</button>
+      {open && (
+        <ol className="space-y-2 text-xs text-text-dim">
+          {steps.map((step, index) => (
+            <li key={index} className="space-y-1">
+              <span className="font-mono break-words">{step.summary}</span>
+              {Array.isArray(step.rows) && step.rows.length > 0 && (
+                <table className="text-[11px] border border-border">
+                  <tbody>
+                    {step.rows.slice(0, 5).map((row, rowIndex) => (
+                      <tr key={rowIndex}>
+                        {Array.isArray(row)
+                          ? row.map((cell, cellIndex) => (
+                            <td key={cellIndex} className="border border-border px-1 align-top">
+                              {cellText(cell)}
+                            </td>
+                          ))
+                          : <td className="border border-border px-1">{cellText(row)}</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+/** One cell of a `sql_read` row as text; `null` reads as an empty cell. */
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
 }

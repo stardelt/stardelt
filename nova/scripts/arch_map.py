@@ -69,8 +69,8 @@ AREAS: dict[str, list[str]] = {
     "Connections": ["connections", "connection_routes", "secret_store"],
     "Lineage": ["lineage_api", "lineage_event", "lineage_store"],
     "AI (Ask, MCP, models)": [
-        "ask", "mcp", "mcp_audit", "model_chat", "model_calls", "model_endpoints",
-        "model_probe", "model_usage", "model_proxy",
+        "ask", "ask_agent", "mcp", "mcp_audit", "model_chat", "model_calls",
+        "model_endpoints", "model_probe", "model_proxy", "model_usage",
     ],
     "Platform view": ["apps", "cluster"],
 }

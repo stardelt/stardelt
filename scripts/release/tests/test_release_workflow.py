@@ -95,7 +95,7 @@ class ReleaseSigningTest(unittest.TestCase):
         "operator-image.yml": 1,
         "platform-image.yml": 3,
         "demos-ci.yml": 2,
-        "python-ci.yml": 1,
+        "python-ci.yml": 2,  # CLI and the agent harness image (#2398)
     }
 
     def setUp(self) -> None:
