@@ -322,6 +322,16 @@
       ],
       "body": true
     },
+    "dashboards_list": {
+      "method": "GET",
+      "path": "/api/dashboards",
+      "path_params": [],
+      "query_params": [
+        "bundle",
+        "ownerGroup"
+      ],
+      "body": false
+    },
     "deployments_get": {
       "method": "GET",
       "path": "/api/deployments/{id}",
