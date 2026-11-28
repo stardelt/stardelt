@@ -226,6 +226,10 @@ export type Eval = Schema<'Eval'>
 export type EvalWithLastRun = Schema<'EvalWithLastRun'>
 /** A `POST /api/catalog/evals` body. */
 export type NewEval = Schema<'NewEval'>
+/** A `POST /api/evals/{id}/runs` body: the answer one run compared (#125 point 2). */
+export type NewEvalRun = Schema<'NewEvalRun'>
+/** One stored eval run and its verdict. */
+export type EvalRun = Schema<'EvalRun'>
 
 /** The freshness promise and the status it yields (#402 slice 2). */
 export type TableFreshness = Schema<'TableFreshness'>
@@ -1511,6 +1515,8 @@ export const api = {
     return jpost<Eval>(`/api/catalog/evals${q}`, body)
   },
   deleteEval: (id: number) => jdel(`/api/evals/${id}`),
+  /** Post one answer to an eval: the server compares it and stores the verdict (#125). */
+  runEval: (id: number, body: NewEvalRun) => jpost<EvalRun>(`/api/evals/${id}/runs`, body),
   putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
     jput<TableDocumentation>(
       catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),
@@ -1671,7 +1677,10 @@ export const api = {
   /** The model endpoints an administrator connected, without their URL or key. */
   modelEndpoints: () => jget<ModelEndpoint[]>('/api/model-endpoints'),
   /** A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform. */
-  ask:          (question: string)                => jpost<AskAnswer>('/api/ask', { question }),
+  ask:          (question: string, catalog?: string) => {
+    const qs = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
+    return jpost<AskAnswer>(`/api/ask${qs}`, { question })
+  },
   /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */
   askHistory:   ()                                => jget<AskConversation[]>('/api/ask/history'),
   /** 👍 or 👎 on one recorded call; the caller's own row only. */

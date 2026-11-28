@@ -87,13 +87,14 @@ flowchart LR
   fe_detail_pages --&gt;|39| be_pipelines_delivery
   fe_detail_pages --&gt;|2| be_platform_view
   fe_detail_pages --&gt;|2| be_sql_query_log
-  fe_explore --&gt;|28| be_catalog
+  fe_explore --&gt;|1| be_ai_ask_mcp_models
+  fe_explore --&gt;|29| be_catalog
   fe_explore --&gt;|3| be_core_identity
   fe_explore --&gt;|5| be_lineage
   fe_explore --&gt;|3| be_notebooks_compute
   fe_explore --&gt;|8| be_pipelines_delivery
   fe_explore --&gt;|1| be_platform_view
-  fe_explore --&gt;|14| be_sql_query_log
+  fe_explore --&gt;|15| be_sql_query_log
   fe_share --&gt;|4| be_catalog
   fe_share --&gt;|1| be_platform_view
   be_ai_ask_mcp_models -.-&gt;|1| x_airflow
@@ -188,7 +189,7 @@ sequenceDiagram
   main.rs 1513
 F-size frontend files over 800 lines: 7
   api-schema.d.ts 16253
-  api.ts 1758
+  api.ts 1767
   components/ScheduleDialog.tsx 1512
   routes/AdminCatalogs.tsx 1189
   components/ConnectionDialogs.tsx 1167
