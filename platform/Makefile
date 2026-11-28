@@ -1358,6 +1358,19 @@ access-sync-now: _context ## Run one access-sync Job now, wait for it and print 
 	         echo "job $$name did not complete — see the log above" >&2; exit 1; }; \
 	  kubectl -n $(NAMESPACE) logs "job/$$name"
 
+.PHONY: refresh-s3-credentials
+refresh-s3-credentials: _context ## Re-push the Secret's S3 key pair to every platform warehouse (rotation, #2174)
+	@$(MAKE) --no-print-directory access-sync
+	@name=access-sync-refresh-$$(date +%s); \
+	  kubectl -n $(NAMESPACE) create job --from=cronjob/access-sync "$$name" --dry-run=client -o json \
+	    | python3 -c 'import json,sys; job=json.load(sys.stdin); c=job["spec"]["template"]["spec"]["containers"][0]; c["command"]=c["command"]+["--refresh-storage-credentials"]; job["spec"]["backoffLimit"]=0; job["spec"]["activeDeadlineSeconds"]=300; json.dump(job,sys.stdout)' \
+	    | kubectl -n $(NAMESPACE) create -f - >/dev/null \
+	    || { echo "the refresh Job could not be created" >&2; exit 1; }; \
+	  kubectl -n $(NAMESPACE) wait --for=condition=complete "job/$$name" --timeout=300s >/dev/null \
+	    || { kubectl -n $(NAMESPACE) logs "job/$$name" 2>/dev/null || true; \
+	         echo "job $$name did not complete — see the log above" >&2; exit 1; }; \
+	  kubectl -n $(NAMESPACE) logs "job/$$name"
+
 .PHONY: verify-access-sync-script
 verify-access-sync-script: _context ## The live access-sync ConfigMap carries the repository's script
 	python3 scripts/check_access_sync_live.py
