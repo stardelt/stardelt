@@ -232,6 +232,7 @@ stardelt bundle deploy pipelines/ -t prod                        # Nova checks e
 stardelt dashboards export 42 -o dashboards/shop   # inside a bundle: a dashboard as bundle files; databases/ is never stored
 stardelt bundle dashboards pipelines/ -t prod     # import the `dashboards:` folders for that target
 stardelt classify columns gold.shop.customers   # suggest a class for each unclassed column; --apply writes it
+stardelt agent --once "what is in silver.shop.stg_customers?"   # an agent in the terminal: the read-only tools as you, the platform's model
 ```
 
 `bundle plan` and `bundle deploy` (which also takes `--dry-run`, the same as `plan`) work on one target. Every pipeline file gets

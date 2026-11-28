@@ -25,7 +25,7 @@ from pathlib import Path
 
 import requests
 
-from stardelt import __version__, api, apply, bundle, lineage, login, maintenance, mcp, runs, shortcuts, skill, statements
+from stardelt import __version__, agent, api, apply, bundle, lineage, login, maintenance, mcp, runs, shortcuts, skill, statements
 
 OK, ERROR, USAGE, AUTH = 0, 1, 2, 3
 
@@ -51,6 +51,16 @@ def _parser():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("whoami", help="who Nova thinks you are (JSON)")
     commands.add_parser("doctor", help="check the host, Nova, the sign-in and who you are; each failure names its fix")
+    assistant = commands.add_parser(
+        "agent", help="an agent in your terminal: it reads the catalog and data as you, with the platform's model"
+    )
+    assistant.add_argument(
+        "--endpoint", metavar="NAME", help="the ModelEndpoint to use (default: the first reachable one offered to agents)"
+    )
+    assistant.add_argument("--once", metavar="QUESTION", help="answer one question and exit (0 on an answer, 1 on an error)")
+    assistant.add_argument(
+        "--max-steps", type=int, default=agent.MAX_STEPS, help=f"model calls per question (default {agent.MAX_STEPS})"
+    )
     signin = commands.add_parser("login", help="sign in once with a code approved in a browser (device flow)")
     signin.add_argument(
         "--issuer", help="your identity provider's realm address (default: $STARDELT_ISSUER, else asked from Nova's address)"
@@ -987,6 +997,30 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 stderr.write(f"stardelt: run {run['runId']} ended {run['state']}{more}\n")
                 return ERROR
             return OK
+        if args.command == "agent":
+            try:
+                endpoint = agent.pick_endpoint(nova.call("model_endpoints_list"), args.endpoint)
+            except ValueError as err:
+                stderr.write(f"stardelt: {err}\n")
+                return ERROR
+            tools_server = mcp.Server(nova)
+            say = lambda line: stderr.write(line + "\n")  # noqa: E731
+            if args.once is not None:
+                messages = [{"role": "user", "content": args.once}]
+                stdout.write(agent.ask(nova, tools_server, endpoint, messages, max_steps=args.max_steps, say=say) + "\n")
+                return OK
+            messages = []
+            while True:
+                stdout.write("agent> ")
+                stdout.flush()
+                line = stdin.readline()
+                if not line:
+                    return OK
+                question = line.strip()
+                if not question or question == "exit":
+                    return OK
+                messages.append({"role": "user", "content": question})
+                stdout.write(agent.ask(nova, tools_server, endpoint, messages, max_steps=args.max_steps, say=say) + "\n")
         if args.command == "mcp":
             allowed = list(mcp.DEFAULT_TOOLS) + [n for n in args.allow if n not in mcp.DEFAULT_TOOLS]
             log = lambda name, failed: stderr.write(f"stardelt-mcp: {name} {'error' if failed else 'ok'}\n")  # noqa: E731
