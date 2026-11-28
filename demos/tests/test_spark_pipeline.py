@@ -67,6 +67,9 @@ def values(**overrides):
         catalog="playground",
         database="scratch",
         storage="s3a://lakehouse/pipelines/demo/shop/build/checkpoints",
+        catalogs=("playground",),
+        catalog_uri="http://lakekeeper.test/catalog",
+        s3_endpoint="http://s3.test",
         steps=steps(SPEC_PATH, None, ()),
         wap_branch=None,
     )
@@ -119,6 +122,23 @@ def test_the_runner_reads_the_projected_catalog_token():
     assert "TOKEN_DIR" in spark_pipeline.RUNNER
     assert "/var/run/secrets/stardelt-catalog/token" in spark_pipeline.RUNNER
     assert "PIPELINE_CLIENT_SECRET" not in spark_pipeline.RUNNER
+
+
+def test_the_pod_carries_the_catalog_configuration(monkeypatch):
+    variables = env(monkeypatch, catalogs=("bronze", "playground"))
+    configuration = json.loads(variables["SPARK_PROJECT_CONFIGURATION"].value)
+    assert configuration["spark.sql.catalog.bronze.warehouse"] == "bronze"
+    assert configuration["spark.sql.catalog.playground.warehouse"] == "playground"
+    assert not any("access-key" in key for key in configuration)
+    assert json.loads(variables["SPARK_PROJECT_CATALOGS"].value) == ["bronze", "playground"]
+
+
+def test_the_runner_tokens_every_catalog_it_configures():
+    assert "SPARK_PROJECT_CATALOGS" in spark_pipeline.RUNNER
+    assert (
+        'configuration.update(json.loads(os.environ["SPARK_PROJECT_CONFIGURATION"]))'
+        in spark_pipeline.RUNNER
+    )
 
 
 def test_the_graph_map_is_the_json_pair_list(monkeypatch):

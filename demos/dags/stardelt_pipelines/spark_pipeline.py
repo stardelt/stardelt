@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from kubernetes.client import models as k8s
 
 from stardelt_pipelines import wap as wap_module
+from stardelt_pipelines.catalog_properties import spark_catalog_configuration
 
 try:  # Airflow is in the loader image and on the cluster, not in the unit-test environment.
     from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
@@ -33,6 +34,10 @@ IMAGE_ENV = "PIPELINE_SPARK_IMAGE"
 REMOTE_ENV = "PIPELINE_SPARK_REMOTE"
 PULL_SECRET_ENV = "PIPELINE_SPARK_PULL_SECRET"
 BUCKET_ENV = "PIPELINE_SPARK_BUCKET"
+CATALOG_URI_ENV = "PIPELINE_CATALOG_URL"
+DEFAULT_CATALOG_URI = "http://lakekeeper.stardelt.svc.cluster.local:8181"
+S3_ENDPOINT_ENV = "S3_ENDPOINT"
+DEFAULT_S3_ENDPOINT = "http://seaweedfs-s3.stardelt.svc.cluster.local:8333"
 GRAPH_DIR = "/opt/graph"
 SPARK_HOME = "/opt/spark"
 # The projected ServiceAccount token the kubelet writes for the catalog audience (#492). The
@@ -66,6 +71,7 @@ document["catalog"] = os.environ["SPARK_CATALOG"]
 document["database"] = os.environ["SPARK_DATABASE"]
 document["storage"] = os.environ["SPARK_STORAGE"]
 configuration = document.get("configuration") or {}
+configuration.update(json.loads(os.environ["SPARK_PROJECT_CONFIGURATION"]))
 configuration["spark.remote"] = os.environ["SPARK_REMOTE"]
 branch = os.environ.get("SPARK_WAP_BRANCH") or ""
 if branch:
@@ -77,9 +83,9 @@ for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
 # The kubelet writes the projected ServiceAccount token to
 # /var/run/secrets/stardelt-catalog/token; it is the only catalog credential in the pod.
 token = Path(f"{TOKEN_DIR}/token").read_text().strip()
-catalog = document["catalog"]
-configuration[f"spark.sql.catalog.{catalog}.token"] = token
-configuration[f"spark.sql.catalog.{catalog}.header.X-Iceberg-Access-Delegation"] = "vended-credentials"
+for name in json.loads(os.environ["SPARK_PROJECT_CATALOGS"]):
+    configuration[f"spark.sql.catalog.{name}.token"] = token
+    configuration[f"spark.sql.catalog.{name}.header.X-Iceberg-Access-Delegation"] = "vended-credentials"
 document["configuration"] = configuration
 spec.write_text(yaml.safe_dump(document, sort_keys=False))
 
@@ -153,6 +159,9 @@ def pod_env(
     catalog: str,
     database: str,
     storage: str,
+    catalogs: tuple[str, ...],
+    catalog_uri: str,
+    s3_endpoint: str,
     steps: tuple[tuple[str, ...], ...],
     wap_branch: str | None = None,
 ) -> list[k8s.V1EnvVar]:
@@ -166,6 +175,14 @@ def pod_env(
         k8s.V1EnvVar(name="SPARK_CATALOG", value=catalog),
         k8s.V1EnvVar(name="SPARK_DATABASE", value=database),
         k8s.V1EnvVar(name="SPARK_STORAGE", value=storage),
+        k8s.V1EnvVar(
+            name="SPARK_PROJECT_CONFIGURATION",
+            value=json.dumps(
+                spark_catalog_configuration(catalogs, catalog_uri, s3_endpoint),
+                sort_keys=True,
+            ),
+        ),
+        k8s.V1EnvVar(name="SPARK_PROJECT_CATALOGS", value=json.dumps(list(catalogs))),
         k8s.V1EnvVar(
             name="SPARK_PROJECT_STEPS",
             value=json.dumps([list(step) for step in steps]),
@@ -204,6 +221,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         owner_group: str,
         files: Mapping[str, str],
         writes: tuple[str, ...],
+        catalogs: tuple[str, ...] = (),
         refresh: str | None,
         full_refresh: tuple[str, ...],
         principal_sa: str,
@@ -216,6 +234,7 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
         self.owner_group = owner_group
         self.files = dict(files)
         self.catalog, self.database = writes[0].rsplit(".", 1)[0].split(".", 1)
+        self.catalogs = tuple(catalogs) or (self.catalog,)
         self.refresh = refresh
         self.full_refresh = tuple(full_refresh)
         self.principal_sa = principal_sa
@@ -272,6 +291,9 @@ class SparkPipelinePodOperator(KubernetesPodOperator):
             remote=connect_remote(self.owner_group),
             catalog=self.catalog,
             database=self.database,
+            catalogs=self.catalogs,
+            catalog_uri=os.environ.get(CATALOG_URI_ENV) or DEFAULT_CATALOG_URI,
+            s3_endpoint=os.environ.get(S3_ENDPOINT_ENV) or DEFAULT_S3_ENDPOINT,
             storage=checkpoint_uri(
                 os.environ.get(BUCKET_ENV) or "lakehouse",
                 self.owner_group,

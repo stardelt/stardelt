@@ -229,6 +229,9 @@ class TaskPlan:
     graph: tuple[tuple[str, str], ...] = ()
     refresh: str | None = None
     full_refresh: tuple[str, ...] = ()
+    # `spark-pipeline` tasks only: the catalogs the loader configures (the write catalog and
+    # every catalog the graph names). Defaults keep every other kind unchanged.
+    spark_catalogs: tuple[str, ...] = ()
     # `quality` tasks only: the SQL assertions the run is gated on. Defaults keep every other kind
     # unchanged.
     checks: tuple[Check, ...] = ()
@@ -356,10 +359,13 @@ def plan(
         graph: tuple[tuple[str, str], ...] = ()
         refresh = None
         full_refresh: tuple[str, ...] = ()
+        spark_catalogs: tuple[str, ...] = ()
         if kind == "spark-pipeline":
             if not (spec.get("ownerGroup") and spec.get("runAs")):
                 raise PlanError(SPARK_PIPELINE_NEEDS_PRINCIPAL)
-            graph, refresh, full_refresh = _spark_pipeline_config(task_name, raw)
+            graph, refresh, full_refresh, spark_catalogs = _spark_pipeline_config(
+                task_name, raw
+            )
         checks: tuple[Check, ...] = ()
         if kind == "quality":
             checks = _quality_checks(task_name, raw.get("checks"), publish)
@@ -444,6 +450,7 @@ def plan(
                 graph=graph,
                 refresh=refresh,
                 full_refresh=full_refresh,
+                spark_catalogs=spark_catalogs,
                 checks=checks,
                 writes=writes,
             )
@@ -576,14 +583,15 @@ def _spark_glob_include_problem(include):
 
 def _spark_pipeline_config(
     task_name: str, raw: dict
-) -> tuple[tuple[tuple[str, str], ...], str | None, tuple[str, ...]]:
-    """The graph's files, its refresh mode and its full-refresh datasets, or a `PlanError`.
+) -> tuple[tuple[tuple[str, str], ...], str | None, tuple[str, ...], tuple[str, ...]]:
+    """The graph's files, its refresh mode, its full-refresh datasets and its catalogs, or a `PlanError`.
 
     The graph must not set `catalog`, `database` or `storage` (the bundle refuses those too):
     stardelt sets them from the task's `writes` — one catalog and one schema per graph — and
     from the group's bucket. `spark-pipeline.yml` must be present and be a map; its
     `configuration:` must carry the `spark.sql.catalog.<catalog>.type` block the loader gives
-    the principal's token to (#957 Q2/Q3).
+    the principal's token to (#957 Q2/Q3). The set is the write catalog plus every catalog the
+    graph names in `configuration:`.
     """
     files = raw.get("files")
     if not isinstance(files, dict) or "spark-pipeline.yml" not in files:
@@ -634,6 +642,11 @@ def _spark_pipeline_config(
         raise PlanError(
             SPARK_PIPELINE_NEEDS_BLOCK.format(task=task_name, catalog=catalog)
         )
+    catalogs = {catalog}
+    for entry in configuration:
+        parts = entry.split(".")
+        if len(parts) >= 4 and parts[:3] == ["spark", "sql", "catalog"]:
+            catalogs.add(parts[3])
     for path, content in files.items():
         if not isinstance(path, str) or not isinstance(content, str):
             raise PlanError(SPARK_PIPELINE_NEEDS_FILES.format(task=task_name))
@@ -649,7 +662,12 @@ def _spark_pipeline_config(
         raise PlanError(
             f"spark-pipeline task `{task_name}` sets fullRefresh as a list of dataset names"
         )
-    return tuple(sorted(files.items())), refresh, tuple(full_refresh)
+    return (
+        tuple(sorted(files.items())),
+        refresh,
+        tuple(full_refresh),
+        tuple(sorted(catalogs)),
+    )
 
 
 def refuse_unrunnable(p: PipelinePlan) -> None:

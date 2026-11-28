@@ -178,7 +178,10 @@ def test_the_graph_is_one_spark_pipeline_task():
     assert task["spark-pipeline"] == {"project": "graph"}
     assert task["writes"] == ["silver.${var.schema}.customer_value", "silver.${var.schema}.daily_orders"]
     spec = yaml.safe_load((BUNDLE / "graph" / "spark-pipeline.yml").read_text(encoding="utf-8"))
-    assert spec["configuration"] == {"spark.sql.catalog.silver.type": "rest"}
+    assert spec["configuration"] == {
+        "spark.sql.catalog.bronze.type": "rest",
+        "spark.sql.catalog.silver.type": "rest",
+    }
     assert spec["libraries"] == [{"glob": {"include": "sql/**"}}]
     assert sorted(p.name for p in (BUNDLE / "graph" / "sql").glob("*.sql")) == [
         "customer_value.sql",
