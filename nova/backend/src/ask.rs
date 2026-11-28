@@ -2897,6 +2897,7 @@ mod tests {
             error: None,
             mode: "sql".into(),
             text: None,
+            thinking: None,
             steps: Vec::new(),
         }
     }
