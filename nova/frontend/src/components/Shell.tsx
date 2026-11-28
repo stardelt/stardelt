@@ -172,23 +172,25 @@ export default function Shell() {
 
   // Ask is on when an endpoint may answer it: purpose `ask`, the probe found it
   // reachable, and it answers in a JSON shape — the rule the backend applies to itself
-  // (`backend/src/ask.rs`, `ready_ask_endpoint`). Without one the button never shows.
+  // (`backend/src/ask.rs`, `ready_ask_endpoints`). Without one the button never shows, and
+  // the panel's switcher offers every one that has it (#2342).
   const endpoints = useQuery({ queryKey: ['model-endpoints'], queryFn: api.modelEndpoints, staleTime: 60_000 })
   // The endpoint list is an array or nothing; an answer that is neither leaves Ask off
   // rather than taking the shell down with it.
   const endpointRows = Array.isArray(endpoints.data) ? endpoints.data : []
-  const askEndpoint = endpointRows
+  const askEndpoints = endpointRows
     .filter(e => e.purposes.includes('ask') && e.reachable === true && e.jsonOutput === true)
-    .sort((a, b) => a.name.localeCompare(b.name))[0]
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const askReady = askEndpoints.length > 0
   const [askOpen, setAskOpen] = useState(false)
   // A question handed to the panel by the ⌘K row; cleared once the panel has asked it.
   const [askQuestion, setAskQuestion] = useState<string | null>(null)
-  useEffect(() => { if (!askEndpoint) setAskOpen(false) }, [askEndpoint])
+  useEffect(() => { if (!askReady) setAskOpen(false) }, [askReady])
 
   // ⌘J / Ctrl+J opens Ask — when an endpoint can answer it, and never from a field where
   // the person is typing a question.
   useEffect(() => {
-    if (!askEndpoint) return
+    if (!askReady) return
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'j') return
       const target = e.target as HTMLElement | null
@@ -198,7 +200,7 @@ export default function Shell() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [askEndpoint])
+  }, [askReady])
 
   // ⌘K / Ctrl+K opens the page palette. The SQL editor owns Ctrl/⌘+Enter, so nothing
   // else is bound here.
@@ -277,7 +279,7 @@ export default function Shell() {
         />
       )}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} onSwitchTheme={toggleTheme}
-        askReady={askEndpoint != null}
+        askReady={askReady}
         onAsk={(q) => { setAskQuestion(q); setAskOpen(true) }} />
       <aside
         id="primary-nav"
@@ -410,7 +412,7 @@ export default function Shell() {
             />
           </form>
           <span className="md:hidden"><StageBadge me={me.data} /></span>
-          {askEndpoint && (
+          {askReady && (
             <button
               type="button"
               className="btn-ghost py-1.5 text-sm"
@@ -462,9 +464,9 @@ export default function Shell() {
               <Outlet />
             </ErrorBoundary>
           </main>
-          {askOpen && askEndpoint && (
+          {askOpen && askReady && (
             <AskPanel
-              endpoint={askEndpoint}
+              endpoints={askEndpoints}
               onClose={() => setAskOpen(false)}
               initialQuestion={askQuestion ?? undefined}
               onInitialQuestion={() => setAskQuestion(null)}
