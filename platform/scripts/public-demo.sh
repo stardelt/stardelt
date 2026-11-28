@@ -717,10 +717,10 @@ PY
     fi
   }
 
-  # 18. The shop pipelines are the bundle's three, scheduled (#335, #79 slice 2b): twelve
+  # 18. The shop pipelines are the bundle's scheduled ones (#335, #79 slice 2b): twelve
   # one-statement On demand pipelines also carry the label, so the count alone proves nothing.
   check_18() {
-    local document names unscheduled
+    local document names unscheduled expected
     document="$(kubectl -n "$NAMESPACE" get pipelines.stardelt.io -l stardelt.io/bundle=shop -o json 2>/dev/null || true)"
     names=""
     unscheduled=""
@@ -728,8 +728,16 @@ PY
       names="$(jq -r '[.items[]? | .metadata.name] | sort | join(" ")' <<<"$document")"
       unscheduled="$(jq -r '[.items[]? | select((.spec.schedule.cron // "") == "") | .metadata.name] | join(" ")' <<<"$document")"
     fi
-    if [ "$names" != "shop-1-bronze shop-2-silver shop-3-gold" ]; then
-      check_msg="the shop pipelines are '${names:-none}', not the bundle's 3 scheduled ones (shop-1-bronze, shop-2-silver, shop-3-gold)"
+    # The bundle's own scheduled pipelines, not a hand-kept list (#1296 added the fourth).
+    expected="$(for f in ../demos/examples/shop-bundle/resources/*.yaml; do
+      awk 'BEGIN{sched=0} /^schedule:/{sched=1} /^name:/{sub(/^name:[[:space:]]*/,""); name=$0} END{if (name != "" && sched) print name}' "$f"
+    done | sort | paste -sd' ' -)"
+    if [ -z "$expected" ]; then
+      check_msg="no scheduled pipeline name was read from ../demos/examples/shop-bundle/resources"
+      return 1
+    fi
+    if [ "$names" != "$expected" ]; then
+      check_msg="the shop pipelines are '${names:-none}', not the bundle's scheduled ones ($expected)"
       check_fix="make demo-shop YES=1"
       return 1
     fi
@@ -738,7 +746,7 @@ PY
       check_fix="make demo-shop YES=1"
       return 1
     fi
-    check_msg="the shop pipelines are the bundle's 3 scheduled ones (shop-1-bronze, shop-2-silver, shop-3-gold)"
+    check_msg="the shop pipelines are the bundle's scheduled ones ($expected)"
   }
 
   # 19. The dbt run exists, is a dbt task on the demo's project, and names the visitors (#335, #112).
