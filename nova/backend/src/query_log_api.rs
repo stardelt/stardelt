@@ -270,6 +270,44 @@ fn decode_cursor(cursor: &str) -> Option<(i64, String)> {
     (!id.is_empty()).then(|| Some((us.parse().ok()?, id.to_string())))?
 }
 
+/// The checked query string of the export route. Unlike the list, the order is ascending,
+/// so a writer can keep one keyset position and continue from it after a restart.
+#[derive(Debug, PartialEq)]
+struct ExportParams {
+    from_ms: Option<i64>,
+    cursor: Option<(i64, String)>,
+    limit: i64,
+}
+
+const DEFAULT_EXPORT_LIMIT: i64 = 500;
+const MAX_EXPORT_LIMIT: i64 = 1000;
+
+fn parse_export_params(raw: &HashMap<String, String>) -> Result<ExportParams, String> {
+    let from_ms = raw
+        .get("from")
+        .map(|v| {
+            v.parse::<i64>()
+                .map_err(|_| "from must be a number (epoch milliseconds)".to_string())
+        })
+        .transpose()?;
+    let cursor = raw
+        .get("cursor")
+        .map(|c| decode_cursor(c).ok_or_else(|| "invalid cursor".to_string()))
+        .transpose()?;
+    let limit = match raw.get("limit") {
+        None => DEFAULT_EXPORT_LIMIT,
+        Some(v) => match v.parse::<i64>() {
+            Ok(n) if (1..=MAX_EXPORT_LIMIT).contains(&n) => n,
+            _ => return Err("limit must be between 1 and 1000".into()),
+        },
+    };
+    Ok(ExportParams {
+        from_ms,
+        cursor,
+        limit,
+    })
+}
+
 /// `%`, `_` and `\` in a search text are literals, not wildcards.
 fn like_pattern(text: &str) -> String {
     let mut out = String::from("%");
@@ -1490,6 +1528,205 @@ pub async fn history(
         .into_response()
 }
 
+/// One stored row of the query log, with every column the table has.
+#[derive(FromRow)]
+struct ExportRow {
+    query_id: String,
+    warehouse: String,
+    state: String,
+    principal: String,
+    source: Option<String>,
+    client_tags: Vec<String>,
+    catalog: Option<String>,
+    schema_name: Option<String>,
+    query_type: Option<String>,
+    sql_text: String,
+    sql_hash: String,
+    created_ms: i64,
+    started_ms: Option<i64>,
+    ended_ms: Option<i64>,
+    updated_ms: i64,
+    queued_ms: Option<i64>,
+    planning_ms: Option<i64>,
+    execution_ms: Option<i64>,
+    wall_ms: Option<i64>,
+    cpu_ms: Option<i64>,
+    peak_memory_bytes: Option<i64>,
+    input_rows: Option<i64>,
+    input_bytes: Option<i64>,
+    output_rows: Option<i64>,
+    output_bytes: Option<i64>,
+    written_rows: Option<i64>,
+    written_bytes: Option<i64>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    tables_read: Vec<String>,
+    tables_written: Vec<String>,
+}
+
+impl From<ExportRow> for QueryLogExportRow {
+    fn from(r: ExportRow) -> Self {
+        let error = r.error_code.map(|code| QueryFailure {
+            code,
+            message: r.error_message,
+        });
+        Self {
+            id: r.query_id,
+            state: r.state,
+            user: r.principal,
+            source: r.source,
+            client_tags: r.client_tags,
+            warehouse: r.warehouse,
+            catalog: r.catalog,
+            schema: r.schema_name,
+            query_type: r.query_type,
+            sql: r.sql_text,
+            sql_hash: r.sql_hash,
+            created_at: r.created_ms,
+            started_at: r.started_ms,
+            ended_at: r.ended_ms,
+            updated_at: r.updated_ms,
+            timing: QueryTiming {
+                queued_ms: r.queued_ms,
+                planning_ms: r.planning_ms,
+                execution_ms: r.execution_ms,
+                wall_ms: r.wall_ms,
+                cpu_ms: r.cpu_ms,
+            },
+            data: QueryData {
+                input_rows: r.input_rows,
+                input_bytes: r.input_bytes,
+                output_rows: r.output_rows,
+                output_bytes: r.output_bytes,
+                written_rows: r.written_rows,
+                written_bytes: r.written_bytes,
+                peak_memory_bytes: r.peak_memory_bytes,
+            },
+            tables_read: r.tables_read,
+            tables_written: r.tables_written,
+            error,
+        }
+    }
+}
+
+/// One row of the export: every stored column, so a writer can copy the table whole.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogExportRow {
+    id: String,
+    state: String,
+    user: String,
+    source: Option<String>,
+    client_tags: Vec<String>,
+    warehouse: String,
+    catalog: Option<String>,
+    schema: Option<String>,
+    query_type: Option<String>,
+    sql: String,
+    sql_hash: String,
+    created_at: i64,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    updated_at: i64,
+    timing: QueryTiming,
+    data: QueryData,
+    tables_read: Vec<String>,
+    tables_written: Vec<String>,
+    error: Option<QueryFailure>,
+}
+
+/// One ascending page of the export; `nextCursor` is null on the last page.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogExportPage {
+    rows: Vec<QueryLogExportRow>,
+    next_cursor: Option<String>,
+}
+
+/// `GET /api/admin/query-log/export?from=&cursor=&limit=` — the whole log, ascending.
+#[utoipa::path(
+    get,
+    operation_id = "query_log_export",
+    path = "/api/admin/query-log/export",
+    tag = "public",
+    description = "Administrator only. Every stored column of the query log, oldest first, a page at a time — the read a job copies into the platform's own tables so usage outlives the 90-day window. The order is ascending (createdAt, then id), so a writer keeps the nextCursor of one page and continues from it after a restart; nextCursor is null on the last page. limit is 1 to 1000, 500 by default; from is an epoch-millisecond lower bound. With NOVA_QUERY_LOG_REDACT_LITERALS=1 every statement shows '?' in place of each string literal.",
+    params(
+        ("from" = Option<i64>, Query, description = "Created at or after this time, epoch milliseconds"),
+        ("cursor" = Option<String>, Query, description = "The nextCursor of the previous page; rows after it, ascending"),
+        ("limit" = Option<i64>, Query, description = "Page size from 1 to 1000; 500 by default"),
+    ),
+    responses(
+        (status = 200, description = "One ascending page of the whole log", body = QueryLogExportPage),
+        (status = 400, description = "A parameter is not valid; the message names it", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn export(
+    State(s): State<Arc<AppState>>,
+    Query(raw): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let params = match parse_export_params(&raw) {
+        Ok(p) => p,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    let cursor_us = params.cursor.as_ref().map(|(us, _)| *us);
+    let cursor_id = params
+        .cursor
+        .as_ref()
+        .map(|(_, id)| id.clone())
+        .unwrap_or_default();
+    let rows: Vec<ExportRow> = match sqlx::query_as(
+        "SELECT query_id, warehouse, state, principal, source, client_tags, catalog, schema_name, \
+                query_type, sql_text, sql_hash, \
+                (extract(epoch FROM created_at) * 1000)::bigint AS created_ms, \
+                (extract(epoch FROM started_at) * 1000)::bigint AS started_ms, \
+                (extract(epoch FROM ended_at) * 1000)::bigint AS ended_ms, \
+                (extract(epoch FROM updated_at) * 1000)::bigint AS updated_ms, \
+                queued_ms, planning_ms, execution_ms, wall_ms, cpu_ms, peak_memory_bytes, \
+                input_rows, input_bytes, output_rows, output_bytes, written_rows, written_bytes, \
+                error_code, error_message, tables_read, tables_written \
+           FROM query_log \
+          WHERE ($1::bigint IS NULL OR created_at >= 'epoch'::timestamptz + ($1::bigint * interval '1 millisecond')) \
+            AND ($2::bigint IS NULL OR (created_at, query_id) > ('epoch'::timestamptz + ($2::bigint * interval '1 microsecond'), $3)) \
+          ORDER BY created_at ASC, query_id ASC \
+          LIMIT $4",
+    )
+    .bind(params.from_ms)
+    .bind(cursor_us)
+    .bind(cursor_id)
+    .bind(params.limit + 1)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return store_failed(e),
+    };
+    let more = rows.len() as i64 > params.limit;
+    let mut rows = rows;
+    rows.truncate(params.limit as usize);
+    let next = if more {
+        rows.last()
+            .map(|r| encode_cursor(r.created_ms * 1000, &r.query_id))
+    } else {
+        None
+    };
+    let mut rows: Vec<QueryLogExportRow> = rows.into_iter().map(QueryLogExportRow::from).collect();
+    if s.redact_query_log_literals {
+        for row in &mut rows {
+            row.sql = redact_literals(&row.sql);
+        }
+    }
+    Json(QueryLogExportPage {
+        rows,
+        next_cursor: next,
+    })
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1577,6 +1814,99 @@ mod tests {
         })
         .unwrap();
         assert_eq!(page, serde_json::json!({ "items": [], "nextCursor": null }));
+    }
+
+    #[test]
+    fn query_log_export_parameters_and_cursor() {
+        let p = parse_export_params(&raw(&[])).unwrap();
+        assert_eq!(
+            p,
+            ExportParams {
+                from_ms: None,
+                cursor: None,
+                limit: 500,
+            }
+        );
+        assert_eq!(
+            parse_export_params(&raw(&[("limit", "1000")]))
+                .unwrap()
+                .limit,
+            1000
+        );
+        assert_eq!(
+            parse_export_params(&raw(&[("limit", "1001")])).unwrap_err(),
+            "limit must be between 1 and 1000"
+        );
+        assert_eq!(
+            parse_export_params(&raw(&[("limit", "0")])).unwrap_err(),
+            "limit must be between 1 and 1000"
+        );
+        assert_eq!(
+            parse_export_params(&raw(&[("from", "abc")])).unwrap_err(),
+            "from must be a number (epoch milliseconds)"
+        );
+        assert_eq!(
+            parse_export_params(&raw(&[("cursor", "nonsense")])).unwrap_err(),
+            "invalid cursor"
+        );
+        let p = parse_export_params(&raw(&[
+            ("cursor", &encode_cursor(1_700_000_000_000_000, "q1")),
+            ("from", "1700000000000"),
+        ]))
+        .unwrap();
+        assert_eq!(p.from_ms, Some(1_700_000_000_000));
+        assert_eq!(p.cursor, Some((1_700_000_000_000_000, "q1".to_string())));
+    }
+
+    /// The exporter reads these names; typing the responses must not rename one.
+    #[test]
+    fn the_export_row_keeps_its_wire_names() {
+        let row = QueryLogExportRow {
+            id: "q1".into(),
+            state: "FINISHED".into(),
+            user: "u".into(),
+            source: None,
+            client_tags: vec![],
+            warehouse: "analytics".into(),
+            catalog: None,
+            schema: None,
+            query_type: None,
+            sql: "select 1".into(),
+            sql_hash: "h".into(),
+            created_at: 1,
+            started_at: None,
+            ended_at: None,
+            updated_at: 2,
+            timing: QueryTiming {
+                queued_ms: None,
+                planning_ms: None,
+                execution_ms: None,
+                wall_ms: None,
+                cpu_ms: None,
+            },
+            data: QueryData {
+                input_rows: None,
+                input_bytes: None,
+                output_rows: None,
+                output_bytes: None,
+                written_rows: None,
+                written_bytes: None,
+                peak_memory_bytes: None,
+            },
+            tables_read: vec![],
+            tables_written: vec![],
+            error: None,
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        for key in ["createdAt", "sqlHash", "tablesWritten", "updatedAt"] {
+            assert!(v.get(key).is_some(), "the export row lost {key}");
+        }
+        let page = serde_json::to_value(QueryLogExportPage {
+            rows: vec![],
+            next_cursor: None,
+        })
+        .unwrap();
+        assert_eq!(page, serde_json::json!({ "rows": [], "nextCursor": null }));
     }
 
     #[test]
