@@ -986,6 +986,9 @@ fn api_router() -> Router<Arc<AppState>> {
             "/dashboards/{id}/export",
             get(superset::export_dashboard_for_bundle),
         )
+        // The prune half (#115 slice b): remove one dashboard this bundle imported, and only
+        // a dashboard its import stamped.
+        .route("/dashboards/{id}", delete(superset::delete_dashboard))
         // The caller's own JupyterHub workspace (stardelt-nova#653): read, start, stop. The
         // hub user is the caller's own sign-in name; there is no path parameter, so nobody
         // reaches somebody else's server, and Nova has no `access:servers` scope.

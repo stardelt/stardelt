@@ -5169,6 +5169,111 @@
         }
       }
     },
+    "/api/dashboards/{id}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/dashboards/{id}`: remove one dashboard **this bundle imported**. The\ndashboard's `certified_by` must be exactly `stardelt bundle <bundle>`; a dashboard\nwithout the stamp is refused, so a person's own dashboard in the target is never\ntouched (#115 decision 6). The caller's rule is the export's owner-group rule.",
+        "description": "Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>`; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own stage.",
+        "operationId": "dashboards_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Superset's numeric dashboard id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "bundle",
+            "in": "query",
+            "description": "The bundle that imported the dashboard",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ownerGroup",
+            "in": "query",
+            "description": "The bundle's owner group; the caller must be a member",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "400": {
+            "description": "The bundle name or owner group is empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the bundle's owner group, or the dashboard is not stamped by this bundle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Superset has no such dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Superset answered an error, or could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance has no Superset service user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/dashboards/{id}/export": {
       "get": {
         "tags": [
@@ -15258,6 +15363,24 @@
               "type": "string"
             },
             "description": "Groups that may read the pipeline without being members (`spec.viewers`). At most 16,\neach a group name; omitted writes none. A bundle's pipeline file carries it (#79)."
+          }
+        }
+      },
+      "DashboardDeleteQuery": {
+        "type": "object",
+        "description": "`DELETE /api/dashboards/{id}` query: the bundle whose import stamped the dashboard.",
+        "required": [
+          "bundle",
+          "ownerGroup"
+        ],
+        "properties": {
+          "bundle": {
+            "type": "string",
+            "description": "The bundle that owns the dashboard, 1 to 64 characters."
+          },
+          "ownerGroup": {
+            "type": "string",
+            "description": "The bundle's owner group; the caller must be a member."
           }
         }
       },
