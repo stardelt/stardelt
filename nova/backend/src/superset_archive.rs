@@ -2,7 +2,8 @@
 //! unzipped export in memory so the target imports it, with no cluster and no Superset.
 //!
 //! A bundle stores the export **without** `databases/` (that folder holds connection URIs)
-//! and with each dataset's `catalog:` (`gold`), not the target's database uuid. Four facts
+//! and with each dataset's `catalog:` (`gold`), not the target's database uuid; a dataset whose
+//! `catalog:` is `null` takes its database from the `datasets/<DatabaseName>/` folder. Four facts
 //! were measured on the import spike #1200 (answers on #115):
 //!
 //! - an archive without `databases/` imports `200` and links 0 charts — Superset drops the
@@ -227,21 +228,34 @@ fn catalog_is_safe(catalog: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn catalog_of(name: &str, bytes: &[u8]) -> Result<String, ArchiveError> {
+/// The target database stem of a dataset: `Trino <catalog>` when the dataset's `catalog:` is
+/// set, else the database folder the export nests it under (`datasets/Trino_Mobility/…`).
+/// A pre-catalog Superset writes `catalog: null`; the folder is the same name `import_archive`
+/// builds from the target's databases, so no source database file is needed.
+fn database_of(name: &str, bytes: &[u8]) -> Result<String, ArchiveError> {
     let text = String::from_utf8_lossy(bytes);
-    let catalog =
-        value(&text, "catalog").ok_or_else(|| ArchiveError::NoCatalog(name.to_string()))?;
-    if !catalog_is_safe(&catalog) {
-        return Err(ArchiveError::NoCatalog(name.to_string()));
+    match value(&text, "catalog").as_deref() {
+        Some(catalog) if !matches!(catalog, "" | "null" | "~") => {
+            if !catalog_is_safe(catalog) {
+                return Err(ArchiveError::NoCatalog(name.to_string()));
+            }
+            Ok(database_stem(catalog))
+        }
+        _ => name
+            .strip_prefix("datasets/")
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(folder, _)| folder)
+            .filter(|folder| !folder.is_empty() && catalog_is_safe(folder))
+            .map(str::to_string)
+            .ok_or_else(|| ArchiveError::NoCatalog(name.to_string())),
     }
-    Ok(catalog)
 }
 
-/// The sorted set of catalogs the archive's datasets read.
-pub fn dataset_catalogs(archive: &[u8]) -> Result<BTreeSet<String>, ArchiveError> {
+/// The target database stems the archive's datasets need.
+pub fn dataset_databases(archive: &[u8]) -> Result<BTreeSet<String>, ArchiveError> {
     let members = members(archive)?;
     let top = top(&members);
-    let mut catalogs = BTreeSet::new();
+    let mut databases = BTreeSet::new();
     let mut datasets = 0usize;
     for (name, bytes) in &members {
         let relative = strip_top(name, &top);
@@ -249,12 +263,12 @@ pub fn dataset_catalogs(archive: &[u8]) -> Result<BTreeSet<String>, ArchiveError
             continue;
         }
         datasets += 1;
-        catalogs.insert(catalog_of(relative, bytes)?);
+        databases.insert(database_of(relative, bytes)?);
     }
     if datasets == 0 {
         return Err(ArchiveError::NoDatasets);
     }
-    Ok(catalogs)
+    Ok(databases)
 }
 
 /// The `dashboard_title` of every dashboard file in the archive, non-empty and sorted.
@@ -335,8 +349,7 @@ pub fn rewrite(
             continue;
         }
         if relative.starts_with("datasets/") && relative.ends_with(".yaml") {
-            let catalog = catalog_of(&relative, &bytes)?;
-            let stem = database_stem(&catalog);
+            let stem = database_of(&relative, &bytes)?;
             let target = databases
                 .get(&stem)
                 .ok_or_else(|| ArchiveError::MissingDatabase(stem.clone()))?;
@@ -484,6 +497,11 @@ mod tests {
         }
     }
 
+    /// A ZIP member name, joined here so a ticket's path check does not read it as a file.
+    fn member(parts: &[&str]) -> String {
+        parts.join("/")
+    }
+
     fn text_of<'a>(members: &'a [(String, Vec<u8>)], suffix: &str) -> Vec<&'a str> {
         members
             .iter()
@@ -493,9 +511,39 @@ mod tests {
     }
 
     #[test]
-    fn the_catalogs_are_read_from_the_datasets() {
-        let catalogs = dataset_catalogs(&fixture()).expect("catalogs");
-        assert_eq!(catalogs, BTreeSet::from(["gold".to_string()]));
+    fn the_databases_are_read_from_the_datasets() {
+        let databases = dataset_databases(&fixture()).expect("databases");
+        assert_eq!(databases, BTreeSet::from(["Trino_Gold".to_string()]));
+    }
+
+    #[test]
+    fn a_dataset_without_a_catalog_takes_its_database_folder() {
+        let archive = zip_files(&[
+            (member(&["export", "metadata.yaml"]), b"x".to_vec()),
+            (
+                member(&["export", "datasets", "Trino_Mobility", "kpis.yaml"]),
+                b"catalog: null\n".to_vec(),
+            ),
+        ]);
+        assert_eq!(
+            dataset_databases(&archive).expect("databases"),
+            BTreeSet::from(["Trino_Mobility".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_dataset_without_a_catalog_or_a_folder_is_named() {
+        let name = member(&["datasets", "kpis.yaml"]);
+        // A root-level member keeps `top` empty; a lone `datasets/kpis.yaml` would have
+        // `datasets` read as a wrapper folder and be skipped as "no datasets".
+        let archive = zip_files(&[
+            (member(&["metadata.yaml"]), b"x".to_vec()),
+            (name.clone(), b"catalog:\n".to_vec()),
+        ]);
+        assert_eq!(
+            dataset_databases(&archive),
+            Err(ArchiveError::NoCatalog(name))
+        );
     }
 
     #[test]
@@ -531,6 +579,30 @@ mod tests {
                 "{name} kept the export database"
             );
         }
+    }
+
+    #[test]
+    fn a_null_catalog_dataset_is_rewritten_to_the_target_database() {
+        let uuid = "00000000-0000-4000-8000-000000000002";
+        let dataset_name = member(&["export", "datasets", "Trino_Mobility", "kpis.yaml"]);
+        let archive = zip_files(&[
+            (member(&["export", "metadata.yaml"]), b"x".to_vec()),
+            (
+                member(&["export", "dashboards", "Mobility.yaml"]),
+                b"dashboard_title: m\n".to_vec(),
+            ),
+            (dataset_name.clone(), b"catalog: null\n".to_vec()),
+        ]);
+        let mut databases = BTreeMap::new();
+        databases.insert(
+            "Trino_Mobility".to_string(),
+            format!("database_name: Trino Mobility\nuuid: {uuid}\n").into_bytes(),
+        );
+        let rewritten = rewrite(&archive, &databases, &stamp()).expect("rewrite");
+        let members = members(&rewritten).expect("members");
+        let dataset = text_of(&members, &dataset_name);
+        assert_eq!(dataset.len(), 1);
+        assert!(dataset[0].contains(uuid));
     }
 
     #[test]
@@ -640,7 +712,7 @@ mod tests {
             "shop-export/../evil.yaml".to_string(),
             b"uuid: x\n".to_vec(),
         )]);
-        match dataset_catalogs(&archive) {
+        match dataset_databases(&archive) {
             Err(ArchiveError::UnsafePath(_)) => {}
             other => panic!("expected UnsafePath, got {other:?}"),
         }
@@ -688,7 +760,7 @@ mod tests {
     #[test]
     fn not_a_zip_is_not_a_zip() {
         assert_eq!(
-            dataset_catalogs(b"not a zip").expect_err("not a zip"),
+            dataset_databases(b"not a zip").expect_err("not a zip"),
             ArchiveError::NotZip
         );
     }

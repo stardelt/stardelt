@@ -754,8 +754,8 @@ pub(crate) struct ImportedDashboard {
 /// the target's `databases/` file is added, every dashboard carries the stamp, then Superset
 /// imports it. Answers Superset's own JSON body.
 ///
-/// The target database for a dataset's `catalog: gold` is the database whose name maps to the
-/// stem `Trino_Gold` (a space becomes `_`, the export's naming). Its uuid is read from the
+/// The target database for a dataset is `Trino <catalog>` from its `catalog:`, or the database
+/// folder when a pre-catalog dashboard exports `catalog: null`. Its uuid is read from the
 /// database's own export — never written by us — so the target keeps its connection URI.
 ///
 /// Before the write, every dashboard the archive carries is matched by title against the
@@ -769,7 +769,7 @@ pub(crate) async fn import_archive(
     stamp: &Stamp<'_>,
     overwrite: bool,
 ) -> Result<ImportedDashboard, ImportError> {
-    let catalogs = superset_archive::dataset_catalogs(archive)?;
+    let stems = superset_archive::dataset_databases(archive)?;
     let titles = superset_archive::dashboard_titles(archive)?;
     if !titles.is_empty() {
         for listed in client.dashboards().await? {
@@ -789,17 +789,16 @@ pub(crate) async fn import_archive(
         ids.insert(database.name.replace(' ', "_"), database.id);
     }
     let mut databases = BTreeMap::new();
-    for catalog in &catalogs {
-        let stem = superset_archive::database_stem(catalog);
-        let Some(id) = ids.get(&stem).copied() else {
-            return Err(ArchiveError::MissingDatabase(stem).into());
+    for stem in &stems {
+        let Some(id) = ids.get(stem).copied() else {
+            return Err(ArchiveError::MissingDatabase(stem.clone()).into());
         };
         let (member, bytes) =
             superset_archive::database_member(&client.database_export(id).await?)?;
-        if member != stem {
+        if member != *stem {
             return Err(ArchiveError::MissingDatabase(member).into());
         }
-        databases.insert(stem, bytes);
+        databases.insert(stem.clone(), bytes);
     }
     let rewritten = superset_archive::rewrite(archive, &databases, stamp)?;
     let result = client.import(&rewritten, overwrite).await?;
