@@ -300,6 +300,20 @@ def _parser():
     evals_run = evals_commands.add_parser("run", help="ask every eval, run its answer read-only and record pass or fail")
     evals_run.add_argument("--catalog", required=False, help="catalog to run; omitted, the default one")
     evals_run.add_argument("--only", type=int, help="run one eval by id")
+    query_log = commands.add_parser(
+        "query-log", help="read Nova's query log: the administrator's export"
+    )
+    query_log_commands = query_log.add_subparsers(dest="query_log_command", required=True)
+    ql_export = query_log_commands.add_parser(
+        "export", help="write every row as JSON lines, oldest first (administrator only)"
+    )
+    ql_export.add_argument("--out", required=True, help="the file to write; overwritten")
+    ql_export.add_argument("--from", dest="from_ms", type=int, default=None,
+                           help="only rows created at or after this epoch-millisecond time")
+    ql_export.add_argument("--cursor", default=None,
+                           help="the nextCursor a previous, interrupted export named")
+    ql_export.add_argument("--limit", type=int, default=None,
+                           help="rows per request, 1 to 1000 (default 500)")
     classify = commands.add_parser("classify", help="suggest a data class for a table's unclassed columns")
     classify_commands = classify.add_subparsers(dest="classify_command", required=True)
     classify_columns = classify_commands.add_parser(
@@ -714,6 +728,22 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 for ev, row in results
             ]))
             return 1 if any(not row.get("passed") for _, row in results) else OK
+        if args.command == "query-log":
+            from stardelt import query_log
+
+            try:
+                with open(args.out, "w", encoding="utf-8") as fh:
+                    answer = query_log.export(
+                        nova, fh, from_ms=args.from_ms, cursor=args.cursor, limit=args.limit
+                    )
+            except query_log.ExportError as err:
+                stderr.write(f"stardelt: {err}\n")
+                return ERROR
+            except OSError as err:
+                stderr.write(f"stardelt: cannot write {args.out}: {err}\n")
+                return ERROR
+            stdout.write(json.dumps(answer, ensure_ascii=False) + "\n")
+            return OK
         if args.command == "lineage":
             if args.depth < 1 or args.depth > 5 or args.days < 1 or args.days > 365:
                 stderr.write("stardelt: --depth is 1 to 5 and --days is 1 to 365\n")
