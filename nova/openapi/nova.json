@@ -5017,6 +5017,101 @@
         }
       }
     },
+    "/api/dashboards": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/dashboards`: the dashboards **this bundle and this owner group** imported, with\nthe target and commit of the stamp the import wrote (#115 decision 6). A dashboard without\nthat stamp, and one another group imported, is never listed. At most 100 (Superset's page\nsize). The caller's rule is the export's owner-group rule.",
+        "description": "The dashboards this bundle and this owner group imported, each with the target and commit of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.",
+        "operationId": "dashboards_list",
+        "parameters": [
+          {
+            "name": "bundle",
+            "in": "query",
+            "description": "The bundle that imported the dashboards",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ownerGroup",
+            "in": "query",
+            "description": "The bundle's owner group; the caller must be a member",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The dashboards this bundle imported, in Superset's order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DashboardImported"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The bundle name or owner group is empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the bundle's owner group, or a deploy principal names another stage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Superset answered an error, or could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance has no Superset service user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/dashboards/import": {
       "post": {
         "tags": [
@@ -15412,6 +15507,35 @@
           "target": {
             "type": "string",
             "description": "The stage the import is for (`dev`, `prod`, …)."
+          }
+        }
+      },
+      "DashboardImported": {
+        "type": "object",
+        "description": "One dashboard a bundle's import left on a target: Superset's id and title, and the target\nand commit the import recorded in the dashboard's stamp.",
+        "required": [
+          "id",
+          "title",
+          "target",
+          "commit"
+        ],
+        "properties": {
+          "commit": {
+            "type": "string",
+            "description": "The bundle's commit the import recorded, or `\"\"`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Superset's numeric dashboard id."
+          },
+          "target": {
+            "type": "string",
+            "description": "The target the import was for (`prod`, from the stamp)."
+          },
+          "title": {
+            "type": "string",
+            "description": "The dashboard's title in Superset."
           }
         }
       },

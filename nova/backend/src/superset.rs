@@ -48,7 +48,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -194,6 +194,13 @@ pub struct SupersetDatabase {
     pub name: String,
 }
 
+/// One dashboard in Superset's list: the numeric id and its title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupersetDashboard {
+    pub id: i64,
+    pub title: String,
+}
+
 impl SupersetClient {
     /// `base` is the public https URL (see the module doc); a trailing slash is dropped.
     pub fn new(base: &str, user: ServiceUser) -> Self {
@@ -328,6 +335,59 @@ impl SupersetClient {
             .map_err(|e| SupersetError::Transport(e.to_string()))?;
         let text = |key: &str| body["result"][key].as_str().unwrap_or_default().to_string();
         Ok((text("certified_by"), text("certification_details")))
+    }
+
+    /// `GET /api/v1/dashboard/?q=(page_size:100)`: every dashboard the target Superset knows,
+    /// as `(id, title)`. A row without a numeric `id` is skipped and a missing
+    /// `dashboard_title` is `""`; an answer without a `result` array is `Transport`.
+    ///
+    /// A `401` means the token from this call expired; Nova signs in once more and repeats the
+    /// GET once. Every other non-`200` is Superset's status and message.
+    pub async fn dashboards(&self) -> Result<Vec<SupersetDashboard>, SupersetError> {
+        let url = format!("{}/api/v1/dashboard/?q=(page_size:100)", self.base);
+        let mut token = self.login().await?;
+        let mut response = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            token = self.login().await?;
+            response = self
+                .http
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        }
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(self.status_error(status, response, &token).await);
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| SupersetError::Transport(e.to_string()))?;
+        let Some(rows) = body["result"].as_array() else {
+            return Err(SupersetError::Transport(
+                "Superset's dashboard list has no result array".into(),
+            ));
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                Some(SupersetDashboard {
+                    id: row["id"].as_i64()?,
+                    title: row["dashboard_title"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            })
+            .collect())
     }
 
     /// `GET /api/v1/database/?q=(page_size:200)`: every database the target Superset knows, as
@@ -933,6 +993,137 @@ pub async fn delete_dashboard(
     }
 }
 
+/// `GET /api/dashboards` query: the bundle whose import stamped the dashboards.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardListQuery {
+    /// The bundle that owns the dashboards, 1 to 64 characters.
+    pub bundle: String,
+    /// The bundle's owner group; the caller must be a member.
+    pub owner_group: String,
+}
+
+/// One dashboard a bundle's import left on a target: Superset's id and title, and the target
+/// and commit the import recorded in the dashboard's stamp.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardImported {
+    /// Superset's numeric dashboard id.
+    pub id: i64,
+    /// The dashboard's title in Superset.
+    pub title: String,
+    /// The target the import was for (`prod`, from the stamp).
+    pub target: String,
+    /// The bundle's commit the import recorded, or `""`.
+    pub commit: String,
+}
+
+/// The `target` and the `commit` a dashboard's stamp records. The import writes
+/// `certification_details: "<target> @ <commit> by <ownerGroup>"`; both are `""` when the
+/// stamp does not carry them.
+fn stamp_parts(details: &str) -> (String, String) {
+    let without_group = details
+        .rsplit_once(" by ")
+        .map(|(before, _)| before)
+        .unwrap_or(details);
+    match without_group.split_once(" @ ") {
+        Some((target, commit)) => (target.to_string(), commit.to_string()),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// `GET /api/dashboards`: the dashboards **this bundle and this owner group** imported, with
+/// the target and commit of the stamp the import wrote (#115 decision 6). A dashboard without
+/// that stamp, and one another group imported, is never listed. At most 100 (Superset's page
+/// size). The caller's rule is the export's owner-group rule.
+///
+/// 200 with the imported dashboards in Superset's order; 403 for a non-member; 502 when
+/// Superset refuses; 503 without a service user.
+#[utoipa::path(
+    get,
+    path = "/api/dashboards",
+    tag = "public",
+    operation_id = "dashboards_list",
+    description = "The dashboards this bundle and this owner group imported, each with the target and commit of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.",
+    params(
+        ("bundle" = String, Query, description = "The bundle that imported the dashboards"),
+        ("ownerGroup" = String, Query, description = "The bundle's owner group; the caller must be a member"),
+    ),
+    responses(
+        (status = 200, description = "The dashboards this bundle imported, in Superset's order", body = Vec<DashboardImported>),
+        (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn list_dashboards(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<crate::auth::Principal>>,
+    Query(query): Query<DashboardListQuery>,
+) -> Response {
+    if query.bundle.trim().is_empty() || query.owner_group.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "bundle and ownerGroup are required" })),
+        )
+            .into_response();
+    }
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "sign in to list dashboards" })),
+        )
+            .into_response();
+    };
+    let identity = match crate::deployments::deploy_identity(&state, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": sentence }))).into_response();
+        }
+    };
+    if let Some(sentence) =
+        export_refusal(&identity, &query.owner_group, caller.client_id.as_deref())
+    {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(user) = state.superset.as_ref() else {
+        return SupersetError::NoServiceUser.into_response();
+    };
+    let client = SupersetClient::new(
+        &state.superset_api_url,
+        ServiceUser {
+            username: user.username.clone(),
+            password: Secret::new(user.password.expose().to_string()),
+        },
+    );
+    let dashboards = match client.dashboards().await {
+        Ok(dashboards) => dashboards,
+        Err(error) => return error.into_response(),
+    };
+    let mut imported = Vec::new();
+    for dashboard in dashboards {
+        let (certified, details) = match client.provenance(dashboard.id).await {
+            Ok(stamp) => stamp,
+            // The dashboard vanished between the list and the read: not this bundle's anymore.
+            Err(SupersetError::Status(404, _)) => continue,
+            Err(error) => return error.into_response(),
+        };
+        if delete_refusal(&certified, &details, &query.bundle, &query.owner_group).is_some() {
+            continue;
+        }
+        let (target, commit) = stamp_parts(&details);
+        imported.push(DashboardImported {
+            id: dashboard.id,
+            title: dashboard.title,
+            target,
+            commit,
+        });
+    }
+    (StatusCode::OK, Json(imported)).into_response()
+}
+
 #[utoipa::path(
     get,
     path = "/api/dashboards/{id}/export",
@@ -1144,7 +1335,7 @@ mod fake {
     //! The five Superset routes the client uses. The password it accepts and the token it
     //! hands out are canaries: neither may ever show up in an error.
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::{Arc, Mutex};
 
     use axum::{
@@ -1200,6 +1391,11 @@ mod fake {
         pub(super) certified: Option<String>,
         /// The `certification_details` the one dashboard answers with (`None` answers `null`).
         pub(super) details: Option<String>,
+        /// A stamp per dashboard id, for a list of more than one dashboard. An id without an
+        /// entry falls back to `certified`/`details` (id 7) or answers no stamp.
+        pub(super) stamps: HashMap<i64, (String, String)>,
+        /// The dashboards the list route answers, in this order: `(id, dashboard_title)`.
+        pub(super) listed: Vec<(i64, String)>,
         /// How many more `401` answers to serve on the dashboard GET.
         pub(super) unauthorized_dashboards: usize,
         /// How many more `401` answers to serve on the dashboard DELETE.
@@ -1410,6 +1606,35 @@ mod fake {
             .into_response()
     }
 
+    async fn list_dashboards(State(s): State<Shared>, headers: HeaderMap) -> Response {
+        let mut state = s.lock().unwrap();
+        if state.unauthorized > 0 {
+            state.unauthorized -= 1;
+            return refused();
+        }
+        if !has_bearer(&headers) {
+            return refused();
+        }
+        let result: Vec<Value> = state
+            .listed
+            .iter()
+            .map(|(id, title)| json!({ "id": id, "dashboard_title": title }))
+            .collect();
+        (StatusCode::OK, Json(json!({ "result": result }))).into_response()
+    }
+
+    /// The stamp one dashboard answers with: its entry in `stamps`, else the single
+    /// `certified`/`details` for id 7, else no stamp.
+    fn stamp_of(state: &Fake, id: i64) -> (Option<String>, Option<String>) {
+        if let Some((certified, details)) = state.stamps.get(&id) {
+            return (Some(certified.clone()), Some(details.clone()));
+        }
+        if id == 7 {
+            return (state.certified.clone(), state.details.clone());
+        }
+        (None, None)
+    }
+
     async fn one_dashboard(
         State(s): State<Shared>,
         Path(id): Path<i64>,
@@ -1420,18 +1645,19 @@ mod fake {
             state.unauthorized_dashboards -= 1;
             return refused();
         }
-        if id != 7 {
+        if !state.listed.iter().any(|(listed, _)| *listed == id) {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "message": "Not found" })),
             )
                 .into_response();
         }
+        let (certified, details) = stamp_of(&state, id);
         (
             StatusCode::OK,
             Json(json!({ "result": {
-                "certified_by": state.certified,
-                "certification_details": state.details,
+                "certified_by": certified,
+                "certification_details": details,
             } })),
         )
             .into_response()
@@ -1466,7 +1692,10 @@ mod fake {
 
     /// Start the fake and a client signed in against it.
     pub(super) async fn start() -> (SupersetClient, Shared) {
-        let shared: Shared = Arc::new(Mutex::new(Fake::default()));
+        let shared: Shared = Arc::new(Mutex::new(Fake {
+            listed: vec![(7, "Shop".to_string()), (8, "Another".to_string())],
+            ..Fake::default()
+        }));
         let app = Router::new()
             .route("/api/v1/security/login", post(login))
             .route("/api/v1/security/csrf_token/", get(csrf_token))
@@ -1475,6 +1704,7 @@ mod fake {
                 "/api/v1/dashboard/{id}",
                 get(one_dashboard).delete(delete_dashboard),
             )
+            .route("/api/v1/dashboard/", get(list_dashboards))
             .route("/api/v1/dashboard/import/", post(import_dashboard))
             .route("/api/v1/database/", get(list_databases))
             .route("/api/v1/database/export/", get(export_database))
@@ -1731,6 +1961,78 @@ mod tests {
         assert_eq!(details, "prod @ abc1234 by shop");
     }
 
+    /// The rows `GET /api/dashboards` answers for `bundle`/`owner_group`, built from the fake
+    /// the way the handler builds them: the list, each row's stamp, the delete rule, the split.
+    async fn listed_rows(
+        client: &SupersetClient,
+        bundle: &str,
+        owner_group: &str,
+    ) -> Vec<DashboardImported> {
+        let mut imported = Vec::new();
+        for dashboard in client.dashboards().await.expect("the list") {
+            let (certified, details) = client.provenance(dashboard.id).await.expect("the stamp");
+            if delete_refusal(&certified, &details, bundle, owner_group).is_some() {
+                continue;
+            }
+            let (target, commit) = stamp_parts(&details);
+            imported.push(DashboardImported {
+                id: dashboard.id,
+                title: dashboard.title,
+                target,
+                commit,
+            });
+        }
+        imported
+    }
+
+    #[tokio::test]
+    async fn a_bundles_dashboards_are_listed_with_their_target_and_commit() {
+        let (client, fake) = fake::start().await;
+        {
+            let mut state = fake.lock().unwrap();
+            state.stamps.insert(
+                7,
+                (
+                    "stardelt bundle shop".to_string(),
+                    "prod @ abc1234 by shop".to_string(),
+                ),
+            );
+            state.stamps.insert(8, (String::new(), String::new()));
+        }
+        let listed = listed_rows(&client, "shop", "shop").await;
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap(),
+            serde_json::json!([
+                { "id": 7, "title": "Shop", "target": "prod", "commit": "abc1234" }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn another_groups_dashboard_is_not_listed() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().stamps.insert(
+            7,
+            (
+                "stardelt bundle shop".to_string(),
+                "prod @ abc1234 by analytics".to_string(),
+            ),
+        );
+        assert!(
+            listed_rows(&client, "shop", "shop").await.is_empty(),
+            "another group's dashboard must not be listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dashboard_without_a_stamp_is_not_listed() {
+        let (client, _fake) = fake::start().await;
+        assert!(
+            listed_rows(&client, "shop", "shop").await.is_empty(),
+            "an unstamped dashboard must not be listed"
+        );
+    }
+
     #[tokio::test]
     async fn the_delete_retries_after_a_401() {
         let (client, fake) = fake::start().await;
@@ -1742,15 +2044,15 @@ mod tests {
     #[tokio::test]
     async fn a_missing_dashboard_is_a_404() {
         let (client, _fake) = fake::start().await;
-        match client.provenance(8).await {
+        match client.provenance(42).await {
             Err(SupersetError::Status(404, sentence)) => {
-                assert!(sentence.contains('8'), "{sentence}")
+                assert!(sentence.contains("42"), "{sentence}")
             }
             other => panic!("expected a 404, got {other:?}"),
         }
-        match client.delete(8).await {
+        match client.delete(42).await {
             Err(SupersetError::Status(404, sentence)) => {
-                assert!(sentence.contains('8'), "{sentence}")
+                assert!(sentence.contains("42"), "{sentence}")
             }
             other => panic!("expected a 404, got {other:?}"),
         }
