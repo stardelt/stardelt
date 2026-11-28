@@ -1030,6 +1030,9 @@ fn admin_router() -> Router<Arc<AppState>> {
         // What the platform used of each model endpoint this month (nova#890): the Models page's
         // data. Same administrator gate.
         .route("/admin/model-usage", get(model_usage::list))
+        // The full, ascending page of the query log an exporter copies into Iceberg (#31, slice 1).
+        // Same administrator gate as the rest of this table.
+        .route("/admin/query-log/export", get(query_log_api::export))
         // The administrator's "Probe now" on one model endpoint (operator#609): the same
         // minute-round probe, started on request. Same administrator gate.
         .route(
