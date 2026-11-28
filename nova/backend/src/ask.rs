@@ -33,6 +33,8 @@ use crate::AppState;
 const MAX_QUESTION_CHARS: usize = 2_000;
 /// How many tables the model may choose from.
 const CANDIDATES: usize = 5;
+/// How many catalogs a question without `?catalog=` searches, in `list_catalogs` order.
+const MAX_CATALOGS: usize = 10;
 /// How long the `EXPLAIN` check of one statement may take.
 const ASK_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// The sentence a person reads when nothing matches their question.
@@ -767,6 +769,127 @@ fn follow_up_candidates(previous: Option<&AskPrevious>, found: Vec<AskTable>) ->
     merged
 }
 
+/// Every `catalog.namespace.table` the question names, in order (D1). Trailing punctuation
+/// (`?`, `.`, `,`, `!`) is ignored.
+fn qualified_names(question: &str) -> Vec<AskTable> {
+    let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+    question
+        .split_whitespace()
+        .filter_map(|word| {
+            let word = word.to_lowercase();
+            let word = word.trim_end_matches(['?', '.', ',', '!']);
+            let parts: Vec<&str> = word.split('.').collect();
+            if parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|part| part.is_empty() || !part.chars().all(allowed))
+            {
+                return None;
+            }
+            Some(AskTable {
+                catalog: parts[0].to_string(),
+                namespace: parts[1].to_string(),
+                table: parts[2].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// D1 names first, then the searched matches; duplicates dropped; at most [`CANDIDATES`].
+fn merge_candidates(named: Vec<AskTable>, searched: Vec<AskTable>) -> Vec<AskTable> {
+    let mut merged: Vec<AskTable> = Vec::with_capacity(named.len() + searched.len());
+    for table in named.into_iter().chain(searched) {
+        if !merged.iter().any(|kept| same_table(kept, &table)) {
+            merged.push(table);
+        }
+        if merged.len() == CANDIDATES {
+            break;
+        }
+    }
+    merged
+}
+
+/// The tables the question matches in `catalogs`, in that order (D2): the every-word search
+/// in each, then — when none matched in any — the any-word fallback in each, until
+/// [`CANDIDATES`] are collected. A catalog that does not answer is the `502` a failed
+/// search answers today.
+// The `Err` is the ready-made refusal this returns, as in `Attempt::call`.
+#[allow(clippy::result_large_err)]
+async fn search_in_catalogs(
+    state: &Arc<AppState>,
+    caller: &Option<axum::Extension<crate::auth::Principal>>,
+    question: &str,
+    catalogs: &[String],
+) -> Result<Vec<AskTable>, Response> {
+    let mut found: Vec<AskTable> = Vec::new();
+    // The search refuses `q` over 100 characters; such a question goes to the fallback.
+    if every_word_search(question) {
+        for catalog in catalogs {
+            let response = crate::catalog_search::search(
+                State(Arc::clone(state)),
+                Query(crate::catalog_search::SearchParams {
+                    q: Some(question.to_string()),
+                    catalog: Some(catalog.clone()),
+                    limit: Some(CANDIDATES - found.len()),
+                    tag: None,
+                    owner: None,
+                    domain: None,
+                }),
+                caller.clone(),
+            )
+            .await;
+            let (status, body) = body_of(response).await;
+            if status != StatusCode::OK {
+                let sentence = body
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the catalog did not answer")
+                    .to_string();
+                return Err(fail(StatusCode::BAD_GATEWAY, sentence));
+            }
+            if let Some(matches) = body.get("matches").and_then(Value::as_array) {
+                found.extend(matches.iter().filter_map(ask_table));
+            }
+            if found.len() >= CANDIDATES {
+                found.truncate(CANDIDATES);
+                return Ok(found);
+            }
+        }
+    }
+    if found.is_empty() {
+        let words: Vec<String> = question.split_whitespace().map(str::to_lowercase).collect();
+        for catalog in catalogs {
+            match crate::catalog_search::search_any_word(
+                state,
+                caller.as_ref().map(|c| &c.0),
+                Some(catalog),
+                &words,
+                CANDIDATES - found.len(),
+            )
+            .await
+            {
+                Ok(matches) => found.extend(matches.into_iter().map(|table| AskTable {
+                    catalog: table.catalog,
+                    namespace: table.namespace,
+                    table: table.table,
+                })),
+                Err(sentence) => return Err(fail(StatusCode::BAD_GATEWAY, sentence)),
+            }
+            if found.len() >= CANDIDATES {
+                found.truncate(CANDIDATES);
+                break;
+            }
+        }
+        if !found.is_empty() {
+            tracing::info!(
+                tables = found.len(),
+                "ask: no table had every word; using the best word matches"
+            );
+        }
+    }
+    Ok(found)
+}
+
 /// Drop the candidates whose documentation is `Value::Null` — the caller may not read that
 /// table, so it is not in the prompt — together with their documentation entries.
 fn drop_unreadable(candidates: Vec<AskTable>, docs: Vec<Value>) -> (Vec<AskTable>, Vec<Value>) {
@@ -825,8 +948,8 @@ fn no_table_answer(endpoint: String, model: String, tried: Vec<String>) -> AskAn
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
-    params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, the default one")),
+    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, every catalog the caller may browse")),
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
@@ -919,70 +1042,44 @@ pub(crate) async fn ask(
         .as_ref()
         .and_then(|caller| caller.0.identity.groups.first().cloned());
 
-    let mut candidates: Vec<AskTable> = if every_word_search(&question) {
-        let response = crate::catalog_search::search(
-            State(Arc::clone(&state)),
-            Query(crate::catalog_search::SearchParams {
-                q: Some(question.clone()),
-                catalog: params.catalog.clone(),
-                limit: Some(CANDIDATES),
-                tag: None,
-                owner: None,
-                domain: None,
-            }),
-            caller.clone(),
-        )
-        .await;
-        let (status, found) = body_of(response).await;
-        if status != StatusCode::OK {
-            let sentence = found
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("the catalog did not answer")
-                .to_string();
-            return fail(StatusCode::BAD_GATEWAY, sentence);
-        }
-        found
-            .get("matches")
-            .and_then(Value::as_array)
-            .map(|matches| matches.iter().filter_map(ask_table).collect())
-            .unwrap_or_default()
-    } else {
-        // The search refuses `q` over 100 characters; the words go to the fallback below.
-        Vec::new()
-    };
-    if candidates.is_empty() {
-        let words: Vec<String> = question.split_whitespace().map(str::to_lowercase).collect();
-        match crate::catalog_search::search_any_word(
-            &state,
-            caller.as_ref().map(|c| &c.0),
-            params.catalog.as_deref(),
-            &words,
-            CANDIDATES,
-        )
-        .await
-        {
-            Ok(found) if !found.is_empty() => {
-                tracing::info!(
-                    tables = found.len(),
-                    "ask: no table had every word; using the best word matches"
-                );
-                candidates = found
-                    .into_iter()
-                    .map(|table| AskTable {
-                        catalog: table.catalog,
-                        namespace: table.namespace,
-                        table: table.table,
-                    })
-                    .collect();
+    // D1: a table the question names in full is a candidate first, whatever the search says.
+    let named = qualified_names(&question);
+    // D2: without `?catalog=` every catalog the caller may browse is searched, in
+    // `list_catalogs` order; with it, that catalog only, as before.
+    let catalogs: Vec<String> = match params.catalog.clone() {
+        Some(catalog) => vec![catalog],
+        None => {
+            let response =
+                crate::catalog::list_catalogs(State(Arc::clone(&state)), caller.clone()).await;
+            let (status, body) = body_of(response).await;
+            if status != StatusCode::OK {
+                let sentence = body
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the catalog did not answer")
+                    .to_string();
+                return fail(StatusCode::BAD_GATEWAY, sentence);
             }
-            Ok(_) => {}
-            Err(sentence) => return fail(StatusCode::BAD_GATEWAY, sentence),
+            body.get("catalogs")
+                .and_then(Value::as_array)
+                .map(|catalogs| {
+                    catalogs
+                        .iter()
+                        .filter_map(|catalog| catalog.get("name")?.as_str().map(str::to_string))
+                        .take(MAX_CATALOGS)
+                        .collect()
+                })
+                .unwrap_or_default()
         }
-    }
+    };
+    let searched = match search_in_catalogs(&state, &caller, &question, &catalogs).await {
+        Ok(searched) => searched,
+        Err(response) => return response,
+    };
     // A follow-up keeps the previous turn's tables first, so a question that names no table
     // still has the statement it refines.
-    let mut candidates = follow_up_candidates(request.previous.as_ref(), candidates);
+    let mut candidates =
+        follow_up_candidates(request.previous.as_ref(), merge_candidates(named, searched));
     if candidates.is_empty() {
         let body = no_table_answer(
             first_name.clone(),
@@ -1012,20 +1109,18 @@ pub(crate) async fn ask(
         });
     }
     // A table the caller may not read is not in the prompt, and not in the answer: sending
-    // its name back would name a table the previous turn learned nothing about.
-    if request.previous.is_some() {
-        let readable = drop_unreadable(candidates, docs);
-        candidates = readable.0;
-        docs = readable.1;
-        if candidates.is_empty() {
-            let body = no_table_answer(
-                first_name.clone(),
-                endpoint_model(first_object),
-                vec![first_name.clone()],
-            );
-            record_conversation(pool, &sub, &question, &body).await;
-            return answer(body);
-        }
+    // its name back would name a table the person learned nothing about.
+    let readable = drop_unreadable(candidates, docs);
+    candidates = readable.0;
+    docs = readable.1;
+    if candidates.is_empty() {
+        let body = no_table_answer(
+            first_name.clone(),
+            endpoint_model(first_object),
+            vec![first_name.clone()],
+        );
+        record_conversation(pool, &sub, &question, &body).await;
+        return answer(body);
     }
 
     let mut verified = Vec::with_capacity(candidates.len());
@@ -1735,6 +1830,61 @@ mod tests {
         assert_eq!(body.sentence, NO_TABLE);
         assert_eq!(body.sql, None);
         assert_eq!(body.explain, "not_run");
+    }
+
+    // --- every catalog is searched, and a name in full wins (stardelt/stardelt#2364) ----
+
+    fn full(catalog: &str, namespace: &str, table: &str) -> AskTable {
+        AskTable {
+            catalog: catalog.into(),
+            namespace: namespace.into(),
+            table: table.into(),
+        }
+    }
+
+    #[test]
+    fn a_question_naming_a_table_in_full_yields_it() {
+        assert_eq!(
+            qualified_names("how to query that table silver.shop.stg_customers?"),
+            vec![full("silver", "shop", "stg_customers")]
+        );
+        // Lower case first, then the trailing punctuation.
+        assert_eq!(
+            qualified_names("Silver.Shop.Stg_Customers."),
+            vec![full("silver", "shop", "stg_customers")]
+        );
+    }
+
+    #[test]
+    fn two_part_names_and_urls_are_not_tables() {
+        assert!(qualified_names("see shop.orders or https://x.io/a").is_empty());
+        assert!(qualified_names("gold.shop").is_empty());
+        assert!(qualified_names("a.b.c.d").is_empty());
+    }
+
+    #[test]
+    fn named_tables_come_first_and_duplicates_go() {
+        let a = full("silver", "shop", "stg_customers");
+        let b = full("gold", "shop", "sales");
+        let c = full("bronze", "shop", "raw_sales");
+        assert_eq!(
+            merge_candidates(vec![a.clone()], vec![b.clone(), a.clone(), c.clone()]),
+            vec![a, b, c]
+        );
+    }
+
+    #[test]
+    fn merge_stops_at_five() {
+        let named: Vec<AskTable> = (0..3)
+            .map(|i| full("silver", "shop", &format!("named_{i}")))
+            .collect();
+        let searched: Vec<AskTable> = (0..4)
+            .map(|i| full("gold", "shop", &format!("found_{i}")))
+            .collect();
+        let merged = merge_candidates(named, searched);
+        assert_eq!(merged.len(), CANDIDATES);
+        assert_eq!(merged[0].table, "named_0");
+        assert_eq!(merged[4].table, "found_1");
     }
 
     #[test]
