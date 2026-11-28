@@ -1033,7 +1033,7 @@ pub struct DashboardDeleteQuery {
     path = "/api/dashboards/{id}",
     tag = "public",
     operation_id = "dashboards_delete",
-    description = "Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group.",
+    description = "Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.",
     params(
         ("id" = i64, Path, description = "Superset's numeric dashboard id"),
         ("bundle" = String, Query, description = "The bundle that imported the dashboard"),
@@ -1043,7 +1043,7 @@ pub struct DashboardDeleteQuery {
         (status = 204, description = "Deleted"),
         (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, or the dashboard is not stamped by this bundle", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, or the dashboard is not stamped by this bundle, or the bundle belongs to another group", body = crate::openapi::ErrorResponse),
         (status = 404, description = "Superset has no such dashboard", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
         (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
@@ -1081,6 +1081,29 @@ pub async fn delete_dashboard(
         caller.client_id.as_deref(),
         "remove",
     ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "the state store is not configured; bundle ownership cannot be checked" })),
+        )
+            .into_response();
+    };
+    let stored = match crate::bundle_owner::owner_of(pool, &query.bundle).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "bundle owner read failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "the state store did not answer" })),
+            )
+                .into_response();
+        }
+    };
+    if let Some(sentence) =
+        crate::bundle_owner::refusal(&query.bundle, stored.as_deref(), &query.owner_group)
+    {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {
@@ -1174,7 +1197,7 @@ fn stamp_parts(details: &str) -> (String, String, String) {
     path = "/api/dashboards",
     tag = "public",
     operation_id = "dashboards_list",
-    description = "The dashboards this bundle and this owner group imported, each with the target, commit and normalized export hash (`sha256`) of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.",
+    description = "The dashboards this bundle and this owner group imported, each with the target, commit and normalized export hash (`sha256`) of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.",
     params(
         ("bundle" = String, Query, description = "The bundle that imported the dashboards"),
         ("ownerGroup" = String, Query, description = "The bundle's owner group; the caller must be a member"),
@@ -1183,7 +1206,7 @@ fn stamp_parts(details: &str) -> (String, String, String) {
         (status = 200, description = "The dashboards this bundle imported, in Superset's order", body = Vec<DashboardImported>),
         (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal asks for another group's dashboards", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal asks for another group's dashboards, or the bundle belongs to another group", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
         (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
     )
@@ -1219,6 +1242,29 @@ pub async fn list_dashboards(
         caller.client_id.as_deref(),
         "list",
     ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "the state store is not configured; bundle ownership cannot be checked" })),
+        )
+            .into_response();
+    };
+    let stored = match crate::bundle_owner::owner_of(pool, &query.bundle).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "bundle owner read failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "the state store did not answer" })),
+            )
+                .into_response();
+        }
+    };
+    if let Some(sentence) =
+        crate::bundle_owner::refusal(&query.bundle, stored.as_deref(), &query.owner_group)
+    {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {
@@ -1263,7 +1309,7 @@ pub async fn list_dashboards(
     path = "/api/dashboards/{id}/export",
     tag = "public",
     operation_id = "dashboards_export",
-    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export its own group's dashboards. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI.",
+    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export its own group's dashboards. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.",
     params(
         ("id" = i64, Path, description = "Superset's numeric dashboard id"),
         ("bundle" = String, Query, description = "The bundle that owns the dashboard"),
@@ -1273,7 +1319,7 @@ pub async fn list_dashboards(
         (status = 200, description = "The ZIP archive Superset exports for one dashboard, without `databases/`", body = String, content_type = "application/zip"),
         (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal asks for another group's dashboards, or the dashboard carries another bundle's or group's stamp", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal asks for another group's dashboards, or the dashboard carries another bundle's or group's stamp, or the bundle belongs to another group", body = crate::openapi::ErrorResponse),
         (status = 404, description = "Superset has no such dashboard", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
         (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
@@ -1311,6 +1357,29 @@ pub async fn export_dashboard_for_bundle(
         caller.client_id.as_deref(),
         "export",
     ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "the state store is not configured; bundle ownership cannot be checked" })),
+        )
+            .into_response();
+    };
+    let stored = match crate::bundle_owner::owner_of(pool, &query.bundle).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "bundle owner read failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "the state store did not answer" })),
+            )
+                .into_response();
+        }
+    };
+    if let Some(sentence) =
+        crate::bundle_owner::refusal(&query.bundle, stored.as_deref(), &query.owner_group)
+    {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {
@@ -1371,7 +1440,7 @@ pub struct DashboardImportQuery {
     operation_id = "dashboards_import",
     path = "/api/dashboards/import",
     tag = "public",
-    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit> #<sha256> by <ownerGroup>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped.",
+    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit> #<sha256> by <ownerGroup>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.",
     params(
         ("bundle" = String, Query, description = "The bundle whose dashboards these are"),
         ("ownerGroup" = String, Query, description = "The bundle's owner group"),
@@ -1384,7 +1453,7 @@ pub struct DashboardImportQuery {
         (status = 200, description = "Superset's import result and the mapped database stems", body = serde_json::Value),
         (status = 400, description = "The body is not a dashboard archive, or a field has the wrong shape: `bundle` 3–40 lower-case letters, digits and dashes; `target` and `ownerGroup` 1–64 letters, digits, dots, underscores or dashes; `commit` lower-case hex", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal names another stage, or a dashboard in the archive is certified by another bundle or owner group", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal names another stage, or a dashboard in the archive is certified by another bundle or owner group, or the bundle belongs to another group", body = crate::openapi::ErrorResponse),
         (status = 413, description = "The archive is larger than 16 MiB", body = crate::openapi::ErrorResponse),
         (status = 422, description = "The target has no database for one of the archive's catalogs", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
@@ -1443,6 +1512,32 @@ pub async fn import_dashboard(
         caller.client_id.as_deref(),
         "import",
     ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(pool) = state.db.as_ref() else {
+        return crate::saved_queries::unavailable();
+    };
+    let owner = match crate::bundle_owner::claim(
+        pool,
+        &query.bundle,
+        &query.owner_group,
+        &caller.identity.sub,
+    )
+    .await
+    {
+        Ok(owner) => owner,
+        Err(e) => {
+            tracing::warn!(error = %e, "bundle owner claim failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "the state store did not answer" })),
+            )
+                .into_response();
+        }
+    };
+    if let Some(sentence) =
+        crate::bundle_owner::refusal(&query.bundle, Some(&owner), &query.owner_group)
+    {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {

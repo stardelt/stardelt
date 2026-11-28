@@ -101,6 +101,7 @@ mod apps;
 mod ask;
 mod audit;
 mod auth;
+mod bundle_owner;
 mod catalog;
 mod catalog_doc_store;
 mod catalog_docs;
