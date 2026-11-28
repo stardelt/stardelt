@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type ModelEndpoint } from '../api'
+import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type AskPrevious, type ModelEndpoint } from '../api'
 import { formatTime } from '../format'
 import { tokenizeSql } from '../sqlHighlight'
 import { TOKEN_CLASS } from '../sqlTokens'
@@ -49,6 +49,8 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
   const navigate = useNavigate()
   const [question, setQuestion] = useState('')
   const [turns, setTurns] = useState<Turn[]>([])
+  // The answered turn the next question refines (nova#2341); `null` after "New question".
+  const [followUp, setFollowUp] = useState<AskPrevious | null>(null)
   const [busy, setBusy] = useState(false)
   const [step, setStep] = useState(0)
   const [showHistory, setShowHistory] = useState(false)
@@ -87,8 +89,12 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
     setStep(0)
     const ticker = setInterval(() => setStep(s => Math.min(s + 1, STEPS.length - 1)), STEP_MS)
     try {
-      const answer = await api.ask(q)
+      const answer = await api.ask(q, undefined, followUp ?? undefined)
       patchTurn(index, { answer })
+      // The next question refines this answer, unless "New question" is pressed first.
+      if (answer.sql !== null) {
+        setFollowUp({ question: q, sql: answer.sql, tables: answer.tables })
+      }
     } catch (e) {
       // A spent budget is the API's 429: a calm notice, not a failure of the question.
       const budget = e instanceof ApiError && e.status === 429
@@ -271,6 +277,16 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
         />
         <button type="submit" className="btn-primary px-2.5 py-2" aria-label="Send the question" disabled={busy}>↵</button>
       </form>
+
+      {followUp !== null && (
+        <div className="shrink-0 px-4 pb-2">
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            onClick={() => setFollowUp(null)}
+          >New question</button>
+        </div>
+      )}
 
       <div className="border-t border-border px-4 py-2 text-[11px]">
         <span className={cloud ? 'text-warn' : 'text-text-mute'}>

@@ -268,7 +268,7 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/ask` — a question in, checked SQL out.
-         * @description A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.
+         * @description A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like "only org domains" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.
          */
         post: operations["ask_answer"];
         delete?: never;
@@ -2838,8 +2838,21 @@ export interface components {
             /** @description `up` or `down`. */
             vote: string;
         };
+        /**
+         * @description The answered turn a follow-up refines, as the panel sends it: the earlier question, the
+         *     statement it got and the tables it was written for.
+         */
+        AskPrevious: {
+            /** @description The earlier question, 1 to 2000 characters. */
+            question: string;
+            /** @description The earlier statement, 1 to 8000 characters. */
+            sql: string;
+            /** @description The tables the earlier answer named, at most five. */
+            tables: components["schemas"]["AskTable"][];
+        };
         /** @description `POST /api/ask` body. */
         AskRequest: {
+            previous?: components["schemas"]["AskPrevious"] | null;
             /** @description The question, in words, 1 to 2000 characters. */
             question: string;
         };
@@ -6940,7 +6953,7 @@ export interface operations {
                     "application/json": components["schemas"]["AskAnswer"];
                 };
             };
-            /** @description The question is empty or longer than 2000 characters */
+            /** @description The question is empty or longer than 2000 characters, or the previous turn's question, statement or table list breaks its limit */
             400: {
                 headers: {
                     [name: string]: unknown;
