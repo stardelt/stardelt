@@ -57,8 +57,15 @@ indent() { local line; while IFS= read -r line; do printf '  %s\n' "$line"; done
 query_id() { python3 -c 'import sys,json;print(json.load(sys.stdin).get("id") or "")' 2>/dev/null || true; }
 rows() { python3 -c 'import sys,json;print(json.load(sys.stdin).get("data") or [])' 2>/dev/null || true; }
 
-kubectl -n "$NAMESPACE" get secret trino-ca >/dev/null 2>&1 \
-  || fail "Secret trino-ca not found — run 'make trino' (manifests/trino-tls.yaml)"
+# An absent Secret and an API server that does not answer are different outcomes: the first is a
+# red row with a fix, the second proved nothing (stardelt/stardelt#2326).
+secret_error="$(kubectl -n "$NAMESPACE" get secret trino-ca 2>&1 >/dev/null | tail -n 1 || true)"
+if [ -n "$secret_error" ]; then
+  case "$secret_error" in
+    *NotFound*) fail "Secret trino-ca not found — run 'make trino' (manifests/trino-tls.yaml)" ;;
+    *) echo "verify-trino-tls: UNVERIFIED (the API server did not answer: $secret_error)" >&2; exit 3 ;;
+  esac
+fi
 
 # run_probe NAME SCRIPT EXTRA_VOLUMES EXTRA_MOUNTS
 # The pod's shell prints the check's variables; the caller parses them. A failing
