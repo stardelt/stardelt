@@ -277,14 +277,15 @@ class VerifyPins(unittest.TestCase):
         self.assertNotIn("✗", done.stdout)
         self.assert_read_only()
 
-    def _airflow_worker_json(self, tag: str) -> str:
-        """One airflow Deployment whose containers carry `tag`; the groomer carries it too."""
+    def _airflow_worker_json(self, tag: str, groomer: str = "") -> str:
+        """One airflow Deployment; the main container carries `tag`, the groomer `groomer`."""
         pinned = re.search(
             r'value:\s*"demo@(sha256:[0-9a-f]{64})"',
             (REPO / "helm-values" / "airflow.yaml").read_text(),
         ).group(1)
         stale = "sha256:e22ab4e381a17d9b01504b324d5fbd91482f90ef2894bb11a6d5528fdf3faeaf"
-        value = {"pinned": f"demo@{pinned}", "stale": f"demo@{stale}"}[tag]
+        values = {"pinned": f"demo@{pinned}", "stale": f"demo@{stale}"}
+        value = values[groomer or tag]
         return json.dumps(
             {
                 "items": [
@@ -299,7 +300,7 @@ class VerifyPins(unittest.TestCase):
                                             "env": [
                                                 {
                                                     "name": "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG",
-                                                    "value": f"demo@{pinned}",
+                                                    "value": values[tag],
                                                 }
                                             ],
                                         },
@@ -336,7 +337,9 @@ class VerifyPins(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("✓ airflow-worker-tag every container carries sha256:", done.stdout)
 
-    def test_the_airflow_worker_tag_catches_a_groomer_with_an_old_digest(self):
+    def test_the_airflow_worker_tag_ignores_the_log_groomer(self):
+        # The groomer launches no task pod. An older bare `kubectl set env` wrote the tag into
+        # every container; Helm kept that stale digest and failed the gate for nothing (#2374).
         done = self.run_script(
             {
                 "access-sync": [PYTHON_PINNED, PYTHON_PINNED],
@@ -346,11 +349,27 @@ class VerifyPins(unittest.TestCase):
                 "spark-confmap-janitor": [ALPINE_PINNED],
             },
             deploys={"keycloak": KEYCLOAK_PINNED},
-            deploys_json=self._airflow_worker_json("stale"),
+            deploys_json=self._airflow_worker_json("pinned", groomer="stale"),
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("✓ airflow-worker-tag", done.stdout)
+        self.assertNotIn("✗", done.stdout)
+
+    def test_the_airflow_worker_tag_catches_a_stale_main_container(self):
+        done = self.run_script(
+            {
+                "access-sync": [PYTHON_PINNED, PYTHON_PINNED],
+                "demo-reset": [PYTHON_PINNED],
+                "lakehouse-backup": [AWS_CLI_PINNED],
+                "openbao-group-policies": [ALPINE_PINNED],
+                "spark-confmap-janitor": [ALPINE_PINNED],
+            },
+            deploys={"keycloak": KEYCLOAK_PINNED},
+            deploys_json=self._airflow_worker_json("stale", groomer="pinned"),
         )
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn(
-            "✗ airflow-worker-tag other worker tag: airflow-scheduler/scheduler-log-groomer "
+            "✗ airflow-worker-tag other worker tag: airflow-scheduler/scheduler "
             "e22ab4e381a17d9b01504b324d5fbd91482f90ef2894bb11a6d5528fdf3faeaf",
             done.stdout,
         )
