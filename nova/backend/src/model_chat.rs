@@ -20,8 +20,11 @@ use serde_json::{Value, json};
 /// Where the kubelet projects each endpoint's key (`stardelt-operator` `nova.rs`
 /// `MODEL_KEYS_PATH`, and the chart's `mountPath`). Nova never reads a Secret.
 const MODEL_KEYS_PATH: &str = "/var/run/stardelt/models";
-/// A chat call's token cap: thinking mode eats an uncapped budget (platform#1099).
-pub(crate) const MAX_TOKENS: u32 = 512;
+/// A chat call's token cap. It is bounded so a thinking model cannot run for ever
+/// (platform#1099), and [`CALL_TIMEOUT`] bounds the wall clock; it leaves room for a
+/// reasoning model's thinking *plus* an answer, because a small cap was spent entirely on
+/// thinking and left `content` empty on every call (nova#2395).
+pub(crate) const MAX_TOKENS: u32 = 4096;
 /// One call's wall-clock limit; the spike's slowest answer was 91 s on a CPU model.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How much of an error body a message may carry.
@@ -48,6 +51,9 @@ pub(crate) struct Answer {
     pub message: Value,
     /// The endpoint's `usage` object, when it sent one.
     pub usage: Option<Value>,
+    /// `choices[0].finish_reason`: `stop`, `length` when the cap cut the answer, `tool_calls`
+    /// for a tool call, `null`/absent when the endpoint sent none (nova#2395).
+    pub finish_reason: Option<String>,
     pub latency_ms: u64,
 }
 
@@ -142,6 +148,10 @@ pub(crate) async fn chat(client: &reqwest::Client, call: &Chat<'_>) -> Result<An
         content,
         message,
         usage: body.get("usage").cloned(),
+        finish_reason: body
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         latency_ms,
     })
 }
@@ -250,6 +260,14 @@ mod tests {
                 .and_then(Value::as_str),
             Some("sql_explain")
         );
+    }
+
+    /// The cap must leave room for a reasoning model's thinking and an answer (nova#2395).
+    /// The assertion is on a constant on purpose — the test is the guard, not a computation.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn max_tokens_leaves_room_for_reasoning() {
+        assert!(MAX_TOKENS >= 4096, "MAX_TOKENS is {MAX_TOKENS}");
     }
 
     /// A refusal names the status and how much of the body, and no URL.
