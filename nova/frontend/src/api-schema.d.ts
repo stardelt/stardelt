@@ -1012,7 +1012,7 @@ export interface paths {
          *     dashboard's `certified_by` must be `stardelt bundle <bundle>` and its
          *     `certification_details` must end with ` by <ownerGroup>`; a dashboard without the stamp,
          *     or one another group imported, is refused and stays (#115 decision 6). The caller's rule
-         *     is the export's owner-group rule.
+         *     is the dashboards owner-group rule.
          * @description Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group.
          */
         delete: operations["dashboards_delete"];
@@ -1028,7 +1028,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export for its own stage. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI. */
+        /** @description The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export its own group's dashboards. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI. */
         get: operations["dashboards_export"];
         put?: never;
         post?: never;
@@ -10013,7 +10013,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, or a deploy principal names another stage */
+            /** @description The caller is not a member of the bundle's owner group, or a deploy principal asks for another group's dashboards */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -10265,7 +10265,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, a deploy principal names another stage, or the dashboard carries another bundle's or group's stamp */
+            /** @description The caller is not a member of the bundle's owner group, a deploy principal asks for another group's dashboards, or the dashboard carries another bundle's or group's stamp */
             403: {
                 headers: {
                     [name: string]: unknown;
