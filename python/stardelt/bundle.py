@@ -2364,7 +2364,9 @@ def summary(nova, directory, target):
     The rows are the objects ``destroy`` would list (stamped with this bundle's name and this target; in a
     ``development`` target only the caller's own). Each row has the ``name`` and, when Nova knows them, the
     ``revision`` (Git commit) it was deployed from, ``deployedBy``, ``deployedAt`` and ``modified`` (true when someone changed
-    the object after the deploy). Every row carries its ``kind``: ``"Pipeline"`` or ``"StreamApp"``.
+    the object after the deploy). Every row carries its ``kind``: ``"Pipeline"``, ``"StreamApp"`` or
+    ``"Dashboard"``; a dashboard row's ``revision`` is the commit its import stamp recorded. A bundle
+    without a ``dashboards:`` block adds no dashboard rows and makes no request for them.
     Nothing is written.
     """
     problems, _, resolved = validate(directory, target)
@@ -2392,7 +2394,45 @@ def summary(nova, directory, target):
                 if stamp.get(key) is not None:
                     row[key] = stamp[key]
             rows.append(row)
+    dashboard_problems, dashboard_rows = _imported_dashboards(nova, directory, target)
+    rows += dashboard_rows
     rows.sort(key=lambda row: (row["name"], row.get("kind", "")))
+    return dashboard_problems, rows
+
+
+def _imported_dashboards(nova, directory, target):
+    """The dashboards this bundle and group imported for ``target``, as ``summary`` rows.
+
+    A bundle without a ``dashboards:`` block makes no request. The rows carry ``name``,
+    ``kind`` and, when the import stamp has one, ``revision`` (the commit it recorded).
+    """
+    root = Path(directory)
+    try:
+        manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        return [(str(root / "bundle.yaml"), f"cannot read it: {err}")], []
+    if not isinstance(manifest, dict) or "dashboards" not in manifest:
+        return [], []
+    head = manifest.get("bundle") if isinstance(manifest.get("bundle"), dict) else {}
+    group = head.get("ownerGroup")
+    if not (isinstance(group, str) and group):
+        return [("bundle", "bundle.ownerGroup is required")], []
+    try:
+        listed = nova.call(
+            "dashboards_list",
+            query={"bundle": provenance(directory, target)["bundle"], "ownerGroup": group},
+        ) or []
+    except api.StardeltApiError as err:
+        return [("dashboards", str(err))], []
+    rows = []
+    for row in listed:
+        if row.get("target") != target:
+            continue
+        name = row.get("title") or str(row.get("id"))
+        row_out = {"name": name, "kind": "Dashboard"}
+        if row.get("commit"):
+            row_out["revision"] = row["commit"]
+        rows.append(row_out)
     return [], rows
 
 

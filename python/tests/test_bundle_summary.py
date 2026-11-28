@@ -6,6 +6,7 @@ import json
 from stardelt import cli
 from tests.test_api import CANARY, FakeResponse, FakeSession
 from tests.test_bundle import LOAD, NIGHTLY, make
+from tests.test_bundle_dashboards import make as make_dashboards
 
 ENV = {"STARDELT_NOVA_URL": "https://nova.example", "STARDELT_TOKEN": CANARY}
 ME = FakeResponse(payload={"user": "alice"})
@@ -178,3 +179,44 @@ def test_a_bundle_problem_and_a_development_target_without_a_sign_in_name_are_re
     )
     assert (code, out) == (2, "") and "sign in first" in err
     assert len(session.calls) == 1, "only the sign-in name was asked; no listing"
+
+
+DASHBOARDS = [
+    {"id": 7, "title": "shop", "target": "prod", "commit": "0123abc"},
+    {"id": 8, "title": "old", "target": "dev", "commit": "fedcba"},
+    {"id": 9, "title": "", "target": "prod", "commit": ""},
+]
+
+
+def test_a_dashboard_of_this_bundle_target_is_a_row_with_its_stamp_commit(tmp_path):
+    make_dashboards(tmp_path)
+    code, out, err, session = run(
+        ["bundle", "summary", str(tmp_path), "-t", "prod"],
+        ME,
+        FakeResponse(payload=LISTING),
+        FakeResponse(payload=DASHBOARDS),
+    )
+    assert (code, err) == (0, "")
+    rows = [json.loads(line) for line in out.splitlines()]
+    dashboards = [row for row in rows if row.get("kind") == "Dashboard"]
+    assert dashboards == [
+        {"name": "9", "kind": "Dashboard"},
+        {"name": "shop", "kind": "Dashboard", "revision": "0123abc"},
+    ]
+    assert ["bare", "load", "nightly"] == [row["name"] for row in rows if row.get("kind") == "Pipeline"]
+    assert any(
+        method == "GET"
+        and url.endswith("/api/dashboards")
+        and kwargs.get("params") == {"bundle": "sales-etl", "ownerGroup": "sales"}
+        for method, url, kwargs in session.calls
+    ), "the dashboards are listed for this bundle and group"
+
+
+def test_a_bundle_without_dashboards_does_not_ask_for_them(tmp_path):
+    make(tmp_path)
+    code, out, err, session = run(
+        ["bundle", "summary", str(tmp_path), "-t", "prod"], ME, FakeResponse(payload=LISTING)
+    )
+    assert (code, err) == (0, "")
+    assert len(session.calls) == 2, "a me call and the pipelines list, nothing else"
+    assert [url for _, url, _ in session.calls if url.endswith("/api/dashboards")] == []
