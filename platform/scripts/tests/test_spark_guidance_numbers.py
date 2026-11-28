@@ -22,6 +22,15 @@ def spark_tips():
     return [f"instead of {rule['bad']}: {rule['good']} ({rule['why']})" for rule in rules]
 
 
+def rules_rows():
+    """The seven rules as `(id, bad, good, why)` texts, in file order."""
+    import json
+    return [
+        (rule["id"], rule["bad"], rule["good"], rule["why"])
+        for rule in json.loads(RULES.read_text(encoding="utf-8"))["rules"]
+    ]
+
+
 def readme_table_rows():
     """The data rows of the README's "Keeping the shared driver healthy" table."""
     text = README.read_text()
@@ -148,6 +157,21 @@ class SparkGuidanceNumbers(unittest.TestCase):
         self.assertIn(f"above {n['max_result_mib']} MiB", text)
         self.assertIn(f"{n['executor_gib']} GiB each", text)
         self.assertEqual(len(tips), len(readme_table_rows()))
+
+    def test_the_readme_table_is_the_rules_file(self):
+        """Every README row is one rule's `bad | good | why`, backticks allowed (stardelt-docs#108)."""
+        parsed = [
+            [cell.strip().replace("`", "") for cell in row.strip().strip("|").split("|")]
+            for row in readme_table_rows()
+        ]
+        expected = [[bad, good, why] for _, bad, good, why in rules_rows()]
+        self.assertEqual(
+            parsed,
+            expected,
+            "python/stardelt/README.md's 'Keeping the shared driver healthy' table disagrees with "
+            "python/stardelt/performance_rules.json; edit the README to the rules file's words "
+            "(backticks may wrap code)",
+        )
 
     def test_the_compute_guide_states_the_operator_presets(self):
         if not CONNECT_GUIDE.exists():
