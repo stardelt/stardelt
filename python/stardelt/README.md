@@ -294,6 +294,34 @@ and a deploy whose row cannot be written still succeeds and prints `not-recorded
 when it has less than a minute left, and remembers `--host`/`STARDELT_NOVA_URL` given at login. `STARDELT_TOKEN`
 still wins when set (CI). `stardelt logout` deletes the file.
 
+### Run the agent in a container
+
+`ghcr.io/stardelt/agent` is the agent harness as one image — the `stardelt` command line with
+`stardelt agent`, the Spark Connect client, and dbt with the Trino adapter — and it starts the agent
+when you run it. It carries no credential: sign in inside it, and keep the sign-in in a volume so the
+next container has it (it is written to `/home/agent/.config/stardelt`).
+
+```bash
+docker volume create stardelt-agent                  # once
+docker run -it --rm -v stardelt-agent:/home/agent/.config \
+  ghcr.io/stardelt/agent --host https://<your Nova> login   # once: the device flow
+docker run -it --rm -v stardelt-agent:/home/agent/.config \
+  ghcr.io/stardelt/agent --host https://<your Nova> agent   # the agent, as you
+```
+
+Any other command runs the same way (`docker run --rm -v stardelt-agent:/home/agent/.config
+ghcr.io/stardelt/agent --host … sql "select 1"`). To use the sign-in your machine already has, copy it
+into that volume once instead of logging in again:
+
+```bash
+docker run --rm -v stardelt-agent:/home/agent/.config -v ~/.config/stardelt:/from-host:ro \
+  --entrypoint sh ghcr.io/stardelt/agent \
+  -c 'mkdir -p /home/agent/.config/stardelt && cp /from-host/* /home/agent/.config/stardelt/'
+```
+
+Mounting the host sign-in read-only in place is not enough: the access token is renewed every few
+minutes and the renewal writes the file.
+
 Results go to stdout, messages to stderr. Exit codes: `0` ok, `1` error, `2` wrong usage,
 `3` authentication needed. A token is never printed.
 

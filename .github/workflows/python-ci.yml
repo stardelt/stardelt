@@ -67,6 +67,34 @@ jobs:
             exit 1
           fi
 
+  image-agent-check:
+    name: Build the agent image (no push)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build ghcr.io/stardelt/agent:dev (not pushed)
+        run: docker build --build-arg REVISION="${{ github.sha }}" -t ghcr.io/stardelt/agent:dev -f image/agent.Dockerfile .
+
+      - name: The image runs the agent
+        run: |
+          docker run --rm ghcr.io/stardelt/agent:dev agent --help \
+            | grep -q 'usage: stardelt agent'
+
+      - name: The image carries dbt with the Trino adapter
+        run: |
+          docker run --rm --entrypoint dbt ghcr.io/stardelt/agent:dev --version \
+            | grep -q 'trino'
+
+      - name: The image names the commit it was built from
+        run: |
+          got="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' ghcr.io/stardelt/agent:dev)"
+          if [ "$got" != "${{ github.sha }}" ]; then
+            echo "revision label is '$got', expected '${{ github.sha }}'" >&2
+            exit 1
+          fi
+
   image-cli:
     name: Push the CLI image
     runs-on: ubuntu-latest
@@ -104,5 +132,45 @@ jobs:
           push: true
           sbom: true
           tags: ghcr.io/stardelt/stardelt-cli:${{ steps.image.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  image-agent:
+    name: Push the agent image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: [test]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The image tag and the commit this build publishes
+        id: image
+        run: |
+          tag=dev
+          echo "tag=${tag#python/}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build and push the agent image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: python
+          file: python/image/agent.Dockerfile
+          build-args: REVISION=${{ steps.image.outputs.sha }}
+          push: true
+          sbom: true
+          tags: ghcr.io/stardelt/agent:${{ steps.image.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
