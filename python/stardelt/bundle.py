@@ -1199,7 +1199,7 @@ def _dashboard_folders(root, section, problems):
         if not any((folder / "dashboards").glob("*.yaml")):
             problems.append((entry, "has no dashboards/*.yaml; is this a Superset export?"))
             continue
-        if (folder / "databases").exists():
+        if any(path.name == "databases" for path in folder.rglob("*")):
             problems.append((entry, "holds databases/; a bundle never stores the connection"))
             continue
         files = [p for p in folder.rglob("*") if p.is_file()]
