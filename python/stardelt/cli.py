@@ -307,11 +307,16 @@ def _parser():
     ql_export = query_log_commands.add_parser(
         "export", help="write every row as JSON lines, oldest first (administrator only)"
     )
-    ql_export.add_argument("--out", required=True, help="the file to write; overwritten")
+    ql_export.add_argument(
+        "--out", required=True,
+        help="the file to write; --cursor and --append add to it, otherwise it is replaced",
+    )
     ql_export.add_argument("--from", dest="from_ms", type=int, default=None,
                            help="only rows created at or after this epoch-millisecond time")
     ql_export.add_argument("--cursor", default=None,
                            help="the nextCursor a previous, interrupted export named")
+    ql_export.add_argument("--append", action="store_true",
+                           help="add the rows to the file instead of replacing it")
     ql_export.add_argument("--limit", type=int, default=None,
                            help="rows per request, 1 to 1000 (default 500)")
     classify = commands.add_parser("classify", help="suggest a data class for a table's unclassed columns")
@@ -731,10 +736,12 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
         if args.command == "query-log":
             from stardelt import query_log
 
+            mode = "a" if args.append or args.cursor else "w"
             try:
-                with open(args.out, "w", encoding="utf-8") as fh:
+                with open(args.out, mode, encoding="utf-8") as fh:
                     answer = query_log.export(
-                        nova, fh, from_ms=args.from_ms, cursor=args.cursor, limit=args.limit
+                        nova, fh, from_ms=args.from_ms, cursor=args.cursor, limit=args.limit,
+                        out_path=args.out,
                     )
             except query_log.ExportError as err:
                 stderr.write(f"stardelt: {err}\n")
