@@ -268,10 +268,10 @@ pub fn dashboard_titles(archive: &[u8]) -> Result<Vec<String>, ArchiveError> {
             continue;
         }
         let text = String::from_utf8_lossy(bytes);
-        if let Some(title) = value(&text, "dashboard_title") {
-            if !title.is_empty() {
-                titles.insert(title);
-            }
+        if let Some(title) = value(&text, "dashboard_title")
+            && !title.is_empty()
+        {
+            titles.insert(title);
         }
     }
     Ok(titles.into_iter().collect())
