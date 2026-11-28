@@ -1,6 +1,7 @@
 method	path	handler_module	router_file	gate
 DELETE	/api/access-requests/{id}	access_requests	main	signed-in
 DELETE	/api/admin/compute/{name}	compute	main	admin
+DELETE	/api/ask/history/{id}	ask	main	signed-in
 DELETE	/api/connections/group/{group}/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/managed/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/personal/{name}	connection_routes	main	signed-in
@@ -165,6 +166,7 @@ POST	/internal/trino-events	query_log_collector	query_log_collector	internal lis
 POST	/mcp	mcp	mcp	mcp (bearer)
 PUT	/api/admin/catalogs/{name}/access	admin_catalogs	main	admin
 PUT	/api/admin/compute/{name}	compute	main	admin
+PUT	/api/ask/history/{id}/pin	ask	main	signed-in
 PUT	/api/catalog/tables/{ns}/{tbl}/columns/{column}/description	catalog_docs	main	signed-in
 PUT	/api/catalog/tables/{ns}/{tbl}/documentation	catalog_docs	main	signed-in
 PUT	/api/catalog/tables/{ns}/{tbl}/health	catalog_docs	main	signed-in

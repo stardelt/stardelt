@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 
 use crate::AppState;
+use crate::api_json::ApiJson;
 
 /// The longest question Ask takes.
 const MAX_QUESTION_CHARS: usize = 2_000;
@@ -147,6 +148,8 @@ pub(crate) struct AskConversation {
     pub explain: String,
     pub error: Option<String>,
     pub created_at: String,
+    /// Kept: a pinned conversation is never pruned.
+    pub pinned: bool,
 }
 
 /// Every endpoint that may answer Ask, in name order: purpose `ask`, the probe found it
@@ -360,8 +363,8 @@ async fn record_conversation(pool: &sqlx::PgPool, sub: &str, question: &str, bod
         return;
     }
     let pruned = sqlx::query(
-        "DELETE FROM ask_conversation WHERE sub = $1 AND id NOT IN ( \
-           SELECT id FROM ask_conversation WHERE sub = $1 \
+        "DELETE FROM ask_conversation WHERE sub = $1 AND NOT pinned AND id NOT IN ( \
+           SELECT id FROM ask_conversation WHERE sub = $1 AND NOT pinned \
            ORDER BY created_at DESC, id DESC LIMIT 20)",
     )
     .bind(sub)
@@ -1738,32 +1741,24 @@ pub(crate) async fn history(
         None => state.dev_user.clone(),
     };
     let rows: Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> = sqlx::query(
-        "SELECT id, question, endpoint, model, call_id, sql, sentence, tables, explain, error, \
-                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at \
-         FROM ask_conversation WHERE sub = $1 \
-         ORDER BY ask_conversation.created_at DESC, id DESC LIMIT 20",
+        "(SELECT id, question, endpoint, model, call_id, sql, sentence, tables, explain, error, \
+                 to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at, \
+                 pinned \
+          FROM ask_conversation WHERE sub = $1 AND pinned \
+          ORDER BY ask_conversation.created_at DESC, id DESC LIMIT 20) \
+         UNION ALL \
+         (SELECT id, question, endpoint, model, call_id, sql, sentence, tables, explain, error, \
+                 to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at, \
+                 pinned \
+          FROM ask_conversation WHERE sub = $1 AND NOT pinned \
+          ORDER BY ask_conversation.created_at DESC, id DESC LIMIT 20)",
     )
     .bind(&sub)
     .fetch_all(pool)
     .await;
     match rows {
         Ok(rows) => {
-            let items: Vec<AskConversation> = rows
-                .into_iter()
-                .map(|row| AskConversation {
-                    id: row.get("id"),
-                    question: row.get("question"),
-                    endpoint: row.get("endpoint"),
-                    model: row.get("model"),
-                    call_id: row.get("call_id"),
-                    sql: row.get("sql"),
-                    sentence: row.get("sentence"),
-                    tables: row.get("tables"),
-                    explain: row.get("explain"),
-                    error: row.get("error"),
-                    created_at: row.get("created_at"),
-                })
-                .collect();
+            let items: Vec<AskConversation> = rows.into_iter().map(conversation_of).collect();
             no_store((StatusCode::OK, Json(items)).into_response())
         }
         Err(e) => {
@@ -1771,6 +1766,168 @@ pub(crate) async fn history(
             fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the history was not read",
+            )
+        }
+    }
+}
+
+/// One `ask_conversation` row as `AskConversation`; the select names every column.
+fn conversation_of(row: sqlx::postgres::PgRow) -> AskConversation {
+    AskConversation {
+        id: row.get("id"),
+        question: row.get("question"),
+        endpoint: row.get("endpoint"),
+        model: row.get("model"),
+        call_id: row.get("call_id"),
+        sql: row.get("sql"),
+        sentence: row.get("sentence"),
+        tables: row.get("tables"),
+        explain: row.get("explain"),
+        error: row.get("error"),
+        created_at: row.get("created_at"),
+        pinned: row.get("pinned"),
+    }
+}
+
+/// The pin body: `pinned` keeps the conversation, or lets it fall off.
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PinRequest {
+    /// `true` keeps the conversation for good; `false` lets it fall off with the other unpinned ones.
+    pub pinned: bool,
+}
+
+/// `PUT …/pin` — keep one of the caller's conversations, or let it go.
+///
+/// A pinned conversation is never pruned: the prune keeps the newest 20 **unpinned** ones
+/// (maintainer, 2026-11-28). A person holds at most 20 pinned; the 21st is a `409`.
+#[utoipa::path(
+    put,
+    operation_id = "ask_history_pin",
+    path = "/api/ask/history/{id}/pin",
+    tag = "public",
+    description = "Keeps one of the caller's own conversations (`pinned: true`) or lets it fall off with the newest 20 unpinned (`pinned: false`), and answers the row. A pinned conversation is never pruned. A person holds at most 20 pinned conversations; a 21st is a `409` `at most 20 conversations can be pinned; unpin one first`. Only the caller's own conversations can be pinned: another person's id, or a missing one, is a `404` `no such conversation`, the same answer for both, so an id probe learns nothing. Every answer carries `Cache-Control: no-store`.",
+    params(("id" = i64, Path, description = "The conversation's id, from History")),
+    request_body = PinRequest,
+    responses(
+        (status = 200, description = "The conversation, as History lists it", body = AskConversation),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No conversation with that id belongs to the caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The caller already holds 20 pinned conversations", body = crate::openapi::ErrorResponse),
+        (status = 500, description = "The conversation was not pinned", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No state store", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn history_pin(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+    Path(id): Path<i64>,
+    ApiJson(body): ApiJson<PinRequest>,
+) -> Response {
+    let Some(pool) = state.db.as_ref() else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Ask needs Nova's database, and this installation has none",
+        );
+    };
+    let sub = match caller.as_ref() {
+        Some(caller) => caller.0.identity.sub.clone(),
+        None => state.dev_user.clone(),
+    };
+    if body.pinned {
+        // The row itself does not count against the limit, so pinning a pinned row is a no-op.
+        let held = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM ask_conversation WHERE sub = $1 AND pinned AND id <> $2",
+        )
+        .bind(&sub)
+        .bind(id)
+        .fetch_one(pool)
+        .await;
+        match held {
+            Ok(held) if held >= 20 => {
+                return fail(
+                    StatusCode::CONFLICT,
+                    "at most 20 conversations can be pinned; unpin one first",
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "ask: the pinned count could not be read");
+                return fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the conversation was not pinned",
+                );
+            }
+        }
+    }
+    let updated = sqlx::query(
+        "UPDATE ask_conversation SET pinned = $3 WHERE id = $1 AND sub = $2 \
+         RETURNING id, question, endpoint, model, call_id, sql, sentence, tables, explain, error, \
+                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at, \
+                   pinned",
+    )
+    .bind(id)
+    .bind(&sub)
+    .bind(body.pinned)
+    .fetch_optional(pool)
+    .await;
+    match updated {
+        Ok(Some(row)) => no_store((StatusCode::OK, Json(conversation_of(row))).into_response()),
+        Ok(None) => fail(StatusCode::NOT_FOUND, "no such conversation"),
+        Err(e) => {
+            tracing::warn!(error = %e, "ask: the conversation was not pinned");
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the conversation was not pinned",
+            )
+        }
+    }
+}
+
+/// `DELETE …/{id}` — remove one of the caller's own conversations.
+#[utoipa::path(
+    delete,
+    operation_id = "ask_history_delete",
+    path = "/api/ask/history/{id}",
+    tag = "public",
+    description = "Removes one of the caller's own Ask conversations for good. Only the caller's own: another person's id, or a missing one, is a `404` `no such conversation`, the same answer for both, so an id probe learns nothing. Every answer carries `Cache-Control: no-store`.",
+    params(("id" = i64, Path, description = "The conversation's id, from History")),
+    responses(
+        (status = 204, description = "The conversation is gone"),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No conversation with that id belongs to the caller", body = crate::openapi::ErrorResponse),
+        (status = 500, description = "The conversation was not deleted", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No state store", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn history_delete(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let Some(pool) = state.db.as_ref() else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Ask needs Nova's database, and this installation has none",
+        );
+    };
+    let sub = match caller.as_ref() {
+        Some(caller) => caller.0.identity.sub.clone(),
+        None => state.dev_user.clone(),
+    };
+    let deleted = sqlx::query("DELETE FROM ask_conversation WHERE id = $1 AND sub = $2")
+        .bind(id)
+        .bind(&sub)
+        .execute(pool)
+        .await;
+    match deleted {
+        Ok(done) if done.rows_affected() == 1 => no_store(StatusCode::NO_CONTENT.into_response()),
+        Ok(_) => fail(StatusCode::NOT_FOUND, "no such conversation"),
+        Err(e) => {
+            tracing::warn!(error = %e, "ask: the conversation was not deleted");
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the conversation was not deleted",
             )
         }
     }
@@ -2678,6 +2835,235 @@ mod tests {
         let items = body.as_array().expect("a list of conversations");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["question"], json!(bobs));
+    }
+
+    // --- pinning and deleting (maintainer, 2026-11-28) --------------------------------
+
+    /// One answer as `record_conversation` stores it.
+    fn conversation_answer(question: &str) -> AskAnswer {
+        AskAnswer {
+            endpoint: "default".into(),
+            model: "qwen3-4b".into(),
+            tried: vec!["default".into()],
+            call_id: None,
+            sql: Some("SELECT 1".into()),
+            sentence: format!("the answer to {question}"),
+            tables: Vec::new(),
+            explain: "passed".into(),
+            error: None,
+            mode: "sql".into(),
+            text: None,
+            steps: Vec::new(),
+        }
+    }
+
+    /// The three history routes as one person sees them.
+    fn conversation_app(state: Arc<AppState>, sub: &str) -> Router {
+        Router::new()
+            .route("/api/ask/history", axum::routing::get(history))
+            .route("/api/ask/history/{id}/pin", axum::routing::put(history_pin))
+            .route(
+                "/api/ask/history/{id}",
+                axum::routing::delete(history_delete),
+            )
+            .with_state(state)
+            .layer(axum::Extension(principal(sub)))
+    }
+
+    /// One `PUT …/pin` (with a body) or `DELETE …` (without), its status and its body.
+    async fn conversation_call(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let request = Request::builder().method(method).uri(uri);
+        let request = match body {
+            Some(body) => request
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+            None => request.body(Body::empty()).unwrap(),
+        };
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// One stored conversation's id.
+    async fn conversation_id(pool: &sqlx::PgPool, sub: &str, question: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM ask_conversation WHERE sub = $1 AND question = $2",
+        )
+        .bind(sub)
+        .bind(question)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_pinned_conversation_survives_the_prune() {
+        use crate::db::test_support::migrated_pool;
+
+        let pool = migrated_pool().await;
+        sqlx::query("DELETE FROM ask_conversation")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let kept = "alice question to keep";
+        record_conversation(&pool, "alice", kept, &conversation_answer(kept)).await;
+        let id = conversation_id(&pool, "alice", kept).await;
+
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let app = conversation_app(Arc::clone(&state), "alice");
+        let (status, body) = conversation_call(
+            &app,
+            "PUT",
+            &format!("/api/ask/history/{id}/pin"),
+            Some(json!({"pinned": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["pinned"], json!(true));
+        assert_eq!(body["question"], json!(kept));
+
+        // Twenty-one more answers: the prune keeps the newest 20 unpinned, and never the pinned one.
+        for number in 0..21 {
+            let question = format!("alice question {number}");
+            record_conversation(&pool, "alice", &question, &conversation_answer(&question)).await;
+        }
+
+        let (status, body, _) = history_call(&app).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body.as_array().expect("a list of conversations");
+        assert_eq!(items.len(), 21, "20 unpinned and the pinned one: {body}");
+        assert_eq!(items[0]["question"], json!(kept), "pinned first: {body}");
+        assert_eq!(items[0]["pinned"], json!(true));
+        assert_eq!(items[1]["question"], json!("alice question 20"));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn another_persons_conversation_is_not_found() {
+        use crate::db::test_support::migrated_pool;
+
+        let pool = migrated_pool().await;
+        sqlx::query("DELETE FROM ask_conversation")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let question = "alice question 0";
+        record_conversation(&pool, "alice", question, &conversation_answer(question)).await;
+        let id = conversation_id(&pool, "alice", question).await;
+
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let bob = conversation_app(Arc::clone(&state), "bob");
+        let (status, body) = conversation_call(
+            &bob,
+            "PUT",
+            &format!("/api/ask/history/{id}/pin"),
+            Some(json!({"pinned": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], json!("no such conversation"));
+        let (status, body) =
+            conversation_call(&bob, "DELETE", &format!("/api/ask/history/{id}"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], json!("no such conversation"));
+
+        // Bob touched nothing of alice's, and an id that does not exist is the same 404.
+        let pinned = sqlx::query_scalar::<_, bool>(
+            "SELECT pinned FROM ask_conversation WHERE sub = 'alice' AND id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            pinned,
+            Some(false),
+            "bob's pin or delete touched alice's row"
+        );
+        let alice = conversation_app(Arc::clone(&state), "alice");
+        let (status, _) =
+            conversation_call(&alice, "DELETE", "/api/ask/history/999999", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_twenty_first_pin_is_refused() {
+        use crate::db::test_support::migrated_pool;
+
+        let pool = migrated_pool().await;
+        sqlx::query("DELETE FROM ask_conversation")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for number in 0..20 {
+            let question = format!("alice question {number}");
+            record_conversation(&pool, "alice", &question, &conversation_answer(&question)).await;
+        }
+
+        let state = crate::router_tests::test_state_with_db(Some(pool.clone()));
+        let app = conversation_app(Arc::clone(&state), "alice");
+        for number in 0..20 {
+            let id = conversation_id(&pool, "alice", &format!("alice question {number}")).await;
+            let (status, _) = conversation_call(
+                &app,
+                "PUT",
+                &format!("/api/ask/history/{id}/pin"),
+                Some(json!({"pinned": true})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "pin {number}");
+        }
+
+        // A 21st unpinned conversation stays (20 is the prune's limit for unpinned rows) and
+        // cannot be pinned.
+        let extra = "alice question extra";
+        record_conversation(&pool, "alice", extra, &conversation_answer(extra)).await;
+        let id = conversation_id(&pool, "alice", extra).await;
+        let (status, body) = conversation_call(
+            &app,
+            "PUT",
+            &format!("/api/ask/history/{id}/pin"),
+            Some(json!({"pinned": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["error"],
+            json!("at most 20 conversations can be pinned; unpin one first")
+        );
+
+        // Unpinning one makes room.
+        let first = conversation_id(&pool, "alice", "alice question 0").await;
+        let (status, _) = conversation_call(
+            &app,
+            "PUT",
+            &format!("/api/ask/history/{first}/pin"),
+            Some(json!({"pinned": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = conversation_call(
+            &app,
+            "PUT",
+            &format!("/api/ask/history/{id}/pin"),
+            Some(json!({"pinned": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[test]

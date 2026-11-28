@@ -15,7 +15,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type AskPrevious, type ModelEndpoint } from '../api'
 import { formatTime } from '../format'
 import { tokenizeSql } from '../sqlHighlight'
@@ -89,6 +89,78 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
     retry: false,
   })
   const conversations = history.data ?? []
+
+  // Pinning keeps a conversation for good; deleting removes one (maintainer, 2026-11-28).
+  // Both act on the caller's own rows only — the API answers a foreign id with a 404.
+  const queryClient = useQueryClient()
+  const [confirmId, setConfirmId] = useState<number | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const refreshHistory = () => {
+    void queryClient.invalidateQueries({ queryKey: ['ask', 'history'] })
+  }
+  const pin = useMutation({
+    mutationFn: ({ id, pinned }: { id: number; pinned: boolean }) => api.askHistoryPin(id, pinned),
+    onSuccess: () => {
+      setHistoryError(null)
+      refreshHistory()
+    },
+    onError: e => setHistoryError(errorMessage(e)),
+  })
+  const remove = useMutation({
+    mutationFn: (id: number) => api.askHistoryDelete(id),
+    onSuccess: () => {
+      setConfirmId(null)
+      setHistoryError(null)
+      refreshHistory()
+    },
+    onError: e => setHistoryError(errorMessage(e)),
+  })
+  const pinned = conversations.filter(c => c.pinned)
+  const unpinned = conversations.filter(c => !c.pinned)
+
+  /** One History row: opening it, pinning it and deleting it are siblings (#2396). */
+  function historyRow(c: AskConversation) {
+    return (
+      <div key={c.id} className="flex items-start gap-1">
+        <button
+          type="button"
+          className="btn-ghost min-w-0 flex-1 text-left"
+          data-testid="history-open"
+          onClick={() => openConversation(c)}
+        >
+          <span className="block truncate text-sm">{c.question}</span>
+          <span className="block text-xs text-text-mute">
+            {formatTime(c.createdAt)}
+            {c.explain === 'passed' && ' ✓ checked'}
+            {c.explain === 'failed' && ' ✕ not runnable'}
+          </span>
+        </button>
+        {confirmId === c.id ? (
+          <span className="flex items-center gap-1 py-1">
+            <span className="text-xs text-text-dim">Delete this conversation?</span>
+            <button type="button" className="btn-ghost px-2 py-1 text-xs" onClick={() => remove.mutate(c.id)}>Delete</button>
+            <button type="button" className="btn-ghost px-2 py-1 text-xs" onClick={() => setConfirmId(null)}>Cancel</button>
+          </span>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={`btn-ghost px-2 py-1${c.pinned ? '' : ' opacity-40'}`}
+              aria-label={c.pinned ? 'Unpin' : 'Pin'}
+              aria-pressed={c.pinned}
+              onClick={() => pin.mutate({ id: c.id, pinned: !c.pinned })}
+            >📌</button>
+            <button
+              type="button"
+              className="btn-ghost px-2 py-1"
+              aria-label="Delete"
+              onClick={() => setConfirmId(c.id)}
+            >✕</button>
+          </>
+        )}
+      </div>
+    )
+  }
 
   const sqlOfLastTurn = turns.length > 0 ? turns[turns.length - 1].answer?.sql ?? null : null
 
@@ -254,21 +326,14 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
             {history.error != null && (
               <p role="status" className="text-sm text-text-dim">{errorMessage(history.error)}</p>
             )}
-            {conversations.map(c => (
-              <button
-                key={c.id}
-                type="button"
-                className="btn-ghost w-full text-left"
-                onClick={() => openConversation(c)}
-              >
-                <span className="block truncate text-sm">{c.question}</span>
-                <span className="block text-xs text-text-mute">
-                  {formatTime(c.createdAt)}
-                  {c.explain === 'passed' && ' ✓ checked'}
-                  {c.explain === 'failed' && ' ✕ not runnable'}
-                </span>
-              </button>
-            ))}
+            {historyError != null && (
+              <p role="status" className="text-sm text-text-dim">{historyError}</p>
+            )}
+            {pinned.length > 0 && (
+              <p className="px-1 pt-1 text-xs text-text-mute">Pinned</p>
+            )}
+            {pinned.map(historyRow)}
+            {unpinned.map(historyRow)}
           </div>
         ) : (
           <>

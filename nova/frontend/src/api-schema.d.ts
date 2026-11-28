@@ -317,6 +317,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ask/history/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE …/{id}` — remove one of the caller's own conversations.
+         * @description Removes one of the caller's own Ask conversations for good. Only the caller's own: another person's id, or a missing one, is a `404` `no such conversation`, the same answer for both, so an id probe learns nothing. Every answer carries `Cache-Control: no-store`.
+         */
+        delete: operations["ask_history_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ask/history/{id}/pin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT …/pin` — keep one of the caller's conversations, or let it go.
+         * @description Keeps one of the caller's own conversations (`pinned: true`) or lets it fall off with the newest 20 unpinned (`pinned: false`), and answers the row. A pinned conversation is never pruned. A person holds at most 20 pinned conversations; a 21st is a `409` `at most 20 conversations can be pinned; unpin one first`. Only the caller's own conversations can be pinned: another person's id, or a missing one, is a `404` `no such conversation`, the same answer for both, so an id probe learns nothing. Every answer carries `Cache-Control: no-store`.
+         */
+        put: operations["ask_history_pin"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/config": {
         parameters: {
             query?: never;
@@ -2871,6 +2911,8 @@ export interface components {
             /** Format: int64 */
             id: number;
             model?: string | null;
+            /** @description Kept: a pinned conversation is never pruned. */
+            pinned: boolean;
             question: string;
             sentence: string;
             sql?: string | null;
@@ -4567,6 +4609,11 @@ export interface components {
             name: string;
             /** @description The peer's base URL, without a trailing slash. */
             url: string;
+        };
+        /** @description The pin body: `pinned` keeps the conversation, or lets it fall off. */
+        PinRequest: {
+            /** @description `true` keeps the conversation for good; `false` lets it fall off with the other unpinned ones. */
+            pinned: boolean;
         };
         /** @description The verdict of the pipeline a promise requires (#402). */
         PipelineChecks: {
@@ -7157,6 +7204,135 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No state store */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    ask_history_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The conversation's id, from History */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The conversation is gone */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No conversation with that id belongs to the caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The conversation was not deleted */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No state store */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    ask_history_pin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The conversation's id, from History */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PinRequest"];
+            };
+        };
+        responses: {
+            /** @description The conversation, as History lists it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AskConversation"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No conversation with that id belongs to the caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller already holds 20 pinned conversations */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The conversation was not pinned */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
