@@ -966,10 +966,10 @@ export interface paths {
         };
         /**
          * `GET /api/dashboards`: the dashboards **this bundle and this owner group** imported, with
-         *     the target and commit of the stamp the import wrote (#115 decision 6). A dashboard without
+         *     the target, commit and normalized export hash of the stamp the import wrote (#115 decision 6). A dashboard without
          *     that stamp, and one another group imported, is never listed. At most 100 (Superset's page
          *     size). The caller's rule is the export's owner-group rule.
-         * @description The dashboards this bundle and this owner group imported, each with the target and commit of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.
+         * @description The dashboards this bundle and this owner group imported, each with the target, commit and normalized export hash (`sha256`) of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.
          */
         get: operations["dashboards_list"];
         put?: never;
@@ -989,7 +989,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped. */
+        /** @description Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit> #<sha256> by <ownerGroup>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped. */
         post: operations["dashboards_import"];
         delete?: never;
         options?: never;
@@ -3487,8 +3487,8 @@ export interface components {
             target: string;
         };
         /**
-         * @description One dashboard a bundle's import left on a target: Superset's id and title, and the target
-         *     and commit the import recorded in the dashboard's stamp.
+         * @description One dashboard a bundle's import left on a target: Superset's id and title, and the target,
+         *     commit and normalized export hash the import recorded in the dashboard's stamp.
          */
         DashboardImported: {
             /** @description The bundle's commit the import recorded, or `""`. */
@@ -3498,6 +3498,8 @@ export interface components {
              * @description Superset's numeric dashboard id.
              */
             id: number;
+            /** @description The normalized sha256 of the export the import stored, or `""` for an import before the hash. */
+            sha256: string;
             /** @description The target the import was for (`prod`, from the stamp). */
             target: string;
             /** @description The dashboard's title in Superset. */

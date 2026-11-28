@@ -901,7 +901,7 @@ pub(crate) fn dashboards_refusal(
 
 /// Why `dashboard` may not be removed for `bundle` by `owner_group`, or `None` when it may.
 /// The import stamps `certified_by: "stardelt bundle <bundle>"` and
-/// `certification_details: "<target> @ <commit> by <owner_group>"` (decision 6 of #115,
+/// `certification_details: "<target> @ <commit> #<sha256> by <owner_group>"` (decision 6 of #115,
 /// amended); both must name this bundle and this group. A dashboard without the group in its
 /// stamp — a person's own, another bundle's, another group's — is never touched.
 pub(crate) fn delete_refusal(
@@ -1126,8 +1126,8 @@ pub struct DashboardListQuery {
     pub owner_group: String,
 }
 
-/// One dashboard a bundle's import left on a target: Superset's id and title, and the target
-/// and commit the import recorded in the dashboard's stamp.
+/// One dashboard a bundle's import left on a target: Superset's id and title, and the target,
+/// commit and normalized export hash the import recorded in the dashboard's stamp.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardImported {
@@ -1139,24 +1139,31 @@ pub struct DashboardImported {
     pub target: String,
     /// The bundle's commit the import recorded, or `""`.
     pub commit: String,
+    /// The normalized sha256 of the export the import stored, or `""` for an import before the hash.
+    pub sha256: String,
 }
 
-/// The `target` and the `commit` a dashboard's stamp records. The import writes
-/// `certification_details: "<target> @ <commit> by <ownerGroup>"`; both are `""` when the
-/// stamp does not carry them.
-fn stamp_parts(details: &str) -> (String, String) {
+/// The `target`, `commit` and normalized export `sha256` a dashboard's stamp records. The
+/// import writes `certification_details: "<target> @ <commit> #<sha256> by <ownerGroup>"`;
+/// each is `""` when the stamp does not carry it. The old three-part stamp
+/// (`<target> @ <commit> by <ownerGroup>`) carries an empty `sha256`, so every dashboard
+/// imported before the hash still lists its target and commit.
+fn stamp_parts(details: &str) -> (String, String, String) {
     let without_group = details
         .rsplit_once(" by ")
         .map(|(before, _)| before)
         .unwrap_or(details);
     match without_group.split_once(" @ ") {
-        Some((target, commit)) => (target.to_string(), commit.to_string()),
-        None => (String::new(), String::new()),
+        Some((target, rest)) => match rest.split_once(" #") {
+            Some((commit, sha256)) => (target.to_string(), commit.to_string(), sha256.to_string()),
+            None => (target.to_string(), rest.to_string(), String::new()),
+        },
+        None => (String::new(), String::new(), String::new()),
     }
 }
 
 /// `GET /api/dashboards`: the dashboards **this bundle and this owner group** imported, with
-/// the target and commit of the stamp the import wrote (#115 decision 6). A dashboard without
+/// the target, commit and normalized export hash of the stamp the import wrote (#115 decision 6). A dashboard without
 /// that stamp, and one another group imported, is never listed. At most 100 (Superset's page
 /// size). The caller's rule is the export's owner-group rule.
 ///
@@ -1167,7 +1174,7 @@ fn stamp_parts(details: &str) -> (String, String) {
     path = "/api/dashboards",
     tag = "public",
     operation_id = "dashboards_list",
-    description = "The dashboards this bundle and this owner group imported, each with the target and commit of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.",
+    description = "The dashboards this bundle and this owner group imported, each with the target, commit and normalized export hash (`sha256`) of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.",
     params(
         ("bundle" = String, Query, description = "The bundle that imported the dashboards"),
         ("ownerGroup" = String, Query, description = "The bundle's owner group; the caller must be a member"),
@@ -1239,12 +1246,13 @@ pub async fn list_dashboards(
         if delete_refusal(&certified, &details, &query.bundle, &query.owner_group).is_some() {
             continue;
         }
-        let (target, commit) = stamp_parts(&details);
+        let (target, commit, sha256) = stamp_parts(&details);
         imported.push(DashboardImported {
             id: dashboard.id,
             title: dashboard.title,
             target,
             commit,
+            sha256,
         });
     }
     (StatusCode::OK, Json(imported)).into_response()
@@ -1363,7 +1371,7 @@ pub struct DashboardImportQuery {
     operation_id = "dashboards_import",
     path = "/api/dashboards/import",
     tag = "public",
-    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped.",
+    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit> #<sha256> by <ownerGroup>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped.",
     params(
         ("bundle" = String, Query, description = "The bundle whose dashboards these are"),
         ("ownerGroup" = String, Query, description = "The bundle's owner group"),
@@ -2242,12 +2250,13 @@ mod tests {
             if delete_refusal(&certified, &details, bundle, owner_group).is_some() {
                 continue;
             }
-            let (target, commit) = stamp_parts(&details);
+            let (target, commit, sha256) = stamp_parts(&details);
             imported.push(DashboardImported {
                 id: dashboard.id,
                 title: dashboard.title,
                 target,
                 commit,
+                sha256,
             });
         }
         imported
@@ -2271,9 +2280,25 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
             serde_json::json!([
-                { "id": 7, "title": "Shop", "target": "prod", "commit": "abc1234" }
+                { "id": 7, "title": "Shop", "target": "prod", "commit": "abc1234", "sha256": "" }
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn a_listed_dashboard_carries_the_hash_of_its_import() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().stamps.insert(
+            7,
+            (
+                "stardelt bundle shop".to_string(),
+                format!("prod @ abc1234 #{} by shop", "a".repeat(64)),
+            ),
+        );
+
+        let listed = listed_rows(&client, "shop", "shop").await;
+        assert_eq!(listed.len(), 1, "the stamped dashboard is listed");
+        assert_eq!(listed[0].sha256, "a".repeat(64));
     }
 
     #[tokio::test]
@@ -2371,9 +2396,24 @@ mod tests {
             dashboard.contains("certified_by: \"stardelt bundle shop\""),
             "the dashboard names the bundle: {dashboard}"
         );
+        let details = dashboard
+            .lines()
+            .find(|line| line.starts_with("certification_details:"))
+            .expect("the stamp line");
         assert!(
-            dashboard.contains("certification_details: \"prod @ abc123 by analytics\""),
-            "the dashboard names the target, the commit and the importing group: {dashboard}"
+            details.starts_with("certification_details: \"prod @ abc123 #"),
+            "{details}"
+        );
+        assert!(details.ends_with(" by analytics\""), "{details}");
+        let hash = details
+            .trim_start_matches("certification_details: \"prod @ abc123 #")
+            .trim_end_matches('"')
+            .strip_suffix(" by analytics")
+            .expect("the importing group");
+        assert_eq!(hash.len(), 64, "{hash}");
+        assert!(
+            hash.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
         let database = member(&sent, "databases/Trino_Gold.yaml");
         assert!(

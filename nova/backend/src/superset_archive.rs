@@ -36,6 +36,7 @@
 //! - Any uploaded `databases/` member is dropped, even one the caller added: the database
 //!   file is always the target's, never the bundle's.
 
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Cursor, Read, Write};
@@ -198,6 +199,53 @@ fn strip_top<'a>(name: &'a str, top: &str) -> &'a str {
         .unwrap_or(name)
 }
 
+/// The normalized sha256 of an export: the same dashboard hashes the same whatever the wrapper
+/// folder, the export minute and the certification stamp. Measured on the lab (#2306); the
+/// Python half (`python/stardelt/dashboards.py::normalized_hash`) must use the same rule.
+pub fn normalized_hash(archive: &[u8]) -> Result<String, ArchiveError> {
+    let members = members(archive)?;
+    let top = top(&members);
+    let mut files = Vec::with_capacity(members.len());
+    for (name, bytes) in members {
+        let relative = strip_top(&name, &top).to_string();
+        if relative.split('/').any(|segment| segment == "databases") {
+            continue;
+        }
+        let kept = if relative == "metadata.yaml" {
+            without_lines(&bytes, &["timestamp:"])
+        } else if relative.starts_with("dashboards/") && relative.ends_with(".yaml") {
+            without_lines(&bytes, &["certified_by:", "certification_details:"])
+        } else {
+            bytes
+        };
+        files.push((relative, kept));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut digest = Sha256::new();
+    for (relative, bytes) in files {
+        digest.update(relative.as_bytes());
+        digest.update(b"\0");
+        digest.update(&bytes);
+        digest.update(b"\0");
+    }
+    Ok(crate::migrations::hex_lower(&digest.finalize()))
+}
+
+/// `bytes` without the lines that start with one of `prefixes`, byte for byte.
+fn without_lines(bytes: &[u8], prefixes: &[&str]) -> Vec<u8> {
+    let mut kept = Vec::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if prefixes
+            .iter()
+            .any(|prefix| line.starts_with(prefix.as_bytes()))
+        {
+            continue;
+        }
+        kept.extend_from_slice(line);
+    }
+    kept
+}
+
 /// `Trino <catalog>`, with the spaces as the export names the file: `Trino <catalog>` →
 /// `Trino_<catalog>`, the export's file stem; the import route maps a target database name the
 /// same way.
@@ -350,6 +398,7 @@ pub fn rewrite(
     } else {
         found
     };
+    let sha256 = normalized_hash(archive)?;
 
     let mut kept: Vec<(String, Vec<u8>)> = Vec::with_capacity(members.len() + databases.len());
     let mut used: BTreeSet<String> = BTreeSet::new();
@@ -386,8 +435,8 @@ pub fn rewrite(
                 &text,
                 "certification_details",
                 &format!(
-                    "{} @ {} by {}",
-                    stamp.target, stamp.commit, stamp.owner_group
+                    "{} @ {} #{} by {}",
+                    stamp.target, stamp.commit, sha256, stamp.owner_group
                 ),
             );
             kept.push((format!("{top}/{relative}"), text.into_bytes()));
@@ -504,6 +553,57 @@ mod tests {
             commit: "abc1234",
             owner_group: "analytics",
         }
+    }
+
+    /// `text` with each line that starts with a prefix replaced (the newline is kept).
+    fn with_lines_replaced(text: &str, replacements: &[(&str, String)]) -> String {
+        let mut out = String::new();
+        for line in text.split_inclusive('\n') {
+            let key = line.trim_end_matches('\n');
+            match replacements
+                .iter()
+                .find(|(prefix, _)| key.starts_with(prefix))
+            {
+                Some((_, value)) => {
+                    out.push_str(value);
+                    if line.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                None => out.push_str(line),
+            }
+        }
+        out
+    }
+
+    /// The fixture wrapped in `wrapper/`, with its `timestamp:` and stamp lines as given.
+    fn export(wrapper: &str, timestamp: &str, certified: &str, details: &str) -> Vec<u8> {
+        let files = fixture_files()
+            .into_iter()
+            .map(|(name, text)| {
+                let text = if name == "metadata.yaml" {
+                    with_lines_replaced(
+                        &text,
+                        &[("timestamp:", format!("timestamp: '{timestamp}'"))],
+                    )
+                } else if name.starts_with("dashboards/") && name.ends_with(".yaml") {
+                    with_lines_replaced(
+                        &text,
+                        &[
+                            ("certified_by:", format!("certified_by: {certified}")),
+                            (
+                                "certification_details:",
+                                format!("certification_details: {details}"),
+                            ),
+                        ],
+                    )
+                } else {
+                    text
+                };
+                (format!("{wrapper}/{name}"), text.into_bytes())
+            })
+            .collect::<Vec<_>>();
+        zip_files(&files)
     }
 
     /// A ZIP member name, joined here so a ticket's path check does not read it as a file.
@@ -729,8 +829,96 @@ mod tests {
 
         assert_eq!(dashboard.len(), 1);
         assert!(dashboard[0].contains("certified_by: \"stardelt bundle shop\""));
-        assert!(dashboard[0].contains("certification_details: \"test @ abc1234 by analytics\""));
+        let details = dashboard[0]
+            .lines()
+            .find(|line| line.starts_with("certification_details:"))
+            .expect("the stamp line");
+        assert!(
+            details.starts_with("certification_details: \"test @ abc1234 #"),
+            "{details}"
+        );
+        assert!(details.ends_with(" by analytics\""), "{details}");
         assert!(!dashboard[0].contains("certification_details: null"));
+    }
+
+    #[test]
+    fn the_normalized_hash_ignores_the_wrapper_the_timestamp_and_the_stamp() {
+        let first = export("shop-export", "2026-11-28T06:16:47Z", "null", "null");
+        let second = export(
+            "other-export",
+            "2026-11-28T06:19:14Z",
+            "\"stardelt bundle shop\"",
+            &format!("\"dev @ abcdef1 #{} by demo\"", "a".repeat(64)),
+        );
+
+        let first = normalized_hash(&first).expect("the first hash");
+        let second = normalized_hash(&second).expect("the second hash");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64, "{first}");
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn a_changed_member_changes_the_normalized_hash() {
+        let base = export("shop-export", "2026-11-28T06:16:47Z", "null", "null");
+        let mut members = members(&base).expect("members");
+        for (name, bytes) in &mut members {
+            if name.ends_with("charts/Daily_revenue.yaml") {
+                bytes.extend_from_slice(b"\n# drift\n");
+            }
+        }
+        let changed = zip_files(&members);
+
+        assert_ne!(
+            normalized_hash(&base).expect("the base hash"),
+            normalized_hash(&changed).expect("the changed hash")
+        );
+    }
+
+    #[test]
+    fn an_imported_dashboard_carries_the_hash() {
+        let mut databases = BTreeMap::new();
+        databases.insert(
+            "Trino_Gold".to_string(),
+            target_database("bbb03e90-0c81-5c87-838a-0497064b6381"),
+        );
+        let fixture = fixture();
+        let rewritten = rewrite(&fixture, &databases, &stamp()).expect("rewrite");
+        let members = members(&rewritten).expect("rewritten members");
+        let dashboard = text_of(&members, "dashboards/Shop.yaml")
+            .into_iter()
+            .next()
+            .expect("the dashboard");
+
+        let details = dashboard
+            .lines()
+            .find(|line| line.starts_with("certification_details:"))
+            .expect("the stamp line");
+        assert!(
+            details.starts_with("certification_details: \"test @ abc1234 #"),
+            "{details}"
+        );
+        assert!(details.ends_with(" by analytics\""), "{details}");
+
+        // The stamp carries the normalized hash of the upload (step 3: "the hash is of the
+        // upload"). `rewrite` re-quotes each dataset's `database_uuid`, which Superset drops
+        // again when it exports, so the post-import export still hashes to the upload's value.
+        let hash = details
+            .trim_start_matches("certification_details: \"test @ abc1234 #")
+            .trim_end_matches('"')
+            .strip_suffix(" by analytics")
+            .expect("the importing group");
+        assert_eq!(
+            hash,
+            normalized_hash(&fixture).expect("the upload hash"),
+            "{details}"
+        );
     }
 
     #[test]
