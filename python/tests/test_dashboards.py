@@ -86,6 +86,17 @@ def test_a_superset_export_nested_in_one_folder_is_unnested_without_databases(tm
     assert not [path for path in out.rglob("*") if "databases" in path.parts]
 
 
+def test_an_archive_wrapped_in_a_databases_folder_stores_no_member(tmp_path):
+    """A ``databases/`` folder is never unwrapped, even when it holds a ``metadata.yaml``."""
+    out = tmp_path / "shop"
+    nova = FakeNova(archive([member("databases", "metadata.yaml"), member("databases", "Trino_Gold.yaml")]))
+
+    with pytest.raises(dashboards.ExportError, match="no dashboards/"):
+        dashboards.export(nova, 42, out, "shop", "analytics")
+
+    assert not [path for path in out.rglob("*") if path.is_file()]
+
+
 def test_an_unsafe_path_writes_nothing(tmp_path):
     out = tmp_path / "shop"
     nova = FakeNova(archive(["metadata.yaml", "dashboards/../../evil.yaml"]))

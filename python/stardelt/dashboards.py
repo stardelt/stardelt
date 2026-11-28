@@ -121,7 +121,7 @@ def export(nova, dashboard_id, out, bundle, owner_group):
             if member.is_dir():
                 continue
             relative = _relative(member, top)
-            if NAME in relative.parts:
+            if NAME in pathlib.PurePosixPath(member.filename).parts or NAME in relative.parts:
                 continue
             _target(out, relative.as_posix())
             members.append((member, relative))
