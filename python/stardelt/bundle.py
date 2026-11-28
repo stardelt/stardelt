@@ -18,7 +18,7 @@ import yaml
 
 from stardelt import api, apply, lineage, runs
 
-KEYS = {"bundle", "variables", "include", "files", "migrations", "requires", "targets", "context"}
+KEYS = {"bundle", "dashboards", "variables", "include", "files", "migrations", "requires", "targets", "context"}
 KINDS = ("Pipeline", "StreamApp")
 PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish", "triggers")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
@@ -49,6 +49,10 @@ SPARK_SKIPPED_DIRS = ("__pycache__", ".git")
 CONTEXT_KEYS = ("tables",)
 MAX_CONTEXT_TABLES = 50
 MAX_GUIDE = 16000
+# A bundle names folders that `stardelt dashboards export` wrote: each holds `metadata.yaml`
+# and a `dashboards/` child, never `databases/` (#115 b).
+MAX_DASHBOARD_FOLDERS = 20
+MAX_DASHBOARD_FILES = 100
 # The store's own limits (nova/backend/src/metric_definitions.rs): a bundle checks them offline
 # with the same sentences, so a refused write is caught in the pull request, not in CI.
 METRIC_KEYS = ("name", "description", "expression", "timeColumn", "dimensions")
@@ -735,6 +739,8 @@ def validate(directory, target=None):
         _migrations(root, manifest["migrations"], problems)
     if "context" in manifest:
         _context_problems(manifest["context"], problems)
+    if "dashboards" in manifest:
+        _dashboard_folders(root, manifest["dashboards"], problems)
 
     targets = manifest.get("targets")
     if not isinstance(targets, dict) or not targets:
@@ -996,6 +1002,94 @@ def context(nova, directory, check=False):
                 rows.append({"table": entry["table"], "action": "set"})
         if "metrics" in entry:
             _apply_metrics(nova, catalog, ns, tbl, entry["metrics"], check, entry["table"], rows, problems)
+    return problems, rows
+
+
+def _dashboard_folders(root, section, problems):
+    """The dashboard folders ``dashboards:`` names, checked offline; appends problems."""
+    if not isinstance(section, list) or not section:
+        problems.append(("dashboards", "must be a list of folders, for example [dashboards/shop]"))
+        return []
+    if len(section) > MAX_DASHBOARD_FOLDERS:
+        problems.append(("dashboards", f"more than {MAX_DASHBOARD_FOLDERS} folders"))
+    folders = []
+    for entry in section:
+        if not isinstance(entry, str) or not entry:
+            problems.append(("dashboards", "each entry must be a folder path"))
+            continue
+        relative = PurePosixPath(entry)
+        if relative.is_absolute() or ".." in relative.parts:
+            problems.append((entry, "a folder must stay inside the bundle (no absolute path, no ..)"))
+            continue
+        folder = root / relative
+        if folder.is_symlink() or not folder.is_dir():
+            problems.append((entry, "is not a directory in the bundle"))
+            continue
+        if not (folder / "metadata.yaml").is_file():
+            problems.append((entry, "has no metadata.yaml; export the dashboard with `stardelt dashboards export`"))
+            continue
+        if not any((folder / "dashboards").glob("*.yaml")):
+            problems.append((entry, "has no dashboards/*.yaml; is this a Superset export?"))
+            continue
+        if (folder / "databases").exists():
+            problems.append((entry, "holds databases/; a bundle never stores the connection"))
+            continue
+        files = [p for p in folder.rglob("*") if p.is_file()]
+        if len(files) > MAX_DASHBOARD_FILES:
+            problems.append((entry, f"holds more than {MAX_DASHBOARD_FILES} files"))
+            continue
+        folders.append(relative.as_posix())
+    return sorted(set(folders))
+
+
+def import_dashboards(nova, directory, target, overwrite=False):
+    """Import the dashboards folders ``dashboards:`` names for ``target``; ``(problems, rows)``.
+
+    Each row is ``{"folder", "dashboards", "databases", "action"}`` with action ``imported``.
+    A refused import is a problem and the other folders are still visited.
+    """
+    root = Path(directory)
+    try:
+        manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        return [(str(root / "bundle.yaml"), f"cannot read it: {err}")], []
+    if not isinstance(manifest, dict) or "dashboards" not in manifest:
+        return [("dashboards", "the bundle has no `dashboards:` block")], []
+    head = manifest.get("bundle") if isinstance(manifest.get("bundle"), dict) else {}
+    name, group = head.get("name"), head.get("ownerGroup")
+    if not (isinstance(name, str) and name) or not (isinstance(group, str) and group):
+        return [("bundle", "bundle.name and bundle.ownerGroup are required")], []
+    if target not in (manifest.get("targets") or {}):
+        return [("targets", f"no target named {target!r}")], []
+    problems = []
+    folders = _dashboard_folders(root, manifest["dashboards"], problems)
+    if problems:
+        return problems, []
+    from stardelt import dashboards as dashboard_files
+
+    commit = _revision(root) or ""
+    rows = []
+    for folder in folders:
+        try:
+            answer = dashboard_files.import_folder(
+                nova,
+                root / folder,
+                bundle=name,
+                owner_group=group,
+                target=target,
+                commit=commit,
+                overwrite=overwrite,
+            )
+        except (api.StardeltApiError, OSError, RuntimeError) as err:
+            problems.append((folder, str(err)))
+            continue
+        count = len(list((root / folder / "dashboards").glob("*.yaml")))
+        rows.append({
+            "folder": folder,
+            "dashboards": count,
+            "databases": answer.get("databases") or [],
+            "action": "imported",
+        })
     return problems, rows
 
 

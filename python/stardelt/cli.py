@@ -225,6 +225,12 @@ def _parser():
         "--check", action="store_true",
         help="answer what would change, write nothing; exits 1 when anything differs",
     )
+    import_dashboards = package_commands.add_parser(
+        "dashboards", help="import the bundle's `dashboards:` folders for one target"
+    )
+    import_dashboards.add_argument("directory", nargs="?", default=".", help="the bundle directory (default: the current one)")
+    import_dashboards.add_argument("-t", "--target", required=True, help="the target the import is for (a name under targets in bundle.yaml)")
+    import_dashboards.add_argument("--overwrite", action="store_true", help="replace a dashboard of the same name")
     history = commands.add_parser("deployments", help="read the deployment record: what each bundle deploy put on a stage")
     history_commands = history.add_subparsers(dest="deployments_command", required=True)
     listed = history_commands.add_parser("list", help="the newest recorded deploys you may see, newest first")
@@ -848,6 +854,16 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
             if problems or (args.check and any(row["action"].startswith("would-") for row in rows)):
                 return ERROR
             return OK
+        if args.command == "bundle" and args.bundle_command == "dashboards":
+            problems, rows = bundle.import_dashboards(
+                nova, args.directory, args.target, overwrite=args.overwrite
+            )
+            for where, message in problems:
+                stderr.write(f"stardelt: {where}: {message}\n")
+            for row in rows:
+                databases = ", ".join(row["databases"]) or "none"
+                stdout.write(f"{row['folder']}  {row['action']} {row['dashboards']} file(s); databases: {databases}\n")
+            return ERROR if problems else OK
         if args.command == "bundle":  # plan or deploy: they talk to Nova
             problems, results = bundle.deploy(
                 nova, args.directory, args.target, dry_run=args.bundle_command == "plan" or args.dry_run, prune=args.prune,

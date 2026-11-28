@@ -90,6 +90,18 @@
         }
       }
     },
+    "dashboards": {
+      "type": "array",
+      "description": "folders a `stardelt dashboards export` wrote; `stardelt bundle dashboards` imports them for one target",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$",
+        "description": "a folder inside the bundle, for example dashboards/shop"
+      }
+    },
     "context": {
       "description": "Guides and metric definitions the bundle sets on its tables; `stardelt bundle context` applies them.",
       "type": "object",

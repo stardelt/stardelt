@@ -230,6 +230,7 @@ stardelt bundle validate pipelines/ -t prod                      # check a bundl
 stardelt bundle plan pipelines/ -t prod                          # ask Nova what deploying the target would do; writes nothing
 stardelt bundle deploy pipelines/ -t prod                        # Nova checks every pipeline, then they are created, updated, or left unchanged
 stardelt dashboards export 42 -o dashboards/shop   # inside a bundle: a dashboard as bundle files; databases/ is never stored
+stardelt bundle dashboards pipelines/ -t prod     # import the `dashboards:` folders for that target
 ```
 
 `bundle plan` and `bundle deploy` (which also takes `--dry-run`, the same as `plan`) work on one target. Every pipeline file gets
