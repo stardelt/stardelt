@@ -128,6 +128,9 @@ pub(crate) struct AskAnswer {
     pub mode: String,
     /// The agent's answer in words; `null` for a `sql` answer.
     pub text: Option<String>,
+    /// The model's thinking, cut at 8,000 characters, when the server sent it; part of the
+    /// live answer only and never stored (nova#2397 D2, D3).
+    pub thinking: Option<String>,
     /// The tool calls an agent answer made, in order; empty for a `sql` answer.
     pub steps: Vec<crate::ask_agent::AskStep>,
 }
@@ -405,6 +408,8 @@ struct First {
     content: String,
     /// The `model_call` row this answer wrote, when the store took it.
     call_id: Option<i64>,
+    /// The call's thinking, already cut (nova#2397).
+    thinking: Option<String>,
 }
 
 /// Why one endpoint did not answer, and whether another one may be asked.
@@ -431,6 +436,8 @@ struct Answered {
     mode: &'static str,
     /// The agent's answer in words; `None` on the `sql` path.
     text: Option<String>,
+    /// The model's thinking, already cut; `None` when no server sent any (nova#2397).
+    thinking: Option<String>,
     /// The tool calls an agent answer made; empty on the `sql` path.
     steps: Vec<crate::ask_agent::AskStep>,
 }
@@ -542,6 +549,9 @@ impl Attempt<'_> {
                 sentence,
                 content: answer.content,
                 call_id,
+                thinking: answer
+                    .thinking
+                    .map(|text| crate::model_chat::cut_thinking(&text)),
             }),
             // Not the JSON shape: another endpoint may answer it. An empty answer cut by
             // the token cap names that instead, since no fallback of ours would help the
@@ -607,6 +617,8 @@ struct AgentShared {
     refusal: Option<Response>,
     /// The row the answer reports as `callId`.
     last_call: Option<i64>,
+    /// Every model call's thinking, in call order, kept for the answer (nova#2397 D4).
+    thinking: Vec<String>,
 }
 
 /// One agent chat call: the budget check first, then the call and its own `model_call` row
@@ -656,6 +668,16 @@ async fn agent_model_call(
             let stored = (!answer.content.is_empty())
                 .then(|| answer.content.clone())
                 .or_else(|| serde_json::to_string(&answer.message).ok());
+            // The thinking is the answer's live only: it never reaches the call's row
+            // (nova#2397 D3), so it is kept here beside it.
+            if let Some(thinking) = answer
+                .thinking
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+                && let Ok(mut state) = shared.lock()
+            {
+                state.thinking.push(thinking.clone());
+            }
             attempt
                 .record(
                     "ok",
@@ -870,6 +892,13 @@ impl AgentCall<'_> {
             }
         };
         let call_id = shared.lock().ok().and_then(|state| state.last_call);
+        // D4: every call's thinking, in order, one blank line between, under the same cap.
+        let thinking = shared
+            .lock()
+            .ok()
+            .map(|state| state.thinking.join("\n\n"))
+            .filter(|text| !text.is_empty())
+            .map(|text| crate::model_chat::cut_thinking(&text));
         let text = outcome.text;
         let sentence = text
             .as_deref()
@@ -886,6 +915,7 @@ impl AgentCall<'_> {
             error: None,
             mode: "agent",
             text,
+            thinking,
             steps: outcome.steps,
         })
     }
@@ -949,6 +979,9 @@ async fn agent_ask(plan: AgentAsk<'_>) -> Response {
         error: answered.error,
         mode: answered.mode.to_string(),
         text: answered.text,
+        // D3: the thinking is part of the live answer only; `record_conversation` keeps
+        // the answer's fields it has named and never this one.
+        thinking: answered.thinking,
         steps: answered.steps,
     };
     record_conversation(plan.pool, plan.sub, plan.question, &body).await;
@@ -1022,6 +1055,7 @@ impl Asking<'_> {
                 error: None,
                 mode: "sql",
                 text: None,
+                thinking: first.thinking,
                 steps: Vec::new(),
             });
         };
@@ -1049,6 +1083,7 @@ impl Asking<'_> {
                     error: None,
                     mode: "sql",
                     text: None,
+                    thinking: second.thinking,
                     steps: Vec::new(),
                 },
                 Err(second_error) => Answered {
@@ -1061,6 +1096,7 @@ impl Asking<'_> {
                     error: Some(second_error),
                     mode: "sql",
                     text: None,
+                    thinking: second.thinking,
                     steps: Vec::new(),
                 },
             },
@@ -1361,6 +1397,7 @@ fn no_table_answer(endpoint: String, model: String, tried: Vec<String>) -> AskAn
         error: None,
         mode: "sql".to_string(),
         text: None,
+        thinking: None,
         steps: Vec::new(),
     }
 }
@@ -1643,6 +1680,9 @@ pub(crate) async fn ask(
         error: answered.error,
         mode: answered.mode.to_string(),
         text: answered.text,
+        // D3: the thinking is part of the live answer only; `record_conversation` keeps
+        // the answer's fields it has named and never this one.
+        thinking: answered.thinking,
         steps: answered.steps,
     };
     record_conversation(pool, &sub, &question, &body).await;
@@ -1882,6 +1922,7 @@ mod tests {
             error: None,
             mode: "sql",
             text: None,
+            thinking: None,
             steps: Vec::new(),
         }
     }
@@ -2113,6 +2154,7 @@ mod tests {
             error: None,
             mode: "sql".into(),
             text: None,
+            thinking: None,
             steps: Vec::new(),
         };
         let value = serde_json::to_value(&answer).unwrap();
@@ -2144,6 +2186,7 @@ mod tests {
             error: None,
             mode: "sql".into(),
             text: None,
+            thinking: None,
             steps: Vec::new(),
         };
         let value = serde_json::to_value(&answer).unwrap();
@@ -2633,6 +2676,7 @@ mod tests {
             error: None,
             mode: "sql".into(),
             text: None,
+            thinking: None,
             steps: Vec::new(),
         };
         // Twenty-one of alice's, then one of bob's.

@@ -305,6 +305,7 @@ mod tests {
             }),
             usage: None,
             finish_reason: None,
+            thinking: None,
             latency_ms: 1,
         }
     }
@@ -316,6 +317,7 @@ mod tests {
             message: json!({"role": "assistant", "content": text}),
             usage: None,
             finish_reason: None,
+            thinking: None,
             latency_ms: 1,
         }
     }

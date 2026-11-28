@@ -29,6 +29,10 @@ pub(crate) const MAX_TOKENS: u32 = 4096;
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How much of an error body a message may carry.
 const BODY_CHARS: usize = 200;
+/// How much of a model's thinking one answer carries; the rest is cut (nova#2397).
+const THINKING_CHARS: usize = 8000;
+/// Appended to thinking cut at [`THINKING_CHARS`].
+const CUT: &str = "… (cut)";
 
 /// One chat call: the endpoint's own base URL, its model, its key, the messages, and an
 /// optional fragment merged into the body (`tools`, `response_format`).
@@ -54,6 +58,10 @@ pub(crate) struct Answer {
     /// `choices[0].finish_reason`: `stop`, `length` when the cap cut the answer, `tool_calls`
     /// for a tool call, `null`/absent when the endpoint sent none (nova#2395).
     pub finish_reason: Option<String>,
+    /// The model's thinking, when the server sent it beside the answer (nova#2397). Nova
+    /// reads `reasoning` or `reasoning_content` and never asks for either; see
+    /// [`thinking_of`].
+    pub thinking: Option<String>,
     pub latency_ms: u64,
 }
 
@@ -76,6 +84,28 @@ pub(crate) fn base_url(url: &str) -> String {
 /// The first `n` characters of a body, never a multi-byte boundary panic.
 fn short(body: &str) -> String {
     body.chars().take(BODY_CHARS).collect()
+}
+
+/// The thinking an assistant message carries, when the server sent it: OpenRouter's
+/// `reasoning`, or else the `reasoning_content` that vLLM and DeepSeek-style servers send.
+/// A field that is not a non-empty string is no thinking at all (nova#2397 D1).
+fn thinking_of(message: &Value) -> Option<String> {
+    ["reasoning", "reasoning_content"]
+        .iter()
+        .find_map(|field| message.get(*field).and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// At most [`THINKING_CHARS`] characters of thinking, with [`CUT`] appended when it was
+/// longer — by characters, so a multi-byte boundary never panics (nova#2397 D2).
+pub(crate) fn cut_thinking(text: &str) -> String {
+    if text.chars().count() <= THINKING_CHARS {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(THINKING_CHARS).collect();
+    cut.push_str(CUT);
+    cut
 }
 
 /// Where the projected keys live; `NOVA_MODEL_KEYS_DIR` is the test seam. The probe's loop
@@ -144,6 +174,7 @@ pub(crate) async fn chat(client: &reqwest::Client, call: &Chat<'_>) -> Result<An
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let thinking = thinking_of(&message);
     Ok(Answer {
         content,
         message,
@@ -152,6 +183,7 @@ pub(crate) async fn chat(client: &reqwest::Client, call: &Chat<'_>) -> Result<An
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
             .map(str::to_string),
+        thinking,
         latency_ms,
     })
 }
@@ -226,6 +258,86 @@ mod tests {
                 .and_then(|u| u.get("prompt_tokens"))
                 .and_then(Value::as_i64),
             Some(7)
+        );
+    }
+
+    /// The thinking comes from `message.reasoning` when the server sends it (nova#2397 D1).
+    #[tokio::test]
+    async fn thinking_is_read_from_reasoning() {
+        let base = serve(
+            200,
+            json!({"choices": [{"message": {"role": "assistant", "content": "Lakes hold water.",
+                "reasoning": "Weigh the water first."}}]}),
+        )
+        .await;
+        let answer = chat(
+            &client(),
+            &Chat {
+                base_url: &format!("{base}/v1"),
+                model: "m",
+                key: None,
+                messages: json!([]),
+                extra: json!({}),
+            },
+        )
+        .await
+        .ok()
+        .expect("an answer");
+        assert_eq!(answer.thinking.as_deref(), Some("Weigh the water first."));
+    }
+
+    /// vLLM and DeepSeek-style servers send it as `message.reasoning_content` (nova#2397 D1).
+    #[tokio::test]
+    async fn thinking_falls_back_to_reasoning_content() {
+        let base = serve(
+            200,
+            json!({"choices": [{"message": {"role": "assistant", "content": "Lakes hold water.",
+                "reasoning_content": "The lake is deep."}}]}),
+        )
+        .await;
+        let answer = chat(
+            &client(),
+            &Chat {
+                base_url: &format!("{base}/v1"),
+                model: "m",
+                key: None,
+                messages: json!([]),
+                extra: json!({}),
+            },
+        )
+        .await
+        .ok()
+        .expect("an answer");
+        assert_eq!(answer.thinking.as_deref(), Some("The lake is deep."));
+    }
+
+    /// No thinking field, an empty one, or one that is not a string is no thinking.
+    #[test]
+    fn no_thinking_field_is_none() {
+        assert_eq!(
+            thinking_of(&json!({"role": "assistant", "content": "hi"})),
+            None
+        );
+        assert_eq!(thinking_of(&json!({"reasoning": ""})), None);
+        assert_eq!(thinking_of(&json!({"reasoning_content": "  "})), None);
+        assert_eq!(thinking_of(&json!({"reasoning": 7})), None);
+    }
+
+    /// At most 8,000 characters, marked when cut, and by characters, not bytes (nova#2397 D2).
+    #[test]
+    fn cut_thinking_caps_at_8000_characters() {
+        let short = "a thought";
+        assert_eq!(cut_thinking(short), short, "short thinking is kept whole");
+        let exact = "a".repeat(THINKING_CHARS);
+        assert_eq!(cut_thinking(&exact), exact, "8000 characters is not cut");
+        // Multi-byte characters must not panic on the boundary.
+        let long = "é".repeat(THINKING_CHARS + 3);
+        let cut = cut_thinking(&long);
+        assert!(cut.ends_with(CUT), "a cut reads as cut");
+        assert_eq!(
+            cut.chars().count(),
+            THINKING_CHARS + CUT.chars().count(),
+            "8000 characters and the marker"
         );
     }
 

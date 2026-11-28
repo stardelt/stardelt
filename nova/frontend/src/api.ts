@@ -420,6 +420,11 @@ export type AskAnswer = {
   mode?: 'agent' | 'sql'
   /** The agent's answer in words; `null` or absent for a `sql` answer. */
   text?: string | null
+  /**
+   * The model's thinking beside the answer, cut at 8,000 characters (stardelt/stardelt#2397).
+   * Absent or null when the server sent none; never stored, so History has none.
+   */
+  thinking?: string | null
   /** The tool calls an agent answer made, in order. */
   steps?: AskStep[]
 }

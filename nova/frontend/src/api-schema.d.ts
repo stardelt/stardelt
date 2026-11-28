@@ -2857,6 +2857,11 @@ export interface components {
             tables: components["schemas"]["AskTable"][];
             /** @description The agent's answer in words; `null` for a `sql` answer. */
             text?: string | null;
+            /**
+             * @description The model's thinking, cut at 8,000 characters, when the server sent it; part of the
+             *     live answer only and never stored (nova#2397 D2, D3).
+             */
+            thinking?: string | null;
             /** @description The endpoints asked, in order: one, or two when auto mode fell back. */
             tried: string[];
         };
