@@ -56,13 +56,14 @@ flowchart LR
   fe_detail_pages -->|39| be_pipelines_delivery
   fe_detail_pages -->|2| be_platform_view
   fe_detail_pages -->|2| be_sql_query_log
-  fe_explore -->|28| be_catalog
+  fe_explore -->|1| be_ai_ask_mcp_models
+  fe_explore -->|29| be_catalog
   fe_explore -->|3| be_core_identity
   fe_explore -->|5| be_lineage
   fe_explore -->|3| be_notebooks_compute
   fe_explore -->|8| be_pipelines_delivery
   fe_explore -->|1| be_platform_view
-  fe_explore -->|14| be_sql_query_log
+  fe_explore -->|15| be_sql_query_log
   fe_share -->|4| be_catalog
   fe_share -->|1| be_platform_view
   be_ai_ask_mcp_models -.->|1| x_airflow
