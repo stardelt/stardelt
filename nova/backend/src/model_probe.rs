@@ -6,7 +6,9 @@
 //!
 //! 1. `GET {base}/models` — best effort, only for the context window (`data[0].meta.n_ctx`).
 //! 2. `POST {base}/chat/completions` — a plain question: does the endpoint answer at all?
-//! 3. the same call with a `tools` entry — does it return a call for `sql_explain`?
+//! 3. the same call with a `tools` entry and `tool_choice` naming `sql_explain` — does it
+//!    return a call for it? The prompt and the named function make a well-behaved model call
+//!    it instead of answering about the question (nova#2362).
 //! 4. the same call with `response_format` — does it return the JSON object it was asked for?
 //!
 //! A key is whatever the kubelet projected at `/var/run/stardelt/models/<name>/key`; Nova
@@ -39,6 +41,9 @@ const ROUND_EVERY: Duration = Duration::from_secs(60);
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// The plain chat check's prompt — also the text whose bytes and hash the call record keeps.
 const CHAT_PROMPT: &str = "Reply with one short sentence about lakes.";
+/// The tool check's question: it can only be answered by calling `sql_explain`.
+const TOOL_PROMPT: &str =
+    "Use the sql_explain tool to check this SQL statement without running it: SELECT 1";
 
 /// What one probe found. The field names are the CRD's (`ModelEndpointStatus`), so the
 /// merge patch needs no translation: `toolCalling`, `jsonOutput`, `contextTokens`, `checkedAt`.
@@ -198,8 +203,15 @@ fn messages() -> Value {
     json!([{"role": "user", "content": CHAT_PROMPT}])
 }
 
-/// The tool check's body fragment: one function, `sql_explain`.
-const TOOL_CHECK: &str = r#"{"tools": [{"type": "function", "function": {"name": "sql_explain", "description": "Check a SQL statement without running it", "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}}]}"#;
+/// The tool check's messages: a question only `sql_explain` can answer, so a model that
+/// follows the prompt has to call the tool (nova#2362).
+fn tool_messages() -> Value {
+    json!([{"role": "user", "content": TOOL_PROMPT}])
+}
+
+/// The tool check's body fragment: one function, `sql_explain`, named by `tool_choice` so a
+/// server cannot answer the question instead of calling it (nova#2362).
+const TOOL_CHECK: &str = r#"{"tools": [{"type": "function", "function": {"name": "sql_explain", "description": "Check a SQL statement without running it", "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}}], "tool_choice": {"type": "function", "function": {"name": "sql_explain"}}}"#;
 
 /// The JSON check's body fragment: an object with both fields, as Ask asks it (`ask.rs`'s
 /// `SYSTEM_PROMPT`).
@@ -319,14 +331,32 @@ pub(crate) async fn probe(
     // (c) A tool call for `sql_explain`, and (d) JSON in the shape it was asked for. A call
     // that fails carries its reason, so the status says why it is not usable.
     let mut detail: Option<String> = None;
+    let mut tool_extra = fragment(TOOL_CHECK);
     let tool_call = Chat {
         base_url: &base,
         model,
         key,
-        messages: messages(),
-        extra: fragment(TOOL_CHECK),
+        messages: tool_messages(),
+        extra: tool_extra.clone(),
     };
-    match chat(client, &tool_call).await {
+    let mut tool_answer = chat(client, &tool_call).await;
+    // Some OpenAI-compatible servers refuse `tool_choice`; a model that follows the prompt
+    // still calls the tool, so the check repeats once without the field (nova#2362).
+    if matches!(&tool_answer, Err(ChatError::Refused(message)) if message.to_lowercase().contains("tool_choice"))
+    {
+        if let Some(object) = tool_extra.as_object_mut() {
+            object.remove("tool_choice");
+        }
+        let retried = Chat {
+            base_url: &base,
+            model,
+            key,
+            messages: tool_messages(),
+            extra: tool_extra,
+        };
+        tool_answer = chat(client, &retried).await;
+    }
+    match tool_answer {
         Ok(answer) => {
             outcome.tool_calling = Some(
                 answer
@@ -605,6 +635,7 @@ mod tests {
     use axum::{
         Json, Router,
         extract::State,
+        response::IntoResponse,
         routing::{get, post},
     };
     use chrono::TimeZone;
@@ -647,18 +678,21 @@ mod tests {
     }
 
     /// A mock endpoint: `/models` names a context window, `/chat/completions` answers the
-    /// shape the body asked for.
+    /// shape the body asked for. Like a real model, it calls the tool only when the question
+    /// asks for it, and only when it can call tools at all (nova#2362).
     struct Fake {
         tool_calls: bool,
         asked: Mutex<Vec<String>>,
+        bodies: Mutex<Vec<Value>>,
     }
 
-    async fn serve(tool_calls: bool) -> String {
+    async fn serve(tool_calls: bool) -> (String, Arc<Fake>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let fake = Arc::new(Fake {
             tool_calls,
             asked: Mutex::new(Vec::new()),
+            bodies: Mutex::new(Vec::new()),
         });
         let app = Router::new()
             .route(
@@ -669,9 +703,22 @@ mod tests {
                 "/v1/chat/completions",
                 post(|State(fake): State<Arc<Fake>>, body: String| async move {
                     let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    fake.bodies.lock().unwrap().push(body.clone());
+                    // The last user message: a fake model only calls a tool the question asks for.
+                    let question: String = body
+                        .get("messages")
+                        .and_then(Value::as_array)
+                        .map(|messages| {
+                            messages
+                                .iter()
+                                .filter_map(|message| message.get("content").and_then(Value::as_str))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
                     if body.get("tools").is_some() {
                         fake.asked.lock().unwrap().push("tools".into());
-                        if fake.tool_calls {
+                        if fake.tool_calls && question.contains("sql_explain") {
                             return Json(json!({"choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "sql_explain", "arguments": "{\"sql\":\"select 1\"}"}}]}}]}));
                         }
                         return Json(json!({"choices": [{"message": {"role": "assistant", "content": "I cannot call tools."}}]}));
@@ -684,14 +731,14 @@ mod tests {
                     Json(json!({"choices": [{"message": {"role": "assistant", "content": "Lakes hold water."}}]}))
                 }),
             )
-            .with_state(fake);
+            .with_state(fake.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        base
+        (base, fake)
     }
 
     #[tokio::test]
     async fn an_endpoint_that_calls_tools_and_returns_json_reports_all_three() {
-        let base = serve(true).await;
+        let (base, _fake) = serve(true).await;
         let client = reqwest::Client::builder()
             .timeout(CALL_TIMEOUT)
             .build()
@@ -711,6 +758,106 @@ mod tests {
         assert_eq!(outcome.context_tokens, Some(32_768));
         assert_eq!(outcome.message, None);
         assert!(outcome.checked_at.ends_with('Z'), "{}", outcome.checked_at);
+    }
+
+    /// The tool check must ask for the tool, or a well-behaved model answers the question
+    /// instead and no endpoint is ever ready for `agents` (nova#2362).
+    #[tokio::test]
+    async fn the_tool_check_asks_for_the_tool_by_name() {
+        let (base, fake) = serve(true).await;
+        let client = reqwest::Client::builder()
+            .timeout(CALL_TIMEOUT)
+            .build()
+            .unwrap();
+        let outcome = probe(
+            &client,
+            "probe-check",
+            &format!("{base}/v1"),
+            "m",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.tool_calling, Some(true));
+        let bodies = fake.bodies.lock().unwrap().clone();
+        let body = bodies
+            .iter()
+            .find(|body| body.get("tools").is_some())
+            .expect("the tool check's request body");
+        assert_eq!(
+            body.pointer("/tool_choice/type").and_then(Value::as_str),
+            Some("function"),
+            "{body}"
+        );
+        assert_eq!(
+            body.pointer("/tool_choice/function/name")
+                .and_then(Value::as_str),
+            Some("sql_explain"),
+            "{body}"
+        );
+        assert_eq!(
+            body.pointer("/messages/0/content").and_then(Value::as_str),
+            Some(TOOL_PROMPT),
+            "{body}"
+        );
+    }
+
+    /// A server that refuses `tool_choice` is asked once more without it, and the answer
+    /// still counts (nova#2362).
+    #[tokio::test]
+    async fn a_server_that_refuses_tool_choice_is_asked_again_without_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post({
+                    let bodies = bodies.clone();
+                    move |body: String| async move {
+                        let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                        bodies.lock().unwrap().push(body.clone());
+                        if body.get("tools").is_some()
+                            && body.get("tool_choice").is_some()
+                        {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                Json(json!({"error": {"message": "unsupported parameter: tool_choice"}})),
+                            )
+                                .into_response();
+                        }
+                        if body.get("tools").is_some() {
+                            return Json(json!({"choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "sql_explain", "arguments": "{\"sql\":\"select 1\"}"}}]}}]}))
+                                .into_response();
+                        }
+                        Json(json!({"choices": [{"message": {"role": "assistant", "content": "{\"sql\": \"select 1\", \"sentence\": \"one row\"}"}}]}))
+                            .into_response()
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .timeout(CALL_TIMEOUT)
+            .build()
+            .unwrap();
+        let outcome = probe(
+            &client,
+            "probe-check",
+            &format!("{base}/v1"),
+            "m",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.tool_calling, Some(true), "{:?}", outcome.message);
+        let bodies = bodies.lock().unwrap().clone();
+        let tool_bodies: Vec<&Value> = bodies
+            .iter()
+            .filter(|body| body.get("tools").is_some())
+            .collect();
+        assert_eq!(tool_bodies.len(), 2, "asked again without the field");
+        assert!(tool_bodies[0].get("tool_choice").is_some());
+        assert!(tool_bodies[1].get("tool_choice").is_none());
     }
 
     #[tokio::test]
@@ -740,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_without_a_tool_call_is_not_tool_calling() {
-        let base = serve(false).await;
+        let (base, _fake) = serve(false).await;
         let client = reqwest::Client::builder()
             .timeout(CALL_TIMEOUT)
             .build()
