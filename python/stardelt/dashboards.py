@@ -149,6 +149,9 @@ def export(nova, dashboard_id, out, bundle, owner_group):
             _target(out, relative.as_posix())
             members.append((member, relative))
         keep = {relative.as_posix() for _member, relative in members}
+        written = sorted(keep)
+        if not written:
+            raise ExportError(f"the archive has no dashboards/ folder; is {number} a dashboard?")
         removed = _remove_stale(out, keep)
         out.mkdir(parents=True, exist_ok=True)
         for member, relative in members:
@@ -156,9 +159,6 @@ def export(nova, dashboard_id, out, bundle, owner_group):
             target.parent.mkdir(parents=True, exist_ok=True)
             with bundle.open(member) as source, target.open("wb") as sink:
                 shutil.copyfileobj(source, sink, CHUNK)
-    written = sorted(relative.as_posix() for _member, relative in members)
-    if not written:
-        raise ExportError(f"the archive has no dashboards/ folder; is {number} a dashboard?")
     return out, written, removed
 
 
