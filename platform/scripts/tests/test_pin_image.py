@@ -360,18 +360,26 @@ class PinImageTest(unittest.TestCase):
             container="airflow",
         )
         lines = [line for line in self.calls().splitlines() if "set env" in line]
-        self.assertEqual(len(lines), 1, self.calls())
-        env_line = lines[0]
-        self.assertIn(
-            "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG=demo@" + DIGEST, env_line
-        )
-        for name in (
-            "airflow-api-server",
-            "airflow-scheduler",
-            "airflow-dag-processor",
-            "airflow-triggerer",
+        # One call per Deployment, and `--containers=` limits each to the container that
+        # launches task pods: a bare `set env` also writes the `*-log-groomer` sidecar, and a
+        # later `helm upgrade` leaves that stale digest there (#2374).
+        self.assertEqual(len(lines), 4, self.calls())
+        for name, container in (
+            ("airflow-api-server", "api-server"),
+            ("airflow-scheduler", "scheduler"),
+            ("airflow-dag-processor", "dag-processor"),
+            ("airflow-triggerer", "triggerer"),
         ):
-            self.assertIn("deploy/" + name, env_line)
+            matching = [
+                line
+                for line in lines
+                if "deploy/" + name in line and "--containers=" + container in line
+            ]
+            self.assertEqual(len(matching), 1, self.calls())
+            self.assertIn(
+                "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG=demo@" + DIGEST,
+                matching[0],
+            )
 
     def test_superset_moves_the_worker_and_the_group_roles_job(self):
         zero = "00" * 32

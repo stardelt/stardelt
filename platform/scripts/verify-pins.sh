@@ -266,10 +266,11 @@ while IFS=$'\t' read -r app deploy path digest kind row_hint; do
   fi
 done <<< "$pins"
 
-# Every container that carries the Airflow worker tag must carry the pinned digest. The main
-# containers get it from helm-values/airflow.yaml; the chart's log-groomer sidecars once got a
-# direct `kubectl set env` that Helm's three-way merge keeps, because the sidecar's env is in
-# neither the old nor the new manifest (platform#1687).
+# Every container that launches a task pod must carry the pinned digest: the main containers of
+# the four Airflow Deployments, which get it from helm-values/airflow.yaml. The chart's
+# `*-log-groomer` sidecars launch none and are skipped here: an older bare `kubectl set env`
+# wrote the tag into every container, Helm's three-way merge keeps it (it is in neither the old
+# nor the new manifest), and the stale digest then failed the gate while nothing used it (#2374).
 airflow_worker_digest="$(grep -A1 '^  - name: AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG$' \
   helm-values/airflow.yaml | sed -n 's/.*demo@\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -1)"
 if [ -z "$airflow_worker_digest" ]; then
@@ -283,6 +284,8 @@ for item in json.load(sys.stdin)["items"]:
     if not name.startswith("airflow-"):
         continue
     for c in item["spec"]["template"]["spec"]["containers"]:
+        if c["name"].endswith("-log-groomer"):
+            continue
         for e in c.get("env") or []:
             if e.get("name") == "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG":
                 value = e.get("value") or ""

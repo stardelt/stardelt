@@ -260,15 +260,17 @@ if [ "$APP" = "airflow" ]; then
     # (`AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG`, rendered by the chart and pinned in
     # helm-values/airflow.yaml). A `kubectl set image` leaves it on the previous digest until a
     # `helm upgrade`, so a run's pods execute the loader code of the last full install (#1021).
-    env_deploys=()
-    for deploy in airflow-api-server airflow-scheduler airflow-dag-processor airflow-triggerer; do
-      kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1 && env_deploys+=("deploy/$deploy")
+    # Only the main container carries the tag: a bare `kubectl set env deploy/…` writes every
+    # container of the pod template, including the chart's `*-log-groomer` sidecar, which
+    # launches no task pod and whose env a later `helm upgrade` leaves behind (#2374).
+    for pair in api-server:airflow-api-server scheduler:airflow-scheduler dag-processor:airflow-dag-processor triggerer:airflow-triggerer; do
+      container="${pair%%:*}"; deploy="${pair##*:}"
+      if kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1; then
+        kubectl -n "$NS" set env "deploy/$deploy" --containers="$container" \
+          "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG=$TAG@$digest" >/dev/null
+        echo "›$NS/$deploy: worker tag $TAG@${digest:0:19}…"
+      fi
     done
-    if [ "${#env_deploys[@]}" -gt 0 ]; then
-      kubectl -n "$NS" set env "${env_deploys[@]}" \
-        "AIRFLOW__KUBERNETES_EXECUTOR__WORKER_CONTAINER_TAG=$TAG@$digest" >/dev/null
-      echo "›${env_deploys[*]}: worker tag $TAG@${digest:0:19}…"
-    fi
     if [ "${NOWAIT:-0}" != "1" ]; then
       for deploy in airflow-scheduler airflow-dag-processor airflow-triggerer; do
         kubectl -n "$NS" get deploy "$deploy" >/dev/null 2>&1 && \
