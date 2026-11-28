@@ -829,6 +829,35 @@
             }
           ],
           "commands": []
+        },
+        {
+          "name": "dashboards",
+          "help": "import the bundle's `dashboards:` folders for one target",
+          "arguments": [
+            {
+              "name": "directory",
+              "help": "the bundle directory (default: the current one)",
+              "optional": true
+            }
+          ],
+          "options": [
+            {
+              "flags": [
+                "-t",
+                "--target"
+              ],
+              "help": "the target the import is for (a name under targets in bundle.yaml)",
+              "required": true
+            },
+            {
+              "flags": [
+                "--overwrite"
+              ],
+              "help": "replace a dashboard of the same name",
+              "flag": true
+            }
+          ],
+          "commands": []
         }
       ]
     },
