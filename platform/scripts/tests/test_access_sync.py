@@ -86,6 +86,8 @@ class FakeLakekeeper:
         self.profiles = {}
         self.storage_updates = []
         self.credential_updates = []
+        self.profile_failures = set()
+        self.credential_refused = set()
         self.storage_refused = False
         self.project_assignments = []
         state = self
@@ -162,6 +164,9 @@ class FakeLakekeeper:
                     return
                 warehouse = re.fullmatch(r"/management/v1/warehouse/([^/]+)", path)
                 if warehouse:
+                    if warehouse.group(1) in state.profile_failures:
+                        self._reply(500, {"type": "unavailable"})
+                        return
                     self._reply(
                         200,
                         {
@@ -209,6 +214,9 @@ class FakeLakekeeper:
                     r"/management/v1/warehouse/([^/]+)/storage-credential", path
                 )
                 if credential:
+                    if credential.group(1) in state.credential_refused:
+                        self._reply(500, {"type": "unavailable"})
+                        return
                     state.credential_updates.append((credential.group(1), body))
                     self._reply(200, {})
                     return
@@ -908,6 +916,62 @@ class RefreshStorageCredentialsTest(JobTestCase):
             any("/permissions/" in request[1] for request in self.fake.requests),
             "the pass must not touch roles, grants or the group files",
         )
+        self.assertEqual(self.opa.bodies, [], "the pass must not publish the catalog table")
+        self.assertEqual(self.fake.role_assignments, {}, "the pass must not touch a role")
+        self.assertEqual(self.configmap_writes, [], "the pass must not write a ConfigMap")
+
+    def test_a_platform_bucket_warehouse_on_another_endpoint_is_named_and_left_alone(self):
+        self.fake.warehouses = {"shop": "wh-shop", "mirror": "wh-mirror"}
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]},
+            "wh-mirror": {"bucket": S3["bucket"], "endpoint": "http://other.example:8333"},
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(access_sync.refresh_storage_credentials(), 0)
+        self.assertEqual([w for w, _ in self.fake.credential_updates], ["wh-shop"])
+        self.assertIn("1 on another endpoint", out.getvalue())
+        self.assertIn("warehouse mirror", err.getvalue())
+
+    def test_an_endpoint_differing_only_in_case_or_a_trailing_slash_is_refreshed(self):
+        self.fake.warehouses = {"shop": "wh-shop"}
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"].upper() + "/"}
+        }
+        self.assertEqual(access_sync.refresh_storage_credentials(), 0)
+        self.assertEqual([w for w, _ in self.fake.credential_updates], ["wh-shop"])
+
+    def test_a_warehouse_read_failure_is_a_failure_and_the_rest_are_refreshed(self):
+        self.fake.warehouses = {"shop": "wh-shop", "finance": "wh-finance"}
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]},
+            "wh-finance": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]},
+        }
+        self.fake.profile_failures = {"wh-finance"}
+        self.assertEqual(access_sync.refresh_storage_credentials(), 1)
+        self.assertEqual([w for w, _ in self.fake.credential_updates], ["wh-shop"])
+
+    def test_a_refused_credential_is_a_failure_and_the_rest_are_refreshed(self):
+        self.fake.warehouses = {"shop": "wh-shop", "finance": "wh-finance"}
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]},
+            "wh-finance": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]},
+        }
+        self.fake.credential_refused = {"wh-finance"}
+        self.assertEqual(access_sync.refresh_storage_credentials(), 1)
+        self.assertEqual([w for w, _ in self.fake.credential_updates], ["wh-shop"])
+
+    def test_the_key_pair_never_reaches_the_output(self):
+        self.fake.warehouses = {"shop": "wh-shop"}
+        self.fake.profiles = {
+            "wh-shop": {"bucket": S3["bucket"], "endpoint": S3["endpoint"]}
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(access_sync.refresh_storage_credentials(), 0)
+        for stream in (out.getvalue(), err.getvalue()):
+            self.assertNotIn(S3["access-key"], stream)
+            self.assertNotIn(S3["secret-key"], stream)
 
 
 class PatchStatusTest(JobTestCase):
