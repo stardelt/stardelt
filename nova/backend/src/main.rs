@@ -132,6 +132,7 @@ mod model_calls;
 mod model_chat;
 mod model_endpoints;
 mod model_probe;
+mod model_proxy;
 mod model_usage;
 mod notebooks;
 mod openapi;
@@ -782,6 +783,14 @@ fn api_router() -> Router<Arc<AppState>> {
         // The model endpoints an administrator connected (operator#609 slice c): Ask reads
         // whether one exists, where prompts go and what the probe last found.
         .route("/model-endpoints", get(model_endpoints::list))
+        // The OpenAI-compatible model proxy (stardelt#2380, agent harness slice 2): an agent
+        // runtime calls the endpoint with the person's Nova token, and the budget and the
+        // model call rows cover its work.
+        .route(
+            "/models/{endpoint}/v1/chat/completions",
+            post(model_proxy::chat),
+        )
+        .route("/models/{endpoint}/v1/models", get(model_proxy::models))
         // A question in words, one checked SQL statement out (nova#891, Ask slice a): the
         // model receives the question and table documentation, never rows.
         .route("/ask", post(ask::ask))

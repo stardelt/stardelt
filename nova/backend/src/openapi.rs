@@ -64,6 +64,8 @@ pub struct ErrorResponse {
         crate::warehouses::start,
         crate::model_endpoints::list,
         crate::model_endpoints::probe,
+        crate::model_proxy::chat,
+        crate::model_proxy::models,
         crate::ask::ask,
         crate::ask::feedback,
         crate::ask::history,

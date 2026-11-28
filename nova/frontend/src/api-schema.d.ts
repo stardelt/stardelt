@@ -1507,6 +1507,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/models/{endpoint}/v1/chat/completions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The OpenAI chat-completions route — the endpoint, through the person.
+         * @description The OpenAI chat-completions protocol, answered by the `ModelEndpoint` named in the path, on behalf of the signed-in caller. Point an OpenAI client's base URL at `https://<nova>/api/models/<endpoint>/v1` and use the person's own Nova token as the API key: the budget and the audit then cover the agent's work. The caller must be signed in (`401`); the endpoint must exist (`404`), list the purpose `agents` (`403`) and its last probe must have found it reachable (`503`). The body must be a JSON object of at most 1 MiB (`413`); `model` is replaced by the endpoint's `spec.model`, `max_tokens` is capped at 4096 (absent means 4096), `stream: true` is refused with `400` (`streaming is not supported yet; send stream: false`), and `messages`, `tools`, `tool_choice` and `response_format` pass through unchanged. The person's or their group's model budget is checked before the call (`429` as on `/api/ask`), and exactly one `model_call` row is written with `feature: agent` — the body's `messages` as its prompt, the answer's `usage` as its tokens, and `ok`, `refused` or `error` as its outcome. A 2xx answer passes through with its status; a non-2xx answer passes through with its status and its body cut to 2000 characters; no answer at all is a `502`. The endpoint's URL and key never appear in an answer or a log line. Answers `Cache-Control: no-store`; streaming is not supported yet.
+         */
+        post: operations["model_proxy_chat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/models/{endpoint}/v1/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The OpenAI model list for one endpoint.
+         * @description The OpenAI model-list protocol for one `ModelEndpoint`: `{"object":"list","data":[{"id":"<spec.model>","object":"model"}]}`. A client that checks `GET /v1/models` before its first call reads this. The caller must be signed in (`401`); the endpoint must exist (`404`), list the purpose `agents` (`403`) and its last probe must have found it reachable (`503`), exactly as on the chat-completions route. The endpoint's URL and key never appear in the answer. Answers `Cache-Control: no-store`.
+         */
+        get: operations["model_proxy_models"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/notebooks": {
         parameters: {
             query?: never;
@@ -12105,6 +12145,160 @@ export interface operations {
                 };
             };
             /** @description No cluster connection */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    model_proxy_chat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `ModelEndpoint`'s name */
+                endpoint: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The endpoint's own answer, passed through */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description The body is not a JSON object, or it asks for `stream: true` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The endpoint does not list the purpose `agents` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such model endpoint */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The body is larger than 1 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The person's or their group's model budget is spent */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The model endpoint did not answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No state store, no cluster connection, no HTTP client, or the endpoint is not reachable now */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    model_proxy_models: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The `ModelEndpoint`'s name */
+                endpoint: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The endpoint's model in the OpenAI list shape */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The endpoint does not list the purpose `agents` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No such model endpoint */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No cluster connection, or the endpoint is not reachable now */
             503: {
                 headers: {
                     [name: string]: unknown;
