@@ -231,6 +231,12 @@ fn choose_endpoints(
     }
 }
 
+/// Whether a question is short enough for the every-word catalog search. A longer one goes
+/// straight to `search_any_word`: the search refuses `q` over its 100 characters.
+fn every_word_search(question: &str) -> bool {
+    question.chars().count() <= crate::catalog_search::MAX_QUERY_CHARS
+}
+
 /// The context the model receives: one entry per candidate table, metadata only. A field
 /// the documentation does not have is `null`.
 fn context_of(
@@ -913,33 +919,38 @@ pub(crate) async fn ask(
         .as_ref()
         .and_then(|caller| caller.0.identity.groups.first().cloned());
 
-    let response = crate::catalog_search::search(
-        State(Arc::clone(&state)),
-        Query(crate::catalog_search::SearchParams {
-            q: Some(question.clone()),
-            catalog: params.catalog.clone(),
-            limit: Some(CANDIDATES),
-            tag: None,
-            owner: None,
-            domain: None,
-        }),
-        caller.clone(),
-    )
-    .await;
-    let (status, found) = body_of(response).await;
-    if status != StatusCode::OK {
-        let sentence = found
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("the catalog did not answer")
-            .to_string();
-        return fail(StatusCode::BAD_GATEWAY, sentence);
-    }
-    let mut candidates: Vec<AskTable> = found
-        .get("matches")
-        .and_then(Value::as_array)
-        .map(|matches| matches.iter().filter_map(ask_table).collect())
-        .unwrap_or_default();
+    let mut candidates: Vec<AskTable> = if every_word_search(&question) {
+        let response = crate::catalog_search::search(
+            State(Arc::clone(&state)),
+            Query(crate::catalog_search::SearchParams {
+                q: Some(question.clone()),
+                catalog: params.catalog.clone(),
+                limit: Some(CANDIDATES),
+                tag: None,
+                owner: None,
+                domain: None,
+            }),
+            caller.clone(),
+        )
+        .await;
+        let (status, found) = body_of(response).await;
+        if status != StatusCode::OK {
+            let sentence = found
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("the catalog did not answer")
+                .to_string();
+            return fail(StatusCode::BAD_GATEWAY, sentence);
+        }
+        found
+            .get("matches")
+            .and_then(Value::as_array)
+            .map(|matches| matches.iter().filter_map(ask_table).collect())
+            .unwrap_or_default()
+    } else {
+        // The search refuses `q` over 100 characters; the words go to the fallback below.
+        Vec::new()
+    };
     if candidates.is_empty() {
         let words: Vec<String> = question.split_whitespace().map(str::to_lowercase).collect();
         match crate::catalog_search::search_any_word(
@@ -2029,5 +2040,20 @@ mod tests {
         let items = body.as_array().expect("a list of conversations");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["question"], json!(bobs));
+    }
+
+    #[test]
+    fn a_question_of_100_characters_uses_the_every_word_search() {
+        assert!(every_word_search(&"a".repeat(100)));
+    }
+
+    #[test]
+    fn a_longer_question_skips_it() {
+        assert!(!every_word_search(&"a".repeat(101)));
+    }
+
+    #[test]
+    fn characters_not_bytes_count() {
+        assert!(every_word_search(&"ä".repeat(100)));
     }
 }

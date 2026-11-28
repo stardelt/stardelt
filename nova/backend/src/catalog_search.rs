@@ -28,7 +28,7 @@ use crate::catalog::{catalog_scope, lakekeeper_authorization, path_segment};
 use crate::{AppState, auth};
 
 /// The longest query.
-const MAX_QUERY_CHARS: usize = 100;
+pub(crate) const MAX_QUERY_CHARS: usize = 100;
 /// Matches returned when `limit` is not given, and the most a request may ask for.
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
