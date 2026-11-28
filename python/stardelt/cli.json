@@ -27,6 +27,35 @@
       "commands": []
     },
     {
+      "name": "agent",
+      "help": "an agent in your terminal: it reads the catalog and data as you, with the platform's model",
+      "arguments": [],
+      "options": [
+        {
+          "flags": [
+            "--endpoint"
+          ],
+          "help": "the ModelEndpoint to use (default: the first reachable one offered to agents)",
+          "metavar": "NAME"
+        },
+        {
+          "flags": [
+            "--once"
+          ],
+          "help": "answer one question and exit (0 on an answer, 1 on an error)",
+          "metavar": "QUESTION"
+        },
+        {
+          "flags": [
+            "--max-steps"
+          ],
+          "help": "model calls per question (default 8)",
+          "default": "8"
+        }
+      ],
+      "commands": []
+    },
+    {
       "name": "login",
       "help": "sign in once with a code approved in a browser (device flow)",
       "arguments": [],
