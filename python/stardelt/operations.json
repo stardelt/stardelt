@@ -285,6 +285,18 @@
       "query_params": [],
       "body": true
     },
+    "dashboards_delete": {
+      "method": "DELETE",
+      "path": "/api/dashboards/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [
+        "bundle",
+        "ownerGroup"
+      ],
+      "body": false
+    },
     "dashboards_export": {
       "method": "GET",
       "path": "/api/dashboards/{id}/export",
