@@ -7,7 +7,7 @@
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1515 | 1409 | 4 | Airflow REST, Trino |
-| `main.rs` ⚠ | Core & identity | 1504 | 1617 | 3 | - |
+| `main.rs` ⚠ | Core & identity | 1510 | 1617 | 3 | - |
 | `query_log_api.rs` | SQL & query log | 1492 | 320 | 6 | Kubernetes API (CRDs), PostgreSQL state store |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -18,12 +18,12 @@
 | `streams.rs` | Pipelines & delivery | 952 | 848 | 5 | Kubernetes API (CRDs) |
 | `apps.rs` | Platform view | 946 | 346 | 4 | JupyterHub, Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Superset, Trino |
 | `airflow.rs` | Pipelines & delivery | 942 | 1003 | 0 | Airflow REST |
+| `superset.rs` | Pipelines & delivery | 922 | 795 | 3 | Superset |
 | `migrations.rs` | Pipelines & delivery | 862 | 395 | 3 | PostgreSQL state store, Trino |
 | `data.rs` | SQL & query log | 856 | 104 | 2 | Trino |
 | `ask.rs` | AI (Ask, MCP, models) | 854 | 511 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
-| `superset.rs` | Pipelines & delivery | 818 | 754 | 2 | Superset |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
 | `secret_store.rs` | Connections | 699 | 363 | 0 | Secret store (OpenBao) |
 | `destinations.rs` | Pipelines & delivery | 647 | 354 | 4 | PostgreSQL state store |
@@ -33,15 +33,15 @@
 | `model_probe.rs` | AI (Ask, MCP, models) | 601 | 341 | 0 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
-| `openapi.rs` | Core & identity | 490 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 491 | 688 | 1 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `metric_definitions.rs` | Catalog | 398 | 69 | 3 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
+| `superset_archive.rs` | Pipelines & delivery | 373 | 233 | 0 | - |
 | `catalog_search.rs` | Catalog | 353 | 467 | 1 | Lakekeeper (Iceberg REST) |
-| `superset_archive.rs` | Pipelines & delivery | 350 | 213 | 0 | - |
 | `token_exchange.rs` | Core & identity | 305 | 189 | 0 | OIDC provider |
 | `stages.rs` | Pipelines & delivery | 296 | 54 | 1 | - |
 | `catalog_token.rs` | Core & identity | 287 | 502 | 0 | OIDC provider |
@@ -73,4 +73,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **52300** | **45630** | **171** | |
+| **total (72 files)** | | **52434** | **45691** | **172** | |

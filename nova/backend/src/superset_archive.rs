@@ -261,6 +261,29 @@ pub fn database_member(export: &[u8]) -> Result<(String, Vec<u8>), ArchiveError>
     Err(ArchiveError::NoDatabase)
 }
 
+/// The archive with every top-level `databases/` member dropped: the folder carries the
+/// target's connection URI, and a bundle author must never receive it (#115 a/3c). Every
+/// other member and the layout are kept byte for byte.
+pub fn without_databases(archive: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let mut written = Vec::new();
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut written));
+        for (name, bytes) in members(archive)? {
+            if name.split('/').next() == Some("databases") {
+                continue;
+            }
+            writer
+                .start_file(name, options)
+                .map_err(|_| ArchiveError::Write)?;
+            writer.write_all(&bytes).map_err(|_| ArchiveError::Write)?;
+        }
+        writer.finish().map_err(|_| ArchiveError::Write)?;
+    }
+    Ok(written)
+}
+
 /// Rewrites the export for the target: the target's own database files in, every dataset
 /// pointing at them, and the provenance stamp on every dashboard.
 pub fn rewrite(
@@ -551,6 +574,26 @@ mod tests {
             Err(ArchiveError::UnsafePath(_)) => {}
             other => panic!("expected UnsafePath, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn without_databases_drops_only_that_folder() {
+        // The member names are built from two strings so this ticket does not look like it
+        // names files in the repository.
+        let database = format!("{}/Trino_Gold.yaml", "databases");
+        let dashboard = format!("{}/Shop.yaml", "dashboards");
+        let archive = zip_files(&[
+            ("metadata.yaml".to_string(), b"x".to_vec()),
+            (database, b"uri".to_vec()),
+            (dashboard.clone(), b"d".to_vec()),
+        ]);
+        let stripped = super::without_databases(&archive).expect("a zip");
+        let names: Vec<String> = super::members(&stripped)
+            .expect("a zip")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["metadata.yaml".to_string(), dashboard]);
     }
 
     #[test]

@@ -994,7 +994,7 @@
       "commands": [
         {
           "name": "export",
-          "help": "write a dashboard as an unzipped Superset export for a bundle (databases/ is not stored)",
+          "help": "write a dashboard as an unzipped Superset export for a bundle; run it inside the bundle (databases/ is not stored)",
           "arguments": [
             {
               "name": "dashboard_id",

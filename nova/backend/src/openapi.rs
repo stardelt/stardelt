@@ -201,6 +201,7 @@ pub struct ErrorResponse {
         crate::admin_catalogs::list,
         crate::superset::export_dashboard,
         crate::superset::import_dashboard,
+        crate::superset::export_dashboard_for_bundle,
         crate::mcp_audit::list,
         crate::model_usage::list,
         crate::admin_catalogs::update_access,
