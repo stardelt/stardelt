@@ -514,10 +514,10 @@ fn plan_problem(new: &NewDeployment) -> Option<String> {
         .then(|| "the plan you applied is not the plan you saw: plan the bundle again".to_string())
 }
 
-/// A name the API stores: 1 to 64 characters, no `/`.
+/// A name the API stores: 1 to 64 characters, no `/`, and not only whitespace.
 fn valid_name(value: &str) -> bool {
     let len = value.chars().count();
-    (1..=MAX_NAME_CHARS).contains(&len) && !value.contains('/')
+    (1..=MAX_NAME_CHARS).contains(&len) && !value.contains('/') && !value.trim().is_empty()
 }
 
 /// The rule for one stored name. `what` is `"bundle"`, `"ownerGroup"` or `"target"`; `Err` is the
@@ -525,7 +525,7 @@ fn valid_name(value: &str) -> bool {
 pub(crate) fn name_rule(what: &str, value: &str) -> Result<(), String> {
     if !valid_name(value) {
         return Err(format!(
-            "{what} must be 1 to {MAX_NAME_CHARS} characters and must not contain '/'"
+            "{what} must be 1 to {MAX_NAME_CHARS} characters, must not contain '/', and must not be blank"
         ));
     }
     Ok(())
@@ -1536,6 +1536,7 @@ mod tests {
         for set in [
             |r: &mut BundlePlanRequest| r.bundle = "shop/sales".into(),
             |r: &mut BundlePlanRequest| r.owner_group = String::new(),
+            |r: &mut BundlePlanRequest| r.bundle = "   ".into(),
             |r: &mut BundlePlanRequest| r.target = "t".repeat(MAX_NAME_CHARS + 1),
         ] {
             let mut request = plan_request();
