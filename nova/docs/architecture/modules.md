@@ -29,8 +29,8 @@
 | `destinations.rs` | Pipelines & delivery | 647 | 354 | 4 | PostgreSQL state store |
 | `query_log_collector.rs` | SQL & query log | 643 | 599 | 3 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `connections.rs` | Connections | 632 | 450 | 0 | Secret store (OpenBao) |
+| `model_probe.rs` | AI (Ask, MCP, models) | 631 | 458 | 0 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `audit.rs` | Core & identity | 601 | 82 | 0 | - |
-| `model_probe.rs` | AI (Ask, MCP, models) | 601 | 341 | 0 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
 | `openapi.rs` | Core & identity | 499 | 688 | 1 | - |
@@ -74,4 +74,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (73 files)** | | **53922** | **47088** | **175** | |
+| **total (73 files)** | | **53952** | **47205** | **175** | |
