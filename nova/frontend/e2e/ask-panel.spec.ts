@@ -100,6 +100,10 @@ type Options = {
   feedback?: (route: Route) => void
   /** What `/api/ask/history` answers; two stored conversations, newest first, by default. */
   history?: (route: Route) => void
+  /** What `PUT /api/ask/history/{id}/pin` answers; the first row, pinned, by default. */
+  pin?: (route: Route) => void
+  /** What `DELETE /api/ask/history/{id}` answers; a 204 by default. */
+  remove?: (route: Route) => void
   /** What `POST …/verified-queries` answers; a stored row by default. */
   verified?: (route: Route) => void
   /** Whether the shell is expected to show the Ask button (it is, unless no endpoint is ready). */
@@ -124,6 +128,12 @@ async function stub(page: Page, options: Options = {}) {
     if (pathname === '/api/lineage/read-tables') return json(route, READ_TABLES)
     if (pathname === '/api/ask') return options.ask ? options.ask(route) : json(route, PASSED)
     if (pathname === '/api/ask/history') return options.history ? options.history(route) : json(route, HISTORY)
+    if (/^\/api\/ask\/history\/\d+\/pin$/.test(pathname)) {
+      return options.pin ? options.pin(route) : json(route, { ...HISTORY[0], pinned: true })
+    }
+    if (/^\/api\/ask\/history\/\d+$/.test(pathname)) {
+      return options.remove ? options.remove(route) : route.fulfill({ status: 204 })
+    }
     if (pathname === '/api/ask/feedback') {
       if (options.feedback) return options.feedback(route)
       return route.fulfill({ status: 204 })
@@ -287,7 +297,7 @@ test('History lists the last conversations, newest first, with their check line'
   await page.keyboard.press('Control+J')
   const panel = page.locator('#ask-panel')
   await panel.getByRole('button', { name: 'History' }).click()
-  const rows = panel.locator('#ask-history button')
+  const rows = panel.locator('#ask-history [data-testid=history-open]')
   await expect(rows).toHaveCount(2)
   await expect(rows.nth(0)).toContainText('How many orders came in this week?')
   await expect(rows.nth(0)).toContainText('✓ checked')
@@ -306,13 +316,51 @@ test('opening a stored conversation shows it, and the model is not asked again',
   await page.keyboard.press('Control+J')
   const panel = page.locator('#ask-panel')
   await panel.getByRole('button', { name: 'History' }).click()
-  await panel.locator('#ask-history button').first().click()
+  await panel.locator('#ask-history [data-testid=history-open]').first().click()
 
   await expect(panel.getByTestId('ask-sql')).toHaveText(HISTORY_SQL)
   await expect(panel.getByText('Orders placed in the last seven days.')).toBeVisible()
   await expect(panel.getByText('✓ Checked: EXPLAIN passed as you')).toBeVisible()
   expect(asked).toBe(0)
   await expect(panel.locator('#ask-history')).toHaveCount(0)
+})
+
+test('a person pins a conversation and deletes one, after one inline question', async ({ page }) => {
+  let pinned: { path: string; body: unknown } | null = null
+  let deleted = ''
+  await stub(page, {
+    pin: (route) => {
+      const url = new URL(route.request().url())
+      pinned = { path: url.pathname, body: route.request().postDataJSON() }
+      return json(route, { ...HISTORY[0], pinned: true })
+    },
+    remove: (route) => {
+      deleted = new URL(route.request().url()).pathname
+      return route.fulfill({ status: 204 })
+    },
+  })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await panel.getByRole('button', { name: 'History' }).click()
+  const rows = panel.locator('#ask-history > div')
+  await expect(rows).toHaveCount(2)
+
+  // The pin is a sibling of the row's open button: it pins, it does not open the conversation.
+  await rows.nth(0).getByRole('button', { name: 'Pin' }).click()
+  await expect.poll(() => pinned).toEqual({ path: '/api/ask/history/2/pin', body: { pinned: true } })
+  await expect(panel.locator('#ask-history')).toBeVisible()
+
+  // Delete asks once in the row; Cancel deletes nothing.
+  const second = rows.nth(1)
+  await second.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(second.getByText('Delete this conversation?')).toBeVisible()
+  await second.getByRole('button', { name: 'Cancel' }).click()
+  await expect(second.getByText('Delete this conversation?')).toHaveCount(0)
+  expect(deleted).toBe('')
+
+  await second.getByRole('button', { name: 'Delete', exact: true }).click()
+  await second.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect.poll(() => deleted).toBe('/api/ask/history/1')
 })
 
 test('a person with no history is told so', async ({ page }) => {

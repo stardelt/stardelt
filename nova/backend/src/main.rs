@@ -800,6 +800,11 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/ask/feedback", post(ask::feedback))
         // The caller's last 20 Ask conversations (nova#891 slice c); the History view reads it.
         .route("/ask/history", get(ask::history))
+        // A person pins one of their own conversations, or lets it go (maintainer, 2026-11-28):
+        // a pinned conversation is never pruned, and at most 20 are pinned.
+        .route("/ask/history/{id}/pin", put(ask::history_pin))
+        // A person deletes one of their own conversations; somebody else's id is a 404.
+        .route("/ask/history/{id}", delete(ask::history_delete))
         // The Spark clusters a person may use (internal#161 slice 5a): the operator translates
         // a SparkCluster into the Spark server, Nova only lists it and sets `spec.state`.
         .route("/compute", get(compute::list))

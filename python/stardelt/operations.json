@@ -56,6 +56,24 @@
       "query_params": [],
       "body": false
     },
+    "ask_history_delete": {
+      "method": "DELETE",
+      "path": "/api/ask/history/{id}",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "ask_history_pin": {
+      "method": "PUT",
+      "path": "/api/ask/history/{id}/pin",
+      "path_params": [
+        "id"
+      ],
+      "query_params": [],
+      "body": true
+    },
     "auth_config": {
       "method": "GET",
       "path": "/api/auth/config",
