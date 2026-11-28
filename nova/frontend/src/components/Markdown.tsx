@@ -5,7 +5,8 @@
  * results that someone else wrote, so it is untrusted. This component therefore never
  * builds HTML: `marked.lexer` turns the text into tokens and each token becomes a React
  * element. The model's own HTML is shown as its text, an image is shown as its alt text
- * and is never fetched, and a link is only drawn for an `http(s)://` or `/` target.
+ * and is never fetched, and a link is only drawn for an `http(s)://` target or a path on
+ * this site (not `//host`, which a browser reads as another site).
  */
 import type { ReactNode } from 'react'
 import { marked, type Token, type Tokens } from 'marked'
