@@ -270,9 +270,10 @@ pub fn database_member(export: &[u8]) -> Result<(String, Vec<u8>), ArchiveError>
     Err(ArchiveError::NoDatabase)
 }
 
-/// The archive with every top-level `databases/` member dropped: the folder carries the
-/// target's connection URI, and a bundle author must never receive it (#115 a/3c). Every
-/// other member and the layout are kept byte for byte.
+/// The archive with every `databases/` member dropped, at the root or inside Superset's
+/// `dashboard_export_*/` wrapper: the folder carries the target's connection URI, and a
+/// bundle author must never receive it (#115 a/3c). Every other member and the layout are
+/// kept byte for byte.
 pub fn without_databases(archive: &[u8]) -> Result<Vec<u8>, ArchiveError> {
     let mut written = Vec::new();
     let options = zip::write::SimpleFileOptions::default()
@@ -280,7 +281,7 @@ pub fn without_databases(archive: &[u8]) -> Result<Vec<u8>, ArchiveError> {
     {
         let mut writer = zip::ZipWriter::new(Cursor::new(&mut written));
         for (name, bytes) in members(archive)? {
-            if name.split('/').next() == Some("databases") {
+            if name.split('/').any(|segment| segment == "databases") {
                 continue;
             }
             writer
@@ -643,6 +644,25 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert_eq!(names, vec!["metadata.yaml".to_string(), dashboard]);
+    }
+
+    #[test]
+    fn without_databases_drops_a_folder_inside_the_wrapper_too() {
+        let wrapper = "dashboard_export_1";
+        let database = format!("{wrapper}/{}/Trino_Mobility.yaml", "databases");
+        let dashboard = format!("{wrapper}/{}/Shop.yaml", "dashboards");
+        let archive = zip_files(&[
+            (format!("{wrapper}/metadata.yaml"), b"x".to_vec()),
+            (database, b"sqlalchemy_uri: trino://u@h/mobility".to_vec()),
+            (dashboard.clone(), b"d".to_vec()),
+        ]);
+        let stripped = super::without_databases(&archive).expect("a zip");
+        let names: Vec<String> = super::members(&stripped)
+            .expect("a zip")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec![format!("{wrapper}/metadata.yaml"), dashboard]);
     }
 
     #[test]

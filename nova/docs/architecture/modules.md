@@ -38,7 +38,7 @@
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `metric_definitions.rs` | Catalog | 398 | 69 | 3 | PostgreSQL state store |
-| `superset_archive.rs` | Pipelines & delivery | 385 | 270 | 0 | - |
+| `superset_archive.rs` | Pipelines & delivery | 386 | 289 | 0 | - |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
 | `catalog_search.rs` | Catalog | 353 | 467 | 1 | Lakekeeper (Iceberg REST) |
@@ -73,4 +73,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **53218** | **46196** | **175** | |
+| **total (72 files)** | | **53219** | **46215** | **175** | |
