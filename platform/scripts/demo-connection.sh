@@ -14,7 +14,8 @@
 #
 #   1. the External Secrets store `openbao-managed` (scripts/eso-openbao-store.sh managed);
 #   2. the secret `secret/connections/managed/rnacentral` (keys `user`, `password`);
-#   3. the `Connection` rnacentral, scope `managed`, `usableBy: [visitors, demo]`.
+#   3. the `Connection` rnacentral, scope `managed`, `usableBy: [visitors, demo]`,
+#      `viewers: [visitors]` (the visitors' Connections page shows it read-only).
 #
 # `managed` means the platform's own work uses it, never a person's notebook: a pipeline of
 # the group `visitors` may use it, while `stardelt.connection()` in a notebook refuses a
@@ -62,7 +63,7 @@ if [ "$YES" != 1 ]; then
   if [ "$mode" = off ]; then
     echo "would: delete Connection $NAME and the secret path $SECRET_PATH (metadata and every version)"
   else
-    echo "would: ensure the External Secrets store openbao-managed; write $SECRET_PATH (user, password); apply Connection $NAME (managed, usableBy $GROUP)"
+    echo "would: ensure the External Secrets store openbao-managed; write $SECRET_PATH (user, password); apply Connection $NAME (managed, usableBy $GROUP, viewers $GROUP)"
   fi
   echo "nothing was changed — re-run with YES=1"
   exit 1
@@ -93,6 +94,8 @@ spec:
   scope: managed
   # "visitors" see it, "demo" runs the pipeline that uses it (the loader refuses any other group).
   usableBy: [visitors, demo]
+  # The visitors' Connections page lists it read-only; usableBy lets their pipelines run it.
+  viewers: [visitors]
   type: postgresql
   config:
     host: $HOST
