@@ -13,7 +13,7 @@
 #   sign-in     `stardelt whoami`             the minted token: demo, visitor, `via` bearer
 #   sql         `stardelt sql "SELECT …"`     customers = 200 from bronze.shop.customers
 #   api         `stardelt api --list`         the shipped operations (at least 100)
-#   bundle      `stardelt bundle validate …`  dev and prod, three pipelines each, offline
+#   bundle      `stardelt bundle validate …`  dev and prod, the bundle's pipelines each, offline
 #   skill       `stardelt skill`              the agent Skill (at least 90 lines, sql_read …)
 #   history     `stardelt deployments list`   the deployment record's header, exit 0
 #   signed-out  `stardelt whoami`             exit 3 and the sign-in hint, with no token
@@ -192,7 +192,14 @@ row_bundle() {
     bad bundle "bundle validate exited $rc: $(first_line "$err")"
     return
   fi
-  local pipelines="shop-1-bronze, shop-2-silver, shop-3-gold"
+  local pipelines
+  pipelines="$(for f in "$repo_dir"/demos/examples/shop-bundle/resources/*.yaml; do
+    awk '/^name:/ { sub(/^name:[[:space:]]*/, ""); print; exit }' "$f"
+  done | paste -sd, - | sed 's/,/, /g')"
+  if [ -z "$pipelines" ]; then
+    bad bundle "no pipeline name was read from $repo_dir/demos/examples/shop-bundle/resources"
+    return
+  fi
   if printf '%s\n' "$out" | grep -qxF "dev (development): $pipelines" \
      && printf '%s\n' "$out" | grep -qxF "prod (production): $pipelines"; then
     ok bundle "dev and prod: $pipelines"
