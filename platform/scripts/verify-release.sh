@@ -77,6 +77,7 @@ declare -A recipe=(
   [verify-stream-path]='bash scripts/verify-stream-path.sh'
   [verify-evals]='bash scripts/verify-evals.sh'
   [verify-chart-upstream]='python3 scripts/check_chart_upstream.py'
+  [demo-inventory-check]='python3 scripts/demo_inventory.py --check'
 )
 # The tests only: `target=command` lines that replace entries of the table above.
 if [ -n "${VERIFY_RELEASE_RECIPES:-}" ]; then
@@ -95,7 +96,7 @@ verify-trino-tls verify-oidc-clients verify-mcp verify-mcp-tools verify-realm-ad
 verify-spark-demo-sandbox verify-spark-demo-query verify-spark-auth verify-spark-query verify-spark-janitor verify-spark-demo-security
 verify-wap verify-product-path verify-usage verify-cli verify-pipeline-validate verify-spark-pipeline verify-spark-no-platform-key verify-spark-guard verify-spark-driver-identity verify-spark-group-read verify-spark-group-write verify-superset-nova-identity verify-compute verify-deploy-stage
 verify-secret-annotations verify-trino-system-catalog verify-trusted-engine verify-warehouse-scale verify-cron-schedule verify-metrics verify-seaweedfs-ports verify-s3-sts verify-airflow-actions verify-operator-quiet verify-pod-security-baseline verify-external-secrets verify-storage-capacity verify-perf verify-pegelonline verify-stream-path verify-evals
-verify-chart-upstream"
+verify-chart-upstream demo-inventory-check"
 targets="${VERIFY_RELEASE_TARGETS:-$default_targets}"
 
 # The Makefile passes these to its recipes; the recipes are called here now, so the same defaults
