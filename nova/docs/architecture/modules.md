@@ -16,12 +16,12 @@
 | `lineage_api.rs` | Lineage | 1175 | 443 | 4 | PostgreSQL state store |
 | `evals.rs` | Catalog | 1048 | 325 | 6 | PostgreSQL state store |
 | `admin_catalogs.rs` | Catalog | 976 | 1350 | 3 | Kubernetes API (CRDs) |
+| `ask.rs` | AI (Ask, MCP, models) | 976 | 656 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `streams.rs` | Pipelines & delivery | 961 | 861 | 5 | Kubernetes API (CRDs) |
 | `apps.rs` | Platform view | 946 | 346 | 4 | JupyterHub, Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Superset, Trino |
 | `airflow.rs` | Pipelines & delivery | 942 | 1003 | 0 | Airflow REST |
 | `migrations.rs` | Pipelines & delivery | 862 | 395 | 3 | PostgreSQL state store, Trino |
 | `data.rs` | SQL & query log | 856 | 104 | 2 | Trino |
-| `ask.rs` | AI (Ask, MCP, models) | 854 | 511 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `verified_queries.rs` | Catalog | 836 | 381 | 5 | PostgreSQL state store, Trino |
 | `catalog_metrics.rs` | Catalog | 833 | 1187 | 2 | Lakekeeper (Iceberg REST) |
 | `statements.rs` | SQL & query log | 737 | 769 | 5 | Trino |
@@ -33,7 +33,7 @@
 | `model_probe.rs` | AI (Ask, MCP, models) | 601 | 341 | 0 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
-| `openapi.rs` | Core & identity | 498 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 499 | 688 | 1 | - |
 | `superset_archive.rs` | Pipelines & delivery | 477 | 550 | 0 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
@@ -74,4 +74,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (73 files)** | | **53544** | **46796** | **175** | |
+| **total (73 files)** | | **53667** | **46941** | **175** | |

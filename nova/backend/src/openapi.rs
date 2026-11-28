@@ -236,6 +236,7 @@ pub struct ErrorResponse {
         crate::warehouses::SqlWarehouse,
         crate::model_endpoints::ModelEndpointRow,
         crate::ask::AskRequest,
+        crate::ask::AskPrevious,
         crate::ask::AskAnswer,
         crate::ask::AskTable,
         crate::ask::AskFeedback,

@@ -401,6 +401,17 @@ export type AskAnswer = {
   callId?: number | null
 }
 
+/**
+ * The answered turn a follow-up refines (`POST /api/ask` body `previous`, nova#2341): the
+ * earlier question, the statement it got and the tables it was written for. The panel sends
+ * the last answered turn, so "rewrite it for only org domains" changes that statement.
+ */
+export type AskPrevious = {
+  question: string
+  sql: string
+  tables: AskTable[]
+}
+
 /** One conversation from the person's Ask History (`GET /api/ask/history`, design #891 slice c). */
 export type AskConversation = {
   id: number
@@ -1677,9 +1688,13 @@ export const api = {
   /** The model endpoints an administrator connected, without their URL or key. */
   modelEndpoints: () => jget<ModelEndpoint[]>('/api/model-endpoints'),
   /** A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform. */
-  ask:          (question: string, catalog?: string) => {
+  /**
+   * A question in words. `previous` is the answered turn this question refines
+   * (nova#2341): Nova then keeps that turn's tables and sends its statement to the model.
+   */
+  ask:          (question: string, catalog?: string, previous?: AskPrevious) => {
     const qs = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
-    return jpost<AskAnswer>(`/api/ask${qs}`, { question })
+    return jpost<AskAnswer>(`/api/ask${qs}`, { question, ...(previous ? { previous } : {}) })
   },
   /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */
   askHistory:   ()                                => jget<AskConversation[]>('/api/ask/history'),

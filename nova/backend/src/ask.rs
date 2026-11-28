@@ -47,12 +47,30 @@ const SYSTEM_PROMPT: &str = "You write one Trino SQL statement for a question ab
 const VERIFIED_QUERIES_IN_CONTEXT: usize = 5;
 /// Longest verified SQL kept in the context; a longer one is cut with `…`.
 const MAX_VERIFIED_SQL_CHARS: usize = 4000;
+/// The longest previous statement a follow-up may send back.
+const MAX_PREVIOUS_SQL_CHARS: usize = 8_000;
 
 /// `POST /api/ask` body.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(crate) struct AskRequest {
     /// The question, in words, 1 to 2000 characters.
     pub question: String,
+    /// The turn this question refines (the panel's last answered turn), or absent.
+    #[serde(default)]
+    pub previous: Option<AskPrevious>,
+}
+
+/// The answered turn a follow-up refines, as the panel sends it: the earlier question, the
+/// statement it got and the tables it was written for.
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AskPrevious {
+    /// The earlier question, 1 to 2000 characters.
+    pub question: String,
+    /// The earlier statement, 1 to 8000 characters.
+    pub sql: String,
+    /// The tables the earlier answer named, at most five.
+    pub tables: Vec<AskTable>,
 }
 
 /// `POST /api/ask` query: the catalog to search, or the default one.
@@ -62,7 +80,7 @@ pub(crate) struct AskQuery {
 }
 
 /// One table the model was given.
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AskTable {
     pub catalog: String,
@@ -418,18 +436,115 @@ async fn check_statement(
     .map(|_| ())
 }
 
+/// Why a previous turn may not be refined, or `None` when it may.
+fn previous_refusal(previous: &AskPrevious) -> Option<String> {
+    if previous.question.trim().is_empty() || previous.question.chars().count() > MAX_QUESTION_CHARS
+    {
+        return Some(format!(
+            "the previous question must be 1 to {MAX_QUESTION_CHARS} characters"
+        ));
+    }
+    if previous.sql.trim().is_empty() {
+        return Some(format!(
+            "the previous statement must be 1 to {MAX_PREVIOUS_SQL_CHARS} characters"
+        ));
+    }
+    if previous.sql.chars().count() > MAX_PREVIOUS_SQL_CHARS {
+        return Some(format!(
+            "the previous statement is longer than {MAX_PREVIOUS_SQL_CHARS} characters"
+        ));
+    }
+    if previous.tables.len() > CANDIDATES {
+        return Some(format!(
+            "the previous turn names more than {CANDIDATES} tables"
+        ));
+    }
+    None
+}
+
+/// Two table names are the same table when all three parts are equal.
+fn same_table(a: &AskTable, b: &AskTable) -> bool {
+    a.catalog == b.catalog && a.namespace == b.namespace && a.table == b.table
+}
+
+/// The tables a follow-up may choose from: the previous turn's first, then the new search's
+/// matches, without duplicates and at most [`CANDIDATES`]. Without a previous turn the
+/// search's answer is used unchanged.
+fn follow_up_candidates(previous: Option<&AskPrevious>, found: Vec<AskTable>) -> Vec<AskTable> {
+    let Some(previous) = previous else {
+        return found;
+    };
+    let mut merged: Vec<AskTable> = previous
+        .tables
+        .iter()
+        .map(|table| AskTable {
+            catalog: table.catalog.clone(),
+            namespace: table.namespace.clone(),
+            table: table.table.clone(),
+        })
+        .collect();
+    for table in found {
+        if !merged.iter().any(|kept| same_table(kept, &table)) {
+            merged.push(table);
+        }
+    }
+    merged.truncate(CANDIDATES);
+    merged
+}
+
+/// Drop the candidates whose documentation is `Value::Null` — the caller may not read that
+/// table, so it is not in the prompt — together with their documentation entries.
+fn drop_unreadable(candidates: Vec<AskTable>, docs: Vec<Value>) -> (Vec<AskTable>, Vec<Value>) {
+    candidates
+        .into_iter()
+        .zip(docs)
+        .filter(|(_, doc)| !doc.is_null())
+        .unzip()
+}
+
+/// The user message: the previous turn in words when this question refines it, the question,
+/// and the candidate tables' documentation. `previous.question` follows the question's own
+/// limit, its statement the 8000-character one.
+fn user_text_of(question: &str, previous: Option<&AskPrevious>, context: &Value) -> String {
+    let before = previous
+        .map(|previous| {
+            format!(
+                "The previous question: {}\nIts statement: {}\nThe question below refines it; change that statement unless the question asks for something new.\n\n",
+                previous.question, previous.sql
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{before}The question: {question}\n\nThe tables you may use, with their documentation:\n{context}"
+    )
+}
+
+/// The answer when no candidate table is left: no statement, and a sentence saying so.
+fn no_table_answer(endpoint: String, model: String) -> AskAnswer {
+    AskAnswer {
+        endpoint,
+        model,
+        call_id: None,
+        sql: None,
+        sentence: NO_TABLE.to_string(),
+        tables: Vec::new(),
+        explain: "not_run".to_string(),
+        error: None,
+    }
+}
+
 /// `POST /api/ask` — a question in, checked SQL out.
 #[utoipa::path(
     post,
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, the default one")),
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
-        (status = 400, description = "The question is empty or longer than 2000 characters", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The question is empty or longer than 2000 characters, or the previous turn's question, statement or table list breaks its limit", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
         (status = 429, description = "The person's or their group's model budget is spent", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog, the cluster or the model endpoint did not answer", body = crate::openapi::ErrorResponse),
@@ -448,6 +563,9 @@ pub(crate) async fn ask(
             StatusCode::BAD_REQUEST,
             "a question is required: 1 to 2000 characters",
         );
+    }
+    if let Some(refusal) = request.previous.as_ref().and_then(previous_refusal) {
+        return fail(StatusCode::BAD_REQUEST, refusal);
     }
     let Some(pool) = state.db.as_ref() else {
         return fail(
@@ -565,17 +683,11 @@ pub(crate) async fn ask(
             Err(sentence) => return fail(StatusCode::BAD_GATEWAY, sentence),
         }
     }
+    // A follow-up keeps the previous turn's tables first, so a question that names no table
+    // still has the statement it refines.
+    let mut candidates = follow_up_candidates(request.previous.as_ref(), candidates);
     if candidates.is_empty() {
-        let body = AskAnswer {
-            endpoint: name,
-            model,
-            call_id: None,
-            sql: None,
-            sentence: NO_TABLE.to_string(),
-            tables: Vec::new(),
-            explain: "not_run".to_string(),
-            error: None,
-        };
+        let body = no_table_answer(name.clone(), model.clone());
         record_conversation(pool, &sub, &question, &body).await;
         return answer(body);
     }
@@ -597,6 +709,18 @@ pub(crate) async fn ask(
         } else {
             Value::Null
         });
+    }
+    // A table the caller may not read is not in the prompt, and not in the answer: sending
+    // its name back would name a table the previous turn learned nothing about.
+    if request.previous.is_some() {
+        let readable = drop_unreadable(candidates, docs);
+        candidates = readable.0;
+        docs = readable.1;
+        if candidates.is_empty() {
+            let body = no_table_answer(name.clone(), model.clone());
+            record_conversation(pool, &sub, &question, &body).await;
+            return answer(body);
+        }
     }
 
     let mut verified = Vec::with_capacity(candidates.len());
@@ -632,9 +756,7 @@ pub(crate) async fn ask(
     }
 
     let context = context_of(&candidates, &docs, &verified, &metrics);
-    let user_text = format!(
-        "The question: {question}\n\nThe tables you may use, with their documentation:\n{context}"
-    );
+    let user_text = user_text_of(&question, request.previous.as_ref(), &context);
     let messages = json!([
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
@@ -1067,6 +1189,11 @@ mod tests {
 
     /// A request to `POST /api/ask`, its status, its body and its `Cache-Control`.
     async fn ask_call(app: &Router, question: &str) -> (StatusCode, Value, Option<String>) {
+        ask_body_call(app, json!({ "question": question })).await
+    }
+
+    /// One `POST /api/ask` with the given body, its status, its body and its `Cache-Control`.
+    async fn ask_body_call(app: &Router, body: Value) -> (StatusCode, Value, Option<String>) {
         let response = app
             .clone()
             .oneshot(
@@ -1074,7 +1201,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/ask")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({ "question": question }).to_string()))
+                    .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
@@ -1115,6 +1242,146 @@ mod tests {
             json!("Ask needs Nova's database, and this installation has none")
         );
         assert_eq!(cache.as_deref(), Some("no-store"));
+    }
+
+    // --- a follow-up refines the previous statement (nova#2341) ------------------------
+
+    fn table(namespace: &str, table: &str) -> AskTable {
+        AskTable {
+            catalog: "bronze".into(),
+            namespace: namespace.into(),
+            table: table.into(),
+        }
+    }
+
+    fn previous_turn() -> AskPrevious {
+        AskPrevious {
+            question: "can you tell me what I can do here?".into(),
+            sql: "SELECT id, display_name FROM bronze.public_db.rnacentral_databases".into(),
+            tables: vec![table("public_db", "rnacentral_databases")],
+        }
+    }
+
+    #[test]
+    fn a_follow_up_keeps_the_previous_tables_when_the_new_words_match_none() {
+        let previous = previous_turn();
+        // "rewrite the query to find only org domains" names no table, so the search finds
+        // none and the handler would otherwise answer `NO_TABLE`.
+        let candidates = follow_up_candidates(Some(&previous), Vec::new());
+        assert_eq!(candidates, previous.tables);
+        // The model receives that table in its context, with the refinement.
+        let docs = vec![json!({"description": "Rfam RNA databases"})];
+        let context = context_of(&candidates, &docs, &[], &[]);
+        let prompt = user_text_of(
+            "rewrite the query to find only org domains",
+            Some(&previous),
+            &context,
+        );
+        assert!(
+            prompt.contains("bronze.public_db.rnacentral_databases"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Rfam RNA databases"), "{prompt}");
+        // A new match is kept after the previous turn's tables, once.
+        let found = vec![
+            table("public_db", "rnacentral_databases"),
+            table("public_db", "other"),
+        ];
+        let merged = follow_up_candidates(Some(&previous), found);
+        assert_eq!(
+            merged,
+            vec![
+                table("public_db", "rnacentral_databases"),
+                table("public_db", "other")
+            ]
+        );
+        // A plain question uses the search's answer unchanged.
+        assert_eq!(
+            follow_up_candidates(None, vec![table("public_db", "other")]),
+            vec![table("public_db", "other")]
+        );
+    }
+
+    #[test]
+    fn a_follow_up_drops_a_previous_table_the_caller_cannot_read() {
+        let previous = previous_turn();
+        // The docs loop above turns a 403 or 404 documentation read into `Value::Null`.
+        let (candidates, docs) = drop_unreadable(previous.tables.clone(), vec![Value::Null]);
+        assert!(
+            candidates.is_empty(),
+            "an unreadable table stays in the prompt"
+        );
+        assert!(docs.is_empty());
+        // A readable one survives with its documentation.
+        let (candidates, docs) = drop_unreadable(
+            previous.tables.clone(),
+            vec![json!({"description": "Rfam"})],
+        );
+        assert_eq!(candidates, previous.tables);
+        assert_eq!(docs.len(), 1);
+        // With no other candidate the answer is `NO_TABLE`, exactly as the empty search is.
+        let body = no_table_answer("default".into(), "qwen3-4b".into());
+        assert_eq!(body.sentence, NO_TABLE);
+        assert_eq!(body.sql, None);
+        assert_eq!(body.explain, "not_run");
+    }
+
+    #[test]
+    fn a_follow_up_puts_the_previous_statement_in_the_prompt() {
+        let previous = previous_turn();
+        let prompt = user_text_of("only org domains", Some(&previous), &json!([]));
+        assert!(prompt.contains("Its statement:"), "{prompt}");
+        assert!(prompt.contains(&previous.sql), "{prompt}");
+        assert!(
+            prompt.contains("The previous question: can you tell me what I can do here?"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "The question below refines it; change that statement unless the question asks for something new."
+            ),
+            "{prompt}"
+        );
+        // The question still comes after the previous turn.
+        assert!(
+            prompt.find("The question: only org domains") > prompt.find("Its statement:"),
+            "{prompt}"
+        );
+        // A plain question carries none of the previous turn.
+        let plain = user_text_of("how many rows?", None, &json!([]));
+        assert!(!plain.contains("Its statement:"));
+        assert!(plain.starts_with("The question: how many rows?"));
+    }
+
+    #[tokio::test]
+    async fn a_previous_statement_over_8000_characters_is_refused() {
+        let body = json!({
+            "question": "only org domains",
+            "previous": {
+                "question": "can you tell me what I can do here?",
+                "sql": format!("SELECT {}", "x".repeat(8000)),
+                "tables": [{"catalog": "bronze", "namespace": "public_db", "table": "rnacentral_databases"}]
+            }
+        });
+        let (status, body, cache) =
+            ask_body_call(&app(crate::router_tests::test_state()), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            json!("the previous statement is longer than 8000 characters")
+        );
+        assert_eq!(cache.as_deref(), Some("no-store"));
+        // At the limit it is accepted: the request goes on to the state store's 503.
+        let at_limit = json!({
+            "question": "only org domains",
+            "previous": {
+                "question": "can you tell me what I can do here?",
+                "sql": "x".repeat(8000),
+                "tables": []
+            }
+        });
+        let (status, _, _) = ask_body_call(&app(crate::router_tests::test_state()), at_limit).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // --- the feedback route (slice b) -------------------------------------------------
