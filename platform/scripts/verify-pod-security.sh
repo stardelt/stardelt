@@ -41,11 +41,25 @@ done
 command -v kubectl >/dev/null 2>&1 || { echo "UNVERIFIED (kubectl not found)"; exit 3; }
 command -v jq >/dev/null 2>&1 || { echo "UNVERIFIED (jq not found)"; exit 3; }
 tmp="$(mktemp -d)"
+created=""
+# Cleanup deletes only a namespace this run created or one that carries this script's own probe
+# label. POD_SECURITY_PROBE_NS is caller-supplied, and on 2026-11-28 a real namespace named there
+# (`stardelt`) was deleted on exit (stardelt/stardelt#2323).
+probe_label() {
+  kubectl get namespace "$PROBE" -o jsonpath='{.metadata.labels.stardelt\.io/pod-security-probe}' 2>/dev/null || true
+}
 cleanup() {
   rm -rf "$tmp"
-  kubectl delete namespace "$PROBE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if [ "$created" = "1" ] || [ "$(probe_label)" = "true" ]; then
+    kubectl delete namespace "$PROBE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+# A namespace named by the caller must already be a probe namespace; never adopt a real one.
+if kubectl get namespace "$PROBE" >/dev/null 2>&1 && [ "$(probe_label)" != "true" ]; then
+  echo "refusing: namespace $PROBE already exists and is not a pod-security probe namespace" >&2
+  exit 1
+fi
 # A run killed before its trap leaves its own probe namespace behind. Each one is labelled, so
 # remove the ones older than ten minutes; this run's namespace is new and is never selected.
 now="$(date -u +%s)"
@@ -60,6 +74,7 @@ if ! kubectl create namespace "$PROBE" >/dev/null; then
   echo "cannot create the probe namespace $PROBE (the API server's message is above); set POD_SECURITY_PROBE_NS to another name" >&2
   exit 1
 fi
+created=1
 if ! kubectl label namespace "$PROBE" \
     pod-security.kubernetes.io/enforce="$level" \
     pod-security.kubernetes.io/enforce-version=latest \
