@@ -108,15 +108,18 @@ mod tests {
         let pool = crate::db::test_support::migrated_pool().await;
         insert(&pool, "analytics", "shop", "prod", -60.0).await;
         insert(&pool, "visitors", "shop", "prod", 0.0).await;
+        // A row stored with surrounding spaces (`valid_name` accepts them) is the same bundle.
+        insert(&pool, "finance", " sales ", "prod", -120.0).await;
+        insert(&pool, "visitors", "sales", "prod", -30.0).await;
         sqlx::query("DELETE FROM bundle_owner")
             .execute(&pool)
             .await
             .expect("clear the claims");
         sqlx::query(
             "INSERT INTO bundle_owner (bundle, owner_group, claimed_by, claimed_at) \
-             SELECT DISTINCT ON (bundle) bundle, owner_group, actor, created_at \
+             SELECT DISTINCT ON (TRIM(bundle)) TRIM(bundle), TRIM(owner_group), actor, created_at \
              FROM deployment \
-             ORDER BY bundle, created_at ASC, id ASC",
+             ORDER BY TRIM(bundle), created_at ASC, id ASC",
         )
         .execute(&pool)
         .await
@@ -124,6 +127,11 @@ mod tests {
         assert_eq!(
             owner_of(&pool, "shop").await.expect("read"),
             Some("analytics".to_string())
+        );
+        assert_eq!(
+            owner_of(&pool, "sales").await.expect("read"),
+            Some("finance".to_string()),
+            "the trimmed name of the oldest row"
         );
     }
 }

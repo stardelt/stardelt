@@ -6,7 +6,9 @@ CREATE TABLE bundle_owner (
     claimed_by TEXT NOT NULL,
     claimed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- TRIM as the writers do (`bundle_owner::claim`): a row stored with surrounding spaces must not
+-- become a second, unclaimed name.
 INSERT INTO bundle_owner (bundle, owner_group, claimed_by, claimed_at)
-SELECT DISTINCT ON (bundle) bundle, owner_group, actor, created_at
+SELECT DISTINCT ON (TRIM(bundle)) TRIM(bundle), TRIM(owner_group), actor, created_at
 FROM deployment
-ORDER BY bundle, created_at ASC, id ASC;
+ORDER BY TRIM(bundle), created_at ASC, id ASC;
