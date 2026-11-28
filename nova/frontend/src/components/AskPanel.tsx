@@ -478,6 +478,12 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
           {answer.mode === 'agent'
             ? <p className="whitespace-pre-wrap">{answer.text ?? answer.sentence}</p>
             : <p>{answer.sentence}</p>}
+          {answer.thinking && (
+            <details className="mt-2">
+              <summary className="text-xs text-text-mute cursor-pointer">Thinking</summary>
+              <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-text-mute">{answer.thinking}</pre>
+            </details>
+          )}
           <p className="text-xs text-text-mute">
             answered by {answer.model || answer.endpoint}
             {(answer.tried?.length ?? 0) > 1 && ` after ${answer.tried[0]} failed`}

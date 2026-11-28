@@ -14166,6 +14166,13 @@
             ],
             "description": "The agent's answer in words; `null` for a `sql` answer."
           },
+          "thinking": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model's thinking, cut at 8,000 characters, when the server sent it; part of the\nlive answer only and never stored (nova#2397 D2, D3)."
+          },
           "tried": {
             "type": "array",
             "items": {

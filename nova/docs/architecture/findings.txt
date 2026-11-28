@@ -3,15 +3,15 @@ B1 file-size budget (1500 production lines): 10 backend files over
   catalog_docs.rs 2702
   auth.rs 2544
   notebooks.rs 2277
-  ask.rs 1961
+  ask.rs 2001
   connection_routes.rs 1949
   mcp.rs 1853
   query_log_api.rs 1729
   superset.rs 1579
   main.rs 1538
 F-size frontend files over 800 lines: 7
-  api-schema.d.ts 16886
-  api.ts 1822
+  api-schema.d.ts 16891
+  api.ts 1827
   components/ScheduleDialog.tsx 1512
   routes/AdminCatalogs.tsx 1189
   components/ConnectionDialogs.tsx 1167

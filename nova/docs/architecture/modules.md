@@ -5,7 +5,7 @@
 | `catalog_docs.rs` ⚠ | Catalog | 2702 | 2066 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `auth.rs` ⚠ | Core & identity | 2544 | 2316 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
-| `ask.rs` ⚠ | AI (Ask, MCP, models) | 1961 | 1138 | 5 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
+| `ask.rs` ⚠ | AI (Ask, MCP, models) | 2001 | 1143 | 5 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1853 | 1616 | 4 | Airflow REST, Trino |
 | `query_log_api.rs` ⚠ | SQL & query log | 1729 | 413 | 7 | Kubernetes API (CRDs), PostgreSQL state store |
@@ -46,20 +46,20 @@
 | `token_exchange.rs` | Core & identity | 305 | 189 | 0 | OIDC provider |
 | `stages.rs` | Pipelines & delivery | 296 | 54 | 1 | - |
 | `catalog_token.rs` | Core & identity | 287 | 502 | 0 | OIDC provider |
-| `ask_agent.rs` | AI (Ask, MCP, models) | 283 | 451 | 0 | Model endpoints (external) |
+| `ask_agent.rs` | AI (Ask, MCP, models) | 283 | 453 | 0 | Model endpoints (external) |
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `catalog_doc_store.rs` | Catalog | 242 | 209 | 0 | PostgreSQL state store |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
 | `model_usage.rs` | AI (Ask, MCP, models) | 214 | 125 | 1 | PostgreSQL state store |
 | `query_log_store.rs` | SQL & query log | 191 | 182 | 0 | PostgreSQL state store |
+| `model_chat.rs` | AI (Ask, MCP, models) | 190 | 258 | 0 | Model endpoints (external) |
 | `samples.rs` | Catalog | 186 | 49 | 1 | Trino |
 | `lineage_store.rs` | Lineage | 179 | 218 | 0 | PostgreSQL state store |
 | `mcp_audit.rs` | AI (Ask, MCP, models) | 176 | 68 | 1 | PostgreSQL state store |
 | `query_hints.rs` | SQL & query log | 176 | 118 | 0 | - |
 | `user_settings.rs` | Core & identity | 173 | 14 | 3 | PostgreSQL state store |
 | `lineage_event.rs` | Lineage | 170 | 0 | 0 | - |
-| `model_chat.rs` | AI (Ask, MCP, models) | 158 | 178 | 0 | Model endpoints (external) |
 | `embed.rs` | Core & identity | 153 | 181 | 0 | - |
 | `previews.rs` | Pipelines & delivery | 150 | 74 | 0 | Kubernetes API (CRDs) |
 | `db.rs` | Core & identity | 134 | 72 | 0 | PostgreSQL state store |
@@ -76,4 +76,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (75 files)** | | **55739** | **48287** | **179** | |
+| **total (75 files)** | | **55811** | **48374** | **179** | |
