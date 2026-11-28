@@ -18,7 +18,7 @@ import yaml
 
 from stardelt import api, apply, lineage, runs
 
-KEYS = {"bundle", "dashboards", "variables", "include", "files", "migrations", "requires", "targets", "context"}
+KEYS = {"bundle", "dashboards", "evals", "variables", "include", "files", "migrations", "requires", "targets", "context"}
 KINDS = ("Pipeline", "StreamApp")
 PIPELINE_ONLY = ("sql", "sqlFile", "notebook", "schedule", "params", "tasks", "publish", "triggers")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
@@ -49,6 +49,16 @@ SPARK_SKIPPED_DIRS = ("__pycache__", ".git")
 CONTEXT_KEYS = ("tables",)
 MAX_CONTEXT_TABLES = 50
 MAX_GUIDE = 16000
+# A bundle's fixed eval set (#125): a question with a known answer, the same three shapes
+# the server's `validate_expected` (nova/backend/src/evals.rs) takes.
+EVAL_KEYS = ("question", "expected")
+MAX_EVALS = 50
+MAX_EVAL_QUESTION = 500
+MAX_EVAL_ROWS = 100
+MAX_EVAL_VALUES = 50
+MAX_EVAL_CELL = 500
+MAX_EVAL_TABLES = 10
+EVAL_TABLE = re.compile(r"^[^ .]+\.[^ .]+$")
 # A bundle names folders that `stardelt dashboards export` wrote: each holds `metadata.yaml`
 # and a `dashboards/` child, never `databases/` (#115 b).
 MAX_DASHBOARD_FOLDERS = 20
@@ -243,6 +253,82 @@ def _context_problems(section, problems):
             problems.append((at, "needs a `guide`, a `metrics` list, or both"))
         if "metrics" in entry:
             _metric_problems(f"{at}.metrics", entry["metrics"], problems)
+
+
+def _expected_problem(expected):
+    """Nova's `validate_expected` in one sentence, or ``None`` when the answer is fine."""
+    if not isinstance(expected, dict) or len(expected) != 2:
+        return "expected must be an object with kind rows, value or uses"
+    kind = expected.get("kind")
+    if kind == "rows":
+        rows = expected.get("rows")
+        if (
+            not isinstance(rows, list)
+            or not (1 <= len(rows) <= MAX_EVAL_ROWS)
+            or any(
+                not isinstance(row, list)
+                or not (1 <= len(row) <= MAX_EVAL_VALUES)
+                or any(
+                    isinstance(cell, str) and len(cell) > MAX_EVAL_CELL
+                    or not isinstance(cell, (str, int, float, bool, type(None)))
+                    for cell in row
+                )
+                for row in rows
+            )
+        ):
+            return "expected.rows must hold 1 to 100 rows of 1 to 50 values, each a string of at most 500 characters, a number, a boolean or null"
+        return None
+    if kind == "value":
+        value = expected.get("value")
+        if not isinstance(value, (str, int, float, bool, type(None))):
+            return "expected.value must be a string, a number, a boolean or null"
+        return None
+    if kind == "uses":
+        tables = expected.get("tables")
+        if (
+            not isinstance(tables, list)
+            or not (1 <= len(tables) <= MAX_EVAL_TABLES)
+            or not all(isinstance(t, str) and EVAL_TABLE.match(t) for t in tables)
+        ):
+            return "expected.tables must hold 1 to 10 namespace.table names"
+        return None
+    return "expected must be an object with kind rows, value or uses"
+
+
+def _evals_problems(section, problems):
+    """Check a ``evals:`` block offline; appends problems and returns its questions or []."""
+    where = "evals"
+    if not isinstance(section, dict):
+        problems.append((where, "must be a mapping with catalog and questions"))
+        return []
+    for key in sorted(set(section) - {"catalog", "questions"}):
+        problems.append((where, f"unknown key {key!r} (known: catalog, questions)"))
+    if not isinstance(section.get("catalog"), str) or not CATALOG.match(section["catalog"]):
+        problems.append((where + ".catalog", "must be a catalog name: 1 to 63 characters, lower-case letters, digits and dashes, starting with a letter or digit"))
+    questions = section.get("questions")
+    if not isinstance(questions, list) or not questions:
+        problems.append((where + ".questions", "must be a list of questions"))
+        return []
+    if len(questions) > MAX_EVALS:
+        problems.append((where + ".questions", f"more than {MAX_EVALS} questions"))
+    checked = []
+    for index, entry in enumerate(questions):
+        at = f"{where}.questions[{index}]"
+        if not isinstance(entry, dict):
+            problems.append((at, "must be a mapping with question and expected"))
+            continue
+        for key in sorted(set(entry) - set(EVAL_KEYS)):
+            problems.append((at, f"unknown key {key!r} (known: expected, question)"))
+        question = entry.get("question")
+        if not isinstance(question, str) or not (1 <= len(question.strip()) <= MAX_EVAL_QUESTION):
+            problems.append((at + ".question", "must be 1 to 500 characters"))
+            continue
+        problem = _expected_problem(entry.get("expected"))
+        if problem:
+            problems.append((at + ".expected", problem))
+            continue
+        checked.append({"question": question.strip(), "expected": entry["expected"]})
+    return checked
 
 
 def _substitute(text, values, problems, where):
@@ -739,6 +825,8 @@ def validate(directory, target=None):
         _migrations(root, manifest["migrations"], problems)
     if "context" in manifest:
         _context_problems(manifest["context"], problems)
+    if "evals" in manifest:
+        _evals_problems(manifest["evals"], problems)
     if "dashboards" in manifest:
         _dashboard_folders(root, manifest["dashboards"], problems)
 
@@ -1002,6 +1090,86 @@ def context(nova, directory, check=False):
                 rows.append({"table": entry["table"], "action": "set"})
         if "metrics" in entry:
             _apply_metrics(nova, catalog, ns, tbl, entry["metrics"], check, entry["table"], rows, problems)
+    return problems, rows
+
+
+def apply_evals(nova, directory, check=False):
+    """Create or correct the bundle's ``evals:`` questions; ``(problems, rows)``.
+
+    A question is matched by its trimmed text. A question the catalog stores under another
+    owner group is a problem (the server would answer 403); two rows with the same question
+    are a problem too, because the answer would be ambiguous. A row is
+    ``{"question", "action"}`` with action ``unchanged``, ``created``/``corrected``, or
+    ``would-create``/``would-update`` with ``check``.
+    """
+    root = Path(directory)
+    try:
+        manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        return [(str(root / "bundle.yaml"), f"cannot read it: {err}")], []
+    if not isinstance(manifest, dict) or "evals" not in manifest:
+        return [("evals", "the bundle has no `evals:` block")], []
+    problems = []
+    questions = _evals_problems(manifest["evals"], problems)
+    if problems:
+        return problems, []
+    head = manifest.get("bundle") if isinstance(manifest.get("bundle"), dict) else {}
+    group = head.get("ownerGroup")
+    if not isinstance(group, str) or not group:
+        return [("bundle.ownerGroup", "must be a group name")], []
+    catalog = manifest["evals"]["catalog"]
+    try:
+        stored = nova.call("catalog_eval_list", query={"catalog": catalog}) or []
+    except api.StardeltApiError as err:
+        return [("evals", str(err))], []
+    by_question = {}
+    duplicates = set()
+    for row in stored:
+        text = (row.get("question") or "").strip()
+        if text in by_question:
+            duplicates.add(text)
+        by_question[text] = row
+    rows = []
+    for entry in questions:
+        text = entry["question"]
+        row = by_question.get(text)
+        if text in duplicates:
+            problems.append(("evals", f"the catalog stores {text!r} twice; correct the duplicate in Nova first"))
+            continue
+        if row is None:
+            if check:
+                rows.append({"question": text, "action": "would-create"})
+                continue
+            try:
+                nova.call(
+                    "catalog_eval_create",
+                    query={"catalog": catalog},
+                    body={"ownerGroup": group, "question": text, "expected": entry["expected"]},
+                )
+            except api.StardeltApiError as err:
+                problems.append(("evals", f"{text}: {err}"))
+                continue
+            rows.append({"question": text, "action": "created"})
+            continue
+        if row.get("ownerGroup") != group:
+            problems.append(("evals", f"{text!r} is owned by {row.get('ownerGroup')}, not {group}; only its group may correct it"))
+            continue
+        if row.get("expected") == entry["expected"]:
+            rows.append({"question": text, "action": "unchanged"})
+            continue
+        if check:
+            rows.append({"question": text, "action": "would-update"})
+            continue
+        try:
+            nova.call(
+                "eval_update",
+                path={"id": row["id"]},
+                body={"question": text, "expected": entry["expected"]},
+            )
+        except api.StardeltApiError as err:
+            problems.append(("evals", f"{text}: {err}"))
+            continue
+        rows.append({"question": text, "action": "corrected"})
     return problems, rows
 
 
