@@ -20,6 +20,7 @@ import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type
 import { formatTime } from '../format'
 import { tokenizeSql } from '../sqlHighlight'
 import { TOKEN_CLASS } from '../sqlTokens'
+import { Markdown } from './Markdown'
 
 /** What one question left in the panel. */
 type Turn = {
@@ -475,9 +476,9 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
 
       {answer && (
         <div className="card p-3 space-y-2 text-sm">
-          {answer.mode === 'agent'
-            ? <p className="whitespace-pre-wrap">{answer.text ?? answer.sentence}</p>
-            : <p>{answer.sentence}</p>}
+          {answer.mode === 'sql'
+            ? <p>{answer.sentence}</p>
+            : <Markdown text={answer.text ?? answer.sentence ?? ''} />}
           {answer.thinking && (
             <details className="mt-2">
               <summary className="text-xs text-text-mute cursor-pointer">Thinking</summary>

@@ -411,3 +411,49 @@ test('an answer is marked as verified on one of its sources', async ({ page }) =
   await expect(page.getByText('Verified on gold.shop.customer_ltv')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Mark as verified' })).toHaveCount(0)
 })
+
+/** An agent answer: words in Markdown, no statement. */
+const agentAnswer = (text: string) => ({
+  endpoint: 'lab', model: 'llama-3.3-70b', tried: ['lab'], callId: 42,
+  sql: null, sentence: '', tables: [], explain: 'not_run', error: null,
+  mode: 'agent', text,
+})
+
+test('an agent answer renders bold, lists and tables', async ({ page }) => {
+  await stub(page, {
+    ask: (route) => json(route, agentAnswer('**shop-3-gold** failed\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |')),
+  })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await ask(page, 'Which shop pipelines failed?')
+
+  await expect(panel.locator('strong', { hasText: 'shop-3-gold' })).toHaveText('shop-3-gold')
+  await expect(panel.locator('li')).toHaveCount(2)
+  await expect(panel.locator('table')).toHaveCount(1)
+  await expect(panel).not.toContainText('**')
+})
+
+test('model HTML is shown as text', async ({ page }) => {
+  await stub(page, {
+    ask: (route) => json(route, agentAnswer('<img src=x onerror=alert(1)> <b>hi</b>')),
+  })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await ask(page, 'Which shop pipelines failed?')
+
+  await expect(panel.locator('img')).toHaveCount(0)
+  await expect(panel.locator('b')).toHaveCount(0)
+  await expect(panel.getByText('<b>hi</b>')).toBeVisible()
+})
+
+test('a javascript link is not a link', async ({ page }) => {
+  await stub(page, {
+    ask: (route) => json(route, agentAnswer('[x](javascript:alert(1))')),
+  })
+  await page.keyboard.press('Control+J')
+  const panel = page.locator('#ask-panel')
+  await ask(page, 'Which shop pipelines failed?')
+
+  await expect(panel.locator('a')).toHaveCount(0)
+  await expect(panel.getByText('x', { exact: true })).toBeVisible()
+})
