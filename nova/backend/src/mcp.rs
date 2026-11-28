@@ -433,7 +433,7 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
 }
 
 /// The eighteen read tools and one write tool, in a fixed order so a client's menu does not move.
-fn tools() -> Value {
+pub(crate) fn tools() -> Value {
     json!([
         {
             "name": "platform_status",
@@ -733,7 +733,7 @@ async fn engine_caller(state: &Arc<AppState>, caller: &Principal) -> Result<Prin
 }
 
 /// `tools/call`: run one read tool as the caller and answer in MCP's shape.
-async fn call_tool(
+pub(crate) async fn call_tool(
     state: &Arc<AppState>,
     cfg: &McpConfig,
     principal: &Principal,
