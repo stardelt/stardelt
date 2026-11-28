@@ -717,6 +717,10 @@ step-catalog-clients: ## The svc-catalog-* secrets, before the release that vali
 	fi
 
 step-lakekeeper: ## The Iceberg REST catalog, its bootstrap and the ingress NetworkPolicy
+	@kubectl -n $(NAMESPACE) get configmap stardelt-identity >/dev/null 2>&1 || { \
+	  echo "Lakekeeper needs OpenFGA, and OpenFGA needs the platform IdP: there is no ConfigMap $(NAMESPACE)/stardelt-identity." >&2; \
+	  echo "On a new cluster run: make install-core, then make install-identity BASE_DOMAIN=<domain>, then make install (dev/home-k3s/README.md)." >&2; \
+	  exit 2; }
 	@echo "› Lakekeeper"
 	@helm upgrade --install lakekeeper lakekeeper/lakekeeper \
 	  --version $(LAKEKEEPER_VERSION) \
