@@ -969,7 +969,7 @@ export interface paths {
          *     the target, commit and normalized export hash of the stamp the import wrote (#115 decision 6). A dashboard without
          *     that stamp, and one another group imported, is never listed. At most 100 (Superset's page
          *     size). The caller's rule is the export's owner-group rule.
-         * @description The dashboards this bundle and this owner group imported, each with the target, commit and normalized export hash (`sha256`) of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.
+         * @description The dashboards this bundle and this owner group imported, each with the target, commit and normalized export hash (`sha256`) of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.
          */
         get: operations["dashboards_list"];
         put?: never;
@@ -989,7 +989,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit> #<sha256> by <ownerGroup>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped. */
+        /** @description Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit> #<sha256> by <ownerGroup>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too. */
         post: operations["dashboards_import"];
         delete?: never;
         options?: never;
@@ -1013,7 +1013,7 @@ export interface paths {
          *     `certification_details` must end with ` by <ownerGroup>`; a dashboard without the stamp,
          *     or one another group imported, is refused and stays (#115 decision 6). The caller's rule
          *     is the dashboards owner-group rule.
-         * @description Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group.
+         * @description Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.
          */
         delete: operations["dashboards_delete"];
         options?: never;
@@ -1028,7 +1028,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export its own group's dashboards. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI. */
+        /** @description The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export its own group's dashboards. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too. */
         get: operations["dashboards_export"];
         put?: never;
         post?: never;
@@ -1053,7 +1053,7 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/deployments` — `201` with the stored row.
-         * @description Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the rendered documents it applied (its `Pipeline`s and its `StreamApp`s). Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.
+         * @description Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the rendered documents it applied (its `Pipeline`s and its `StreamApp`s). Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.
          */
         post: operations["deployments_record"];
         delete?: never;
@@ -1073,7 +1073,7 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/deployments/plan` — what the set would do, `200` with the plan, nothing written.
-         * @description Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes are not covered yet; a StreamApp document is checked with the rules its write runs, and reads as an update when a StreamApp of that name exists, a create otherwise (a stream write is a PUT, so a stream change carries no diff yet). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.
+         * @description Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes are not covered yet; a StreamApp document is checked with the rules its write runs, and reads as an update when a StreamApp of that name exists, a create otherwise (a stream write is a PUT, so a stream change carries no diff yet). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.
          */
         post: operations["deployments_plan"];
         delete?: never;
@@ -10015,7 +10015,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, or a deploy principal asks for another group's dashboards */
+            /** @description The caller is not a member of the bundle's owner group, or a deploy principal asks for another group's dashboards, or the bundle belongs to another group */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -10096,7 +10096,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, a deploy principal names another stage, or a dashboard in the archive is certified by another bundle or owner group */
+            /** @description The caller is not a member of the bundle's owner group, a deploy principal names another stage, or a dashboard in the archive is certified by another bundle or owner group, or the bundle belongs to another group */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -10185,7 +10185,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, or the dashboard is not stamped by this bundle */
+            /** @description The caller is not a member of the bundle's owner group, or the dashboard is not stamped by this bundle, or the bundle belongs to another group */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -10267,7 +10267,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, a deploy principal asks for another group's dashboards, or the dashboard carries another bundle's or group's stamp */
+            /** @description The caller is not a member of the bundle's owner group, a deploy principal asks for another group's dashboards, or the dashboard carries another bundle's or group's stamp, or the bundle belongs to another group */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -10505,7 +10505,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Only a member of the pipeline's owner group may record a deployment; a deploy principal may only record a deployment to its stage and of its own group */
+            /** @description Only a member of the pipeline's owner group may record a deployment; a deploy principal may only record a deployment to its stage and of its own group, or the bundle belongs to another group */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -10633,7 +10633,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Only a member of the pipeline's owner group may plan a deployment; a deploy principal may only plan a deployment to its stage and of its own group */
+            /** @description Only a member of the pipeline's owner group may plan a deployment; a deploy principal may only plan a deployment to its stage and of its own group, or the bundle belongs to another group */
             403: {
                 headers: {
                     [name: string]: unknown;

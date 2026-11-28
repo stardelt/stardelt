@@ -5,7 +5,7 @@ B1 file-size budget (1500 production lines): 9 backend files over
   notebooks.rs 2277
   connection_routes.rs 1949
   query_log_api.rs 1729
-  superset.rs 1571
+  superset.rs 1579
   main.rs 1523
   mcp.rs 1515
 F-size frontend files over 800 lines: 7
