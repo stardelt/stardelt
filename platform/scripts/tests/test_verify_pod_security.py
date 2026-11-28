@@ -50,6 +50,10 @@ import sys
 NAMESPACE_LABELS = """__NAMESPACE_LABELS__"""
 
 argv = sys.argv[1:]
+log = os.environ.get("KUBECTL_LOG")
+if log:
+    with open(log, "a") as handle:
+        handle.write(" ".join(argv) + "\\n")
 namespace = ""
 rest = []
 i = 0
@@ -106,6 +110,9 @@ if verb == "get":
     kind = rest[1] if len(rest) > 1 else ""
     if kind == "namespace":
         name = rest[2] if len(rest) > 2 else ""
+        existing = os.environ.get("EXISTING_NAMESPACE", "")
+        if existing and name == existing and not any(a.startswith("jsonpath") for a in rest):
+            sys.exit(0)  # the namespace exists (the caller named a real one)
         if name == "stardelt" and any(a.startswith("jsonpath") for a in rest):
             # The platform namespace's own Pod Security labels (#1096 question 5).
             print(os.environ.get("NAMESPACE_LABELS", NAMESPACE_LABELS))
@@ -292,6 +299,24 @@ class CronJobTemplates(unittest.TestCase):
         result = self.run_script("--level", "baseline", "--allow-namespace-level", "baseline")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("0 of 0 CronJob template(s)", result.stdout)
+
+    def test_a_real_namespace_named_by_the_caller_is_refused_and_never_deleted(self):
+        """POD_SECURITY_PROBE_NS is caller-supplied: a real namespace must not be adopted or
+        deleted on exit (stardelt/stardelt#2323 deleted the lab's `stardelt` namespace)."""
+        log = Path(self.tmp.name) / "kubectl.log"
+        result = self.run_script(
+            env_extra={
+                "POD_SECURITY_PROBE_NS": "stardelt",
+                "EXISTING_NAMESPACE": "stardelt",
+                "KUBECTL_LOG": str(log),
+            }
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "refusing: namespace stardelt already exists and is not a pod-security probe namespace",
+            result.stderr,
+        )
+        self.assertNotIn("delete namespace stardelt", log.read_text())
 
 
 if __name__ == "__main__":
