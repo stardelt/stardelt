@@ -270,3 +270,29 @@ def test_a_folder_without_dashboards_is_a_sentence(tmp_path):
         )
 
     assert str(raised.value) == f"{folder} has no dashboards/ folder to import"
+
+
+def test_the_normalized_hash_ignores_the_wrapper_the_minute_and_the_stamp(tmp_path):
+    def folder(name, timestamp, stamp):
+        root = tmp_path / name
+        (root / "dashboards").mkdir(parents=True)
+        (root / "charts").mkdir(parents=True)
+        (root / "metadata.yaml").write_text(f"version: 1.0.0\ntimestamp: {timestamp}\n")
+        (root / "dashboards" / "shop.yaml").write_text(
+            f"dashboard_title: shop\ncertified_by: someone\ncertification_details: {stamp}\n"
+        )
+        (root / "charts" / "revenue.yaml").write_text("# revenue\n")
+        return root
+
+    first = folder("first", "2026-11-28T10:00:00", "prod @ abc1234")
+    second = folder("second", "2026-11-28T11:42:07", "dev @ def5678")
+
+    before = dashboards.normalized_hash(first)
+    assert dashboards.normalized_hash(second) == before, "the wrapper, the minute and the stamp do not count"
+
+    (first / "databases").mkdir()
+    (first / "databases" / "Trino_Gold.yaml").write_text("database_name: Trino Gold\n")
+    assert dashboards.normalized_hash(first) == before, "databases/ is dropped"
+
+    (second / "charts" / "revenue.yaml").write_text("# revenue changed\n")
+    assert dashboards.normalized_hash(second) != before
