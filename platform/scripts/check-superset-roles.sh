@@ -14,6 +14,11 @@ fail() {
   exit 1
 }
 
+nova=scripts/superset-nova-user.py
+[ -f "$nova" ] || fail "missing $nova"
+grep -qF -e '("can_export", "Database")' "$nova" \
+  || fail "Nova's service user must export a database (the import maps a dataset's catalog)"
+
 [ -f "$analyst" ] || fail "missing $analyst"
 grep -qF -e 'catalog_from_uri' "$analyst" || fail "analyst script must filter to shared catalog"
 grep -qF -e '"shared"' "$analyst" || fail "analyst script must match only shared"
