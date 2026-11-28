@@ -39,7 +39,7 @@ const STEP_MS = 900
 /** How many of the person's read tables become example questions. */
 const EXAMPLES = 3
 const EMPTY =
-  'Ask a question about the tables you can see. stardelt writes SQL, checks it as you, and never runs it without you.'
+  'Ask the agent about the tables you can see. stardelt writes SQL, checks it as you, and never runs it without you.'
 /** Where this browser keeps the person's endpoint choice (`auto` when nothing is stored). */
 const ENDPOINT_KEY = 'stardelt.ask.endpoint'
 /** The stored choice; a browser that refuses storage keeps Auto. */
@@ -230,11 +230,11 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
   return (
     <aside
       id="ask-panel"
-      aria-label="Ask"
+      aria-label="Agent"
       className="fixed inset-0 z-50 flex flex-col bg-bg border-border md:border-l xl:static xl:z-auto xl:w-[420px] xl:shrink-0"
     >
       <div className="h-14 shrink-0 border-b border-border px-4 flex items-center gap-2">
-        <span className="text-sm font-medium mr-auto">Ask</span>
+        <span className="text-sm font-medium mr-auto">Agent</span>
         <button
           type="button"
           className="btn-ghost px-2 py-1 text-xs"
@@ -242,7 +242,7 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
           aria-controls="ask-history"
           onClick={() => setShowHistory(v => !v)}
         >History</button>
-        <button type="button" className="btn-ghost px-2.5 py-2" aria-label="Close Ask" onClick={onClose}>✕</button>
+        <button type="button" className="btn-ghost px-2.5 py-2" aria-label="Close Agent" onClick={onClose}>✕</button>
       </div>
 
       <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
@@ -310,8 +310,8 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
         <input
           ref={inputRef}
           className="input"
-          placeholder="Ask about your data…"
-          aria-label="Ask a question"
+          placeholder="Ask the agent about your data…"
+          aria-label="Ask the agent a question"
           value={question}
           onChange={e => setQuestion(e.target.value)}
         />
