@@ -298,22 +298,29 @@ still wins when set (CI). `stardelt logout` deletes the file.
 
 `ghcr.io/stardelt/agent` is the agent harness as one image — the `stardelt` command line with
 `stardelt agent`, the Spark Connect client, and dbt with the Trino adapter — and it starts the agent
-when you run it. It carries no credential: sign in inside it once, and the sign-in is kept in the
-container's own `/home/agent/.config/stardelt`.
+when you run it. It carries no credential: sign in inside it, and keep the sign-in in a volume so the
+next container has it (it is written to `/home/agent/.config/stardelt`).
 
 ```bash
-docker run -it --rm ghcr.io/stardelt/agent --host https://<your Nova> login   # once, the device flow
-docker run -it --rm ghcr.io/stardelt/agent --host https://<your Nova> agent   # the agent, as you
+docker volume create stardelt-agent                  # once
+docker run -it --rm -v stardelt-agent:/home/agent/.config \
+  ghcr.io/stardelt/agent --host https://<your Nova> login   # once: the device flow
+docker run -it --rm -v stardelt-agent:/home/agent/.config \
+  ghcr.io/stardelt/agent --host https://<your Nova> agent   # the agent, as you
 ```
 
-Any other command runs the same way (`docker run --rm ghcr.io/stardelt/agent --host … sql "select 1"`). To
-use the sign-in you already have on your machine, mount it read-only instead of logging in again:
+Any other command runs the same way (`docker run --rm -v stardelt-agent:/home/agent/.config
+ghcr.io/stardelt/agent --host … sql "select 1"`). To use the sign-in your machine already has, copy it
+into that volume once instead of logging in again:
 
 ```bash
-docker run -it --rm -v ~/.config/stardelt:/home/agent/.config/stardelt:ro \
-  ghcr.io/stardelt/agent --host https://<your Nova> agent
+docker run --rm -v stardelt-agent:/home/agent/.config -v ~/.config/stardelt:/from-host:ro \
+  --entrypoint sh ghcr.io/stardelt/agent \
+  -c 'mkdir -p /home/agent/.config/stardelt && cp /from-host/* /home/agent/.config/stardelt/'
 ```
 
+Mounting the host sign-in read-only in place is not enough: the access token is renewed every few
+minutes and the renewal writes the file.
 
 Results go to stdout, messages to stderr. Exit codes: `0` ok, `1` error, `2` wrong usage,
 `3` authentication needed. A token is never printed.
