@@ -5,10 +5,10 @@
 | `catalog_docs.rs` ⚠ | Catalog | 2702 | 2066 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `auth.rs` ⚠ | Core & identity | 2544 | 2316 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
-| `ask.rs` ⚠ | AI (Ask, MCP, models) | 1985 | 1142 | 5 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
+| `ask.rs` ⚠ | AI (Ask, MCP, models) | 2001 | 1143 | 5 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
+| `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1853 | 1616 | 4 | Airflow REST, Trino |
 | `query_log_api.rs` ⚠ | SQL & query log | 1729 | 413 | 7 | Kubernetes API (CRDs), PostgreSQL state store |
-| `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1644 | 1527 | 4 | Airflow REST, Trino |
 | `superset.rs` ⚠ | Pipelines & delivery | 1579 | 1372 | 5 | Superset |
 | `main.rs` ⚠ | Core & identity | 1538 | 1620 | 3 | - |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
@@ -46,8 +46,8 @@
 | `token_exchange.rs` | Core & identity | 305 | 189 | 0 | OIDC provider |
 | `stages.rs` | Pipelines & delivery | 296 | 54 | 1 | - |
 | `catalog_token.rs` | Core & identity | 287 | 502 | 0 | OIDC provider |
+| `ask_agent.rs` | AI (Ask, MCP, models) | 283 | 453 | 0 | Model endpoints (external) |
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
-| `ask_agent.rs` | AI (Ask, MCP, models) | 257 | 391 | 0 | Model endpoints (external) |
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `catalog_doc_store.rs` | Catalog | 242 | 209 | 0 | PostgreSQL state store |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
@@ -76,4 +76,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (75 files)** | | **55560** | **48222** | **179** | |
+| **total (75 files)** | | **55811** | **48374** | **179** | |

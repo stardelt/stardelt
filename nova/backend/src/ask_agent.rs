@@ -1,13 +1,18 @@
 //! Ask's agent loop — slice 1 of stardelt/stardelt#2344 (stardelt/stardelt#2365).
 //!
 //! In agent mode Ask talks to the model over several turns, offering it the platform's
-//! **read-only** MCP tools. The rules of this module:
+//! **read-only** MCP tools, plus the non-destructive write tools outside production. The
+//! rules of this module:
 //!
-//! - **Read-only, as the person.** Only a tool whose `annotations.readOnlyHint` is `true` is
-//!   offered; a call naming anything else is answered to the model with
+//! - **As the person.** Only a tool whose `annotations.readOnlyHint` is `true` is offered;
+//!   outside a production stage a tool that is neither read-only nor destructive (a
+//!   documentation, eval or notebook write) is offered too, never a destructive one
+//!   (`pipeline_start`). A call naming anything else is answered to the model with
 //!   [`NOT_AVAILABLE`] and is never run. The caller runs the tools with that person's own
-//!   `Principal` and the read scope only (`ask.rs`); the loop here only decides *which* call
-//!   is allowed, never as whom it runs.
+//!   `Principal` and the read scope, plus the write scope when it offered the writes; the loop
+//!   here only decides *which* call is allowed, never as whom it runs.
+//! - **A write is visible.** A write call's step list line reads `wrote: <tool> <target>`, so
+//!   the person sees what changed and where.
 //! - **Bounded.** At most [`MAX_MODEL_CALLS`] model calls and [`MAX_TOOL_CALLS`] tool calls
 //!   per question, and every tool result is cut to [`MAX_TOOL_RESULT_CHARS`] characters
 //!   before it goes back to the model.
@@ -64,14 +69,23 @@ pub(crate) struct AgentOutcome {
     pub last_sql: Option<String>,
 }
 
-/// The MCP tool list as an OpenAI `tools` array, read-only tools only (D2).
-pub(crate) fn openai_tools(mcp_tools: &Value) -> Value {
+/// The MCP tool list as an OpenAI `tools` array: the read-only tools, plus — with `writes`
+/// — the tools that change state without destroying any (`readOnlyHint: false` and not
+/// `destructiveHint: true`). A destructive tool is never offered (D2).
+pub(crate) fn openai_tools(mcp_tools: &Value, writes: bool) -> Value {
     let tools: Vec<Value> = mcp_tools
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[])
         .iter()
-        .filter(|tool| tool.pointer("/annotations/readOnlyHint") == Some(&Value::Bool(true)))
+        .filter(|tool| {
+            if tool.pointer("/annotations/readOnlyHint") == Some(&Value::Bool(true)) {
+                return true;
+            }
+            writes
+                && tool.pointer("/annotations/readOnlyHint") == Some(&Value::Bool(false))
+                && tool.pointer("/annotations/destructiveHint") != Some(&Value::Bool(true))
+        })
         .filter_map(|tool| {
             let name = tool.get("name")?.as_str()?;
             Some(json!({
@@ -121,8 +135,9 @@ pub(crate) fn without_rows(result: &Value) -> Value {
     })
 }
 
-/// One line for the step list. `sql_read` reports its row count; a table tool names the
-/// table it read; anything else names the one argument that says what it looked at.
+/// One line for the step list. `sql_read` reports its row count; a write says `wrote: <tool>
+/// <target>` so the person sees what changed; a read tool names the table or the argument it
+/// looked at.
 fn summary_of(name: &str, arguments: &Value, result: &Value) -> String {
     if name == "sql_read" {
         let rows = result
@@ -138,15 +153,26 @@ fn summary_of(name: &str, arguments: &Value, result: &Value) -> String {
         return format!("sql_read: {rows} rows");
     }
     let part = |key: &str| arguments.get(key).and_then(Value::as_str);
-    if let (Some(namespace), Some(table)) = (part("namespace"), part("table")) {
-        return format!("{name}: {namespace}.{table}");
+    let target = if let (Some(namespace), Some(table)) = (part("namespace"), part("table")) {
+        Some(format!("{namespace}.{table}"))
+    } else if let (Some(group), Some(notebook)) = (part("group"), part("name")) {
+        Some(format!("{group}/{notebook}"))
+    } else {
+        ["catalog", "query", "pipeline", "id"]
+            .iter()
+            .find_map(|key| part(key))
+            .map(str::to_string)
+    };
+    if crate::mcp::required_scope(name) == crate::mcp::WRITE_SCOPE {
+        return match target {
+            Some(target) => format!("wrote: {name} {target}"),
+            None => format!("wrote: {name}"),
+        };
     }
-    for key in ["catalog", "query", "pipeline", "id"] {
-        if let Some(value) = part(key) {
-            return format!("{name}: {value}");
-        }
+    match target {
+        Some(target) => format!("{name}: {target}"),
+        None => name.to_string(),
     }
-    name.to_string()
 }
 
 /// The rows of a `sql_read` the panel keeps, at most [`STEP_ROWS`].
@@ -346,7 +372,7 @@ mod tests {
 
     #[test]
     fn openai_tools_offers_only_read_only_tools() {
-        let offered = openai_tools(&mcp_tools());
+        let offered = openai_tools(&mcp_tools(), false);
         let names: Vec<&str> = offered
             .as_array()
             .expect("a list")
@@ -373,9 +399,71 @@ mod tests {
         assert!(allowed("sql_read", &offered));
     }
 
+    #[test]
+    fn writes_are_offered_only_outside_production() {
+        let tools = crate::mcp::tools();
+        // A development stage: the non-destructive writes are offered, the destructive one is not.
+        let offered = openai_tools(&tools, true);
+        assert!(allowed("notebook_save", &offered));
+        assert!(allowed("table_documentation_update", &offered));
+        assert!(!allowed("pipeline_start", &offered));
+        // Production (or a client that asked for reads): neither write is offered.
+        let offered = openai_tools(&tools, false);
+        assert!(!allowed("notebook_save", &offered));
+        assert!(!allowed("table_documentation_update", &offered));
+        assert!(!allowed("pipeline_start", &offered));
+        // Every read tool is offered either way.
+        assert!(allowed("notebooks_list", &offered));
+        assert!(allowed("notebook_read", &offered));
+    }
+
+    #[test]
+    fn a_destructive_tool_is_never_offered() {
+        let offered = openai_tools(&crate::mcp::tools(), true);
+        let names: Vec<&str> = offered
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(
+            !names.contains(&"pipeline_start"),
+            "a destructive tool reached the model: {names:?}"
+        );
+        assert!(names.contains(&"notebook_save"), "{names:?}");
+        // The fixture's destructive tool is refused with `writes` on, too.
+        let offered = openai_tools(&mcp_tools(), true);
+        assert!(!allowed("pipeline_start", &offered));
+    }
+
+    #[test]
+    fn a_write_step_says_wrote_and_where() {
+        assert_eq!(
+            summary_of(
+                "notebook_save",
+                &json!({"group": "demo", "name": "revenue.ipynb"}),
+                &json!({"objectVersion": "v1"})
+            ),
+            "wrote: notebook_save demo/revenue.ipynb"
+        );
+        assert_eq!(
+            summary_of(
+                "table_documentation_update",
+                &json!({"namespace": "gold", "table": "shop", "reason": "clarify"}),
+                &json!({"ok": true})
+            ),
+            "wrote: table_documentation_update gold.shop"
+        );
+        // A read tool keeps its colon form.
+        assert_eq!(
+            summary_of("catalog_search", &json!({"query": "trips"}), &json!({})),
+            "catalog_search: trips"
+        );
+    }
+
     #[tokio::test]
     async fn the_loop_runs_a_tool_and_answers_in_words() {
-        let offered = openai_tools(&mcp_tools());
+        let offered = openai_tools(&mcp_tools(), false);
         let mut answers = vec![
             tool_call("catalog_search", json!({"query": "trips"})),
             words("Two tables hold trips."),
@@ -436,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_write_tool_is_never_run() {
-        let offered = openai_tools(&mcp_tools());
+        let offered = openai_tools(&mcp_tools(), false);
         let mut answers = vec![
             tool_call(
                 "pipeline_start",
@@ -492,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_loop_stops_at_six_tool_calls_and_asks_for_an_answer() {
-        let offered = openai_tools(&mcp_tools());
+        let offered = openai_tools(&mcp_tools(), false);
         let seen: Arc<Mutex<Vec<(Value, bool)>>> = Arc::new(Mutex::new(Vec::new()));
         let model = {
             let seen = Arc::clone(&seen);
@@ -545,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn rows_do_not_reach_the_model_without_send_rows() {
-        let offered = openai_tools(&mcp_tools());
+        let offered = openai_tools(&mcp_tools(), false);
         let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let tool = || {
             let _ = ();
