@@ -755,6 +755,9 @@ step-app-secrets: ## The Airflow/Superset Secrets (generated once, kept across i
 step-airflow: ## Airflow and the pipeline templates
 	@echo "› Airflow"
 	@kubectl apply -f manifests/airflow-auth-manager.yaml
+	@# A non-hook Job is patched on every upgrade and a Job's pod template is
+	@# immutable, so a failed upgrade's --atomic rollback fails on the same patch and leaves the release `failed`; recreate the two Jobs instead.
+	@kubectl -n $(NAMESPACE) delete job --ignore-not-found airflow-create-user airflow-run-airflow-migrations
 	@helm upgrade --install airflow apache-airflow/airflow \
 	  --version $(AIRFLOW_VERSION) \
 	  $(HELM_FLAGS) \
