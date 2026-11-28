@@ -289,10 +289,10 @@ impl SupersetClient {
         Err(self.status_error(status, response, &token).await)
     }
 
-    /// `GET /api/v1/dashboard/{id}`: the dashboard's `certified_by` value, or `""` when it has
-    /// none. The prune rule reads it: a dashboard is removed only when this bundle's import
-    /// stamped it (#115 decision 6).
-    pub async fn certified_by(&self, id: i64) -> Result<String, SupersetError> {
+    /// `GET /api/v1/dashboard/{id}`: the dashboard's `certified_by` and
+    /// `certification_details`, each `""` when Superset answers `null`. The prune rule reads
+    /// both (#115 decision 6): the bundle names the dashboard, the group authorises its removal.
+    pub async fn provenance(&self, id: i64) -> Result<(String, String), SupersetError> {
         let url = format!("{}/api/v1/dashboard/{id}", self.base);
         let mut token = self.login().await?;
         let mut response = self
@@ -326,10 +326,8 @@ impl SupersetClient {
             .json()
             .await
             .map_err(|e| SupersetError::Transport(e.to_string()))?;
-        Ok(body["result"]["certified_by"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string())
+        let text = |key: &str| body["result"][key].as_str().unwrap_or_default().to_string();
+        Ok((text("certified_by"), text("certification_details")))
     }
 
     /// `GET /api/v1/database/?q=(page_size:200)`: every database the target Superset knows, as
@@ -806,17 +804,29 @@ pub(crate) fn export_refusal(
     crate::deployments::deploy_refusal(identity, owner_group, target, client_id, "export")
 }
 
-/// Why `dashboard` may not be removed for `bundle`, or `None` when it may. The import stamps
-/// `certified_by` with `stardelt bundle <bundle>` (#115 decision 6); anything else — a person's
-/// own dashboard, another bundle's — is never touched.
-pub(crate) fn delete_refusal(certified: &str, bundle: &str) -> Option<String> {
+/// Why `dashboard` may not be removed for `bundle` by `owner_group`, or `None` when it may.
+/// The import stamps `certified_by: "stardelt bundle <bundle>"` and
+/// `certification_details: "<target> @ <commit> by <owner_group>"` (decision 6 of #115,
+/// amended); both must name this bundle and this group. A dashboard without the group in its
+/// stamp — a person's own, another bundle's, another group's — is never touched.
+pub(crate) fn delete_refusal(
+    certified: &str,
+    details: &str,
+    bundle: &str,
+    owner_group: &str,
+) -> Option<String> {
     let bundle = bundle.trim();
-    if certified.trim() == format!("stardelt bundle {bundle}") {
-        None
-    } else {
-        Some(format!(
+    let owner_group = owner_group.trim();
+    if certified.trim() != format!("stardelt bundle {bundle}") {
+        return Some(format!(
             "dashboard is not certified by bundle {bundle}; only a dashboard this bundle imported is removed"
-        ))
+        ));
+    }
+    match details.rsplit_once(" by ") {
+        Some((_, group)) if group.trim() == owner_group => None,
+        _ => Some(format!(
+            "dashboard is not certified for group {owner_group}; a dashboard another group imported is not removed"
+        )),
     }
 }
 
@@ -831,9 +841,10 @@ pub struct DashboardDeleteQuery {
 }
 
 /// `DELETE /api/dashboards/{id}`: remove one dashboard **this bundle imported**. The
-/// dashboard's `certified_by` must be exactly `stardelt bundle <bundle>`; a dashboard
-/// without the stamp is refused, so a person's own dashboard in the target is never
-/// touched (#115 decision 6). The caller's rule is the export's owner-group rule.
+/// dashboard's `certified_by` must be `stardelt bundle <bundle>` and its
+/// `certification_details` must end with ` by <ownerGroup>`; a dashboard without the stamp,
+/// or one another group imported, is refused and stays (#115 decision 6). The caller's rule
+/// is the export's owner-group rule.
 ///
 /// 204 on success; 403 for a non-member or an unstamped dashboard; 404 when Superset has
 /// no such dashboard; 502 when Superset refuses; 503 without a service user.
@@ -842,7 +853,7 @@ pub struct DashboardDeleteQuery {
     path = "/api/dashboards/{id}",
     tag = "public",
     operation_id = "dashboards_delete",
-    description = "Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>`; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own stage.",
+    description = "Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group.",
     params(
         ("id" = i64, Path, description = "Superset's numeric dashboard id"),
         ("bundle" = String, Query, description = "The bundle that imported the dashboard"),
@@ -899,11 +910,12 @@ pub async fn delete_dashboard(
             password: Secret::new(user.password.expose().to_string()),
         },
     );
-    let certified = match client.certified_by(id).await {
-        Ok(certified) => certified,
+    let (certified, details) = match client.provenance(id).await {
+        Ok(stamp) => stamp,
         Err(error) => return error.into_response(),
     };
-    if let Some(sentence) = delete_refusal(&certified, &query.bundle) {
+    if let Some(sentence) = delete_refusal(&certified, &details, &query.bundle, &query.owner_group)
+    {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     match client.delete(id).await {
@@ -1102,6 +1114,7 @@ pub async fn import_dashboard(
         bundle: query.bundle.trim(),
         target: query.target.trim(),
         commit: query.commit.trim(),
+        owner_group: query.owner_group.trim(),
     };
     match import_archive(&client, &body, &stamp, query.overwrite).await {
         Ok(imported) => {
@@ -1185,6 +1198,12 @@ mod fake {
         pub(super) import_body: Vec<u8>,
         /// The `certified_by` the one dashboard answers with (`None` answers `null`).
         pub(super) certified: Option<String>,
+        /// The `certification_details` the one dashboard answers with (`None` answers `null`).
+        pub(super) details: Option<String>,
+        /// How many more `401` answers to serve on the dashboard GET.
+        pub(super) unauthorized_dashboards: usize,
+        /// How many more `401` answers to serve on the dashboard DELETE.
+        pub(super) unauthorized_deletes: usize,
         /// Every id a delete removed, in order.
         pub(super) deletions: Vec<i64>,
     }
@@ -1394,14 +1413,11 @@ mod fake {
     async fn one_dashboard(
         State(s): State<Shared>,
         Path(id): Path<i64>,
-        headers: HeaderMap,
+        _headers: HeaderMap,
     ) -> Response {
         let mut state = s.lock().unwrap();
-        if state.unauthorized > 0 {
-            state.unauthorized -= 1;
-            return refused();
-        }
-        if !has_bearer(&headers) {
+        if state.unauthorized_dashboards > 0 {
+            state.unauthorized_dashboards -= 1;
             return refused();
         }
         if id != 7 {
@@ -1413,7 +1429,10 @@ mod fake {
         }
         (
             StatusCode::OK,
-            Json(json!({ "result": { "certified_by": state.certified, "certification_details": null } })),
+            Json(json!({ "result": {
+                "certified_by": state.certified,
+                "certification_details": state.details,
+            } })),
         )
             .into_response()
     }
@@ -1424,6 +1443,10 @@ mod fake {
         headers: HeaderMap,
     ) -> Response {
         let mut state = s.lock().unwrap();
+        if state.unauthorized_deletes > 0 {
+            state.unauthorized_deletes -= 1;
+            return refused();
+        }
         if !has_bearer(&headers) {
             return refused();
         }
@@ -1619,20 +1642,68 @@ mod tests {
     #[tokio::test]
     async fn a_stamped_dashboard_is_deleted() {
         let (client, fake) = fake::start().await;
-        fake.lock().unwrap().certified = Some("stardelt bundle shop".to_string());
-        let certified = client.certified_by(7).await.unwrap();
+        {
+            let mut state = fake.lock().unwrap();
+            state.certified = Some("stardelt bundle shop".to_string());
+            state.details = Some("prod @ abc1234 by shop".to_string());
+        }
+        let (certified, details) = client.provenance(7).await.unwrap();
         assert_eq!(certified, "stardelt bundle shop");
-        assert_eq!(delete_refusal(&certified, "shop"), None);
+        assert_eq!(details, "prod @ abc1234 by shop");
+        assert_eq!(delete_refusal(&certified, &details, "shop", "shop"), None);
         client.delete(7).await.expect("the delete");
         assert_eq!(fake.lock().unwrap().deletions, vec![7]);
     }
 
     #[test]
+    fn another_groups_dashboard_is_never_deleted() {
+        // The attack the first review found: the caller names another group's bundle and
+        // their own group. The recorded importing group is not theirs, so it stays.
+        let refused = delete_refusal(
+            "stardelt bundle analytics-shop",
+            "prod @ abc1234 by analytics",
+            "analytics-shop",
+            "visitors",
+        )
+        .expect("another group's dashboard must not be removed");
+        assert!(refused.contains("visitors"), "{refused}");
+    }
+
+    #[test]
+    fn a_dashboard_without_the_group_is_never_deleted() {
+        // The pre-amendment stamp carries no ` by <group>`: refused, never touched.
+        let refused = delete_refusal(
+            "stardelt bundle shop",
+            "prod @ abc1234",
+            "shop",
+            "analytics",
+        )
+        .expect("a dashboard without the group must not be removed");
+        assert!(refused.contains("analytics"), "{refused}");
+    }
+
+    #[test]
     fn the_stamp_rule_names_the_bundle() {
-        assert_eq!(delete_refusal("stardelt bundle shop", "shop"), None);
-        assert_eq!(delete_refusal("stardelt bundle shop", " shop "), None);
+        assert_eq!(
+            delete_refusal(
+                "stardelt bundle shop",
+                "prod @ abc1234 by shop",
+                "shop",
+                "shop"
+            ),
+            None
+        );
+        assert_eq!(
+            delete_refusal(
+                "stardelt bundle shop",
+                "prod @ abc1234 by shop",
+                " shop ",
+                "shop"
+            ),
+            None
+        );
         for certified in ["", "stardelt bundle other"] {
-            let refused = delete_refusal(certified, "shop")
+            let refused = delete_refusal(certified, "prod @ abc1234 by shop", "shop", "shop")
                 .unwrap_or_else(|| panic!("{certified:?} must not be removed"));
             assert!(refused.contains("shop"), "{refused}");
         }
@@ -1641,24 +1712,37 @@ mod tests {
     #[tokio::test]
     async fn a_certified_get_reads_null_as_no_stamp() {
         let (client, _fake) = fake::start().await;
-        let certified = client.certified_by(7).await.unwrap();
-        assert_eq!(certified, "");
-        assert!(delete_refusal(&certified, "shop").is_some());
+        let (certified, details) = client.provenance(7).await.unwrap();
+        assert_eq!((certified.as_str(), details.as_str()), ("", ""));
+        assert!(delete_refusal(&certified, &details, "shop", "shop").is_some());
     }
 
     #[tokio::test]
     async fn a_certified_get_retries_after_a_401() {
         let (client, fake) = fake::start().await;
-        fake.lock().unwrap().unauthorized = 1;
-        fake.lock().unwrap().certified = Some("stardelt bundle shop".to_string());
-        let certified = client.certified_by(7).await.expect("the retried GET");
+        {
+            let mut state = fake.lock().unwrap();
+            state.unauthorized_dashboards = 1;
+            state.certified = Some("stardelt bundle shop".to_string());
+            state.details = Some("prod @ abc1234 by shop".to_string());
+        }
+        let (certified, details) = client.provenance(7).await.expect("the retried GET");
         assert_eq!(certified, "stardelt bundle shop");
+        assert_eq!(details, "prod @ abc1234 by shop");
+    }
+
+    #[tokio::test]
+    async fn the_delete_retries_after_a_401() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().unauthorized_deletes = 1;
+        client.delete(7).await.expect("the retried delete");
+        assert_eq!(fake.lock().unwrap().deletions, vec![7]);
     }
 
     #[tokio::test]
     async fn a_missing_dashboard_is_a_404() {
         let (client, _fake) = fake::start().await;
-        match client.certified_by(8).await {
+        match client.provenance(8).await {
             Err(SupersetError::Status(404, sentence)) => {
                 assert!(sentence.contains('8'), "{sentence}")
             }
@@ -1689,6 +1773,7 @@ mod tests {
                 bundle: "shop",
                 target: "prod",
                 commit: "abc123",
+                owner_group: "analytics",
             },
             false,
         )
@@ -1717,8 +1802,8 @@ mod tests {
             "the dashboard names the bundle: {dashboard}"
         );
         assert!(
-            dashboard.contains("certification_details: \"prod @ abc123\""),
-            "the dashboard names the target and the commit: {dashboard}"
+            dashboard.contains("certification_details: \"prod @ abc123 by analytics\""),
+            "the dashboard names the target, the commit and the importing group: {dashboard}"
         );
         let database = member(&sent, "databases/Trino_Gold.yaml");
         assert!(
@@ -1738,6 +1823,7 @@ mod tests {
                 bundle: "shop",
                 target: "prod",
                 commit: "abc123",
+                owner_group: "analytics",
             },
             false,
         )
@@ -1766,6 +1852,7 @@ mod tests {
                 bundle: "shop",
                 target: "prod",
                 commit: "abc123",
+                owner_group: "analytics",
             },
             false,
         )
@@ -1792,6 +1879,7 @@ mod tests {
                 bundle: "shop",
                 target: "prod",
                 commit: "abc123",
+                owner_group: "analytics",
             },
             false,
         )
@@ -1820,6 +1908,7 @@ mod tests {
                 bundle: "shop",
                 target: "prod",
                 commit: "abc123",
+                owner_group: "analytics",
             },
             false,
         )

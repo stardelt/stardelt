@@ -966,10 +966,11 @@ export interface paths {
         post?: never;
         /**
          * `DELETE /api/dashboards/{id}`: remove one dashboard **this bundle imported**. The
-         *     dashboard's `certified_by` must be exactly `stardelt bundle <bundle>`; a dashboard
-         *     without the stamp is refused, so a person's own dashboard in the target is never
-         *     touched (#115 decision 6). The caller's rule is the export's owner-group rule.
-         * @description Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>`; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own stage.
+         *     dashboard's `certified_by` must be `stardelt bundle <bundle>` and its
+         *     `certification_details` must end with ` by <ownerGroup>`; a dashboard without the stamp,
+         *     or one another group imported, is refused and stays (#115 decision 6). The caller's rule
+         *     is the export's owner-group rule.
+         * @description Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group.
          */
         delete: operations["dashboards_delete"];
         options?: never;

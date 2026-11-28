@@ -28,7 +28,7 @@
 //!   `_` is a [`ArchiveError::NoCatalog`] input error — catalogs are Kubernetes names, so
 //!   this is `[a-z0-9-]` in practice.
 //! - The stamp is two `dashboards/*.yaml` lines: `certified_by: "stardelt bundle <bundle>"`
-//!   and `certification_details: "<target> @ <commit>"`. They replace the existing lines (the
+//!   and `certification_details: "<target> @ <commit> by <owner_group>"`. They replace the existing lines (the
 //!   export has both as `null`) or are appended when absent. Nothing else in the file changes.
 //! - Any uploaded `databases/` member is dropped, even one the caller added: the database
 //!   file is always the target's, never the bundle's.
@@ -37,11 +37,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{Cursor, Read, Write};
 
-/// The provenance the import stamps into every dashboard (decision 5 of #115).
+/// The provenance the import stamps into every dashboard (decision 5 of #115, amended: the
+/// importing owner group is part of it, so the delete can bind bundle and group).
 pub struct Stamp<'a> {
     pub bundle: &'a str,
     pub target: &'a str,
     pub commit: &'a str,
+    pub owner_group: &'a str,
 }
 
 /// Why the rewrite refused. `MissingDatabase` carries the file stem ("Trino_Gold").
@@ -329,7 +331,10 @@ pub fn rewrite(
             let text = set_value(
                 &text,
                 "certification_details",
-                &format!("{} @ {}", stamp.target, stamp.commit),
+                &format!(
+                    "{} @ {} by {}",
+                    stamp.target, stamp.commit, stamp.owner_group
+                ),
             );
             kept.push((name, text.into_bytes()));
             continue;
@@ -447,6 +452,7 @@ mod tests {
             bundle: "shop",
             target: "test",
             commit: "abc1234",
+            owner_group: "analytics",
         }
     }
 
@@ -551,7 +557,7 @@ mod tests {
 
         assert_eq!(dashboard.len(), 1);
         assert!(dashboard[0].contains("certified_by: \"stardelt bundle shop\""));
-        assert!(dashboard[0].contains("certification_details: \"test @ abc1234\""));
+        assert!(dashboard[0].contains("certification_details: \"test @ abc1234 by analytics\""));
         assert!(!dashboard[0].contains("certification_details: null"));
     }
 
