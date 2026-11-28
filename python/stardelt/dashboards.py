@@ -97,11 +97,32 @@ def bundle_identity(directory="."):
     return name, owner
 
 
+EXPORT_ROOTS = ("dashboards", "charts", "datasets", "databases")
+
+
+def _remove_stale(out, keep):
+    """Delete export files the new archive does not carry; leave every other file. Returns their paths."""
+    removed = []
+    if out.is_dir():
+        for path in sorted(out.rglob("*")):
+            relative = path.relative_to(out).as_posix()
+            if not path.is_file() or relative in keep:
+                continue
+            if relative == "metadata.yaml" or relative.split("/", 1)[0] in EXPORT_ROOTS:
+                path.unlink()
+                removed.append(relative)
+        for path in sorted(out.rglob("*"), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+    return removed
+
+
 def export(nova, dashboard_id, out, bundle, owner_group):
     """Write the Superset dashboard ``dashboard_id`` as the files of a bundle under ``out``.
 
-    Returns ``(out, written)``: the folder and the sorted relative paths written. The
-    ``databases/`` folder of the archive is never written.
+    Returns ``(out, written, removed)``: the folder, the sorted relative paths written, and the
+    stale export files the previous export left that this one removed. The ``databases/`` folder
+    of the archive is never written.
     """
     number = int(dashboard_id)
     if number < 1:
@@ -114,6 +135,8 @@ def export(nova, dashboard_id, out, bundle, owner_group):
         raise ExportError("Nova did not answer a Superset export (not a ZIP archive)") from None
 
     out = pathlib.Path(out)
+    if (out / "bundle.yaml").is_file():
+        raise ExportError(f"{out} is a bundle root; export into a folder of its own, for example dashboards/<slug>")
     top = _top(bundle.infolist())
     members = []
     with bundle:
@@ -125,6 +148,8 @@ def export(nova, dashboard_id, out, bundle, owner_group):
                 continue
             _target(out, relative.as_posix())
             members.append((member, relative))
+        keep = {relative.as_posix() for _member, relative in members}
+        removed = _remove_stale(out, keep)
         out.mkdir(parents=True, exist_ok=True)
         for member, relative in members:
             target = out / relative.as_posix()
@@ -134,12 +159,12 @@ def export(nova, dashboard_id, out, bundle, owner_group):
     written = sorted(relative.as_posix() for _member, relative in members)
     if not written:
         raise ExportError(f"the archive has no dashboards/ folder; is {number} a dashboard?")
-    return out, written
+    return out, written, removed
 
 
-def summary(out, written):
+def summary(out, written, removed):
     """The one line the command line prints after a successful export."""
-    return f"wrote {len(written)} file(s) to {out}; databases/ is not stored"
+    return f"wrote {len(written)} file(s) to {out}; removed {len(removed)} stale export file(s); databases/ is not stored"
 
 
 class UploadError(RuntimeError):

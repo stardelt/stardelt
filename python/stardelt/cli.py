@@ -771,13 +771,13 @@ def main(argv=None, environ=None, stdout=None, stderr=None, session=None, stdin=
                 from stardelt import dashboards
 
                 name, owner_group = dashboards.bundle_identity(".")
-                target, written = dashboards.export(
+                target, written, removed = dashboards.export(
                     nova, args.dashboard_id, args.out, name, owner_group
                 )
             except (ValueError, OSError, RuntimeError) as err:
                 stderr.write(f"stardelt: {err}\n")
                 return ERROR if not isinstance(err, ValueError) else USAGE
-            stderr.write(f"stardelt: {dashboards.summary(target, written)}\n")
+            stderr.write(f"stardelt: {dashboards.summary(target, written, removed)}\n")
             return OK
         if args.command == "dashboards" and args.dashboards_command == "import":
             try:

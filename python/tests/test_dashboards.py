@@ -49,10 +49,11 @@ def test_the_export_writes_every_folder_but_databases(tmp_path):
         )
     )
 
-    target, written = dashboards.export(nova, 42, out, "shop", "analytics")
+    target, written, removed = dashboards.export(nova, 42, out, "shop", "analytics")
 
     assert target == out
     assert written == ["charts/sales.yaml", "dashboards/shop.yaml", "datasets/orders.yaml", "metadata.yaml"]
+    assert removed == []
     for name in written:
         assert (out / name).read_text() == f"# {name}\n"
     assert not (out / "databases").exists()
@@ -75,7 +76,7 @@ def test_a_superset_export_nested_in_one_folder_is_unnested_without_databases(tm
     ]
     nova = FakeNova(archive([wrapper + "/" + name for name in names] + [wrapper + "/"]))
 
-    target, written = dashboards.export(nova, 42, out, "shop", "analytics")
+    target, written, removed = dashboards.export(nova, 42, out, "shop", "analytics")
 
     assert written == [
         member("dashboards", "Shop.yaml"),
@@ -95,6 +96,64 @@ def test_an_archive_wrapped_in_a_databases_folder_stores_no_member(tmp_path):
         dashboards.export(nova, 42, out, "shop", "analytics")
 
     assert not [path for path in out.rglob("*") if path.is_file()]
+
+
+def test_a_second_export_removes_the_files_the_first_one_wrote(tmp_path):
+    """A re-export replaces the previous export; it does not merge with it."""
+    out = tmp_path / "shop"
+    first = FakeNova(
+        archive(
+            [member("metadata.yaml"), member("dashboards", "Shop.yaml"), member("charts", "sales.yaml")]
+        )
+    )
+    dashboards.export(first, 42, out, "shop", "analytics")
+    second = FakeNova(archive([member("metadata.yaml"), member("dashboards", "Shop.yaml")]))
+
+    _target, _written, removed = dashboards.export(second, 42, out, "shop", "analytics")
+
+    assert removed == [member("charts", "sales.yaml")]
+    assert not (out / "charts" / "sales.yaml").exists()
+    assert not (out / "charts").exists()
+    assert (out / "dashboards" / "Shop.yaml").is_file()
+
+
+def test_an_export_leaves_files_that_are_not_part_of_an_export(tmp_path):
+    """A README next to the export is the author's, not the exporter's."""
+    out = tmp_path / "shop"
+    out.mkdir()
+    (out / "README.md").write_text("# shop dashboards\n")
+    nova = FakeNova(archive([member("metadata.yaml"), member("dashboards", "Shop.yaml")]))
+
+    _target, _written, removed = dashboards.export(nova, 42, out, "shop", "analytics")
+
+    assert removed == []
+    assert (out / "README.md").read_text() == "# shop dashboards\n"
+
+
+def test_an_export_refuses_the_bundle_root(tmp_path):
+    """Exporting into the bundle root would let the cleanup see the bundle's own dashboards/."""
+    out = tmp_path / "bundle"
+    out.mkdir()
+    (out / "bundle.yaml").write_text("bundle:\n  name: shop\n  ownerGroup: analytics\n")
+    (out / "dashboards").mkdir()
+    (out / "dashboards" / "Shop.yaml").write_text("# Shop\n")
+    nova = FakeNova(archive([member("metadata.yaml"), member("dashboards", "Shop.yaml")]))
+
+    with pytest.raises(dashboards.ExportError) as raised:
+        dashboards.export(nova, 42, out, "shop", "analytics")
+
+    assert str(raised.value) == (
+        f"{out} is a bundle root; export into a folder of its own, for example dashboards/<slug>"
+    )
+    assert (out / "dashboards" / "Shop.yaml").read_text() == "# Shop\n"
+
+
+def test_the_summary_names_the_removed_files(tmp_path):
+    out = tmp_path / "shop"
+
+    assert dashboards.summary(out, ["metadata.yaml", "dashboards/Shop.yaml"], ["charts/sales.yaml"]) == (
+        f"wrote 2 file(s) to {out}; removed 1 stale export file(s); databases/ is not stored"
+    )
 
 
 def test_an_unsafe_path_writes_nothing(tmp_path):
