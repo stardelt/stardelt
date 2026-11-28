@@ -772,13 +772,13 @@ pub async fn detail(
     operation_id = "deployments_record",
     path = "/api/deployments",
     tag = "public",
-    description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the rendered documents it applied (its `Pipeline`s and its `StreamApp`s). Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
+    description = "Record one bundle deploy: the bundle, the owner group of its pipelines, the stage it went to, the commit and repository, whether it applied or failed, and the rendered documents it applied (its `Pipeline`s and its `StreamApp`s). Only an administrator or a member of the owner group may record one; the caller is stored as `actor`. A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) is refused with 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.",
     request_body(content = NewDeployment, example = json!(new_deployment_example())),
     responses(
         (status = 201, description = "The stored row", body = Deployment, example = json!(row_example())),
         (status = 400, description = "A name is empty, too long or carries a `/`, the status or an action is not one of the known values, or there are more than 200 pipelines", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Only a member of the pipeline's owner group may record a deployment; a deploy principal may only record a deployment to its stage and of its own group", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only a member of the pipeline's owner group may record a deployment; a deploy principal may only record a deployment to its stage and of its own group, or the bundle belongs to another group", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The planId does not name the rendered set of this row", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
     )
@@ -820,6 +820,24 @@ pub async fn record(
     ) {
         return error(StatusCode::FORBIDDEN, &sentence);
     }
+    let owner =
+        match crate::bundle_owner::claim(pool, &new.bundle, &new.owner_group, &caller.identity.sub)
+            .await
+        {
+            Ok(owner) => owner,
+            Err(e) => {
+                tracing::warn!(error = %e, "bundle owner claim failed");
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the state store did not answer",
+                );
+            }
+        };
+    if let Some(sentence) =
+        crate::bundle_owner::refusal(&new.bundle, Some(&owner), &new.owner_group)
+    {
+        return error(StatusCode::FORBIDDEN, &sentence);
+    }
     match store(pool, &new, &caller.identity).await {
         Ok(row) => {
             let pruned = prune(pool, &row.owner_group, &row.bundle, &row.target).await;
@@ -844,13 +862,13 @@ pub async fn record(
     operation_id = "deployments_plan",
     path = "/api/deployments/plan",
     tag = "public",
-    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes are not covered yet; a StreamApp document is checked with the rules its write runs, and reads as an update when a StreamApp of that name exists, a create otherwise (a stream write is a PUT, so a stream change carries no diff yet). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected.",
+    description = "Say what applying one bundle's rendered Pipeline documents to one stage would do, writing nothing. Every document goes through the same create rules `pipelines_validate` and the write routes use, so the plan and the apply cannot disagree: `changes` names a `create`, an `update` (with the sentences it would change) or an `unchanged` document, `errors` carries the rule that refuses one, and `warnings` names a pipeline this bundle and stage own that the set does not name (a warning unless `prune` is true, when it is a `delete` change). `files` says which of the bundle's files are new against the newest applied deployment of this bundle and stage. `planId` is the identity of the rendered set: the SHA-256 of the bundle, the stage, the documents in the order given and the files sorted by path. A later `POST /api/deployments` may carry it as `planId`, and answers 409 when the row's set is not the planned one. A `prune: true` request names each owned pipeline the set omits as a `delete` change. The stage modes are not covered yet; a StreamApp document is checked with the rules its write runs, and reads as an update when a StreamApp of that name exists, a create otherwise (a stream write is a PUT, so a stream change carries no diff yet). A token issued to the Keycloak client `stardelt-deploy-<stage>` (a deploy principal, #57) answers 403 unless the target is `<stage>` and the caller is a member of the owner group; an administrator's credential has no such client and is unaffected. A bundle belongs to the group that first recorded a deploy of it or imported a dashboard for it; a call that names another group answers 403, an administrator's too.",
     request_body(content = BundlePlanRequest, example = json!(bundle_plan_request_example())),
     responses(
         (status = 200, description = "The plan, with its identity", body = BundlePlan, example = json!(bundle_plan_example())),
         (status = 400, description = "A name is empty, too long or carries a `/`, or there are more than 200 resources or 200 file digests", body = crate::openapi::ErrorResponse),
         (status = 401, description = "The caller has no identity", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Only a member of the pipeline's owner group may plan a deployment; a deploy principal may only plan a deployment to its stage and of its own group", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only a member of the pipeline's owner group may plan a deployment; a deploy principal may only plan a deployment to its stage and of its own group, or the bundle belongs to another group", body = crate::openapi::ErrorResponse),
         (status = 503, description = "The state store is not configured, or there is no cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
@@ -884,6 +902,21 @@ pub async fn plan(
         caller.client_id.as_deref(),
         "plan",
     ) {
+        return error(StatusCode::FORBIDDEN, &sentence);
+    }
+    let stored = match crate::bundle_owner::owner_of(pool, &request.bundle).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "bundle owner read failed");
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the state store did not answer",
+            );
+        }
+    };
+    if let Some(sentence) =
+        crate::bundle_owner::refusal(&request.bundle, stored.as_deref(), &request.owner_group)
+    {
         return error(StatusCode::FORBIDDEN, &sentence);
     }
     let recorded =
