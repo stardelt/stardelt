@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ApiError, api, type NewEval } from '../api'
+import { ApiError, api, errorMessage, type EvalWithLastRun, type NewEval, type NewEvalRun } from '../api'
 import CatalogSelect from '../components/CatalogSelect'
 import ErrorBox from '../components/ErrorBox'
 import { formatTime, relativeTime } from '../format'
@@ -53,6 +53,55 @@ export default function Evals() {
   const [removeError, setRemoveError] = useState<unknown>(null)
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState<number | null>(null)
+  const [running, setRunning] = useState<number | 'all' | null>(null)
+  const [runError, setRunError] = useState<unknown>(null)
+  const mayRun = (row: EvalWithLastRun) => me.data?.is_admin === true || groups.includes(row.ownerGroup)
+  const runnable = rows.filter(mayRun)
+
+  /** The CLI's three calls for one row (#125 point 2): Ask, execute, post the answer. */
+  async function runOne(row: EvalWithLastRun) {
+    const answer = await api.ask(row.question, catalog)
+    const meta = { model: answer.model, endpoint: answer.endpoint }
+    let body: NewEvalRun
+    if (!answer.sql) {
+      body = { ...meta, error: (answer.sentence || 'Ask answered no SQL').slice(0, 2000) }
+    } else {
+      const sql = answer.sql
+      try {
+        const result = await api.query(sql)
+        body = { ...meta, sql, rows: result.rows as NewEvalRun['rows'] }
+      } catch (err) {
+        body = { ...meta, sql, error: errorMessage(err as unknown).slice(0, 2000) }
+      }
+    }
+    await api.runEval(row.id, body)
+  }
+
+  async function run(row: EvalWithLastRun) {
+    setRunError(null)
+    setRunning(row.id)
+    try {
+      await runOne(row)
+    } catch (err) {
+      setRunError(err)
+    } finally {
+      setRunning(null)
+      await qc.invalidateQueries({ queryKey })
+    }
+  }
+
+  async function runAll() {
+    setRunError(null)
+    setRunning('all')
+    try {
+      for (const row of rows.filter(mayRun)) await runOne(row)
+    } catch (err) {
+      setRunError(err)
+    } finally {
+      setRunning(null)
+      await qc.invalidateQueries({ queryKey })
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -121,6 +170,16 @@ export default function Evals() {
         </div>
         <div className="flex items-center gap-2">
           <CatalogSelect />
+          {runnable.length > 0 && (
+            <button
+              type="button"
+              className="btn-ghost py-1.5 px-3 text-sm"
+              disabled={running !== null}
+              onClick={() => void runAll()}
+            >
+              {running === 'all' ? 'Running…' : 'Run all'}
+            </button>
+          )}
           {!adding && (
             <button
               type="button"
@@ -206,6 +265,7 @@ export default function Evals() {
       )}
 
       {removeError != null && <ErrorBox error={removeError} />}
+      {runError != null && <ErrorBox error={runError} />}
 
       {list.isLoading && !list.data && <p className="text-sm text-text-mute">Loading…</p>}
       {list.isError && <ErrorBox error={list.error} onRetry={() => void list.refetch()} />}
@@ -259,6 +319,17 @@ export default function Evals() {
                       {relativeTime(Date.parse(row.createdAt))}
                     </td>
                     <td className="td px-3 py-2.5 text-right">
+                      {mayRun(row) && (
+                        <button
+                          type="button"
+                          className="btn-ghost mr-1 py-1 px-2.5 text-xs"
+                          aria-label={`Run the eval: ${row.question}`}
+                          disabled={running !== null}
+                          onClick={() => void run(row)}
+                        >
+                          {running === row.id ? 'Running…' : 'Run'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn-ghost py-1 px-2.5 text-xs"
