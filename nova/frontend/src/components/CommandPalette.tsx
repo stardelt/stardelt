@@ -269,9 +269,9 @@ export default function CommandPalette({
     if (askReady && onAsk && q) {
       filtered.push({
         key: 'action:ask',
-        group: 'Ask',
-        label: `Ask: ${query.trim()}`,
-        hint: 'A question in, checked SQL out',
+        group: 'Agent',
+        label: `Agent: ${query.trim()}`,
+        hint: 'Ask the agent',
         icon: 'spark',
         to: '',
         run: () => onAsk(query.trim()),

@@ -416,13 +416,13 @@ export default function Shell() {
             <button
               type="button"
               className="btn-ghost py-1.5 text-sm"
-              aria-label="Ask about your data"
+              aria-label="Agent: ask about your data"
               aria-expanded={askOpen}
               aria-controls="ask-panel"
               onClick={() => setAskOpen(v => !v)}
             >
               <Icon name="spark" className="w-4 h-4" />
-              <span className="hidden sm:inline">Ask</span>
+              <span className="hidden sm:inline">Agent</span>
             </button>
           )}
           <AppSwitcher />

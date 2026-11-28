@@ -29,7 +29,7 @@ const READ_TABLES = {
 }
 
 const EMPTY =
-  'Ask a question about the tables you can see. stardelt writes SQL, checks it as you, and never runs it without you.'
+  'Ask the agent about the tables you can see. stardelt writes SQL, checks it as you, and never runs it without you.'
 
 const SQL = "SELECT count(*) AS rows\nFROM gold.shop.customer_ltv\nWHERE read_at >= current_date - INTERVAL '1' DAY"
 
@@ -102,7 +102,7 @@ type Options = {
   history?: (route: Route) => void
   /** What `POST …/verified-queries` answers; a stored row by default. */
   verified?: (route: Route) => void
-  /** Whether the shell is expected to show the Ask button (it is, unless no endpoint is ready). */
+  /** Whether the shell is expected to show the Agent button (it is, unless no endpoint is ready). */
   ready?: boolean
 }
 
@@ -136,7 +136,7 @@ async function stub(page: Page, options: Options = {}) {
   })
   await page.goto('/')
   if (options.ready !== false) {
-    await expect(page.getByRole('button', { name: 'Ask about your data' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Agent: ask about your data' })).toBeVisible()
   }
 }
 
@@ -149,18 +149,18 @@ async function view(page: Page, theme: 'dark' | 'light', width: number, height: 
   // The endpoint list arrives after the first paint; the shortcut's keydown listener is an
   // effect that can trail the button by a frame (the 12:08Z main run lost that race). Open the
   // panel the way a person does — the shortcut has its own test, `⌘J opens the panel …`.
-  await page.getByRole('button', { name: 'Ask about your data' }).click()
+  await page.getByRole('button', { name: 'Agent: ask about your data' }).click()
   await expect(page.locator('#ask-panel')).toBeVisible()
 }
 
 async function ask(page: Page, question: string) {
-  await page.getByRole('textbox', { name: 'Ask a question' }).fill(question)
+  await page.getByRole('textbox', { name: 'Ask the agent a question' }).fill(question)
   await page.keyboard.press('Enter')
 }
 
-test('no ready endpoint, no Ask button', async ({ page }) => {
+test('no ready endpoint, no Agent button', async ({ page }) => {
   await stub(page, { endpoints: [], ready: false })
-  await expect(page.getByRole('button', { name: 'Ask about your data' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Agent: ask about your data' })).toHaveCount(0)
   await expect(page.locator('#ask-panel')).toHaveCount(0)
 })
 
@@ -346,7 +346,7 @@ test('an answer is marked as verified on one of its sources', async ({ page }) =
 
   await page.getByRole('button', { name: 'Mark as verified' }).click()
   // `exact` because the dashboard underneath draws "Tables at risk" (a section label
-  // Playwright's substring match accepts) and the panel's own box is "Ask a question".
+  // Playwright's substring match accepts) and the panel's own box is "Ask the agent a question".
   await expect(page.getByLabel('Table', { exact: true })).toHaveValue('gold.shop.customer_ltv')
   await expect(page.getByLabel('Question', { exact: true })).toHaveValue(
     'How many customer rows did the shop read yesterday?',

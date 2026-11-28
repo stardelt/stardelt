@@ -21,13 +21,18 @@ import { formatDurationMs, formatTime, relativeTime } from '../format'
 const LIMITS = [50, 100, 200, 500] as const
 
 /**
- * The probe's verdict in one phrase: `Ready`, `Not ready` or `Not probed`. An endpoint that
- * answers but cannot call tools is not ready either — Ask and the agents need the tool call
- * (`backend/src/model_probe.rs`, "an answer without a tool call is not tool calling").
+ * The probe's verdict in one phrase: `Ready`, `Not ready` or `Not probed`. Readiness is judged
+ * per purpose: every endpoint must answer and return JSON, and only the `agents` purpose (the
+ * agent pods) needs a tool call (`backend/src/model_probe.rs`, "an answer without a tool call is
+ * not tool calling"). An ask-only endpoint that answers in JSON is ready without tools.
  */
 function probeWord(endpoint: ModelEndpoint): string {
   if (endpoint.reachable === false) return 'Not ready'
-  if (endpoint.reachable === true) return endpoint.toolCalling === true ? 'Ready' : 'Not ready'
+  if (endpoint.reachable === true) {
+    const needsTools = endpoint.purposes.includes('agents')
+    const ready = endpoint.jsonOutput === true && (!needsTools || endpoint.toolCalling === true)
+    return ready ? 'Ready' : 'Not ready'
+  }
   return 'Not probed'
 }
 
@@ -59,7 +64,7 @@ function checkedLabel(checkedAt: string | null | undefined): string | null {
 
 /** The feature the API records in the call row, in Nova's words rather than the column's. */
 function featureWord(feature: string): string {
-  const words: Record<string, string> = { ask: 'Ask', agent: 'Agent', probe: 'Probe' }
+  const words: Record<string, string> = { ask: 'Agent', agent: 'Agent pods', probe: 'Probe' }
   return words[feature] ?? feature
 }
 
@@ -201,7 +206,7 @@ export default function Models() {
                     <td className="px-5 py-6" colSpan={5}>
                       <p className="font-medium">No model call this month.</p>
                       <p className="text-text-mute mt-1 max-w-2xl">
-                        A call is counted when Ask or an agent uses an endpoint; the totals cover
+                        A call is counted when the Agent or an agent pod uses an endpoint; the totals cover
                         the calendar month (UTC).
                       </p>
                     </td>
