@@ -37,6 +37,12 @@ class GrantsTest(unittest.TestCase):
         )
 
 
+class WantedTest(unittest.TestCase):
+    def test_the_service_user_may_export_a_database(self):
+        # Nova's import route reads `GET /api/v1/database/export/`; 403 there is a 502 import (#2271).
+        self.assertEqual(nova.DATABASE, {("can_export", "Database")})
+
+
 class ConvergeTest(unittest.TestCase):
     def test_a_missing_datasource_grant_is_added_and_drift_is_removed(self):
         wanted = {("can_read", "Dashboard")}

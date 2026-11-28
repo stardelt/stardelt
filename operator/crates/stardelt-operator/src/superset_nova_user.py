@@ -7,9 +7,10 @@
 Nova calls Superset's export/import API as `stardelt-nova`, not as the human `admin`.
 The spike (stardelt#1210) measured that the role needs `Gamma`'s permission set plus
 `can_write`/`can_delete`/`can_export` on Dashboard (the import, the overwrite and the
-prune), and `datasource_access` on the datasets of every Trino database (any catalog,
-not only `shared`) — without that a service user sees no dashboard and the export
-answers 404. `DASHBOARD_RBAC` is off, so `dashboard.roles` grants nothing and the
+prune), `can_export` on Database (the import route exports the target's database row to
+read its uuid and name), and `datasource_access` on the datasets of every Trino database
+(any catalog, not only `shared`) — without that a service user sees no dashboard and the
+export answers 404. `DASHBOARD_RBAC` is off, so `dashboard.roles` grants nothing and the
 datasource grant is what lets the user export a dashboard it does not own.
 
 The password comes from `STARDELT_SUPERSET_NOVA_PASSWORD`, which the chart reads from
@@ -24,6 +25,11 @@ environment:
 """
 
 DASHBOARD = {("can_write", "Dashboard"), ("can_delete", "Dashboard"), ("can_export", "Dashboard")}
+
+# Nova reads a dataset's target database by exporting it (`GET /api/v1/database/export/`,
+# `export_database` in nova/backend/src/superset.rs); without this the route answers 403 and
+# every bundle import answers 502 (#2271).
+DATABASE = {("can_export", "Database")}
 
 USER = "stardelt-nova"
 ROLE = "stardelt-nova"
@@ -64,7 +70,7 @@ def main():
         trino = [d for d in db.session.query(Database).order_by(Database.id) if is_trino(d.sqlalchemy_uri)]
         tables = db.session.query(SqlaTable).filter(SqlaTable.database_id.in_([d.id for d in trino])).all()
         names = lambda r: {(p.permission.name, p.view_menu.name) for p in r.permissions}
-        wanted = names(sm.find_role("Gamma")) | DASHBOARD
+        wanted = names(sm.find_role("Gamma")) | DASHBOARD | DATABASE
         role = sm.find_role(ROLE) or sm.add_role(ROLE)
         add, remove = converge(names(role), wanted, grants([t.perm for t in tables]))
         for n, v in add:
