@@ -1261,6 +1261,118 @@ def import_dashboards(nova, directory, target, overwrite=False):
     return problems, rows
 
 
+def apply_dashboards(nova, directory, target, stamp, prune=False, dry_run=False):
+    """Import the bundle's ``dashboards:`` folders and prune the ones it dropped; ``(problems, rows)``.
+
+    A bundle without a ``dashboards:`` block is unchanged (``([], [])``). ``dry_run`` writes
+    nothing and answers ``would-import-dashboards`` per folder and, with ``prune``, one
+    ``would-delete-dashboards`` per dashboard of this bundle, group and target that no folder
+    names any more. A real run imports every folder (``imported-dashboards``) and, after them, with
+    ``prune`` deletes those stale dashboards (``deleted-dashboards``). A dashboard that belongs to
+    another target is never deleted.
+    """
+    root = Path(directory)
+    try:
+        manifest = yaml.safe_load((root / "bundle.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        return [(str(root / "bundle.yaml"), f"cannot read it: {err}")], []
+    if not isinstance(manifest, dict) or "dashboards" not in manifest:
+        return [], []
+    head = manifest.get("bundle") if isinstance(manifest.get("bundle"), dict) else {}
+    group = head.get("ownerGroup")
+    if not (isinstance(group, str) and group):
+        return [("bundle", "bundle.ownerGroup is required")], []
+    problems = []
+    folders = _dashboard_folders(root, manifest["dashboards"], problems)
+    if problems:
+        return problems, []
+    bundle_name = stamp["bundle"]
+    titles, counts = set(), {}
+    for folder in folders:
+        files = sorted((root / folder / "dashboards").glob("*.yaml"))
+        counts[folder] = len(files)
+        for path in files:
+            try:
+                document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError):
+                document = None
+            title = document.get("dashboard_title") if isinstance(document, dict) else None
+            titles.add(title if isinstance(title, str) and title else path.stem)
+
+    def stale():
+        """The dashboards of this bundle, group and target no folder names; ``(problems, rows)``."""
+        try:
+            listed = nova.call(
+                "dashboards_list", query={"bundle": bundle_name, "ownerGroup": group}
+            ) or []
+        except api.StardeltApiError as err:
+            return [("dashboards", str(err))], []
+        rows = []
+        for row in listed:
+            if row.get("target") != target or row.get("title") in titles:
+                continue
+            rows.append(row)
+        return [], rows
+
+    if dry_run:
+        rows = []
+        if prune:
+            problems, dropped = stale()
+            if problems:
+                return problems, []
+            rows += [
+                {"action": "would-delete-dashboards", "name": row["title"], "id": row["id"], "kind": "Dashboard"}
+                for row in dropped
+            ]
+        rows += [
+            {
+                "action": "would-import-dashboards",
+                "name": folder,
+                "dashboards": counts[folder],
+                "kind": "Dashboard",
+            }
+            for folder in folders
+        ]
+        return [], rows
+    from stardelt import dashboards as dashboard_files
+
+    rows = []
+    for folder in folders:
+        try:
+            answer = dashboard_files.import_folder(
+                nova,
+                root / folder,
+                bundle=bundle_name,
+                owner_group=group,
+                target=target,
+                commit=stamp.get("revision") or "",
+                overwrite=True,
+            )
+        except (dashboard_files.UploadError, api.StardeltApiError) as err:
+            return [(folder, str(err))], rows
+        rows.append({
+            "action": "imported-dashboards",
+            "name": folder,
+            "dashboards": counts[folder],
+            "databases": answer.get("databases") or [],
+            "kind": "Dashboard",
+        })
+    if prune:
+        problems, dropped = stale()
+        for row in dropped:
+            try:
+                nova.call(
+                    "dashboards_delete",
+                    path={"id": row["id"]},
+                    query={"bundle": bundle_name, "ownerGroup": group},
+                )
+            except api.StardeltApiError as err:
+                problems.append((row["title"], str(err)))
+                continue
+            rows.append({"action": "deleted-dashboards", "name": row["title"], "id": row["id"], "kind": "Dashboard"})
+    return problems, rows
+
+
 def _slug(user):
     """A person's sign-in name as part of a pipeline name: lower-case letters, digits and single dashes.
 
@@ -2008,6 +2120,9 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         ]
     results += [{"action": "would-delete", "name": name, "kind": "Pipeline"} for _, name in stale]
     results += [{"action": "would-delete", "name": name, "kind": "StreamApp"} for _, name in stale_streams]
+    plan_dashboards, dashboard_plan = apply_dashboards(nova, directory, target, stamp, prune=prune, dry_run=True)
+    refused += plan_dashboards
+    results += dashboard_plan
     if refused or dry_run:
         return refused, results
     done = list(migration_rows)
@@ -2153,6 +2268,16 @@ def deploy(nova, directory, target, dry_run=False, prune=False, accept_drift=Fal
         except api.StardeltApiError as err:
             return [(target, f"{name}: {err}")], done
         done.append({"action": "deleted", "name": name, "kind": "StreamApp"})
+    dashboard_problems, dashboard_rows = apply_dashboards(nova, directory, target, stamp, prune=prune, dry_run=False)
+    if dashboard_problems:
+        try:
+            touched = _touched(nova, specs, done, stale)
+        except (api.StardeltApiError, KeyError) as listing_err:
+            done.append({"action": "not-recorded", "reason": str(listing_err)})
+        else:
+            done.append(_record(nova, stamp, directory, target, "failed", touched, plan_id=None))
+        return dashboard_problems, done
+    done.extend(dashboard_rows)
     touched = _touched(nova, specs, done, stale)
     if smoke:
         smoke_problems, smoke_rows = run(
