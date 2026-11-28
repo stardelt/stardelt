@@ -980,6 +980,9 @@ fn api_router() -> Router<Arc<AppState>> {
         // One dashboard archive for a bundle's target (#115 a/3b2): the caller must be in
         // the bundle's owner group; the deploy-principal rule is the deployments' rule.
         .route("/dashboards/import", post(superset::import_dashboard))
+        // The read the prune needs (#115 slice b): which dashboards this bundle imported, for
+        // which target and at which commit. Owner-group members; a deploy principal sees its group.
+        .route("/dashboards", get(superset::list_dashboards))
         // A bundle author's export (#115 a/3c): owner-group members and deploy principals
         // confined to their own group; `databases/` is dropped server-side.
         .route(
