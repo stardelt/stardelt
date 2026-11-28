@@ -73,6 +73,17 @@ def test_four_pipelines_three_sql_layers_and_the_graph():
         assert len(doc["name"]) <= MAX_NAME, f"{doc['name']} is {len(doc['name'])} characters"
 
 
+def test_the_bundle_carries_ten_eval_questions_on_gold():
+    evals = manifest().get("evals")
+    assert evals, "bundle.yaml has no `evals:` block"
+    assert evals["catalog"] == "gold"
+    questions = evals["questions"]
+    assert len(questions) == 10
+    assert all(q["question"].strip() and set(q["expected"]) >= {"kind"} for q in questions)
+    kinds = {q["expected"]["kind"] for q in questions}
+    assert kinds == {"value", "uses"}
+
+
 def test_every_pipeline_is_readable_by_visitors():
     for path, doc in pipelines():
         assert doc.get("viewers") == ["visitors"], f"{path.name} must name viewers: [visitors]"

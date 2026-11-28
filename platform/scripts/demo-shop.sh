@@ -103,8 +103,12 @@ if [ "$YES" = 1 ]; then
   "$CLI" --host "$NOVA" bundle deploy "$BUNDLE" -t prod \
     || fail "stardelt bundle deploy $BUNDLE -t prod failed"
   echo "› shop bundle: deployed (shop-1-bronze 02:00, shop-2-silver 02:30, shop-3-gold 03:00 Europe/Berlin)"
+  evals="$("$CLI" --host "$NOVA" bundle evals "$BUNDLE" 2>&1)" \
+    || fail "stardelt bundle evals $BUNDLE failed: $(printf '%s' "$evals" | tail -1)"
+  echo "› shop evals: 10 questions on gold.shop (created: $(printf '%s\n' "$evals" | grep -c ' created$'))"
 else
   echo "would: stardelt bundle deploy $BUNDLE -t prod --host $NOVA"
+  echo "would: stardelt bundle evals $BUNDLE --check"
   mapfile -t planned < <(printf '%s\n' "$plan" | jq -Rr 'fromjson? | select(.name != null) | .name')
   [ "${#planned[@]}" -gt 0 ] || fail "cannot read the plan of $BUNDLE: $(printf '%s' "$plan" | tail -1)"
   printf '%s\n' "$plan" | jq -Rr 'fromjson? | select(.name != null) | "› plan: \(.name) \(.action)"'

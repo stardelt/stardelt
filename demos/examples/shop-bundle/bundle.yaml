@@ -8,6 +8,29 @@ variables:
   scale:
     default: 200000
     description: how many order lines to generate; a multiple of 1000
+evals:
+  catalog: gold
+  questions:
+    - question: How many rows does the daily revenue table have?
+      expected: {kind: value, value: 365}
+    - question: How many order lines were placed on 2025-01-01?
+      expected: {kind: value, value: 552}
+    - question: What is the highest number of order lines placed on one day?
+      expected: {kind: value, value: 614}
+    - question: How many units were sold in total?
+      expected: {kind: value, value: 600224}
+    - question: How many different customers placed at least one order?
+      expected: {kind: value, value: 200}
+    - question: How many customers are in the enterprise segment?
+      expected: {kind: value, value: 67}
+    - question: Which customer has the highest lifetime value?
+      expected: {kind: value, value: Customer 053}
+    - question: How many order lines did the customer with the highest lifetime value place?
+      expected: {kind: value, value: 1075}
+    - question: Which table has one row per day with the day's order lines, units and revenue?
+      expected: {kind: uses, tables: [shop.daily_revenue]}
+    - question: Which table ranks customers by lifetime value?
+      expected: {kind: uses, tables: [shop.customer_ltv]}
 include: [resources/*.yaml]
 files: [sql/*.sql]
 requires:
