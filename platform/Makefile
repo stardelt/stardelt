@@ -1960,6 +1960,16 @@ check-pins: ## Fail when the registry's `dev`/`demo` digest moved ahead of a che
 	@OPERATOR_DIR=$(OPERATOR_DIR) bash scripts/check-operator-pins.sh
 	@OPERATOR_DIR=$(OPERATOR_DIR) python3 scripts/check_golden_image.py
 
+.PHONY: check-chart-upstream
+check-chart-upstream: ## Every pinned chart version is still published upstream (needs network)
+	@python3 scripts/check_chart_upstream.py
+
+# The release row. `scripts/tests/test_verify_release.py` reads the Makefile target of the same
+# name as the table entry, so the row and `make check-chart-upstream` are two names for one check.
+.PHONY: verify-chart-upstream
+verify-chart-upstream: ## The release row of check-chart-upstream (needs network)
+	@python3 scripts/check_chart_upstream.py
+
 check-hub-config: ## Fail when the notebook config disagrees with itself: the two values files, the culler, Nova's countdown
 	@python3 scripts/check-hub-config.py
 
