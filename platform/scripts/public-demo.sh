@@ -1067,6 +1067,31 @@ fi
 
 start_keycloak
 
+# 0c. The realm's user profile must keep the marker below (the same block as seed-dev-access.sh).
+# Keycloak 24+ keeps only the attributes its user profile declares, and on a fresh
+# realm an undeclared one is dropped silently (unmanagedAttributePolicy unset) —
+# the public-demo marker would never stick. ADMIN_EDIT is the narrowest policy that lets
+# this script (admin API) write it: people still see and edit no extra attribute.
+# The realm has no field for it, only the user profile; round-trip that document
+# rather than send a partial one (a partial PUT would drop the attribute rules).
+kc "$API/users/profile" >"$tmp/user-profile.json" \
+  || fail "cannot read the realm's user profile"
+profile_policy="$(jq -r '.unmanagedAttributePolicy // ""' "$tmp/user-profile.json")"
+if [ "$profile_policy" = ENABLED ] || [ "$profile_policy" = ADMIN_EDIT ]; then
+  echo "› realm user profile: unmanaged attributes $profile_policy"
+else
+  python3 - "$tmp/user-profile.json" >"$tmp/user-profile-updated.json" <<'PY'
+import json, sys
+profile = json.load(open(sys.argv[1]))
+profile["unmanagedAttributePolicy"] = "ADMIN_EDIT"
+json.dump(profile, sys.stdout)
+PY
+  kc -H 'Content-Type: application/json' -X PUT --data @"$tmp/user-profile-updated.json" \
+    "$API/users/profile" >/dev/null \
+    || fail "Keycloak refused unmanagedAttributePolicy=ADMIN_EDIT on the realm's user profile"
+  echo "› realm user profile: unmanaged attributes ADMIN_EDIT (the public-demo marker needs it)"
+fi
+
 # 1. The group.
 read_groups
 if [ -n "$(group_id "$GROUP")" ]; then
