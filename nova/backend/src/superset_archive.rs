@@ -257,6 +257,26 @@ pub fn dataset_catalogs(archive: &[u8]) -> Result<BTreeSet<String>, ArchiveError
     Ok(catalogs)
 }
 
+/// The `dashboard_title` of every dashboard file in the archive, non-empty and sorted.
+pub fn dashboard_titles(archive: &[u8]) -> Result<Vec<String>, ArchiveError> {
+    let members = members(archive)?;
+    let top = top(&members);
+    let mut titles = BTreeSet::new();
+    for (name, bytes) in &members {
+        let relative = strip_top(name, &top);
+        if !relative.starts_with("dashboards/") || !relative.ends_with(".yaml") {
+            continue;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        if let Some(title) = value(&text, "dashboard_title")
+            && !title.is_empty()
+        {
+            titles.insert(title);
+        }
+    }
+    Ok(titles.into_iter().collect())
+}
+
 /// The single `databases/` member of a database export, as `(stem, bytes)`.
 pub fn database_member(export: &[u8]) -> Result<(String, Vec<u8>), ArchiveError> {
     for (name, bytes) in members(export)? {
