@@ -459,6 +459,8 @@ struct Health {
     /// Always `ok`.
     status: &'static str,
     db: db::DbStatus,
+    /// Whether this instance has a Superset service user, so a bundle can import dashboards.
+    superset: bool,
 }
 
 /// Always `200`: the kubelet's readiness probe must not take Trino queries offline because
@@ -477,6 +479,7 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Health> {
     Json(Health {
         status: "ok",
         db: db::status(s.db.as_ref()).await,
+        superset: s.superset.is_some(),
     })
 }
 
@@ -1913,7 +1916,10 @@ mod router_tests {
             .await
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value, serde_json::json!({"status": "ok", "db": "disabled"}));
+        assert_eq!(
+            value,
+            serde_json::json!({"status": "ok", "db": "disabled", "superset": false})
+        );
     }
 
     /// One request through `app`; the answer's status and JSON body (`null` when empty).

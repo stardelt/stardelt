@@ -1286,6 +1286,17 @@ def apply_dashboards(nova, directory, target, stamp, prune=False, dry_run=False)
     folders = _dashboard_folders(root, manifest["dashboards"], problems)
     if problems:
         return problems, []
+    try:
+        capability = nova.call("health") or {}
+    except api.StardeltApiError:
+        capability = {}
+    if capability.get("superset") is False:
+        return [
+            (
+                "dashboards",
+                "this instance has no Superset starter; promote dashboards with your BI tool",
+            )
+        ], []
     bundle_name = stamp["bundle"]
     titles, counts = set(), {}
     for folder in folders:

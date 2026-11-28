@@ -3874,6 +3874,8 @@ export interface components {
             db: components["schemas"]["DbStatus"];
             /** @description Always `ok`. */
             status: string;
+            /** @description Whether this instance has a Superset service user, so a bundle can import dashboards. */
+            superset: boolean;
         };
         /** @description One earlier run of the same statement (nova#788 S4). */
         HistoryRun: {
