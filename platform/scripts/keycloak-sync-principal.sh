@@ -612,39 +612,11 @@ try: print(json.load(sys.stdin).get("access_token") or "")
 except Exception: print("")' 2>/dev/null || true)"
 [ -n "$cc_token" ] || fail "the token endpoint refused the $CLIENT_ID client credentials — the secret did not stick"
 printf '%s' "$cc_token" > "$tmp/cc-token"
-python3 - "$tmp/cc-token" "$CLIENT_ID" "$KIND" "$GROUP" "${aud_list[@]}" <<'PY' \
+audiences="$(IFS=,; printf '%s' "${aud_list[*]}")"
+python3 "$SCRIPT_DIR/lib/token-claims.py" \
+  --token-file "$tmp/cc-token" --client "$CLIENT_ID" --kind "$KIND" \
+  --group "$GROUP" --audiences "$audiences" \
   || fail "the $CLIENT_ID token does not carry what the client needs"
-import base64, json, sys
-payload = open(sys.argv[1]).read().split(".")[1]
-claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-client, kind, group, wanted = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
-audiences = claims.get("aud") if isinstance(claims.get("aud"), list) else [claims.get("aud")]
-groups = claims.get("groups") or []
-problems = []
-if claims.get("azp") != client:
-    problems.append("azp is %r" % claims.get("azp"))
-for audience in wanted:
-    if audience not in audiences:
-        problems.append("audience lacks %s (aud=%s)" % (audience, audiences))
-if kind == "service":
-    if groups:
-        problems.append("groups is %r (a service client has no group)" % groups)
-else:
-    if sorted(groups) != [group]:
-        problems.append("groups is %r (expected [%s])" % (groups, group))
-if claims.get("preferred_username") != "service-account-" + client:
-    problems.append("preferred_username is %r" % claims.get("preferred_username"))
-lifetime = claims.get("exp", 0) - claims.get("iat", 0)
-if kind == "principal" and lifetime < 28800:
-    problems.append("token lifespan is %s s, a principal needs 28800" % lifetime)
-if problems:
-    sys.exit("; ".join(problems))
-if kind == "service":
-    print("› token claims: azp=%s aud=%s" % (claims["azp"], audiences))
-else:
-    print("› token claims: azp=%s aud=%s groups=%s preferred_username=%s exp-iat=%s" % (
-        claims["azp"], audiences, groups, claims["preferred_username"], lifetime))
-PY
 if [ "$KIND" = service ]; then
   echo "keycloak-sync-principal: OK — $CLIENT_ID is a confidential service client with audiences [${aud_list[*]}], no group membership and no admin role"
 else
