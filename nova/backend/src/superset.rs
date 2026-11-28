@@ -668,20 +668,124 @@ pub async fn export_dashboard(State(state): State<Arc<AppState>>, Path(id): Path
         .export(id)
         .await
     {
-        Ok(bytes) => {
-            let mut response = bytes.into_response();
-            let headers = response.headers_mut();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/zip"),
-            );
-            if let Ok(disposition) =
-                HeaderValue::from_str(&format!("attachment; filename=\"dashboard-{id}.zip\""))
-            {
-                headers.insert(header::CONTENT_DISPOSITION, disposition);
-            }
-            response
+        Ok(bytes) => zip_response(bytes, id),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// A ZIP answer with Superset's content type and a download name; both export routes use it,
+/// so the administrator route's answer is unchanged by #115 a/3c.
+fn zip_response(bytes: Vec<u8>, id: i64) -> Response {
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("attachment; filename=\"dashboard-{id}.zip\""))
+    {
+        headers.insert(header::CONTENT_DISPOSITION, disposition);
+    }
+    response
+}
+
+/// `GET /api/dashboards/{id}/export`: the ZIP of one dashboard for a bundle author. A member
+/// of the bundle's owner group may call it (the maintainer's decision on #115 a/3c); a deploy
+/// principal is confined to its own group by `deploy_refusal`. `databases/` is dropped
+/// server-side, so the target's connection URI never leaves Nova.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardExportQuery {
+    /// The bundle that owns the dashboard, 1 to 64 characters.
+    pub bundle: String,
+    /// The bundle's owner group; the caller must be a member.
+    pub owner_group: String,
+}
+
+/// Why this caller may not export a bundle's dashboard, or `None` when it may. A deploy
+/// principal is confined to the stage its client names, which here is its own stage, so the
+/// `deploy_refusal` call is the import route's rule with the export verb.
+pub(crate) fn export_refusal(
+    identity: &crate::auth::Identity,
+    owner_group: &str,
+    client_id: Option<&str>,
+) -> Option<String> {
+    let target = crate::auth::deploy_stage(client_id).unwrap_or("");
+    crate::deployments::deploy_refusal(identity, owner_group, target, client_id, "export")
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboards/{id}/export",
+    tag = "public",
+    operation_id = "dashboards_export",
+    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export for its own stage. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI.",
+    params(
+        ("id" = i64, Path, description = "Superset's numeric dashboard id"),
+        ("bundle" = String, Query, description = "The bundle that owns the dashboard"),
+        ("ownerGroup" = String, Query, description = "The bundle's owner group; the caller must be a member"),
+    ),
+    responses(
+        (status = 200, description = "The ZIP archive Superset exports for one dashboard, without `databases/`", body = String, content_type = "application/zip"),
+        (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "Superset has no such dashboard", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn export_dashboard_for_bundle(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Extension<crate::auth::Principal>>,
+    Path(id): Path<i64>,
+    Query(query): Query<DashboardExportQuery>,
+) -> Response {
+    if query.bundle.trim().is_empty() || query.owner_group.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "bundle and ownerGroup are required" })),
+        )
+            .into_response();
+    }
+    let Some(caller) = caller.as_ref().map(|c| &c.0) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "sign in to export a dashboard" })),
+        )
+            .into_response();
+    };
+    let identity = match crate::deployments::deploy_identity(&state, caller).await {
+        Ok(identity) => identity,
+        Err(sentence) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": sentence }))).into_response();
         }
+    };
+    if let Some(sentence) =
+        export_refusal(&identity, &query.owner_group, caller.client_id.as_deref())
+    {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    let Some(user) = state.superset.as_ref() else {
+        return SupersetError::NoServiceUser.into_response();
+    };
+    let user = ServiceUser {
+        username: user.username.clone(),
+        password: Secret::new(user.password.expose().to_string()),
+    };
+    match SupersetClient::new(&state.superset_api_url, user)
+        .export(id)
+        .await
+    {
+        Ok(bytes) => match superset_archive::without_databases(&bytes) {
+            Ok(stripped) => zip_response(stripped, id),
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+        },
         Err(error) => error.into_response(),
     }
 }
@@ -1108,6 +1212,47 @@ mod tests {
 
     use super::fake::{self, ARCHIVE, PASSWORD, TOKEN};
     use super::*;
+
+    fn person(groups: &[&str], is_admin: bool) -> crate::auth::Identity {
+        crate::auth::Identity {
+            sub: "u".to_string(),
+            display_name: "u".to_string(),
+            email: None,
+            name: None,
+            groups: groups.iter().map(|g| (*g).to_string()).collect(),
+            roles: Vec::new(),
+            groups_overage: false,
+            is_admin,
+        }
+    }
+
+    #[test]
+    fn an_export_is_refused_outside_the_bundle_owner_group() {
+        assert_eq!(
+            export_refusal(&person(&["analytics"], false), "analytics", None),
+            None
+        );
+        let refused = export_refusal(&person(&["visitors"], false), "analytics", None)
+            .expect("a non-member is refused");
+        assert!(refused.contains("only a member"), "{refused}");
+        assert_eq!(export_refusal(&person(&[], true), "analytics", None), None);
+        assert_eq!(
+            export_refusal(
+                &person(&["analytics"], false),
+                "analytics",
+                Some("stardelt-deploy-prod")
+            ),
+            None,
+            "a deploy principal of the group may export"
+        );
+        let refused = export_refusal(
+            &person(&[], false),
+            "analytics",
+            Some("stardelt-deploy-prod"),
+        )
+        .expect("a group-less deploy principal is refused");
+        assert!(refused.contains("its own group"), "{refused}");
+    }
 
     /// The members of a ZIP as `(name, text)`, in archive order.
     fn unzip(archive: &[u8]) -> Vec<(String, String)> {

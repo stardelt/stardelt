@@ -49,6 +49,7 @@ GET	/api/catalog/warehouse	catalog	main	signed-in
 GET	/api/compute	compute	main	signed-in
 GET	/api/connections	connection_routes	main	signed-in
 GET	/api/connections/break-glass-log	connection_routes	main	signed-in
+GET	/api/dashboards/{id}/export	superset	main	signed-in
 GET	/api/deployments	deployments	deployments	signed-in
 GET	/api/deployments/{id}	deployments	deployments	signed-in
 GET	/api/destinations	destinations	main	signed-in

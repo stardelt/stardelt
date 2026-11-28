@@ -16,6 +16,8 @@ import shutil
 import urllib.parse
 import zipfile
 
+import yaml
+
 NAME = "databases"
 
 CHUNK = 64 * 1024
@@ -39,7 +41,30 @@ def _target(out, name):
     return out / name
 
 
-def export(nova, dashboard_id, out):
+def bundle_identity(directory="."):
+    """``(name, owner_group)`` from ``bundle.yaml`` in ``directory``; ``ExportError`` otherwise.
+
+    ``stardelt dashboards export`` runs inside the bundle it writes into, so the route's guard
+    reads the same name and group the deploy will use.
+    """
+    manifest = pathlib.Path(directory) / "bundle.yaml"
+    if not manifest.is_file():
+        raise ExportError("run this inside a bundle: no bundle.yaml here")
+    try:
+        document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError) as err:
+        raise ExportError("bundle.yaml cannot be read: %s" % str(err).splitlines()[0]) from None
+    head = document.get("bundle") if isinstance(document, dict) else None
+    name = head.get("name") if isinstance(head, dict) else None
+    owner = head.get("ownerGroup") if isinstance(head, dict) else None
+    if not isinstance(name, str) or not name:
+        raise ExportError("bundle.yaml names no bundle.name")
+    if not isinstance(owner, str) or not owner:
+        raise ExportError("bundle.yaml names no bundle.ownerGroup")
+    return name, owner
+
+
+def export(nova, dashboard_id, out, bundle, owner_group):
     """Write the Superset dashboard ``dashboard_id`` as the files of a bundle under ``out``.
 
     Returns ``(out, written)``: the folder and the sorted relative paths written. The
@@ -48,7 +73,8 @@ def export(nova, dashboard_id, out):
     number = int(dashboard_id)
     if number < 1:
         raise ValueError("the dashboard id must be a positive integer")
-    archive = nova.download(f"/api/admin/dashboards/{number}/export")
+    query = urllib.parse.urlencode({"bundle": bundle, "ownerGroup": owner_group})
+    archive = nova.download("/api/dashboards/%d/export?%s" % (number, query))
     try:
         bundle = zipfile.ZipFile(io.BytesIO(archive))
     except zipfile.BadZipFile:

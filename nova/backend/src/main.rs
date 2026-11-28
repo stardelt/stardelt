@@ -980,6 +980,12 @@ fn api_router() -> Router<Arc<AppState>> {
         // One dashboard archive for a bundle's target (#115 a/3b2): the caller must be in
         // the bundle's owner group; the deploy-principal rule is the deployments' rule.
         .route("/dashboards/import", post(superset::import_dashboard))
+        // A bundle author's export (#115 a/3c): owner-group members and deploy principals
+        // confined to their own group; `databases/` is dropped server-side.
+        .route(
+            "/dashboards/{id}/export",
+            get(superset::export_dashboard_for_bundle),
+        )
         // The caller's own JupyterHub workspace (stardelt-nova#653): read, start, stop. The
         // hub user is the caller's own sign-in name; there is no path parameter, so nobody
         // reaches somebody else's server, and Nova has no `access:servers` scope.

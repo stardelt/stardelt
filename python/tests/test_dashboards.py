@@ -49,7 +49,7 @@ def test_the_export_writes_every_folder_but_databases(tmp_path):
         )
     )
 
-    target, written = dashboards.export(nova, 42, out)
+    target, written = dashboards.export(nova, 42, out, "shop", "analytics")
 
     assert target == out
     assert written == ["charts/sales.yaml", "dashboards/shop.yaml", "datasets/orders.yaml", "metadata.yaml"]
@@ -63,7 +63,7 @@ def test_an_unsafe_path_writes_nothing(tmp_path):
     nova = FakeNova(archive(["metadata.yaml", "dashboards/../../evil.yaml"]))
 
     with pytest.raises(dashboards.ExportError, match="unsafe path"):
-        dashboards.export(nova, 42, out)
+        dashboards.export(nova, 42, out, "shop", "analytics")
 
     assert not out.exists() or not any(out.rglob("*"))
     assert not (tmp_path / "evil.yaml").exists()
@@ -71,14 +71,14 @@ def test_an_unsafe_path_writes_nothing(tmp_path):
 
 def test_an_archive_that_is_not_a_zip_is_a_sentence(tmp_path):
     with pytest.raises(dashboards.ExportError) as raised:
-        dashboards.export(FakeNova(b"not a zip"), 42, tmp_path / "shop")
+        dashboards.export(FakeNova(b"not a zip"), 42, tmp_path / "shop", "shop", "analytics")
 
     assert str(raised.value) == "Nova did not answer a Superset export (not a ZIP archive)"
 
 
 def test_an_empty_or_foreign_archive_is_refused(tmp_path):
     with pytest.raises(dashboards.ExportError) as raised:
-        dashboards.export(FakeNova(archive(["databases/warehouse.yaml"])), 42, tmp_path / "shop")
+        dashboards.export(FakeNova(archive(["databases/warehouse.yaml"])), 42, tmp_path / "shop", "shop", "analytics")
 
     assert str(raised.value) == "the archive has no dashboards/ folder; is 42 a dashboard?"
 
@@ -86,9 +86,20 @@ def test_an_empty_or_foreign_archive_is_refused(tmp_path):
 def test_the_download_path_names_the_nova_operation(tmp_path):
     nova = FakeNova(archive(["dashboards/shop.yaml"]))
 
-    dashboards.export(nova, 42, tmp_path / "shop")
+    dashboards.export(nova, 42, tmp_path / "shop", "shop", "analytics")
 
-    assert nova.paths == ["/api/admin/dashboards/42/export"]
+    assert nova.paths == ["/api/dashboards/42/export?bundle=shop&ownerGroup=analytics"]
+
+
+def test_a_bundle_identity_is_read_from_bundle_yaml(tmp_path):
+    (tmp_path / "bundle.yaml").write_text("bundle:\n  name: shop\n  ownerGroup: analytics\n")
+
+    assert dashboards.bundle_identity(tmp_path) == ("shop", "analytics")
+
+
+def test_exporting_outside_a_bundle_is_a_sentence(tmp_path):
+    with pytest.raises(dashboards.ExportError, match="no bundle.yaml here"):
+        dashboards.bundle_identity(tmp_path)
 
 
 def test_import_zips_the_folder_and_posts_the_query(tmp_path):

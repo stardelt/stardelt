@@ -121,9 +121,11 @@ and their parameters; a schedule pins one version, not the file on disk.
 
 ## Dashboards
 
-`stardelt dashboards export <superset-id> -o DIR` writes a dashboard as the files of a bundle
-(`databases/` is not stored: each stage keeps its own). There is no MCP tool for dashboards;
-run the command and read the files. Importing a dashboard into a stage is a write.
+`stardelt dashboards export <superset-id> -o DIR` runs inside a bundle and writes a dashboard
+as the files of that bundle (`databases/` is not stored: each stage keeps its own; Nova drops
+it server-side too). A member of the bundle's owner group may run it — not only an
+administrator — and a deploy principal only for its own stage. There is no MCP tool for
+dashboards; run the command and read the files. Importing a dashboard into a stage is a write.
 
 ## Maintenance
 
