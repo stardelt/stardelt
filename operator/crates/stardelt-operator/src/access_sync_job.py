@@ -1277,6 +1277,28 @@ def ensure_warehouse(name, spec, s3):
     return warehouse_id, "created"
 
 
+def same_endpoint(left, right):
+    """Whether two S3 endpoints name the same service.
+
+    A warehouse's endpoint was compared as an exact string, so one that differed only in
+    scheme or host case, or in a trailing slash, was left on the old key while the run
+    reported no failure (#2213). The path stays significant: a gateway may serve a prefix.
+    """
+
+    def normalized(value):
+        parsed = urllib.parse.urlsplit((value or "").strip())
+        if not parsed.scheme and not parsed.netloc:
+            return ((value or "").strip().rstrip("/"), "", None, "")
+        return (
+            parsed.scheme.lower(),
+            (parsed.hostname or "").lower(),
+            parsed.port,
+            parsed.path.rstrip("/"),
+        )
+
+    return normalized(left) == normalized(right)
+
+
 def refresh_storage_credentials():
     """Re-write every platform warehouse's storage credential from Secret stardelt-s3-creds.
 
@@ -1297,6 +1319,7 @@ def refresh_storage_credentials():
     if status != 200 or listing is None:
         fail("cannot list Lakekeeper warehouses (HTTP %s)" % status)
     refreshed, failures = 0, 0
+    skipped = 0
     for entry in listing.get("warehouses") or []:
         name = entry.get("name")
         warehouse_id = entry.get("warehouse-id") or entry.get("id")
@@ -1314,8 +1337,13 @@ def refresh_storage_credentials():
         if profile.get("bucket") != s3["bucket"]:
             print("rotate: warehouse %s uses another bucket — left alone" % name)
             continue
-        if (profile.get("endpoint") or "").rstrip("/") != endpoint:
-            print("rotate: warehouse %s uses another endpoint — left alone" % name)
+        if not same_endpoint(profile.get("endpoint"), endpoint):
+            print(
+                "rotate: warehouse %s uses the platform bucket on another endpoint (%s) — left alone"
+                % (name, profile.get("endpoint") or "none"),
+                file=sys.stderr,
+            )
+            skipped += 1
             continue
         status, _ = lk(
             "POST",
@@ -1332,7 +1360,10 @@ def refresh_storage_credentials():
             continue
         print("rotate: warehouse %s refreshed (%s)" % (name, warehouse_id))
         refreshed += 1
-    print("rotate: %d warehouse(s) refreshed, %d failure(s)" % (refreshed, failures))
+    print(
+        "rotate: %d warehouse(s) refreshed, %d failure(s), %d on another endpoint"
+        % (refreshed, failures, skipped)
+    )
     return 1 if failures else 0
 
 
