@@ -750,8 +750,11 @@ struct AgentCall<'a> {
     sub: &'a str,
     group: Option<&'a str>,
     messages: &'a Value,
-    /// The OpenAI `tools` array: the endpoints' read-only menu.
+    /// The OpenAI `tools` array: the endpoints' menu.
     offered: &'a Value,
+    /// A development stage offers the non-destructive write tools and the write scope; a
+    /// production stage offers the read-only tools and the read scope only (#2414).
+    writes: bool,
     /// What the rows store as the call's prompt.
     prompt: &'a str,
 }
@@ -806,10 +809,19 @@ impl AgentCall<'_> {
                 .expect("the handler checked Nova's MCP endpoint"),
         );
         let principal = tool_principal(self.principal, &state);
+        let scopes: Vec<String> = if self.writes {
+            vec![
+                crate::mcp::READ_SCOPE.to_string(),
+                crate::mcp::WRITE_SCOPE.to_string(),
+            ]
+        } else {
+            vec![crate::mcp::READ_SCOPE.to_string()]
+        };
         let tool_call = move |name: String, arguments: Value| {
             let state = Arc::clone(&state);
             let cfg = std::sync::Arc::clone(&cfg);
             let principal = principal.clone();
+            let scopes = scopes.clone();
             async move {
                 let request = json!({
                     "jsonrpc": "2.0",
@@ -818,8 +830,8 @@ impl AgentCall<'_> {
                     "params": { "name": name, "arguments": arguments },
                 });
                 let facts = crate::auth::BearerFacts {
-                    scopes: vec![crate::mcp::READ_SCOPE.to_string()],
-                    client_id: None,
+                    scopes,
+                    client_id: Some("nova-agent".to_string()),
                 };
                 let response = crate::mcp::call_tool(
                     &state,
@@ -899,7 +911,10 @@ async fn agent_ask(plan: AgentAsk<'_>) -> Response {
     let Some(client) = crate::model_probe::http_client() else {
         return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
     };
-    let offered = crate::ask_agent::openai_tools(plan.mcp_tools);
+    // D2 of #2414: a development stage lets the Agent write without destroying anything; a
+    // production stage keeps it read-only.
+    let writes = plan.state.stage_kind != "prod";
+    let offered = crate::ask_agent::openai_tools(plan.mcp_tools, writes);
     let mut messages: Vec<Value> = vec![json!({
         "role": "system",
         "content": AGENT_SYSTEM_PROMPT,
@@ -928,6 +943,7 @@ async fn agent_ask(plan: AgentAsk<'_>) -> Response {
         group: plan.group,
         messages: &messages,
         offered: &offered,
+        writes,
         prompt: plan.question,
     };
     let (answered, tried) = match ask_ranked(&endpoints, |index| {
