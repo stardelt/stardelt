@@ -18,7 +18,8 @@ use sha2::{Digest, Sha256};
 
 use crate::controller::Context;
 use crate::crd::{
-    Condition, Connection, SinkMode, StreamApp, StreamAppSpec, StreamAppStatus, StreamRestartPolicy,
+    Condition, Connection, DeletionPolicy, SinkMode, StreamApp, StreamAppSpec, StreamAppStatus,
+    StreamRestartPolicy,
 };
 use crate::objects::{self, FIELD_MANAGER};
 use crate::spark;
@@ -130,7 +131,15 @@ fn topic_resource_name(app: &str, topic: &str) -> String {
     }
 }
 
-pub fn kafka_topic(app: &str, topic: &str, owner: &OwnerReference) -> DynamicObject {
+/// The `KafkaTopic` for a stream's source topic on the platform's own bus. The owner
+/// reference is written only for `DeletionPolicy::Delete`: a retained topic must outlive its
+/// `StreamApp`, so the garbage collector must not own it (D18).
+pub fn kafka_topic(
+    app: &str,
+    topic: &str,
+    owner: &OwnerReference,
+    deletion_policy: DeletionPolicy,
+) -> DynamicObject {
     let mut topic_labels = labels();
     topic_labels.insert("strimzi.io/cluster".to_string(), "kafka".to_string());
     DynamicObject {
@@ -141,7 +150,10 @@ pub fn kafka_topic(app: &str, topic: &str, owner: &OwnerReference) -> DynamicObj
         metadata: ObjectMeta {
             name: Some(topic_resource_name(app, topic)),
             labels: Some(topic_labels),
-            owner_references: Some(vec![owner.clone()]),
+            // D18: a retained topic must outlive its StreamApp, so the garbage collector must
+            // not own it. `Delete` keeps the owner reference the operator always wrote.
+            owner_references: (deletion_policy == DeletionPolicy::Delete)
+                .then(|| vec![owner.clone()]),
             ..Default::default()
         },
         data: json!({
@@ -640,7 +652,12 @@ pub async fn reconcile_stream_app(
     let owner = owner_reference(&app);
     let checkpoint = checkpoint_for(&app.spec, &namespace, &name);
     if create_topic {
-        let topic = kafka_topic(&name, &app.spec.source.topic, &owner);
+        let topic = kafka_topic(
+            &name,
+            &app.spec.source.topic,
+            &owner,
+            app.spec.deletion_policy,
+        );
         let topics: Api<DynamicObject> = Api::namespaced_with(
             ctx.client.clone(),
             &namespace,
@@ -952,6 +969,7 @@ mod tests {
             viewers: Vec::new(),
             run_as: Some("pipeline-analysts".into()),
             restart_policy: StreamRestartPolicy::Always,
+            deletion_policy: DeletionPolicy::Retain,
             stopped: false,
         }
     }
@@ -1315,7 +1333,12 @@ mod tests {
 
     #[test]
     fn kafka_topic_is_a_strimzi_topic_for_the_cluster() {
-        let topic = kafka_topic("measurements", "pegelonline.measurements", &owner());
+        let topic = kafka_topic(
+            "measurements",
+            "pegelonline.measurements",
+            &owner(),
+            DeletionPolicy::Delete,
+        );
         assert_eq!(
             topic.types.as_ref().unwrap().api_version,
             "kafka.strimzi.io/v1"
@@ -1335,11 +1358,29 @@ mod tests {
             Some(&"kafka".to_string())
         );
         assert_eq!(topic.data["spec"]["replicas"], 1);
+        assert_eq!(topic.metadata.owner_references, Some(vec![owner()]));
+    }
+
+    #[test]
+    fn a_retained_topic_carries_no_owner_reference() {
+        let topic = kafka_topic(
+            "measurements",
+            "pegelonline.measurements",
+            &owner(),
+            DeletionPolicy::Retain,
+        );
+        assert!(
+            topic.metadata.owner_references.is_none(),
+            "a retained topic must outlive its StreamApp, so the garbage collector must not own it (D18)"
+        );
+        assert_eq!(topic.data["spec"]["topicName"], "pegelonline.measurements");
+        assert_eq!(topic.data["spec"]["partitions"], 1);
+        assert_eq!(topic.data["spec"]["replicas"], 1);
     }
 
     #[test]
     fn an_illegal_topic_name_moves_to_spec_topic_name() {
-        let topic = kafka_topic("orders", "orders_v1", &owner());
+        let topic = kafka_topic("orders", "orders_v1", &owner(), DeletionPolicy::Retain);
         assert_eq!(topic.metadata.name.as_deref(), Some("stream-orders"));
         assert_eq!(topic.data["spec"]["topicName"], "orders_v1");
     }
@@ -1350,7 +1391,7 @@ mod tests {
         // own topic_resource_name so the resource would be named "orders.v1" (not
         // "stream-producer"). Use an illegal topic name (underscore) to exercise the
         // case where the KafkaTopic resource name differs from spec.topicName.
-        let other = kafka_topic("producer", "orders_v1", &owner());
+        let other = kafka_topic("producer", "orders_v1", &owner(), DeletionPolicy::Retain);
         assert_eq!(
             topic_owner(&[other], "orders_v1").as_deref(),
             Some("stream-producer")
@@ -1362,8 +1403,18 @@ mod tests {
     fn an_identical_kafka_topic_satisfies_the_requirement() {
         // What the operator would apply, and what the demo applied by hand: same topic,
         // same spec, a different object name.
-        let desired = kafka_topic("pegelonline-continuous", "pegelonline.continuous", &owner());
-        let mut same = kafka_topic("pegelonline-continuous", "pegelonline.continuous", &owner());
+        let desired = kafka_topic(
+            "pegelonline-continuous",
+            "pegelonline.continuous",
+            &owner(),
+            DeletionPolicy::Retain,
+        );
+        let mut same = kafka_topic(
+            "pegelonline-continuous",
+            "pegelonline.continuous",
+            &owner(),
+            DeletionPolicy::Retain,
+        );
         same.metadata.name = Some("pegelonline-continuous".into());
         same.metadata.owner_references = None;
         assert!(topic_satisfied(

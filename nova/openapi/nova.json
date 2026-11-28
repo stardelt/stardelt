@@ -12157,7 +12157,7 @@
         "tags": [
           "public"
         ],
-        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `deletionPolicy` is `Retain` or `Delete`: `Retain` keeps the source topic and its messages when the stream is deleted. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
         "operationId": "streams_list",
         "responses": {
           "200": {
@@ -12378,7 +12378,7 @@
         "tags": [
           "public"
         ],
-        "description": "Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; a topic read through a `Connection`, or one another `KafkaTopic` manages, stays. Answers 204 when the object is gone, including when it was already gone.",
+        "description": "Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) follows `spec.deletionPolicy`: with `Delete` the topic is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; with `Retain` (the default) the `KafkaTopic` carries no owner reference and stays, with every message, still managed. A topic read through a `Connection`, or one another `KafkaTopic` manages, always stays. Answers 204 when the object is gone, including when it was already gone.",
         "operationId": "streams_delete",
         "parameters": [
           {
@@ -20626,6 +20626,7 @@
           "owner_group",
           "phase",
           "stopped",
+          "deletion_policy",
           "source_connection",
           "source_topic",
           "sink_catalog",
@@ -20641,6 +20642,10 @@
             ],
             "format": "int64",
             "description": "How many times Spark has submitted the application (`status.attempts`); absent until\nthe operator reports it (operator#336)."
+          },
+          "deletion_policy": {
+            "type": "string",
+            "description": "`spec.deletionPolicy`, defaulted: `Retain` keeps the source topic and its messages when\nthis stream is deleted; `Delete` deletes the topic too (D18). Only a topic the operator\ncreated on the internal bus is affected."
           },
           "deployment": {
             "oneOf": [
