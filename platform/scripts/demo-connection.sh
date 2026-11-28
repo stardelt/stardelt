@@ -94,7 +94,7 @@ spec:
   scope: managed
   # "visitors" see it, "demo" runs the pipeline that uses it (the loader refuses any other group).
   usableBy: [visitors, demo]
-  # The visitors' Connections page lists it read-only; `usableBy` lets their pipelines run it.
+  # The visitors' Connections page lists it read-only; usableBy lets their pipelines run it.
   viewers: [visitors]
   type: postgresql
   config:
