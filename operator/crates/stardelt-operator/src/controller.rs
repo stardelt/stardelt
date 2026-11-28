@@ -2059,6 +2059,10 @@ async fn reconcile_lakehouse(lh: Arc<Lakehouse>, ctx: Arc<Context>) -> Result<Ac
     components.extend(notebook_public_egress);
     components.push(bootstrap);
     components.extend(spark);
+    // The engine has loaded every SqlWarehouse (po263c): `Ready` means a member can query.
+    if !lh.spec.dry_run && identity_contract && trino_ready {
+        components.extend(crate::warehouses_ready::status(&ctx.client, &namespace, &name).await);
+    }
     components.push(discovery);
     outcome.components = components;
     let phase = phase(lh.spec.dry_run, &outcome);
