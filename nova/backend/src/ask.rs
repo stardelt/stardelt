@@ -392,6 +392,12 @@ pub(crate) fn parse_answer(content: &str) -> Option<(String, String)> {
     (!sql.is_empty()).then_some((sql, sentence))
 }
 
+/// True when the endpoint sent no content and said it ran out of tokens: a reasoning model
+/// spent the whole answer budget thinking, so no retry in the same shape can help (nova#2395).
+fn empty_by_length(answer_content: &str, finish_reason: Option<&str>) -> bool {
+    answer_content.trim().is_empty() && finish_reason == Some("length")
+}
+
 /// One parsed answer, with the text it came from (the retry shows it to the model).
 struct First {
     sql: String,
@@ -537,14 +543,28 @@ impl Attempt<'_> {
                 content: answer.content,
                 call_id,
             }),
-            // Not the JSON shape: another endpoint may answer it.
-            None => Err(CallFailure {
-                response: fail(
-                    StatusCode::BAD_GATEWAY,
-                    "the model did not answer with SQL. Try again, or ask differently.",
-                ),
-                retryable: true,
-            }),
+            // Not the JSON shape: another endpoint may answer it. An empty answer cut by
+            // the token cap names that instead, since no fallback of ours would help the
+            // person understand why every model answered nothing (nova#2395).
+            None => {
+                let refusal = if empty_by_length(&answer.content, answer.finish_reason.as_deref()) {
+                    let budget = answer
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.get("completion_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(u64::from(crate::model_chat::MAX_TOKENS));
+                    format!(
+                        "the model used its whole answer budget ({budget} tokens) before answering; try another model"
+                    )
+                } else {
+                    "the model did not answer with SQL. Try again, or ask differently.".to_string()
+                };
+                Err(CallFailure {
+                    response: fail(StatusCode::BAD_GATEWAY, refusal),
+                    retryable: true,
+                })
+            }
         }
     }
 
@@ -2143,6 +2163,15 @@ mod tests {
         );
         assert_eq!(parse_answer("not json"), None);
         assert_eq!(parse_answer("{\"sql\": \" \", \"sentence\": \"x\"}"), None);
+    }
+
+    /// An empty answer the endpoint cut at `length` is named; a non-empty one, or another
+    /// finish reason, is not (nova#2395).
+    #[test]
+    fn an_empty_answer_cut_by_length_is_named() {
+        assert!(empty_by_length("", Some("length")));
+        assert!(!empty_by_length("x", Some("length")));
+        assert!(!empty_by_length("", Some("stop")));
     }
 
     fn app(state: Arc<AppState>) -> Router {

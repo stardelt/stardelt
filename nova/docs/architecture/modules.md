@@ -6,7 +6,7 @@
 | `auth.rs` ⚠ | Core & identity | 2544 | 2316 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
-| `ask.rs` ⚠ | AI (Ask, MCP, models) | 1768 | 900 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
+| `ask.rs` ⚠ | AI (Ask, MCP, models) | 1788 | 909 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `query_log_api.rs` ⚠ | SQL & query log | 1729 | 413 | 7 | Kubernetes API (CRDs), PostgreSQL state store |
 | `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1644 | 1527 | 4 | Airflow REST, Trino |
 | `superset.rs` ⚠ | Pipelines & delivery | 1579 | 1372 | 5 | Superset |
@@ -47,7 +47,7 @@
 | `stages.rs` | Pipelines & delivery | 296 | 54 | 1 | - |
 | `catalog_token.rs` | Core & identity | 287 | 502 | 0 | OIDC provider |
 | `model_calls.rs` | AI (Ask, MCP, models) | 281 | 330 | 0 | PostgreSQL state store |
-| `ask_agent.rs` | AI (Ask, MCP, models) | 257 | 387 | 0 | Model endpoints (external) |
+| `ask_agent.rs` | AI (Ask, MCP, models) | 257 | 389 | 0 | Model endpoints (external) |
 | `model_endpoints.rs` | AI (Ask, MCP, models) | 246 | 169 | 2 | Kubernetes API (CRDs) |
 | `catalog_doc_store.rs` | Catalog | 242 | 209 | 0 | PostgreSQL state store |
 | `cluster.rs` | Platform view | 234 | 111 | 1 | Kubernetes API (CRDs) |
@@ -59,9 +59,9 @@
 | `query_hints.rs` | SQL & query log | 176 | 118 | 0 | - |
 | `user_settings.rs` | Core & identity | 173 | 14 | 3 | PostgreSQL state store |
 | `lineage_event.rs` | Lineage | 170 | 0 | 0 | - |
+| `model_chat.rs` | AI (Ask, MCP, models) | 158 | 178 | 0 | Model endpoints (external) |
 | `embed.rs` | Core & identity | 153 | 181 | 0 | - |
 | `previews.rs` | Pipelines & delivery | 150 | 74 | 0 | Kubernetes API (CRDs) |
-| `model_chat.rs` | AI (Ask, MCP, models) | 148 | 170 | 0 | Model endpoints (external) |
 | `db.rs` | Core & identity | 134 | 72 | 0 | PostgreSQL state store |
 | `people.rs` | Core & identity | 124 | 129 | 0 | PostgreSQL state store |
 | `shared_accounts.rs` | Core & identity | 123 | 137 | 0 | PostgreSQL state store |
@@ -76,4 +76,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (75 files)** | | **55293** | **47888** | **177** | |
+| **total (75 files)** | | **55323** | **47907** | **177** | |

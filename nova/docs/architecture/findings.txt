@@ -4,7 +4,7 @@ B1 file-size budget (1500 production lines): 10 backend files over
   auth.rs 2544
   notebooks.rs 2277
   connection_routes.rs 1949
-  ask.rs 1768
+  ask.rs 1788
   query_log_api.rs 1729
   mcp.rs 1644
   superset.rs 1579
