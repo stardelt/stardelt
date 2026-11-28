@@ -49,6 +49,8 @@ const VERIFIED_QUERIES_IN_CONTEXT: usize = 5;
 const MAX_VERIFIED_SQL_CHARS: usize = 4000;
 /// The longest previous statement a follow-up may send back.
 const MAX_PREVIOUS_SQL_CHARS: usize = 8_000;
+/// How many endpoints one auto-mode question may ask: the ranked one, and one fallback (D3).
+const FALLBACK_ENDPOINTS: usize = 2;
 
 /// `POST /api/ask` body.
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -58,6 +60,11 @@ pub(crate) struct AskRequest {
     /// The turn this question refines (the panel's last answered turn), or absent.
     #[serde(default)]
     pub previous: Option<AskPrevious>,
+    /// The `ModelEndpoint` that answers. Absent or `auto` uses auto mode: the ready
+    /// endpoints ranked by this catalog's eval results, falling back once. A name asks
+    /// that endpoint only, and is a `400` when it cannot answer Ask now.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// The answered turn a follow-up refines, as the panel sends it: the earlier question, the
@@ -95,6 +102,8 @@ pub(crate) struct AskAnswer {
     /// The `ModelEndpoint` that answered — never its URL.
     pub endpoint: String,
     pub model: String,
+    /// The endpoints asked, in order: one, or two when auto mode fell back.
+    pub tried: Vec<String>,
     /// The `model_call` row the answer's last call wrote; `null` when the store failed.
     pub call_id: Option<i64>,
     /// The statement; `null` when no table matched, kept when the check failed.
@@ -125,9 +134,9 @@ pub(crate) struct AskConversation {
     pub created_at: String,
 }
 
-/// The first endpoint (name order) that may answer Ask: purpose `ask`, the probe found it
-/// reachable, and it answered in a JSON shape. `None` means the feature is off.
-fn ready_ask_endpoint(objects: &[Value]) -> Option<(String, Value)> {
+/// Every endpoint that may answer Ask, in name order: purpose `ask`, the probe found it
+/// reachable, and it answered in a JSON shape. Empty means the feature is off.
+fn ready_ask_endpoints(objects: &[Value]) -> Vec<(String, Value)> {
     let mut ready: Vec<(String, Value)> = objects
         .iter()
         .map(|object| (crate::model_endpoints::row(object), object))
@@ -139,7 +148,87 @@ fn ready_ask_endpoint(objects: &[Value]) -> Option<(String, Value)> {
         .map(|(row, object)| (row.name, object.clone()))
         .collect();
     ready.sort_by(|a, b| a.0.cmp(&b.0));
-    ready.into_iter().next()
+    ready
+}
+
+/// How many of one endpoint's eval runs on this catalog passed in the last 30 days:
+/// `endpoint → (passed, total)`.
+async fn eval_shares(
+    pool: &sqlx::PgPool,
+    catalog: &str,
+) -> Result<std::collections::HashMap<String, (i64, i64)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT r.endpoint, count(*) FILTER (WHERE r.passed), count(*) \
+         FROM eval_run r JOIN eval e ON e.id = r.eval_id \
+         WHERE e.catalog = $1 AND r.endpoint IS NOT NULL AND r.created_at > now() - interval '30 days' \
+         GROUP BY r.endpoint",
+    )
+    .bind(catalog)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<String, _>(0),
+                (row.get::<i64, _>(1), row.get::<i64, _>(2)),
+            )
+        })
+        .collect())
+}
+
+/// An endpoint's pass share on the catalog, or `None` when it has fewer than three runs:
+/// three runs are the least that says anything.
+fn pass_share(shares: &std::collections::HashMap<String, (i64, i64)>, name: &str) -> Option<f64> {
+    let (passed, total) = *shares.get(name)?;
+    (total >= 3).then(|| passed as f64 / total as f64)
+}
+
+/// Auto mode's order: the endpoints with at least three eval runs by their pass share,
+/// highest first; the others after them, in name order; ties by name.
+fn rank(
+    mut ready: Vec<(String, Value)>,
+    shares: &std::collections::HashMap<String, (i64, i64)>,
+) -> Vec<(String, Value)> {
+    ready.sort_by(|a, b| {
+        match (pass_share(shares, &a.0), pass_share(shares, &b.0)) {
+            (Some(one), Some(other)) => other.total_cmp(&one),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| a.0.cmp(&b.0))
+    });
+    ready
+}
+
+/// The endpoint a request names, when it names one: absent, blank or `auto` is auto mode.
+fn requested_endpoint(requested: Option<&str>) -> Option<&str> {
+    match requested.map(str::trim) {
+        Some(name) if !name.is_empty() && name != "auto" => Some(name),
+        _ => None,
+    }
+}
+
+/// The endpoints one question may ask, in the order it asks them: the named one, or the
+/// auto ranking of D2. A named endpoint that cannot answer Ask is a `400`.
+// The `Err` is the ready-made refusal this returns, as in `catalog_search::filter_value`.
+#[allow(clippy::result_large_err)]
+fn choose_endpoints(
+    ready: Vec<(String, Value)>,
+    requested: Option<&str>,
+    shares: &std::collections::HashMap<String, (i64, i64)>,
+) -> Result<Vec<(String, Value)>, Response> {
+    match requested_endpoint(requested) {
+        Some(name) => match ready.into_iter().find(|(ready, _)| ready == name) {
+            Some(found) => Ok(vec![found]),
+            None => Err(fail(
+                StatusCode::BAD_REQUEST,
+                format!("endpoint `{name}` cannot answer Ask now"),
+            )),
+        },
+        None => Ok(rank(ready, shares)),
+    }
 }
 
 /// The context the model receives: one entry per candidate table, metadata only. A field
@@ -291,6 +380,39 @@ struct First {
     call_id: Option<i64>,
 }
 
+/// Why one endpoint did not answer, and whether another one may be asked.
+struct CallFailure {
+    /// The refusal the person reads.
+    response: Response,
+    /// `true` for the reasons D3 names — a transport error, an upstream 5xx or 429, and an
+    /// answer that is not the JSON shape. Our own budget refusal is `false`: the person's
+    /// spent budget stays visible.
+    retryable: bool,
+}
+
+/// What one endpoint answered, before the question's own fields (`tables`, `tried`).
+#[derive(Debug)]
+struct Answered {
+    endpoint: String,
+    model: String,
+    call_id: Option<i64>,
+    sql: Option<String>,
+    sentence: String,
+    explain: String,
+    error: Option<String>,
+}
+
+/// True when an upstream refusal is a `5xx` or a `429` — the case another endpoint may
+/// answer. The status is the refusal's first field (`model_chat::ChatError::Refused`).
+fn refusable_by_another(message: &str) -> bool {
+    let status: Option<u16> = message
+        .split(':')
+        .next()
+        .map(str::trim)
+        .and_then(|status| status.parse().ok());
+    matches!(status, Some(429) | Some(500..=599))
+}
+
 /// Everything a chat call needs that does not change between the first call and the retry.
 struct Attempt<'a> {
     client: &'a reqwest::Client,
@@ -312,7 +434,7 @@ impl Attempt<'_> {
     /// One budget check, one chat call, one `model_call` row.
     // The `Err` is the ready-made refusal this returns, as in `catalog_search::filter_value`.
     #[allow(clippy::result_large_err)]
-    async fn call(&self, messages: &Value) -> Result<First, Response> {
+    async fn call(&self, messages: &Value) -> Result<First, CallFailure> {
         if let Err(refusal) = crate::model_calls::check(
             self.pool,
             &crate::model_calls::quota_of(self.object),
@@ -321,7 +443,11 @@ impl Attempt<'_> {
         )
         .await
         {
-            return Err(crate::model_calls::refuse(&refusal));
+            // The person's spent budget is not a reason to ask another endpoint.
+            return Err(CallFailure {
+                response: crate::model_calls::refuse(&refusal),
+                retryable: false,
+            });
         }
         let extra = json!({
             "response_format": {
@@ -348,17 +474,22 @@ impl Attempt<'_> {
             Ok(answer) => answer,
             Err(error) => {
                 use crate::model_chat::ChatError;
-                let (outcome, sentence) = match &error {
-                    ChatError::Refused(sentence) => ("refused", sentence.clone()),
-                    ChatError::Transport(sentence) => ("error", sentence.clone()),
+                let (outcome, sentence, retryable) = match &error {
+                    ChatError::Refused(sentence) => {
+                        ("refused", sentence.clone(), refusable_by_another(sentence))
+                    }
+                    ChatError::Transport(sentence) => ("error", sentence.clone(), true),
                 };
                 let _ = self
                     .record(outcome, None, None, started.elapsed().as_millis() as u64)
                     .await;
-                return Err(fail(
-                    StatusCode::BAD_GATEWAY,
-                    format!("the model endpoint did not answer: {sentence}"),
-                ));
+                return Err(CallFailure {
+                    response: fail(
+                        StatusCode::BAD_GATEWAY,
+                        format!("the model endpoint did not answer: {sentence}"),
+                    ),
+                    retryable,
+                });
             }
         };
         let parsed = parse_answer(&answer.content);
@@ -378,10 +509,14 @@ impl Attempt<'_> {
                 content: answer.content,
                 call_id,
             }),
-            None => Err(fail(
-                StatusCode::BAD_GATEWAY,
-                "the model did not answer with SQL. Try again, or ask differently.",
-            )),
+            // Not the JSON shape: another endpoint may answer it.
+            None => Err(CallFailure {
+                response: fail(
+                    StatusCode::BAD_GATEWAY,
+                    "the model did not answer with SQL. Try again, or ask differently.",
+                ),
+                retryable: true,
+            }),
         }
     }
 
@@ -414,6 +549,140 @@ impl Attempt<'_> {
             }
         }
     }
+}
+
+/// One question's attempt on one endpoint: the model call, `EXPLAIN` as the caller, and at
+/// most one correction. Everything that does not change between the endpoints is here.
+struct Asking<'a> {
+    state: &'a Arc<AppState>,
+    principal: Option<&'a crate::auth::Principal>,
+    pool: &'a sqlx::PgPool,
+    client: &'a reqwest::Client,
+    /// What is stored as the call's prompt and hashed into its row.
+    user_text: &'a str,
+    messages: &'a Value,
+    sub: &'a str,
+    group: Option<&'a str>,
+}
+
+impl Asking<'_> {
+    /// Asks one endpoint and checks what it wrote, then asks it once more with the
+    /// engine's sentence when the statement does not run.
+    // The `Err` is the ready-made refusal this returns, as in `catalog_search::filter_value`.
+    #[allow(clippy::result_large_err)]
+    async fn one(&self, name: &str, object: &Value) -> Result<Answered, CallFailure> {
+        let url = object
+            .pointer("/spec/url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let model = object
+            .pointer("/spec/model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if url.is_empty() || model.is_empty() {
+            // A broken object is not an answer: the next endpoint may still say it.
+            return Err(CallFailure {
+                response: fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT),
+                retryable: true,
+            });
+        }
+        let key = crate::model_chat::key_for(name);
+        let attempt = Attempt {
+            client: self.client,
+            pool: self.pool,
+            object,
+            name,
+            model: &model,
+            url: &url,
+            key: key.as_deref(),
+            sub: self.sub,
+            group: self.group,
+            prompt: self.user_text,
+        };
+        let first = attempt.call(self.messages).await?;
+        let Some(error) = check_statement(self.state, self.principal, &first.sql)
+            .await
+            .err()
+        else {
+            return Ok(Answered {
+                endpoint: name.to_string(),
+                model,
+                call_id: first.call_id,
+                sql: Some(first.sql),
+                sentence: first.sentence,
+                explain: "passed".to_string(),
+                error: None,
+            });
+        };
+
+        // One correction: the model sees its own statement and why it does not run.
+        let correction = format!(
+            "That statement is not runnable: {error}. Answer with the corrected statement in the same JSON shape."
+        );
+        let retry = json!([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": self.user_text},
+            {"role": "assistant", "content": first.content},
+            {"role": "user", "content": correction},
+        ]);
+        let second = attempt.call(&retry).await?;
+        Ok(
+            match check_statement(self.state, self.principal, &second.sql).await {
+                Ok(()) => Answered {
+                    endpoint: name.to_string(),
+                    model,
+                    call_id: second.call_id,
+                    sql: Some(second.sql),
+                    sentence: second.sentence,
+                    explain: "passed".to_string(),
+                    error: None,
+                },
+                Err(second_error) => Answered {
+                    endpoint: name.to_string(),
+                    model,
+                    call_id: second.call_id,
+                    sql: Some(second.sql),
+                    sentence: second.sentence,
+                    explain: "failed".to_string(),
+                    error: Some(second_error),
+                },
+            },
+        )
+    }
+}
+
+/// Asks the endpoints in their order, at most [`FALLBACK_ENDPOINTS`] of them, and answers
+/// with what it tried. A named endpoint is a one-item list, so it never falls back; our
+/// own budget refusal stops the loop too (`CallFailure::retryable`).
+// The `Err` is the ready-made refusal this returns, as in `catalog_search::filter_value`.
+#[allow(clippy::result_large_err)]
+async fn ask_ranked<F, Fut>(
+    endpoints: &[(String, Value)],
+    mut one: F,
+) -> Result<(Answered, Vec<String>), Response>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Answered, CallFailure>>,
+{
+    let mut tried = Vec::new();
+    let mut failure: Option<Response> = None;
+    for (index, (name, _)) in endpoints.iter().take(FALLBACK_ENDPOINTS).enumerate() {
+        tried.push(name.clone());
+        match one(index).await {
+            Ok(answered) => return Ok((answered, tried)),
+            Err(call) => {
+                failure = Some(call.response);
+                if !call.retryable {
+                    break;
+                }
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT)))
 }
 
 /// The model's statement, through the MCP guard and then `EXPLAIN` — never run.
@@ -519,11 +788,22 @@ fn user_text_of(question: &str, previous: Option<&AskPrevious>, context: &Value)
     )
 }
 
+/// The model an endpoint object names, trimmed; empty when the object has none.
+fn endpoint_model(object: &Value) -> String {
+    object
+        .pointer("/spec/model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// The answer when no candidate table is left: no statement, and a sentence saying so.
-fn no_table_answer(endpoint: String, model: String) -> AskAnswer {
+fn no_table_answer(endpoint: String, model: String, tried: Vec<String>) -> AskAnswer {
     AskAnswer {
         endpoint,
         model,
+        tried,
         call_id: None,
         sql: None,
         sentence: NO_TABLE.to_string(),
@@ -539,12 +819,12 @@ fn no_table_answer(endpoint: String, model: String) -> AskAnswer {
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, the default one")),
     request_body = AskRequest,
     responses(
         (status = 200, description = "The statement, its sentence, the tables it was written for and the `EXPLAIN` result", body = AskAnswer),
-        (status = 400, description = "The question is empty or longer than 2000 characters, or the previous turn's question, statement or table list breaks its limit", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The question is empty or longer than 2000 characters, the previous turn's question, statement or table list breaks its limit, or `endpoint` names a `ModelEndpoint` that cannot answer Ask now", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
         (status = 429, description = "The person's or their group's model budget is spent", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog, the cluster or the model endpoint did not answer", body = crate::openapi::ErrorResponse),
@@ -598,25 +878,31 @@ pub(crate) async fn ask(
             return fail(StatusCode::BAD_GATEWAY, "the cluster did not answer");
         }
     };
-    let Some((name, object)) = ready_ask_endpoint(&objects) else {
-        return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
-    };
-    let url = object
-        .pointer("/spec/url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let model = object
-        .pointer("/spec/model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if url.is_empty() || model.is_empty() {
+    let ready = ready_ask_endpoints(&objects);
+    if ready.is_empty() {
         return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
     }
-    let key = crate::model_chat::key_for(&name);
+    // Auto mode ranks the ready endpoints by this catalog's evals; a named endpoint is
+    // taken as asked and refused when it cannot answer (D1).
+    let catalog = params
+        .catalog
+        .clone()
+        .unwrap_or_else(|| state.warehouse_name.clone());
+    let shares = match eval_shares(pool, &catalog).await {
+        Ok(shares) => shares,
+        Err(e) => {
+            // Without the eval history auto is today's behaviour, name order.
+            tracing::warn!(error = %e, "ask: the eval shares were not read");
+            std::collections::HashMap::new()
+        }
+    };
+    let endpoints = match choose_endpoints(ready, request.endpoint.as_deref(), &shares) {
+        Ok(endpoints) => endpoints,
+        Err(response) => return response,
+    };
+    let Some((first_name, first_object)) = endpoints.first() else {
+        return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
+    };
     // The same group is checked against the quota and written to the row, so spend and
     // limit agree.
     let sub = match caller.as_ref() {
@@ -687,7 +973,11 @@ pub(crate) async fn ask(
     // still has the statement it refines.
     let mut candidates = follow_up_candidates(request.previous.as_ref(), candidates);
     if candidates.is_empty() {
-        let body = no_table_answer(name.clone(), model.clone());
+        let body = no_table_answer(
+            first_name.clone(),
+            endpoint_model(first_object),
+            vec![first_name.clone()],
+        );
         record_conversation(pool, &sub, &question, &body).await;
         return answer(body);
     }
@@ -717,7 +1007,11 @@ pub(crate) async fn ask(
         candidates = readable.0;
         docs = readable.1;
         if candidates.is_empty() {
-            let body = no_table_answer(name.clone(), model.clone());
+            let body = no_table_answer(
+                first_name.clone(),
+                endpoint_model(first_object),
+                vec![first_name.clone()],
+            );
             record_conversation(pool, &sub, &question, &body).await;
             return answer(body);
         }
@@ -765,73 +1059,34 @@ pub(crate) async fn ask(
     let Some(client) = crate::model_probe::http_client() else {
         return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
     };
-    let attempt = Attempt {
-        client: &client,
+    let asking = Asking {
+        state: &state,
+        principal: caller.as_ref().map(|caller| &caller.0),
         pool,
-        object: &object,
-        name: &name,
-        model: &model,
-        url: &url,
-        key: key.as_deref(),
+        client: &client,
+        user_text: &user_text,
+        messages: &messages,
         sub: &sub,
         group: group.as_deref(),
-        prompt: &user_text,
     };
-    let principal = caller.as_ref().map(|caller| &caller.0);
-    let first = match attempt.call(&messages).await {
-        Ok(first) => first,
+    let (answered, tried) = match ask_ranked(&endpoints, |index| {
+        asking.one(&endpoints[index].0, &endpoints[index].1)
+    })
+    .await
+    {
+        Ok(answer) => answer,
         Err(response) => return response,
     };
-    let Some(error) = check_statement(&state, principal, &first.sql).await.err() else {
-        let body = AskAnswer {
-            endpoint: name,
-            model,
-            call_id: first.call_id,
-            sql: Some(first.sql),
-            sentence: first.sentence,
-            tables: candidates,
-            explain: "passed".to_string(),
-            error: None,
-        };
-        record_conversation(pool, &sub, &question, &body).await;
-        return answer(body);
-    };
-
-    // One correction: the model sees its own statement and why it does not run.
-    let correction = format!(
-        "That statement is not runnable: {error}. Answer with the corrected statement in the same JSON shape."
-    );
-    let retry = json!([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
-        {"role": "assistant", "content": first.content},
-        {"role": "user", "content": correction},
-    ]);
-    let second = match attempt.call(&retry).await {
-        Ok(second) => second,
-        Err(response) => return response,
-    };
-    let body = match check_statement(&state, principal, &second.sql).await {
-        Ok(()) => AskAnswer {
-            endpoint: name,
-            model,
-            call_id: second.call_id,
-            sql: Some(second.sql),
-            sentence: second.sentence,
-            tables: candidates,
-            explain: "passed".to_string(),
-            error: None,
-        },
-        Err(second_error) => AskAnswer {
-            endpoint: name,
-            model,
-            call_id: second.call_id,
-            sql: Some(second.sql),
-            sentence: second.sentence,
-            tables: candidates,
-            explain: "failed".to_string(),
-            error: Some(second_error),
-        },
+    let body = AskAnswer {
+        endpoint: answered.endpoint,
+        model: answered.model,
+        tried,
+        call_id: answered.call_id,
+        sql: answered.sql,
+        sentence: answered.sentence,
+        tables: candidates,
+        explain: answered.explain,
+        error: answered.error,
     };
     record_conversation(pool, &sub, &question, &body).await;
     answer(body)
@@ -998,26 +1253,169 @@ mod tests {
     }
 
     #[test]
-    fn ready_picks_the_first_ask_endpoint_that_is_reachable_with_json() {
+    fn ready_lists_every_ask_endpoint_that_is_reachable_with_json_in_name_order() {
         let objects = vec![
             endpoint("agents-only", &["agents"], json!(true), json!(true)),
             endpoint("no-json", &["ask"], json!(true), Value::Null),
             endpoint("unreachable", &["ask"], json!(false), json!(true)),
             endpoint("works", &["ask", "agents"], json!(true), json!(true)),
-        ];
-        let (name, object) = ready_ask_endpoint(&objects).expect("one ready endpoint");
-        assert_eq!(name, "works");
-        assert_eq!(object.pointer("/spec/model"), Some(&json!("qwen3-4b")));
-        // Name order decides between two ready endpoints.
-        let two = vec![
-            endpoint("zulu", &["ask"], json!(true), json!(true)),
             endpoint("alpha", &["ask"], json!(true), json!(true)),
         ];
+        let ready = ready_ask_endpoints(&objects);
+        let names: Vec<&str> = ready.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "works"], "name order, every ready one");
+        assert_eq!(ready[1].1.pointer("/spec/model"), Some(&json!("qwen3-4b")));
+        assert!(ready_ask_endpoints(&[]).is_empty());
+    }
+
+    /// The two D2 tests ask the same question of `rank`: what the catalog's evals say.
+    fn ready_pair() -> Vec<(String, Value)> {
+        vec![
+            (
+                "a".to_string(),
+                endpoint("a", &["ask"], json!(true), json!(true)),
+            ),
+            (
+                "b".to_string(),
+                endpoint("b", &["ask"], json!(true), json!(true)),
+            ),
+        ]
+    }
+
+    #[test]
+    fn auto_ranks_by_the_catalogs_eval_share() {
+        let mut shares = std::collections::HashMap::new();
+        shares.insert("a".to_string(), (1, 4));
+        shares.insert("b".to_string(), (4, 4));
+        let ranked = rank(ready_pair(), &shares);
+        let names: Vec<&str> = ranked.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["b", "a"], "four of four before one of four");
+    }
+
+    #[test]
+    fn auto_without_evals_keeps_name_order() {
+        let ranked = rank(ready_pair(), &std::collections::HashMap::new());
+        let names: Vec<&str> = ranked.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "today's behaviour without evals");
+        // Fewer than three runs is no verdict: those endpoints come after a ranked one.
+        let mut shares = std::collections::HashMap::new();
+        shares.insert("a".to_string(), (0, 2));
+        shares.insert("b".to_string(), (1, 3));
+        let ranked = rank(ready_pair(), &shares);
+        let names: Vec<&str> = ranked.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["b", "a"], "one of three beats two runs");
+        // An equal share is decided by name.
+        let mut ties = std::collections::HashMap::new();
+        ties.insert("a".to_string(), (2, 4));
+        ties.insert("b".to_string(), (3, 6));
+        let ranked = rank(ready_pair(), &ties);
+        let names: Vec<&str> = ranked.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "a tie goes by name");
+    }
+
+    /// One answer as `Asking::one` would return it for `name`.
+    fn answered(name: &str) -> Answered {
+        Answered {
+            endpoint: name.to_string(),
+            model: "qwen3-4b".to_string(),
+            call_id: None,
+            sql: Some("SELECT 1".to_string()),
+            sentence: "One.".to_string(),
+            explain: "passed".to_string(),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_falls_back_once_on_an_upstream_429() {
+        let ranked = vec![
+            ("a".to_string(), Value::Null),
+            ("b".to_string(), Value::Null),
+            ("c".to_string(), Value::Null),
+        ];
+        let (answer, tried) = ask_ranked(&ranked, |index| async move {
+            if index == 0 {
+                return Err(CallFailure {
+                    response: fail(
+                        StatusCode::BAD_GATEWAY,
+                        "the model endpoint did not answer: 429: slow down",
+                    ),
+                    retryable: true,
+                });
+            }
+            Ok(answered("b"))
+        })
+        .await
+        .expect("the second endpoint answers");
+        assert_eq!(tried, vec!["a", "b"], "two endpoints at most");
+        assert_eq!(answer.endpoint, "b");
+    }
+
+    #[tokio::test]
+    async fn auto_does_not_fall_back_on_the_persons_budget() {
+        let ranked = ready_pair();
+        let asked = std::cell::Cell::new(0);
+        let response = ask_ranked(&ranked, |_| {
+            asked.set(asked.get() + 1);
+            async {
+                Err(CallFailure {
+                    response: fail(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Your group used its 2 M tokens",
+                    ),
+                    retryable: false,
+                })
+            }
+        })
+        .await
+        .expect_err("a spent budget is the answer");
+        assert_eq!(asked.get(), 1, "the second endpoint is not asked");
+        let (status, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], json!("Your group used its 2 M tokens"));
+    }
+
+    #[tokio::test]
+    async fn a_named_endpoint_that_is_not_ready_is_refused() {
+        let ready = ready_pair();
+        let shares = std::collections::HashMap::new();
+        let response = choose_endpoints(ready.clone(), Some("gone"), &shares).expect_err("a 400");
+        let (status, body) = body_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            ready_ask_endpoint(&two).map(|(name, _)| name).as_deref(),
-            Some("alpha")
+            body["error"],
+            json!("endpoint `gone` cannot answer Ask now")
         );
-        assert!(ready_ask_endpoint(&[]).is_none());
+        // A ready one by name is taken as asked, even when the ranking prefers another.
+        let mut shares = std::collections::HashMap::new();
+        shares.insert("a".to_string(), (4, 4));
+        let chosen = choose_endpoints(ready, Some("b"), &shares).expect("b answers");
+        let names: Vec<&str> = chosen.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["b"]);
+    }
+
+    #[tokio::test]
+    async fn a_named_endpoint_never_falls_back() {
+        let ready = ready_pair();
+        let shares = std::collections::HashMap::new();
+        let chosen = choose_endpoints(ready, Some("b"), &shares).expect("b answers");
+        let mut asked = Vec::new();
+        let response = ask_ranked(&chosen, |index| {
+            asked.push(chosen[index].0.clone());
+            async {
+                Err(CallFailure {
+                    response: fail(
+                        StatusCode::BAD_GATEWAY,
+                        "the model endpoint did not answer: 503: busy",
+                    ),
+                    retryable: true,
+                })
+            }
+        })
+        .await
+        .expect_err("the named endpoint's failure is the answer");
+        assert_eq!(asked, vec!["b"], "no other endpoint is asked");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]
@@ -1126,6 +1524,7 @@ mod tests {
         let answer = AskAnswer {
             endpoint: "default".into(),
             model: "qwen3-4b".into(),
+            tried: vec!["default".into()],
             call_id: Some(7),
             sql: None,
             sentence: NO_TABLE.into(),
@@ -1157,6 +1556,7 @@ mod tests {
         let answer = AskAnswer {
             endpoint: "default".into(),
             model: "qwen3-4b".into(),
+            tried: vec!["default".into()],
             call_id: None,
             sql: Some("SELECT 1".into()),
             sentence: "One.".into(),
@@ -1320,7 +1720,7 @@ mod tests {
         assert_eq!(candidates, previous.tables);
         assert_eq!(docs.len(), 1);
         // With no other candidate the answer is `NO_TABLE`, exactly as the empty search is.
-        let body = no_table_answer("default".into(), "qwen3-4b".into());
+        let body = no_table_answer("default".into(), "qwen3-4b".into(), vec!["default".into()]);
         assert_eq!(body.sentence, NO_TABLE);
         assert_eq!(body.sql, None);
         assert_eq!(body.explain, "not_run");
@@ -1578,6 +1978,7 @@ mod tests {
         let answer_of = |question: &str| AskAnswer {
             endpoint: "default".into(),
             model: "qwen3-4b".into(),
+            tried: vec!["default".into()],
             call_id: None,
             sql: Some("SELECT 1".into()),
             sentence: format!("the answer to {question}"),

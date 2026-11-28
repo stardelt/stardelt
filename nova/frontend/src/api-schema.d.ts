@@ -268,7 +268,7 @@ export interface paths {
         put?: never;
         /**
          * `POST /api/ask` — a question in, checked SQL out.
-         * @description A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like "only org domains" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to the first `ModelEndpoint` (name order) whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.
+         * @description A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like "only org domains" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches the catalog as the caller for at most five tables — the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.
          */
         post: operations["ask_answer"];
         delete?: never;
@@ -2811,6 +2811,8 @@ export interface components {
             /** @description The statement; `null` when no table matched, kept when the check failed. */
             sql?: string | null;
             tables: components["schemas"]["AskTable"][];
+            /** @description The endpoints asked, in order: one, or two when auto mode fell back. */
+            tried: string[];
         };
         /** @description One conversation from a person's History. */
         AskConversation: {
@@ -2852,6 +2854,12 @@ export interface components {
         };
         /** @description `POST /api/ask` body. */
         AskRequest: {
+            /**
+             * @description The `ModelEndpoint` that answers. Absent or `auto` uses auto mode: the ready
+             *     endpoints ranked by this catalog's eval results, falling back once. A name asks
+             *     that endpoint only, and is a `400` when it cannot answer Ask now.
+             */
+            endpoint?: string | null;
             previous?: components["schemas"]["AskPrevious"] | null;
             /** @description The question, in words, 1 to 2000 characters. */
             question: string;
@@ -6953,7 +6961,7 @@ export interface operations {
                     "application/json": components["schemas"]["AskAnswer"];
                 };
             };
-            /** @description The question is empty or longer than 2000 characters, or the previous turn's question, statement or table list breaks its limit */
+            /** @description The question is empty or longer than 2000 characters, the previous turn's question, statement or table list breaks its limit, or `endpoint` names a `ModelEndpoint` that cannot answer Ask now */
             400: {
                 headers: {
                     [name: string]: unknown;

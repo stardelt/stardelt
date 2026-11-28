@@ -390,6 +390,8 @@ export type AskTable = Schema<'AskTable'>
 export type AskAnswer = {
   endpoint: string
   model: string
+  /** The endpoints asked, in order: one, or two when auto mode fell back. */
+  tried: string[]
   /** `null` when no table matched. */
   sql: string | null
   sentence: string
@@ -1687,14 +1689,19 @@ export const api = {
   },
   /** The model endpoints an administrator connected, without their URL or key. */
   modelEndpoints: () => jget<ModelEndpoint[]>('/api/model-endpoints'),
-  /** A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform. */
   /**
-   * A question in words. `previous` is the answered turn this question refines
-   * (nova#2341): Nova then keeps that turn's tables and sends its statement to the model.
+   * A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform.
+   * `previous` is the answered turn this question refines (nova#2341): Nova then keeps that
+   * turn's tables and sends its statement to the model. `endpoint` names the `ModelEndpoint`;
+   * omitted, auto mode ranks the ready ones (#2342).
    */
-  ask:          (question: string, catalog?: string, previous?: AskPrevious) => {
+  ask:          (question: string, catalog?: string, previous?: AskPrevious, endpoint?: string) => {
     const qs = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
-    return jpost<AskAnswer>(`/api/ask${qs}`, { question, ...(previous ? { previous } : {}) })
+    return jpost<AskAnswer>(`/api/ask${qs}`, {
+      question,
+      ...(previous ? { previous } : {}),
+      ...(endpoint ? { endpoint } : {}),
+    })
   },
   /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */
   askHistory:   ()                                => jget<AskConversation[]>('/api/ask/history'),

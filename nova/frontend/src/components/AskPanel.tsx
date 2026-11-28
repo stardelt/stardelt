@@ -7,7 +7,11 @@
  *
  * The promise on the outside is the rule inside: metadata only leaves the platform — the
  * question and the documentation of a few tables, never a row. The footer says where the
- * prompts of the endpoint that answers go, so the promise is visible, not claimed.
+ * prompts go, so the promise is visible, not claimed.
+ *
+ * `Auto` is the default (#2342): the backend ranks the ready endpoints by this catalog's
+ * evals and falls back once. The switcher offers every ready endpoint with its location,
+ * and the person's choice is kept in this browser.
  */
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
@@ -36,10 +40,20 @@ const STEP_MS = 900
 const EXAMPLES = 3
 const EMPTY =
   'Ask a question about the tables you can see. stardelt writes SQL, checks it as you, and never runs it without you.'
+/** Where this browser keeps the person's endpoint choice (`auto` when nothing is stored). */
+const ENDPOINT_KEY = 'stardelt.ask.endpoint'
+/** The stored choice; a browser that refuses storage keeps Auto. */
+function storedEndpoint(): string {
+  try {
+    return localStorage.getItem(ENDPOINT_KEY) ?? 'auto'
+  } catch {
+    return 'auto'
+  }
+}
 
-export default function AskPanel({ endpoint, onClose, initialQuestion, onInitialQuestion }: {
-  /** The ready endpoint Shell found; its model and location fill the footer. */
-  endpoint: ModelEndpoint
+export default function AskPanel({ endpoints, onClose, initialQuestion, onInitialQuestion }: {
+  /** Every ready endpoint Shell found, in name order; the switcher offers them all. */
+  endpoints: ModelEndpoint[]
   onClose: () => void
   /** A question handed in from outside the panel (the ⌘K row), asked once. */
   initialQuestion?: string
@@ -60,6 +74,10 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
   const inFlight = useRef(false)
   // React runs an effect twice in development; the question from outside is asked once.
   const askedInitial = useRef(false)
+
+  const [choice, setChoice] = useState(storedEndpoint)
+  // A stored name that is no longer ready is Auto: a name that cannot answer is refused.
+  const selected = choice !== 'auto' && endpoints.some(e => e.name === choice) ? choice : 'auto'
 
   const examples = useQuery({ queryKey: ['ask', 'examples'], queryFn: () => api.readTables() })
   const exampleTables = (examples.data?.tables ?? []).slice(0, EXAMPLES)
@@ -89,7 +107,8 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
     setStep(0)
     const ticker = setInterval(() => setStep(s => Math.min(s + 1, STEPS.length - 1)), STEP_MS)
     try {
-      const answer = await api.ask(q, undefined, followUp ?? undefined)
+      const endpoint = selected === 'auto' ? undefined : selected
+      const answer = await api.ask(q, undefined, followUp ?? undefined, endpoint)
       patchTurn(index, { answer })
       // The next question refines this answer, unless "New question" is pressed first.
       if (answer.sql !== null) {
@@ -151,7 +170,27 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
     return () => window.removeEventListener('keydown', onKey)
   }, [turns, sqlOfLastTurn, navigate, onClose])
 
-  const cloud = endpoint.location === 'cloud'
+  function chooseEndpoint(name: string) {
+    setChoice(name)
+    try {
+      localStorage.setItem(ENDPOINT_KEY, name)
+    } catch {
+      // A browser with no storage keeps the choice for this panel only.
+    }
+  }
+
+  // Where the prompts of the next question go: the chosen endpoint's location, or, on
+  // Auto, the strongest promise the ready endpoints keep.
+  const chosen = endpoints.find(e => e.name === selected)
+  const cloud = chosen ? chosen.location === 'cloud' : endpoints.some(e => e.location === 'cloud')
+  const promise =
+    selected === 'auto'
+      ? cloud
+        ? 'may use a cloud model · prompts may leave your cluster'
+        : 'on-premise · prompts stay here'
+      : cloud
+        ? 'cloud · prompts leave your cluster'
+        : 'on-premise · prompts stay here'
 
   // A question handed in by the ⌘K row: ask it once, then tell the shell it was taken.
   useEffect(() => {
@@ -172,6 +211,7 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
       answer: {
         endpoint: c.endpoint,
         model: c.model ?? '',
+        tried: [],
         sql: c.sql,
         sentence: c.sentence,
         tables: c.tables,
@@ -288,10 +328,22 @@ export default function AskPanel({ endpoint, onClose, initialQuestion, onInitial
         </div>
       )}
 
-      <div className="border-t border-border px-4 py-2 text-[11px]">
-        <span className={cloud ? 'text-warn' : 'text-text-mute'}>
-          {endpoint.model} · {cloud ? 'cloud · prompts leave your cluster' : 'on-premise · prompts stay here'}
-        </span>
+      <div className="border-t border-border px-4 py-2 text-[11px] flex flex-wrap items-center gap-x-2 gap-y-1">
+        <label htmlFor="ask-endpoint" className="text-text-mute">Model</label>
+        <select
+          id="ask-endpoint"
+          className="input w-auto max-w-[260px] py-0.5 text-[11px]"
+          value={selected}
+          onChange={e => chooseEndpoint(e.target.value)}
+        >
+          <option value="auto">{endpoints.some(e => e.location === 'cloud') ? 'Auto · may use a cloud model' : 'Auto'}</option>
+          {endpoints.map(e => (
+            <option key={e.name} value={e.name} title={e.name}>
+              {e.model} · {e.location === 'cloud' ? 'cloud' : 'on-premise'}
+            </option>
+          ))}
+        </select>
+        <span className={cloud ? 'text-warn' : 'text-text-mute'}>{promise}</span>
       </div>
     </aside>
   )
@@ -359,6 +411,10 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
       {answer && (
         <div className="card p-3 space-y-2 text-sm">
           <p>{answer.sentence}</p>
+          <p className="text-xs text-text-mute">
+            answered by {answer.model || answer.endpoint}
+            {(answer.tried?.length ?? 0) > 1 && ` after ${answer.tried[0]} failed`}
+          </p>
 
           {answer.sql !== null && (
             <>
