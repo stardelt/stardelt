@@ -8,3 +8,8 @@ scripts
 dist
 build
 target
+# A local sign-in or environment file must never enter an image (stardelt/stardelt#2401).
+**/credentials.json
+.env*
+.pytest_cache
+node_modules
