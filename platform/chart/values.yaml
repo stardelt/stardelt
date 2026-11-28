@@ -1613,7 +1613,7 @@ jupyterhub:
       # pulls. `make pin-images` only covers Deployments, so spawned single-user
       # pods are pinned here by hand: after a merge publishes a new image,
       # resolve `dev` again and bump the digest.
-      tag: "dev@sha256:9e7992751f129ebe3579bbf72b98f1b586210f9e03e3df82fa32f4f81ab0812c"
+      tag: "dev@sha256:3a1c025bdb7e70750ece157286b951f5edb628f87d174fdc868d6e1558fa38ea"
       pullSecrets:
         - name: ghcr-creds
     defaultUrl: /lab
