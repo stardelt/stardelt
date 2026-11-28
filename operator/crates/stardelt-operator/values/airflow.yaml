@@ -401,7 +401,7 @@ extraEnv: |
   - name: PIPELINE_NOTEBOOK_TRINO_CA_SECRET
     value: trino-ca
   - name: PIPELINE_NOTEBOOK_IMAGE
-    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:3099a1aa59e5b6699e51dba26fce065484923217674d1e39d53365a725d040a6
+    value: ghcr.io/stardelt/jupyter-singleuser:dev@sha256:2e4cac0acdda8393eb3c602c0cb37c747385a03477d06128436bd9ebd9aa3dd3
   # dbt tasks (#11): the same two variables as the platform's helm-values/airflow.yaml. The image
   # runs the demo dbt project in a pod of its own; the digest is the release's pin.
   - name: PIPELINE_DBT_IMAGE
