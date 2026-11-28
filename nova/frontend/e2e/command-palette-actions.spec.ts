@@ -88,11 +88,11 @@ test('a typed question is the last row, and Enter asks it in the panel', async (
   await expect(page).toHaveTitle('Overview · stardelt Nova')
   await page.keyboard.press('Control+k')
   const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
-  // An empty query keeps the Ask row away: it would shadow every page match.
-  await expect(page.getByRole('dialog').getByRole('option', { name: /^Ask: / })).toHaveCount(0)
+  // An empty query keeps the Agent row away: it would shadow every page match.
+  await expect(page.getByRole('dialog').getByRole('option', { name: /^Agent: / })).toHaveCount(0)
   await input.fill('how many orders')
   const options = page.getByRole('dialog').getByRole('option')
-  await expect(options.last()).toHaveText(/Ask: how many orders/)
+  await expect(options.last()).toHaveText(/Agent: how many orders/)
   // Nothing else matches the typed words, so Enter takes the last—and only—row.
   await expect(options).toHaveCount(1)
   await input.press('Enter')

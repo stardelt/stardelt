@@ -5,12 +5,12 @@
 | `catalog_docs.rs` ⚠ | Catalog | 2702 | 2066 | 6 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), PostgreSQL state store, Trino |
 | `auth.rs` ⚠ | Core & identity | 2544 | 2316 | 4 | OIDC provider, PostgreSQL state store |
 | `notebooks.rs` ⚠ | Notebooks & compute | 2277 | 2163 | 6 | S3 (SeaweedFS) |
+| `ask.rs` ⚠ | AI (Ask, MCP, models) | 1985 | 1142 | 5 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
-| `ask.rs` ⚠ | AI (Ask, MCP, models) | 1828 | 913 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `query_log_api.rs` ⚠ | SQL & query log | 1729 | 413 | 7 | Kubernetes API (CRDs), PostgreSQL state store |
 | `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1644 | 1527 | 4 | Airflow REST, Trino |
 | `superset.rs` ⚠ | Pipelines & delivery | 1579 | 1372 | 5 | Superset |
-| `main.rs` ⚠ | Core & identity | 1533 | 1620 | 3 | - |
+| `main.rs` ⚠ | Core & identity | 1538 | 1620 | 3 | - |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
 | `deployments.rs` | Pipelines & delivery | 1179 | 829 | 5 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
@@ -33,7 +33,7 @@
 | `audit.rs` | Core & identity | 601 | 82 | 0 | - |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
-| `openapi.rs` | Core & identity | 502 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 505 | 688 | 1 | - |
 | `superset_archive.rs` | Pipelines & delivery | 477 | 550 | 0 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
@@ -76,4 +76,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (75 files)** | | **55395** | **47993** | **177** | |
+| **total (75 files)** | | **55560** | **48222** | **179** | |

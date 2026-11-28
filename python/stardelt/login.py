@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import time
 from pathlib import Path
 
@@ -50,6 +51,17 @@ def load(environ):
     except (OSError, ValueError):
         return None
     return creds if isinstance(creds, dict) and creds.get("access_token") else None
+
+
+def _keep(environ, creds):
+    """Store renewed tokens; a directory that cannot be written must not end this run."""
+    try:
+        save(environ, creds)
+    except OSError:
+        print(
+            "stardelt: the sign-in could not be saved (read-only config directory); it is used for this run only",
+            file=sys.stderr,
+        )
 
 
 def save(environ, creds):
@@ -301,7 +313,7 @@ def fresh_token(environ, session, clock=time.time):
                 raise LoginError(f"the CI token is gone: set {name} for this step")
             creds["access_token"] = token
             creds["expires_at"] = int(clock() + 240)
-            save(environ, creds)
+            _keep(environ, creds)
             return token
         assertion = environ.get(name, "")
         if not assertion:
@@ -309,7 +321,7 @@ def fresh_token(environ, session, clock=time.time):
         renewed = federated_login(session, creds["issuer"], creds["client_id"], assertion, clock)
         renewed["federated"] = federated
         renewed["host"] = creds.get("host")
-        save(environ, renewed)
+        _keep(environ, renewed)
         return renewed["access_token"]
     if not creds.get("refresh_token"):
         raise LoginError("the sign-in has expired: run `stardelt login` again")
@@ -322,5 +334,5 @@ def fresh_token(environ, session, clock=time.time):
         raise LoginError("the sign-in has ended: run `stardelt login` again")
     renewed = _creds(creds["issuer"], creds["client_id"], creds["token_endpoint"], body, clock(), creds)
     renewed["host"] = creds.get("host")
-    save(environ, renewed)
+    _keep(environ, renewed)
     return renewed["access_token"]

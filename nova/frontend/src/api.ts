@@ -453,6 +453,8 @@ export type AskConversation = {
   explain: string
   error: string | null
   createdAt: string
+  /** Kept: a pinned conversation is never pruned and is listed first. */
+  pinned: boolean
 }
 
 /** The month's tokens for one group and endpoint (`GET /api/admin/model-usage`). */
@@ -1736,6 +1738,11 @@ export const api = {
   },
   /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */
   askHistory:   ()                                => jget<AskConversation[]>('/api/ask/history'),
+  /** Keep one of the caller's own conversations for good, or let it fall off; the row back. */
+  askHistoryPin: (id: number, pinned: boolean) =>
+    jput<AskConversation>(`/api/ask/history/${id}/pin`, { pinned }),
+  /** Remove one of the caller's own conversations; a foreign or missing id is a 404. */
+  askHistoryDelete: (id: number) => jdel(`/api/ask/history/${id}`),
   /** 👍 or 👎 on one recorded call; the caller's own row only. */
   askFeedback:  (callId: number, vote: 'up' | 'down') =>
     jpostNoContent('/api/ask/feedback', { callId, vote }),

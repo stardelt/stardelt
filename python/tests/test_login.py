@@ -196,6 +196,20 @@ def test_a_token_about_to_expire_is_renewed_and_the_new_one_is_kept(tmp_path):
     assert (kept["access_token"], kept["refresh_token"], kept["expires_at"], kept["host"]) == ("renewed", "rt-old", 1300, "https://nova.example")
 
 
+def test_a_renewal_that_cannot_be_saved_still_returns_the_new_token(tmp_path, monkeypatch, capsys):
+    environ = {"HOME": str(tmp_path)}
+    stored(tmp_path, expires_at=1000 + login.SKEW - 1)
+    session = FakeSession(FakeResponse(200, {"access_token": "renewed", "expires_in": 300}))
+
+    def read_only(*args, **kwargs):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(login.os, "replace", read_only)
+    assert login.fresh_token(environ, session, clock=lambda: 1000) == "renewed"
+    assert "the sign-in could not be saved" in capsys.readouterr().err
+    assert login.load(environ)["access_token"] == "stored-token"
+
+
 def test_a_refused_renewal_and_a_missing_refresh_token_ask_for_a_new_login(tmp_path):
     stored(tmp_path, expires_at=0)
     with pytest.raises(login.LoginError, match="stardelt login"):

@@ -142,13 +142,13 @@ test('each group row shows its share of the monthly quota, or says there is none
   await expect(page.getByText('no limit')).toBeVisible()
 })
 
-test('the calls table says Ask, not ask', async ({ page }) => {
+test('the calls table says Agent, not ask', async ({ page }) => {
   await dark(page, 1440)
   await stub(page)
 
   await page.goto('/admin/models')
   const calls = page.getByRole('table', { name: 'The last model calls, newest first' })
-  await expect(calls.getByRole('cell', { name: 'Ask', exact: true })).toBeVisible()
+  await expect(calls.getByRole('cell', { name: 'Agent', exact: true })).toBeVisible()
   await expect(calls.getByRole('cell', { name: 'ask', exact: true })).toHaveCount(0)
 })
 
