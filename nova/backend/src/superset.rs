@@ -867,7 +867,7 @@ fn zip_response(bytes: Vec<u8>, id: i64) -> Response {
 
 /// `GET /api/dashboards/{id}/export`: the ZIP of one dashboard for a bundle author. A member
 /// of the bundle's owner group may call it (the maintainer's decision on #115 a/3c); a deploy
-/// principal is confined to its own group by `deploy_refusal`. `databases/` is dropped
+/// principal is confined to its own group by `dashboards_refusal`. `databases/` is dropped
 /// server-side, so the target's connection URI never leaves Nova.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -878,16 +878,26 @@ pub struct DashboardExportQuery {
     pub owner_group: String,
 }
 
-/// Why this caller may not export a bundle's dashboard, or `None` when it may. A deploy
-/// principal is confined to the stage its client names, which here is its own stage, so the
-/// `deploy_refusal` call is the import route's rule with the export verb.
-pub(crate) fn export_refusal(
+/// Why `caller` may not read this bundle's dashboards, or `None` when it may. `verb` is
+/// `list` or `export`. The routes have no target parameter, so a deploy principal is already
+/// confined to its own stage; it is refused another group's dashboards.
+pub(crate) fn dashboards_refusal(
     identity: &crate::auth::Identity,
     owner_group: &str,
     client_id: Option<&str>,
+    verb: &str,
 ) -> Option<String> {
-    let target = crate::auth::deploy_stage(client_id).unwrap_or("");
-    crate::deployments::deploy_refusal(identity, owner_group, target, client_id, "export")
+    let member = identity.groups.iter().any(|g| g == owner_group);
+    match crate::auth::deploy_stage(client_id) {
+        Some(_) if !member => Some(format!(
+            "a deploy principal may only {verb} its own group's dashboards"
+        )),
+        Some(_) => None,
+        None if crate::deployments::may_record(identity, owner_group) => None,
+        None => Some(format!(
+            "only a member of the bundle's owner group may {verb} its dashboards"
+        )),
+    }
 }
 
 /// Why `dashboard` may not be removed for `bundle` by `owner_group`, or `None` when it may.
@@ -1015,7 +1025,7 @@ pub struct DashboardDeleteQuery {
 /// dashboard's `certified_by` must be `stardelt bundle <bundle>` and its
 /// `certification_details` must end with ` by <ownerGroup>`; a dashboard without the stamp,
 /// or one another group imported, is refused and stays (#115 decision 6). The caller's rule
-/// is the export's owner-group rule.
+/// is the dashboards owner-group rule.
 ///
 /// 204 on success; 403 for a non-member or an unstamped dashboard; 404 when Superset has
 /// no such dashboard; 502 when Superset refuses; 503 without a service user.
@@ -1066,9 +1076,12 @@ pub async fn delete_dashboard(
             return (StatusCode::BAD_GATEWAY, Json(json!({ "error": sentence }))).into_response();
         }
     };
-    if let Some(sentence) =
-        export_refusal(&identity, &query.owner_group, caller.client_id.as_deref())
-    {
+    if let Some(sentence) = dashboards_refusal(
+        &identity,
+        &query.owner_group,
+        caller.client_id.as_deref(),
+        "remove",
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {
@@ -1164,7 +1177,7 @@ fn stamp_parts(details: &str) -> (String, String) {
         (status = 200, description = "The dashboards this bundle imported, in Superset's order", body = Vec<DashboardImported>),
         (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal asks for another group's dashboards", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
         (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
     )
@@ -1194,9 +1207,12 @@ pub async fn list_dashboards(
             return (StatusCode::BAD_GATEWAY, Json(json!({ "error": sentence }))).into_response();
         }
     };
-    if let Some(sentence) =
-        export_refusal(&identity, &query.owner_group, caller.client_id.as_deref())
-    {
+    if let Some(sentence) = dashboards_refusal(
+        &identity,
+        &query.owner_group,
+        caller.client_id.as_deref(),
+        "list",
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {
@@ -1240,7 +1256,7 @@ pub async fn list_dashboards(
     path = "/api/dashboards/{id}/export",
     tag = "public",
     operation_id = "dashboards_export",
-    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export for its own stage. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI.",
+    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export its own group's dashboards. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI.",
     params(
         ("id" = i64, Path, description = "Superset's numeric dashboard id"),
         ("bundle" = String, Query, description = "The bundle that owns the dashboard"),
@@ -1250,7 +1266,7 @@ pub async fn list_dashboards(
         (status = 200, description = "The ZIP archive Superset exports for one dashboard, without `databases/`", body = String, content_type = "application/zip"),
         (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal names another stage, or the dashboard carries another bundle's or group's stamp", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal asks for another group's dashboards, or the dashboard carries another bundle's or group's stamp", body = crate::openapi::ErrorResponse),
         (status = 404, description = "Superset has no such dashboard", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
         (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
@@ -1282,9 +1298,12 @@ pub async fn export_dashboard_for_bundle(
             return (StatusCode::BAD_GATEWAY, Json(json!({ "error": sentence }))).into_response();
         }
     };
-    if let Some(sentence) =
-        export_refusal(&identity, &query.owner_group, caller.client_id.as_deref())
-    {
+    if let Some(sentence) = dashboards_refusal(
+        &identity,
+        &query.owner_group,
+        caller.client_id.as_deref(),
+        "export",
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
     }
     let Some(user) = state.superset.as_ref() else {
@@ -1872,29 +1891,69 @@ mod tests {
     #[test]
     fn an_export_is_refused_outside_the_bundle_owner_group() {
         assert_eq!(
-            export_refusal(&person(&["analytics"], false), "analytics", None),
+            dashboards_refusal(&person(&["analytics"], false), "analytics", None, "export"),
             None
         );
-        let refused = export_refusal(&person(&["visitors"], false), "analytics", None)
-            .expect("a non-member is refused");
+        let refused =
+            dashboards_refusal(&person(&["visitors"], false), "analytics", None, "export")
+                .expect("a non-member is refused");
         assert!(refused.contains("only a member"), "{refused}");
-        assert_eq!(export_refusal(&person(&[], true), "analytics", None), None);
         assert_eq!(
-            export_refusal(
+            dashboards_refusal(&person(&[], true), "analytics", None, "export"),
+            None
+        );
+        assert_eq!(
+            dashboards_refusal(
                 &person(&["analytics"], false),
                 "analytics",
-                Some("stardelt-deploy-prod")
+                Some("stardelt-deploy-prod"),
+                "export"
             ),
             None,
             "a deploy principal of the group may export"
         );
-        let refused = export_refusal(
+        let refused = dashboards_refusal(
             &person(&[], false),
             "analytics",
             Some("stardelt-deploy-prod"),
+            "export",
         )
         .expect("a group-less deploy principal is refused");
         assert!(refused.contains("its own group"), "{refused}");
+    }
+
+    #[test]
+    fn test_the_list_route_refuses_in_its_own_words() {
+        assert_eq!(
+            dashboards_refusal(&person(&["visitors"], false), "analytics", None, "list"),
+            Some("only a member of the bundle's owner group may list its dashboards".to_string())
+        );
+        assert_eq!(
+            dashboards_refusal(
+                &person(&[], false),
+                "analytics",
+                Some("stardelt-deploy-prod"),
+                "list"
+            ),
+            Some("a deploy principal may only list its own group's dashboards".to_string())
+        );
+        assert_eq!(
+            dashboards_refusal(&person(&["analytics"], false), "analytics", None, "list"),
+            None
+        );
+        assert_eq!(
+            dashboards_refusal(&person(&[], true), "analytics", None, "list"),
+            None
+        );
+        assert_eq!(
+            dashboards_refusal(
+                &person(&["analytics"], false),
+                "analytics",
+                Some("stardelt-deploy-prod"),
+                "list"
+            ),
+            None
+        );
     }
 
     /// The members of a ZIP as `(name, text)`, in archive order.
