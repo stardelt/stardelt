@@ -102,6 +102,22 @@ def test_a_folder_that_holds_databases_is_refused(tmp_path):
     assert nova.uploads == []
 
 
+def test_a_folder_that_holds_a_nested_databases_folder_is_a_problem(tmp_path):
+    directory = tmp_path / "bundle"
+    folder = directory / "dashboards" / "shop"
+    (folder / "dashboards").mkdir(parents=True)
+    (folder / "dashboards" / "shop.yaml").write_text("dashboard_title: shop\n")
+    (folder / "metadata.yaml").write_text("version: 1.0.0\n")
+    (folder / "dashboard_export_20261128T035725" / "databases").mkdir(parents=True)
+    (folder / "dashboard_export_20261128T035725" / "databases" / "Trino_Gold.yaml").write_text("sqlalchemy_uri: x\n")
+    (directory / "bundle.yaml").write_text(MANIFEST + "dashboards:\n  - dashboards/shop\n", encoding="utf-8")
+
+    problems, rows = bundle.import_dashboards(Nova({}), directory, "prod")
+
+    assert problems == [("dashboards/shop", "holds databases/; a bundle never stores the connection")]
+    assert rows == []
+
+
 def test_a_dashboards_entry_outside_the_bundle_is_a_problem(tmp_path):
     directory = make(tmp_path)
     (directory / "bundle.yaml").write_text(MANIFEST + "\ndashboards:\n  - ../shop\n", encoding="utf-8")

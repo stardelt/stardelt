@@ -1,10 +1,11 @@
 """A Superset dashboard as the files of a bundle: the unzipped export, without the connection.
 
 A Superset export is a ZIP with ``metadata.yaml``, ``dashboards/``, ``charts/``, ``datasets/`` and
-``databases/``. A bundle keeps the unzipped export in Git, and never ``databases/``: that folder
-carries the target's connection URI. So this module writes every member of the archive except the
-``databases/`` folder, and never ``extractall``: it refuses an unsafe member name before it writes
-anything.
+``databases/``, all wrapped in one ``dashboard_export_<timestamp>/`` folder. A bundle keeps the
+unzipped export in Git and never ``databases/``: that folder carries the target's connection URI.
+So this module writes every member of the archive without the single wrapper folder and drops a
+``databases`` segment anywhere, and never ``extractall``: it refuses an unsafe member name before it
+writes anything.
 
 The caller's own Nova sign-in is the authority for the download; no token is stored in these
 files.
@@ -27,6 +28,38 @@ MAX_UPLOAD_BYTES = 16 * 1024 * 1024  # the route's own limit (413 above it)
 
 class ExportError(RuntimeError):
     """The archive is not something a bundle can store. The message is a sentence for the user."""
+
+
+def _top(members):
+    """The folder Superset wraps an export in (``dashboard_export_*/``), or "".
+
+    Only a shared first segment that holds ``metadata.yaml`` is a wrapper: an archive of one
+    folder named ``databases/`` must not have it stripped, or its folder would be written back.
+    """
+    shared = None
+    names = set()
+    for member in members:
+        if member.is_dir():
+            continue
+        names.add(member.filename)
+        parts = pathlib.PurePosixPath(member.filename).parts
+        if len(parts) < 2:
+            return ""
+        if shared is None:
+            shared = parts[0]
+        elif shared != parts[0]:
+            return ""
+    if shared and f"{shared}/metadata.yaml" in names:
+        return shared
+    return ""
+
+
+def _relative(member, top):
+    """``member``'s path without ``top/``, the single folder Superset wraps an export in."""
+    name = pathlib.PurePosixPath(member.filename)
+    if top and name.parts and name.parts[0] == top:
+        return pathlib.PurePosixPath(*name.parts[1:])
+    return name
 
 
 def _target(out, name):
@@ -81,22 +114,24 @@ def export(nova, dashboard_id, out, bundle, owner_group):
         raise ExportError("Nova did not answer a Superset export (not a ZIP archive)") from None
 
     out = pathlib.Path(out)
+    top = _top(bundle.infolist())
     members = []
     with bundle:
         for member in bundle.infolist():
             if member.is_dir():
                 continue
-            if pathlib.PurePosixPath(member.filename).parts[0] == NAME:
+            relative = _relative(member, top)
+            if NAME in pathlib.PurePosixPath(member.filename).parts or NAME in relative.parts:
                 continue
-            _target(out, member.filename)
-            members.append(member)
+            _target(out, relative.as_posix())
+            members.append((member, relative))
         out.mkdir(parents=True, exist_ok=True)
-        for member in members:
-            target = out / member.filename
+        for member, relative in members:
+            target = out / relative.as_posix()
             target.parent.mkdir(parents=True, exist_ok=True)
             with bundle.open(member) as source, target.open("wb") as sink:
                 shutil.copyfileobj(source, sink, CHUNK)
-    written = sorted(str(pathlib.PurePosixPath(member.filename)) for member in members)
+    written = sorted(relative.as_posix() for _member, relative in members)
     if not written:
         raise ExportError(f"the archive has no dashboards/ folder; is {number} a dashboard?")
     return out, written

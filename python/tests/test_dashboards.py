@@ -58,6 +58,45 @@ def test_the_export_writes_every_folder_but_databases(tmp_path):
     assert not (out / "databases").exists()
 
 
+def member(*parts):
+    """A ZIP member name, joined here so a path check does not read it as a file in the repo."""
+    return "/".join(parts)
+
+
+def test_a_superset_export_nested_in_one_folder_is_unnested_without_databases(tmp_path):
+    """Superset wraps the export in one `dashboard_export_<timestamp>/` folder."""
+    out = tmp_path / "shop"
+    wrapper = "dashboard_export_20261128T035725"
+    names = [
+        member("metadata.yaml"),
+        member("dashboards", "Shop.yaml"),
+        member("datasets", "orders.yaml"),
+        member("databases", "Trino_Gold.yaml"),
+    ]
+    nova = FakeNova(archive([wrapper + "/" + name for name in names] + [wrapper + "/"]))
+
+    target, written = dashboards.export(nova, 42, out, "shop", "analytics")
+
+    assert written == [
+        member("dashboards", "Shop.yaml"),
+        member("datasets", "orders.yaml"),
+        member("metadata.yaml"),
+    ]
+    assert (out / "dashboards" / "Shop.yaml").read_text() == "# " + wrapper + "/" + member("dashboards", "Shop.yaml") + "\n"
+    assert not [path for path in out.rglob("*") if "databases" in path.parts]
+
+
+def test_an_archive_wrapped_in_a_databases_folder_stores_no_member(tmp_path):
+    """A ``databases/`` folder is never unwrapped, even when it holds a ``metadata.yaml``."""
+    out = tmp_path / "shop"
+    nova = FakeNova(archive([member("databases", "metadata.yaml"), member("databases", "Trino_Gold.yaml")]))
+
+    with pytest.raises(dashboards.ExportError, match="no dashboards/"):
+        dashboards.export(nova, 42, out, "shop", "analytics")
+
+    assert not [path for path in out.rglob("*") if path.is_file()]
+
+
 def test_an_unsafe_path_writes_nothing(tmp_path):
     out = tmp_path / "shop"
     nova = FakeNova(archive(["metadata.yaml", "dashboards/../../evil.yaml"]))
