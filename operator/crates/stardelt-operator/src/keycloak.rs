@@ -786,12 +786,20 @@ mod tests {
             .iter()
             .map(|s| s["name"].as_str().expect("a scope name"))
             .collect();
-        assert_eq!(
-            realm_scopes,
-            ["kc-admin-api", "stardelt:read", "stardelt:write"]
-                .into_iter()
-                .collect()
-        );
+        // The realm also ships Keycloak's built-in OIDC scopes (profile, email, …): an import
+        // that names `clientScopes` gets no others.
+        for custom in [
+            "kc-admin-api",
+            "stardelt:read",
+            "stardelt:write",
+            "profile",
+            "basic",
+        ] {
+            assert!(
+                realm_scopes.contains(custom),
+                "{custom} is not a realm client scope"
+            );
+        }
     }
 
     /// A DeployStage's client authenticates with `clientAuthenticatorType=federated-jwt` and
