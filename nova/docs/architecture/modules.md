@@ -36,7 +36,7 @@
 | `openapi.rs` | Core & identity | 498 | 688 | 1 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
-| `superset_archive.rs` | Pipelines & delivery | 419 | 348 | 0 | - |
+| `superset_archive.rs` | Pipelines & delivery | 428 | 411 | 0 | - |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
 | `metric_definitions.rs` | Catalog | 398 | 69 | 3 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
@@ -73,4 +73,4 @@
 | `version.rs` | Core & identity | 53 | 28 | 1 | - |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (72 files)** | | **53299** | **46460** | **175** | |
+| **total (72 files)** | | **53308** | **46523** | **175** | |

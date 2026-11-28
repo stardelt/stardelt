@@ -22,7 +22,9 @@
 //!
 //! - The bundle folder is zipped as-is: members sit at the root or under one top-level
 //!   directory (`shop-export/…`). [`top`] is that shared first segment when every member has
-//!   one, otherwise empty. The rewritten archive keeps the same layout.
+//!   one, otherwise empty. The rewritten archive always has one top-level folder: the upload's
+//!   own when it has one, else [`WRAPPER`] — Superset's v1 importer strips the first path
+//!   segment of every member (#2307).
 //! - A dataset's target database is `Trino <catalog>`; its file is
 //!   `databases/Trino_<catalog>.yaml` (the export's own naming: `database_name` with spaces →
 //!   `_`). A catalog with a character other than `[A-Za-z0-9_-]` after replacing spaces with
@@ -328,6 +330,11 @@ pub fn without_databases(archive: &[u8]) -> Result<Vec<u8>, ArchiveError> {
     Ok(written)
 }
 
+/// The single top-level folder every archive Nova sends to Superset's importer has. Superset's
+/// v1 importer strips the first path segment of every member, so a bundle export without a
+/// wrapper loses `metadata.yaml` and fails (#2307).
+const WRAPPER: &str = "dashboard_export_import";
+
 /// Rewrites the export for the target: the target's own database files in, every dataset
 /// pointing at them, and the provenance stamp on every dashboard.
 pub fn rewrite(
@@ -336,14 +343,20 @@ pub fn rewrite(
     stamp: &Stamp,
 ) -> Result<Vec<u8>, ArchiveError> {
     let members = members(archive)?;
-    let top = top(&members);
+    let found = top(&members);
+    // Superset strips one path segment from every member; give it one even when the upload has none.
+    let top = if found.is_empty() {
+        WRAPPER.to_string()
+    } else {
+        found
+    };
 
     let mut kept: Vec<(String, Vec<u8>)> = Vec::with_capacity(members.len() + databases.len());
     let mut used: BTreeSet<String> = BTreeSet::new();
     let mut rewritten_datasets = 0usize;
 
-    for (name, bytes) in members {
-        let relative = strip_top(&name, &top).to_string();
+    for (_name, bytes) in members {
+        let relative = strip_top(&_name, &top).to_string();
         // The database file is always the target's, never the bundle's.
         if relative.starts_with("databases/") {
             continue;
@@ -359,7 +372,7 @@ pub fn rewrite(
             let text = set_value(&text, "database_uuid", &uuid);
             used.insert(stem);
             rewritten_datasets += 1;
-            kept.push((name, text.into_bytes()));
+            kept.push((format!("{top}/{relative}"), text.into_bytes()));
             continue;
         }
         if relative.starts_with("dashboards/") && relative.ends_with(".yaml") {
@@ -377,10 +390,10 @@ pub fn rewrite(
                     stamp.target, stamp.commit, stamp.owner_group
                 ),
             );
-            kept.push((name, text.into_bytes()));
+            kept.push((format!("{top}/{relative}"), text.into_bytes()));
             continue;
         }
-        kept.push((name, bytes));
+        kept.push((format!("{top}/{relative}"), bytes));
     }
 
     if rewritten_datasets == 0 {
@@ -402,11 +415,7 @@ pub fn rewrite(
             if !used.contains(stem) {
                 continue;
             }
-            let name = if top.is_empty() {
-                format!("databases/{stem}.yaml")
-            } else {
-                format!("{top}/databases/{stem}.yaml")
-            };
+            let name = format!("{top}/databases/{stem}.yaml");
             writer
                 .start_file(name, options)
                 .map_err(|_| ArchiveError::Write)?;
@@ -508,6 +517,69 @@ mod tests {
             .filter(|(name, _)| name.ends_with(suffix))
             .map(|(_, bytes)| std::str::from_utf8(bytes).expect("utf-8 member"))
             .collect()
+    }
+
+    #[test]
+    fn a_wrapperless_archive_is_wrapped() {
+        let files = fixture_files()
+            .into_iter()
+            .map(|(name, text)| (name, text.into_bytes()))
+            .collect::<Vec<_>>();
+        let archive = zip_files(&files);
+        let mut databases = BTreeMap::new();
+        databases.insert(
+            "Trino_Gold".to_string(),
+            target_database("00000000-0000-4000-8000-000000000001"),
+        );
+
+        let rewritten = rewrite(&archive, &databases, &stamp()).expect("rewrite");
+        let written = members(&rewritten).expect("rewritten members");
+        let prefix = format!("{WRAPPER}/");
+        for (name, _) in &written {
+            assert!(name.starts_with(&prefix), "{name} is not under the wrapper");
+        }
+
+        let names: Vec<String> = written.iter().map(|(name, _)| name.clone()).collect();
+        assert!(
+            names.contains(&format!("{WRAPPER}/databases/Trino_Gold.yaml")),
+            "the target database file is not under the wrapper: {names:?}"
+        );
+
+        let wrapped = rewrite(&fixture(), &databases, &stamp()).expect("rewrite");
+        let mut expected: Vec<String> = members(&wrapped)
+            .expect("wrapped members")
+            .into_iter()
+            .map(|(name, _)| name.trim_start_matches("shop-export/").to_string())
+            .collect();
+        expected.sort();
+        let mut got: Vec<String> = names
+            .iter()
+            .map(|name| name.trim_start_matches(prefix.as_str()).to_string())
+            .collect();
+        got.sort();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn the_wrapper_of_a_wrapped_export_is_kept() {
+        let mut databases = BTreeMap::new();
+        databases.insert(
+            "Trino_Gold".to_string(),
+            target_database("00000000-0000-4000-8000-000000000001"),
+        );
+        let rewritten = rewrite(&fixture(), &databases, &stamp()).expect("rewrite");
+        let members = members(&rewritten).expect("rewritten members");
+        let wrapper = format!("{WRAPPER}/");
+        for (name, _) in &members {
+            assert!(
+                name.starts_with("shop-export/"),
+                "{name} left the upload's own wrapper"
+            );
+            assert!(
+                !name.starts_with(&wrapper),
+                "{name} was put under the fallback wrapper"
+            );
+        }
     }
 
     #[test]
