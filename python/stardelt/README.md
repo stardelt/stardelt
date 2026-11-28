@@ -140,12 +140,12 @@ Patterns that are fine on a laptop fill that driver for everyone, so:
 
 | Instead of | Do | Why |
 |---|---|---|
-| `df.toPandas()` / `df.collect()` on a big table | `df.limit(10_000).toPandas()`, aggregate first, or write the result with `df.writeTo("<catalog>.<schema>.<table>").createOrReplace()` and read it with SQL | the whole result lands in the 1 GiB driver heap; above 512 MiB the call fails |
+| `df.toPandas()`/`df.collect()` on a big table | `df.limit(10_000).toPandas()`, aggregate first, or `df.writeTo("<catalog>.<schema>.<table>").createOrReplace()` and read it with SQL | the whole result lands in the 1 GiB driver heap; above 512 MiB the call fails |
 | `spark.createDataFrame(big_pandas_or_list)` | write the data to a table once (`writeTo`), then `spark.table(...)` | local data is shipped inside every task of every job |
 | a Python loop that runs one job per item | one query with a join or `groupBy`, or `df.repartition(n)` plus `mapInPandas` | every job adds a broadcast and a plan to the driver |
 | `df.join(small_df, ...)` repeated in a loop | `from pyspark.sql.functions import broadcast`; `df.join(broadcast(small_df), ...)` once, outside the loop | one broadcast instead of one per iteration |
-| `df.cache()` never released | `df.unpersist()` when done; cache only what several actions reuse | cached blocks occupy executor memory (1 GiB each) and are not freed by themselves |
-| `pd.read_csv(chunksize=250_000)` then `spark.createDataFrame(chunk)` + `saveAsTable(append)` per chunk | chunks of at most 20_000 rows (about 1 MiB per task), write finished chunk numbers to a small table so a restart can resume, and see stardelt/stardelt#52 for the planned loader | measured 2026-10-21: 250_000 rows = tasks of 11 MiB, 305 warnings in 3 h, driver OOMKilled |
+| `df.cache()` never released | `df.unpersist()` when done; cache only what several actions reuse | cached blocks occupy executor memory, 1 GiB each, and are not freed by themselves |
+| `pd.read_csv(chunksize=250_000)` then `spark.createDataFrame(chunk)` + `saveAsTable(append)` per chunk | chunks of at most 20_000 rows (about 1 MiB per task), finished chunk numbers in a small table so a restart can resume, and see stardelt/stardelt#52 for the planned loader | measured 2026-10-21: 250_000 rows = tasks of 11 MiB, 305 warnings in 3 h, driver OOMKilled |
 | `df.count()` repeated to "check" | run it once, keep the number | each action is a job |
 
 Executors: at most 2 x 1 core x 1 GiB today; sizes are designed in platform#375. If a call
