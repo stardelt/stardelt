@@ -534,7 +534,12 @@ mod tests {
     #[test]
     fn a_dataset_without_a_catalog_or_a_folder_is_named() {
         let name = member(&["datasets", "kpis.yaml"]);
-        let archive = zip_files(&[(name.clone(), b"catalog:\n".to_vec())]);
+        // A root-level member keeps `top` empty; a lone `datasets/kpis.yaml` would have
+        // `datasets` read as a wrapper folder and be skipped as "no datasets".
+        let archive = zip_files(&[
+            (member(&["metadata.yaml"]), b"x".to_vec()),
+            (name.clone(), b"catalog:\n".to_vec()),
+        ]);
         assert_eq!(
             dataset_databases(&archive),
             Err(ArchiveError::NoCatalog(name))
