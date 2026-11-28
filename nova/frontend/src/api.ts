@@ -819,6 +819,11 @@ export type StreamView = {
   /** When Spark last submitted the application (RFC 3339); null until the operator reports it. */
   last_submitted_at: string | null
   stopped: boolean
+  /**
+   * `spec.deletionPolicy`, defaulted: `Retain` keeps the source topic and its messages when
+   * this stream is deleted; `Delete` deletes the topic too (D18).
+   */
+  deletion_policy: string
   source_connection: string
   source_topic: string
   sink_catalog: string

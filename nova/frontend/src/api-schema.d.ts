@@ -2332,7 +2332,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`. */
+        /** @description The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `deletionPolicy` is `Retain` or `Delete`: `Retain` keeps the source topic and its messages when the stream is deleted. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`. */
         get: operations["streams_list"];
         put?: never;
         post?: never;
@@ -2370,7 +2370,7 @@ export interface paths {
         /** @description Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. `provenance` (`bundle`, `target`, optional `revision` and `repository`) is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy, a bundle stamp outside a pipeline's provenance rules — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 "the group of an existing stream cannot change"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`. */
         put: operations["streams_put"];
         post?: never;
-        /** @description Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; a topic read through a `Connection`, or one another `KafkaTopic` manages, stays. Answers 204 when the object is gone, including when it was already gone. */
+        /** @description Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) follows `spec.deletionPolicy`: with `Delete` the topic is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; with `Retain` (the default) the `KafkaTopic` carries no owner reference and stays, with every message, still managed. A topic read through a `Connection`, or one another `KafkaTopic` manages, always stays. Answers 204 when the object is gone, including when it was already gone. */
         delete: operations["streams_delete"];
         options?: never;
         head?: never;
@@ -5366,6 +5366,12 @@ export interface components {
              *     the operator reports it (operator#336).
              */
             attempts?: number | null;
+            /**
+             * @description `spec.deletionPolicy`, defaulted: `Retain` keeps the source topic and its messages when
+             *     this stream is deleted; `Delete` deletes the topic too (D18). Only a topic the operator
+             *     created on the internal bus is affected.
+             */
+            deletion_policy: string;
             deployment?: components["schemas"]["DeploymentView"] | null;
             last_error?: string | null;
             /** @description When Spark last submitted the application, RFC 3339 (`status.lastSubmittedAt`). */

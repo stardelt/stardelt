@@ -46,6 +46,10 @@ pub struct StreamView {
     /// When Spark last submitted the application, RFC 3339 (`status.lastSubmittedAt`).
     pub last_submitted_at: Option<String>,
     pub stopped: bool,
+    /// `spec.deletionPolicy`, defaulted: `Retain` keeps the source topic and its messages when
+    /// this stream is deleted; `Delete` deletes the topic too (D18). Only a topic the operator
+    /// created on the internal bus is affected.
+    pub deletion_policy: String,
     pub source_connection: String,
     pub source_topic: String,
     pub sink_catalog: String,
@@ -175,6 +179,11 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
             .get("stopped")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        deletion_policy: spec
+            .get("deletionPolicy")
+            .and_then(Value::as_str)
+            .unwrap_or("Retain")
+            .to_string(),
         source_connection: text(spec.pointer("/source/connectionRef")),
         source_topic: text(spec.pointer("/source/topic")),
         sink_catalog: text(spec.pointer("/sink/catalog")),
@@ -520,7 +529,7 @@ fn not_found() -> Fail {
     operation_id = "streams_list",
     path = "/api/streams",
     tag = "public",
-    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `stopped` is `spec.stopped`. `deletionPolicy` is `Retain` or `Delete`: `Retain` keeps the source topic and its messages when the stream is deleted. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's streams, sorted by namespace and name", body = StreamsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -915,7 +924,7 @@ pub(crate) async fn put(
     operation_id = "streams_delete",
     path = "/api/streams/{namespace}/{name}",
     tag = "public",
-    description = "Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; a topic read through a `Connection`, or one another `KafkaTopic` manages, stays. Answers 204 when the object is gone, including when it was already gone.",
+    description = "Delete one StreamApp that the caller's group owns. A `KafkaTopic` the operator created for the stream (platform bus, no `connectionRef`) follows `spec.deletionPolicy`: with `Delete` the topic is owned by the `StreamApp`, so Kubernetes deletes it and the topic operator deletes the topic with every message in it; with `Retain` (the default) the `KafkaTopic` carries no owner reference and stays, with every message, still managed. A topic read through a `Connection`, or one another `KafkaTopic` manages, always stays. Answers 204 when the object is gone, including when it was already gone.",
     params(
         ("namespace" = String, Path, description = "Namespace (must be the platform namespace)"),
         ("name" = String, Path, description = "StreamApp name"),
@@ -1234,6 +1243,19 @@ mod tests {
             stream_spec_digest(&app),
             "the viewers are part of the spec digest"
         );
+    }
+
+    #[test]
+    fn a_stream_view_carries_the_deletion_policy_and_defaults_to_retain() {
+        let caller = who("u", &["sales"], false);
+        let mut app = app("a", "sales");
+        assert_eq!(
+            stream_view(&app, &caller).deletion_policy,
+            "Retain",
+            "a stream without the field keeps its source topic (D18)"
+        );
+        app["spec"]["deletionPolicy"] = json!("Delete");
+        assert_eq!(stream_view(&app, &caller).deletion_policy, "Delete");
     }
 
     #[test]

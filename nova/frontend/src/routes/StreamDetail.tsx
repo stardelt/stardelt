@@ -93,7 +93,9 @@ function DeleteStreamDialog({ stream, onClose, onDeleted }: {
       <div className="space-y-3 p-5">
         <h2 id={titleId} className="text-lg font-semibold break-words">Delete “{stream.name}”?</h2>
         <p className="text-sm text-text-dim">
-          Nova deletes the stream. If it reads the platform's own bus, its Kafka topic and every message in it are deleted too; a topic read through a connection stays.
+          {stream.deletion_policy === 'Delete'
+            ? "Nova deletes the stream. It reads the platform's own bus, so its Kafka topic and every message in it are deleted too; a topic read through a connection stays."
+            : "Nova deletes the stream. Its Kafka topic and every message in it stay; the topic keeps being managed. A topic read through a connection always stays."}
         </p>
         {error && <p role="alert" className="text-sm text-bad break-words">{error}</p>}
         <div className="flex items-center justify-end gap-2">

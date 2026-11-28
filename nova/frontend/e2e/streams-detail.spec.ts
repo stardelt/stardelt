@@ -18,6 +18,7 @@ const STREAM = {
   attempts: 2,
   last_submitted_at: '2026-11-26T10:00:00Z',
   stopped: false,
+  deletion_policy: 'Retain',
   source_connection: 'kafka',
   source_topic: 'orders.created',
   sink_catalog: 'gold',
@@ -71,12 +72,24 @@ test('Delete asks once, says what happens to the topic, and goes back to the lis
   await page.getByRole('button', { name: 'Delete orders' }).click()
 
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByText('its Kafka topic and every message in it are deleted too')).toBeVisible()
+  await expect(dialog.getByText('Its Kafka topic and every message in it stay')).toBeVisible()
 
   await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
 
   await expect(page).toHaveURL(/\/streams$/)
   expect(deletes).toEqual(['DELETE'])
+})
+
+test('a stream whose topic is deleted with it says so', async ({ page }) => {
+  await page.route('**/api/streams', (route) =>
+    json(route, { streams: [{ ...STREAM, deletion_policy: 'Delete' }] }),
+  )
+
+  await page.goto('/streams/stardelt/orders')
+  await page.getByRole('button', { name: 'Delete orders' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText('its Kafka topic and every message in it are deleted too')).toBeVisible()
 })
 
 test('a refused Delete keeps the dialog open and shows the sentence', async ({ page }) => {
@@ -92,7 +105,7 @@ test('a refused Delete keeps the dialog open and shows the sentence', async ({ p
   await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
 
   await expect(dialog.getByText('this stream belongs to another group')).toBeVisible()
-  await expect(dialog.getByText('its Kafka topic and every message in it are deleted too')).toBeVisible()
+  await expect(dialog.getByText('Its Kafka topic and every message in it stay')).toBeVisible()
   await expect(page).toHaveURL(/\/streams\/stardelt\/orders$/)
 })
 

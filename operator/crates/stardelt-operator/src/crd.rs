@@ -910,7 +910,7 @@ pub enum StorageImpl {
     ByoS3,
 }
 
-/// What happens to the Lakehouse's data when the resource is deleted (decision D18).
+/// What happens to a resource's data when the resource is deleted (decision D18).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum DeletionPolicy {
@@ -2680,6 +2680,12 @@ pub struct StreamAppSpec {
     pub run_as: Option<String>,
     #[serde(default, rename = "restartPolicy")]
     pub restart_policy: StreamRestartPolicy,
+    /// What happens to this stream's source topic when the StreamApp is deleted (D18 applied
+    /// to a stream). Defaults to Retain: the operator created the `KafkaTopic` without an
+    /// owner reference, so the topic and every message stay. `Delete` lets Kubernetes delete
+    /// the `KafkaTopic` with the stream, and Strimzi then deletes the topic.
+    #[serde(default, rename = "deletionPolicy")]
+    pub deletion_policy: DeletionPolicy,
     /// `true` stops the job and deletes its SparkApplication; the checkpoint is kept, so
     /// `stopped: false` resumes from it. The one verb Nova's page needs (D42).
     #[serde(default)]
@@ -7260,6 +7266,50 @@ mod tests {
             }
         }))
         .expect("stream spec parses")
+    }
+
+    #[test]
+    fn stream_app_deletion_policy_defaults_to_retain() {
+        let spec = minimal_stream_spec("orders.v1", "sales.orders", SinkMode::Merge, vec!["id"]);
+        assert_eq!(
+            spec.deletion_policy,
+            DeletionPolicy::Retain,
+            "a stream must keep its source topic unless deletion is opted into (D18)"
+        );
+    }
+
+    #[test]
+    fn stream_app_parses_deletion_policy_delete() {
+        let spec: StreamAppSpec = serde_json::from_value(serde_json::json!({
+            "source": { "connectionRef": "kafka", "topic": "orders.v1" },
+            "sink": {
+                "catalog": "shared",
+                "table": "sales.orders",
+                "mode": "merge",
+                "mergeKeys": ["id"]
+            },
+            "deletionPolicy": "Delete"
+        }))
+        .expect("stream spec parses");
+        assert_eq!(spec.deletion_policy, DeletionPolicy::Delete);
+        assert_eq!(
+            serde_json::to_value(spec.deletion_policy).expect("serialize policy"),
+            serde_json::json!("Delete"),
+            "the YAML value is PascalCase, like PV reclaim policies"
+        );
+    }
+
+    #[test]
+    fn stream_app_schema_carries_the_deletion_policy_enum() {
+        let schema = stream_app_spec_schema();
+        let mut values: Vec<&str> = schema["properties"]["deletionPolicy"]["enum"]
+            .as_array()
+            .expect("deletionPolicy is an enum in the schema")
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings"))
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, ["Delete", "Retain"]);
     }
 
     #[test]
