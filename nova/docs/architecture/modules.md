@@ -8,7 +8,7 @@
 | `connection_routes.rs` ⚠ | Connections | 1949 | 2176 | 12 | Kubernetes API (CRDs), PostgreSQL state store, Secret store (OpenBao) |
 | `query_log_api.rs` ⚠ | SQL & query log | 1729 | 413 | 7 | Kubernetes API (CRDs), PostgreSQL state store |
 | `superset.rs` ⚠ | Pipelines & delivery | 1579 | 1372 | 5 | Superset |
-| `main.rs` ⚠ | Core & identity | 1523 | 1620 | 3 | - |
+| `main.rs` ⚠ | Core & identity | 1532 | 1620 | 3 | - |
 | `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1515 | 1409 | 4 | Airflow REST, Trino |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
@@ -33,11 +33,12 @@
 | `audit.rs` | Core & identity | 601 | 82 | 0 | - |
 | `trino.rs` | SQL & query log | 562 | 429 | 1 | Trino |
 | `query_log_event.rs` | SQL & query log | 549 | 307 | 0 | - |
-| `openapi.rs` | Core & identity | 499 | 688 | 1 | - |
+| `openapi.rs` | Core & identity | 501 | 688 | 1 | - |
 | `superset_archive.rs` | Pipelines & delivery | 477 | 550 | 0 | - |
 | `warehouses.rs` | SQL & query log | 477 | 562 | 2 | Kubernetes API (CRDs) |
 | `pipeline_notice.rs` | Pipelines & delivery | 462 | 332 | 0 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `access_requests.rs` | Catalog | 416 | 232 | 4 | PostgreSQL state store |
+| `model_proxy.rs` | AI (Ask, MCP, models) | 405 | 80 | 2 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `metric_definitions.rs` | Catalog | 398 | 69 | 3 | PostgreSQL state store |
 | `saved_queries.rs` | SQL & query log | 384 | 62 | 5 | PostgreSQL state store |
 | `workspace.rs` | Notebooks & compute | 380 | 460 | 3 | JupyterHub |
@@ -74,4 +75,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (73 files)** | | **54058** | **47275** | **175** | |
+| **total (74 files)** | | **54474** | **47355** | **177** | |

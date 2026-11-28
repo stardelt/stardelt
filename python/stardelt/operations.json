@@ -565,6 +565,24 @@
       "query_params": [],
       "body": false
     },
+    "model_proxy_chat": {
+      "method": "POST",
+      "path": "/api/models/{endpoint}/v1/chat/completions",
+      "path_params": [
+        "endpoint"
+      ],
+      "query_params": [],
+      "body": false
+    },
+    "model_proxy_models": {
+      "method": "GET",
+      "path": "/api/models/{endpoint}/v1/models",
+      "path_params": [
+        "endpoint"
+      ],
+      "query_params": [],
+      "body": false
+    },
     "namespaces_list": {
       "method": "GET",
       "path": "/api/catalog/namespaces",

@@ -7736,6 +7736,188 @@
         }
       }
     },
+    "/api/models/{endpoint}/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "The OpenAI chat-completions route — the endpoint, through the person.",
+        "description": "The OpenAI chat-completions protocol, answered by the `ModelEndpoint` named in the path, on behalf of the signed-in caller. Point an OpenAI client's base URL at `https://<nova>/api/models/<endpoint>/v1` and use the person's own Nova token as the API key: the budget and the audit then cover the agent's work. The caller must be signed in (`401`); the endpoint must exist (`404`), list the purpose `agents` (`403`) and its last probe must have found it reachable (`503`). The body must be a JSON object of at most 1 MiB (`413`); `model` is replaced by the endpoint's `spec.model`, `max_tokens` is capped at 4096 (absent means 4096), `stream: true` is refused with `400` (`streaming is not supported yet; send stream: false`), and `messages`, `tools`, `tool_choice` and `response_format` pass through unchanged. The person's or their group's model budget is checked before the call (`429` as on `/api/ask`), and exactly one `model_call` row is written with `feature: agent` — the body's `messages` as its prompt, the answer's `usage` as its tokens, and `ok`, `refused` or `error` as its outcome. A 2xx answer passes through with its status; a non-2xx answer passes through with its status and its body cut to 2000 characters; no answer at all is a `502`. The endpoint's URL and key never appear in an answer or a log line. Answers `Cache-Control: no-store`; streaming is not supported yet.",
+        "operationId": "model_proxy_chat",
+        "parameters": [
+          {
+            "name": "endpoint",
+            "in": "path",
+            "description": "The `ModelEndpoint`'s name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint's own answer, passed through",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not a JSON object, or it asks for `stream: true`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The endpoint does not list the purpose `agents`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such model endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is larger than 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The person's or their group's model budget is spent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The model endpoint did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No state store, no cluster connection, no HTTP client, or the endpoint is not reachable now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/{endpoint}/v1/models": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "The OpenAI model list for one endpoint.",
+        "description": "The OpenAI model-list protocol for one `ModelEndpoint`: `{\"object\":\"list\",\"data\":[{\"id\":\"<spec.model>\",\"object\":\"model\"}]}`. A client that checks `GET /v1/models` before its first call reads this. The caller must be signed in (`401`); the endpoint must exist (`404`), list the purpose `agents` (`403`) and its last probe must have found it reachable (`503`), exactly as on the chat-completions route. The endpoint's URL and key never appear in the answer. Answers `Cache-Control: no-store`.",
+        "operationId": "model_proxy_models",
+        "parameters": [
+          {
+            "name": "endpoint",
+            "in": "path",
+            "description": "The `ModelEndpoint`'s name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint's model in the OpenAI list shape",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The endpoint does not list the purpose `agents`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such model endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the endpoint is not reachable now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notebooks": {
       "get": {
         "tags": [

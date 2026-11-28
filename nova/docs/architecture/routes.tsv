@@ -66,6 +66,7 @@ GET	/api/lineage/read-tables	lineage_api	main	signed-in
 GET	/api/lineage/runs/{run_id}	lineage_api	main	signed-in
 GET	/api/me	main	main	signed-in
 GET	/api/model-endpoints	model_endpoints	main	signed-in
+GET	/api/models/{endpoint}/v1/models	model_proxy	main	signed-in
 GET	/api/notebooks	notebooks	notebooks	signed-in
 GET	/api/notebooks/{group}/{name}/content	notebooks	notebooks	signed-in
 GET	/api/notebooks/{group}/{name}/parameters	notebooks	notebooks	signed-in
@@ -136,6 +137,7 @@ POST	/api/migrations/apply	migrations	migrations	signed-in
 POST	/api/migrations/approve	migrations	migrations	signed-in
 POST	/api/migrations/plan	migrations	migrations	signed-in
 POST	/api/model-endpoints/{name}/probe	model_endpoints	main	admin
+POST	/api/models/{endpoint}/v1/chat/completions	model_proxy	main	signed-in
 POST	/api/pipelines	pipelines	pipelines	signed-in
 POST	/api/pipelines/check	pipelines	pipelines	signed-in
 POST	/api/pipelines/preview-schedule	pipelines	pipelines	signed-in

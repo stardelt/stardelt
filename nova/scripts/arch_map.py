@@ -70,7 +70,7 @@ AREAS: dict[str, list[str]] = {
     "Lineage": ["lineage_api", "lineage_event", "lineage_store"],
     "AI (Ask, MCP, models)": [
         "ask", "mcp", "mcp_audit", "model_chat", "model_calls", "model_endpoints",
-        "model_probe", "model_usage",
+        "model_probe", "model_usage", "model_proxy",
     ],
     "Platform view": ["apps", "cluster"],
 }
