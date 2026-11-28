@@ -5,9 +5,9 @@ B1 file-size budget (1500 production lines): 7 backend files over
   notebooks.rs 2277
   connection_routes.rs 1949
   mcp.rs 1515
-  main.rs 1510
+  main.rs 1513
 F-size frontend files over 800 lines: 7
-  api-schema.d.ts 16136
+  api-schema.d.ts 16247
   api.ts 1753
   components/ScheduleDialog.tsx 1512
   routes/AdminCatalogs.tsx 1189
@@ -20,7 +20,7 @@ OpenAPI: nova.json operations not served by a scanned router: 0
 dev-mode administrator Identity built by hand: 2 in 1 files auth(2)
 group-membership test written inline: 30 in 14 files notebooks(6), compute(5), connection_routes(5), pipelines(3), deployments(2), access_requests(1), auth(1), connections(1), destinations(1), evals(1), mcp(1), query_log(1), streams(1), warehouses(1)
 hand-written GroupVersionKind: 14 in 9 files admin_catalogs(4), deployments(2), pipelines(2), compute(1), connection_routes(1), model_endpoints(1), query_log_api(1), streams(1), warehouses(1)
-inline error JSON json!({"error": 108 in 19 files mcp(24), catalog(17), superset(17), data(12), migrations(11), auth(6), samples(4), catalog_metrics(3), catalog_docs(2), main(2), query_log_collector(2), api_json(1), apps(1), catalog_search(1), error(1), model_calls(1), saved_queries(1), stages(1), trino(1)
+inline error JSON json!({"error": 113 in 19 files mcp(24), superset(22), catalog(17), data(12), migrations(11), auth(6), samples(4), catalog_metrics(3), catalog_docs(2), main(2), query_log_collector(2), api_json(1), apps(1), catalog_search(1), error(1), model_calls(1), saved_queries(1), stages(1), trino(1)
 own fail()/error_response() helper: 3 in 3 files ask(1), lineage_api(1), statements(1)
 module-wide #![allow(dead_code)]: 0 in 0 files 
 hand-written calendar (civil_from_days): 0 in 0 files 

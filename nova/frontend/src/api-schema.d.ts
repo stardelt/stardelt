@@ -954,6 +954,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboards/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/dashboards/{id}`: remove one dashboard **this bundle imported**. The
+         *     dashboard's `certified_by` must be `stardelt bundle <bundle>` and its
+         *     `certification_details` must end with ` by <ownerGroup>`; a dashboard without the stamp,
+         *     or one another group imported, is refused and stays (#115 decision 6). The caller's rule
+         *     is the export's owner-group rule.
+         * @description Remove one dashboard that this bundle imported. The dashboard's `certified_by` must be `stardelt bundle <bundle>` and its `certification_details` must name the caller's `ownerGroup` as the group that imported it; a dashboard without that stamp is refused. The caller must be a member of the bundle's owner group, and a deploy principal may only remove for its own group.
+         */
+        delete: operations["dashboards_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboards/{id}/export": {
         parameters: {
             query?: never;
@@ -3391,6 +3415,13 @@ export interface components {
              *     each a group name; omitted writes none. A bundle's pipeline file carries it (#79).
              */
             viewers?: string[] | null;
+        };
+        /** @description `DELETE /api/dashboards/{id}` query: the bundle whose import stamped the dashboard. */
+        DashboardDeleteQuery: {
+            /** @description The bundle that owns the dashboard, 1 to 64 characters. */
+            bundle: string;
+            /** @description The bundle's owner group; the caller must be a member. */
+            ownerGroup: string;
         };
         /**
          * @description `POST /api/dashboards/import`: one dashboard archive for the target, for dashboard bundles
@@ -9859,6 +9890,86 @@ export interface operations {
             };
             /** @description The target has no database for one of the archive's catalogs */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Superset answered an error, or could not be reached */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description This instance has no Superset service user */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    dashboards_delete: {
+        parameters: {
+            query: {
+                /** @description The bundle that imported the dashboard */
+                bundle: string;
+                /** @description The bundle's owner group; the caller must be a member */
+                ownerGroup: string;
+            };
+            header?: never;
+            path: {
+                /** @description Superset's numeric dashboard id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The bundle name or owner group is empty */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller is not a member of the bundle's owner group, or the dashboard is not stamped by this bundle */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Superset has no such dashboard */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

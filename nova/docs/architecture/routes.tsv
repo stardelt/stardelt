@@ -4,6 +4,7 @@ DELETE	/api/admin/compute/{name}	compute	main	admin
 DELETE	/api/connections/group/{group}/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/managed/{name}	connection_routes	main	signed-in
 DELETE	/api/connections/personal/{name}	connection_routes	main	signed-in
+DELETE	/api/dashboards/{id}	superset	main	signed-in
 DELETE	/api/destinations/{id}	destinations	main	signed-in
 DELETE	/api/evals/{id}	evals	main	signed-in
 DELETE	/api/metrics/{id}	metric_definitions	main	signed-in
