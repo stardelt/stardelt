@@ -16557,7 +16557,8 @@
         "description": "What the readiness probe answers.",
         "required": [
           "status",
-          "db"
+          "db",
+          "superset"
         ],
         "properties": {
           "db": {
@@ -16566,6 +16567,10 @@
           "status": {
             "type": "string",
             "description": "Always `ok`."
+          },
+          "superset": {
+            "type": "boolean",
+            "description": "Whether this instance has a Superset service user, so a bundle can import dashboards."
           }
         }
       },

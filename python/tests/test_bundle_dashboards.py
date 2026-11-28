@@ -30,15 +30,18 @@ class Nova:
     the fake reads the slug from the archive's ``dashboards/<slug>.yaml``.
     """
 
-    def __init__(self, answer=None, refuse=None):
+    def __init__(self, answer=None, refuse=None, superset=True):
         self.answer = answer or {"databases": ["Trino Gold"], "result": {"ok": True}}
         self.refuse = refuse or set()
+        self.superset = superset
         self.uploads = []
         self.calls = []
         self.listed = []
 
     def call(self, operation, path=None, query=None, body=None):
         self.calls.append((operation, path, query))
+        if operation == "health":
+            return {"status": "ok", "db": "disabled", "superset": self.superset}
         if operation == "dashboards_list":
             return self.listed
         if operation == "dashboards_delete":
@@ -256,11 +259,11 @@ def test_prune_deletes_only_this_targets_dashboards(tmp_path):
     assert [(operation, path) for operation, path, _query in nova.calls if operation == "dashboards_delete"] == [
         ("dashboards_delete", {"id": 5})
     ]
-    assert nova.calls[0] == (
-        "dashboards_list",
-        None,
-        {"bundle": "sales-etl", "ownerGroup": "sales"},
-    )
+    assert [
+        call for call in nova.calls if call[0] == "dashboards_list"
+    ] == [
+        ("dashboards_list", None, {"bundle": "sales-etl", "ownerGroup": "sales"}),
+    ]
 
 
 def test_a_refused_import_stops_the_deploy_and_names_the_folder(tmp_path):
@@ -272,3 +275,19 @@ def test_a_refused_import_stops_the_deploy_and_names_the_folder(tmp_path):
     assert problems == [("dashboards/shop", "Superset answered 500 (HTTP 502)")]
     assert [row["name"] for row in rows] == ["dashboards/ops"], "the folders before it were imported, the rest stops"
     assert len(nova.uploads) == 2
+
+
+def test_an_instance_without_the_superset_starter_refuses_the_plan(tmp_path):
+    directory = make(tmp_path, folders=("dashboards/shop", "dashboards/ops"))
+    nova = Nova(superset=False)
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", STAMP, dry_run=True)
+
+    assert problems == [
+        (
+            "dashboards",
+            "this instance has no Superset starter; promote dashboards with your BI tool",
+        )
+    ]
+    assert rows == []
+    assert nova.uploads == []
