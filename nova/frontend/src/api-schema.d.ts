@@ -937,6 +937,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/dashboards`: the dashboards **this bundle and this owner group** imported, with
+         *     the target and commit of the stamp the import wrote (#115 decision 6). A dashboard without
+         *     that stamp, and one another group imported, is never listed. At most 100 (Superset's page
+         *     size). The caller's rule is the export's owner-group rule.
+         * @description The dashboards this bundle and this owner group imported, each with the target and commit of the stamp the import wrote. A dashboard without that stamp, and one another group imported, is never listed. At most 100 (Superset's page size). The caller must be a member of the bundle's owner group, and a deploy principal sees its own group.
+         */
+        get: operations["dashboards_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/dashboards/import": {
         parameters: {
             query?: never;
@@ -3442,6 +3465,23 @@ export interface components {
             ownerGroup: string;
             /** @description The stage the import is for (`dev`, `prod`, …). */
             target: string;
+        };
+        /**
+         * @description One dashboard a bundle's import left on a target: Superset's id and title, and the target
+         *     and commit the import recorded in the dashboard's stamp.
+         */
+        DashboardImported: {
+            /** @description The bundle's commit the import recorded, or `""`. */
+            commit: string;
+            /**
+             * Format: int64
+             * @description Superset's numeric dashboard id.
+             */
+            id: number;
+            /** @description The target the import was for (`prod`, from the stamp). */
+            target: string;
+            /** @description The dashboard's title in Superset. */
+            title: string;
         };
         /** @description One row of a catalog's data products (#37): a documented table with a lifecycle. */
         DataProduct: {
@@ -9808,6 +9848,76 @@ export interface operations {
                 };
             };
             /** @description The secret store is not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    dashboards_list: {
+        parameters: {
+            query: {
+                /** @description The bundle that imported the dashboards */
+                bundle: string;
+                /** @description The bundle's owner group; the caller must be a member */
+                ownerGroup: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The dashboards this bundle imported, in Superset's order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardImported"][];
+                };
+            };
+            /** @description The bundle name or owner group is empty */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The caller is not a member of the bundle's owner group, or a deploy principal names another stage */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Superset answered an error, or could not be reached */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description This instance has no Superset service user */
             503: {
                 headers: {
                     [name: string]: unknown;
