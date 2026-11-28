@@ -241,6 +241,28 @@ def test_deploy_creates_or_updates_after_every_pipeline_passed(tmp_path):
     ]
 
 
+def test_a_deploy_into_a_bundle_without_dashboards_is_unchanged(tmp_path):
+    make(tmp_path)
+    existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}
+    code, out, err, session = run(
+        ["bundle", "deploy", str(tmp_path), "-t", "prod"],
+        ME, FakeResponse(payload=CREATE), FakeResponse(payload=UPDATE), FakeResponse(payload=PLAN_OK),
+        FakeResponse(payload={"pipelines": []}), FakeResponse(201, {"name": "load"}),
+        FakeResponse(payload=existing), FakeResponse(payload={"name": "nightly"}),
+        FakeResponse(payload={"pipelines": [{"name": "load", "namespace": "stardelt"}, {"name": "nightly", "namespace": "stardelt"}]}),
+        FakeResponse(201, {"id": 7, "bundle": "sales-etl", "target": "prod", "status": "applied"}),
+    )
+    assert (code, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == [
+        {"action": "created", "name": "load", "kind": "Pipeline"},
+        {"action": "updated", "name": "nightly", "kind": "Pipeline"},
+        {"action": "recorded", "id": 7},
+    ]
+    assert [path for _method, path in calls(session) if path.startswith("/api/dashboards")] == [], (
+        "no dashboards_list, no dashboards_delete: a bundle without a dashboards: block is unchanged"
+    )
+
+
 def test_a_write_that_fails_reports_the_sentence_and_what_was_already_written(tmp_path):
     make(tmp_path)
     existing = {"pipelines": [{"name": "nightly", "namespace": "stardelt", "ownerGroup": "sales"}]}

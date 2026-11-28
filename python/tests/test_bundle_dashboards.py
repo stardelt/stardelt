@@ -34,6 +34,16 @@ class Nova:
         self.answer = answer or {"databases": ["Trino Gold"], "result": {"ok": True}}
         self.refuse = refuse or set()
         self.uploads = []
+        self.calls = []
+        self.listed = []
+
+    def call(self, operation, path=None, query=None, body=None):
+        self.calls.append((operation, path, query))
+        if operation == "dashboards_list":
+            return self.listed
+        if operation == "dashboards_delete":
+            return {}
+        raise AssertionError(f"the fake Nova does not answer {operation}")
 
     def upload(self, path, data, content_type="application/zip"):
         self.uploads.append((path, len(data), content_type))
@@ -168,3 +178,81 @@ def test_bundle_validate_accepts_the_key(tmp_path):
     problems, _warnings, _resolved = bundle.validate(directory)
 
     assert problems == []
+
+
+STAMP = {"bundle": "sales-etl", "target": "prod"}
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_a_plan_says_it_would_import_each_folder(tmp_path):
+    directory = make(tmp_path, folders=("dashboards/shop", "dashboards/ops"))
+    nova = Nova()
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", STAMP, dry_run=True)
+
+    assert problems == []
+    assert rows == [
+        {"action": "would-import-dashboards", "name": "dashboards/ops", "dashboards": 1, "kind": "Dashboard"},
+        {"action": "would-import-dashboards", "name": "dashboards/shop", "dashboards": 1, "kind": "Dashboard"},
+    ]
+    assert nova.uploads == [], "a plan writes nothing"
+
+
+def test_a_deploy_imports_each_folder_with_the_target_and_commit(tmp_path):
+    directory = make(tmp_path)
+    nova = Nova()
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", {**STAMP, "revision": REVISION})
+
+    assert problems == []
+    assert rows == [
+        {
+            "action": "imported-dashboards",
+            "name": "dashboards/shop",
+            "dashboards": 1,
+            "databases": ["Trino Gold"],
+            "kind": "Dashboard",
+        }
+    ]
+    assert len(nova.uploads) == 1
+    path = nova.uploads[0][0]
+    assert path.startswith("/api/dashboards/import?bundle=sales-etl")
+    assert "ownerGroup=sales&target=prod" in path
+    assert f"commit={REVISION}" in path
+    assert "overwrite=true" in path
+
+
+def test_prune_deletes_only_this_targets_dashboards(tmp_path):
+    directory = make(tmp_path)
+    nova = Nova()
+    nova.listed = [
+        {"id": 5, "title": "Old overview", "target": "prod", "commit": "abc1234"},
+        {"id": 6, "title": "Old overview", "target": "dev", "commit": "abc1234"},
+        {"id": 7, "title": "shop", "target": "prod", "commit": "abc1234"},
+    ]
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", STAMP, prune=True)
+
+    assert problems == []
+    assert [row for row in rows if row["action"] == "deleted-dashboards"] == [
+        {"action": "deleted-dashboards", "name": "Old overview", "id": 5, "kind": "Dashboard"}
+    ]
+    assert [(operation, path) for operation, path, _query in nova.calls if operation == "dashboards_delete"] == [
+        ("dashboards_delete", {"id": 5})
+    ]
+    assert nova.calls[0] == (
+        "dashboards_list",
+        None,
+        {"bundle": "sales-etl", "ownerGroup": "sales"},
+    )
+
+
+def test_a_refused_import_stops_the_deploy_and_names_the_folder(tmp_path):
+    directory = make(tmp_path, folders=("dashboards/shop", "dashboards/ops"))
+    nova = Nova(refuse={"shop"})
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", STAMP)
+
+    assert problems == [("dashboards/shop", "Superset answered 500 (HTTP 502)")]
+    assert [row["name"] for row in rows] == ["dashboards/ops"], "the folders before it were imported, the rest stops"
+    assert len(nova.uploads) == 2
