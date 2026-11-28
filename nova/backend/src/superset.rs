@@ -830,6 +830,91 @@ pub(crate) fn delete_refusal(
     }
 }
 
+/// Why one of the four fields a dashboard's provenance stamp carries cannot be written,
+/// or `None` when it can. The rules are the CLI's own (`python/stardelt/bundle.py`: NAME,
+/// GROUP) so a value can never break the YAML line or the ` by ` the delete parses.
+pub(crate) fn stamp_field_refusal(
+    bundle: &str,
+    target: &str,
+    commit: &str,
+    owner_group: &str,
+) -> Option<String> {
+    if !is_bundle_name(bundle.trim()) {
+        return Some(
+            "the bundle name must be 3 to 40 lower-case letters, digits and dashes, starting and ending with a letter or digit"
+                .to_string(),
+        );
+    }
+    if !is_group_name(target.trim()) {
+        return Some(
+            "the target must be 1 to 64 letters, digits, dots, underscores or dashes, starting with a letter or digit"
+                .to_string(),
+        );
+    }
+    if !is_commit(commit.trim()) {
+        return Some("commit must be 4 to 40 lower-case hex characters, or empty".to_string());
+    }
+    if !is_group_name(owner_group.trim()) {
+        return Some(
+            "the owner group must be 1 to 64 letters, digits, dots, underscores or dashes, starting with a letter or digit"
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn is_bundle_name(value: &str) -> bool {
+    let count = value.chars().count();
+    (3..=40).contains(&count)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && value.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && value.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+fn is_group_name(value: &str) -> bool {
+    let count = value.chars().count();
+    (1..=64).contains(&count)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && value.starts_with(|c: char| c.is_ascii_alphanumeric())
+}
+
+fn is_commit(value: &str) -> bool {
+    value.is_empty()
+        || ((4..=40).contains(&value.chars().count())
+            && value
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)))
+}
+
+/// Why `dashboard` may not be exported for `bundle` by `owner_group`, or `None`.
+/// A dashboard with a stamp from another bundle or group is refused; an unstamped one
+/// (the person built it in dev, decision 3 of #115) is the author's to export.
+pub(crate) fn export_stamp_refusal(
+    certified: &str,
+    details: &str,
+    bundle: &str,
+    owner_group: &str,
+) -> Option<String> {
+    if certified.trim().is_empty() {
+        return None;
+    }
+    if certified.trim() != format!("stardelt bundle {}", bundle.trim()) {
+        return Some(format!(
+            "this dashboard belongs to {certified}, not bundle {bundle}"
+        ));
+    }
+    match details.rsplit_once(" by ") {
+        Some((_, group)) if group.trim() == owner_group.trim() => None,
+        _ => Some(format!(
+            "this dashboard was imported for another group, not {owner_group}"
+        )),
+    }
+}
+
 /// `DELETE /api/dashboards/{id}` query: the bundle whose import stamped the dashboard.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -948,7 +1033,7 @@ pub async fn delete_dashboard(
         (status = 200, description = "The ZIP archive Superset exports for one dashboard, without `databases/`", body = String, content_type = "application/zip"),
         (status = 400, description = "The bundle name or owner group is empty", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal names another stage, or the dashboard carries another bundle's or group's stamp", body = crate::openapi::ErrorResponse),
         (status = 404, description = "Superset has no such dashboard", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
         (status = 503, description = "This instance has no Superset service user", body = crate::openapi::ErrorResponse),
@@ -992,10 +1077,17 @@ pub async fn export_dashboard_for_bundle(
         username: user.username.clone(),
         password: Secret::new(user.password.expose().to_string()),
     };
-    match SupersetClient::new(&state.superset_api_url, user)
-        .export(id)
-        .await
+    let client = SupersetClient::new(&state.superset_api_url, user);
+    let (certified, details) = match client.provenance(id).await {
+        Ok(stamp) => stamp,
+        Err(error) => return error.into_response(),
+    };
+    if let Some(sentence) =
+        export_stamp_refusal(&certified, &details, &query.bundle, &query.owner_group)
     {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response();
+    }
+    match client.export(id).await {
         Ok(bytes) => match superset_archive::without_databases(&bytes) {
             Ok(stripped) => zip_response(stripped, id),
             Err(error) => (
@@ -1047,7 +1139,7 @@ pub struct DashboardImportQuery {
     request_body(content = Vec<u8>, content_type = "application/zip", description = "The dashboard archive (Superset's export, `databases/` optional)"),
     responses(
         (status = 200, description = "Superset's import result and the mapped database stems", body = serde_json::Value),
-        (status = 400, description = "The body is not a dashboard archive, or a name is empty or too long", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The body is not a dashboard archive, or a field has the wrong shape: `bundle` 3–40 lower-case letters, digits and dashes; `target` and `ownerGroup` 1–64 letters, digits, dots, underscores or dashes; `commit` lower-case hex", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
         (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
         (status = 413, description = "The archive is larger than 16 MiB", body = crate::openapi::ErrorResponse),
@@ -1072,6 +1164,14 @@ pub async fn import_dashboard(
             Json(json!({ "error": "bundle, ownerGroup and target are required" })),
         )
             .into_response();
+    }
+    if let Some(sentence) = stamp_field_refusal(
+        &query.bundle,
+        &query.target,
+        &query.commit,
+        &query.owner_group,
+    ) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": sentence }))).into_response();
     }
     if body.len() > MAX_IMPORT_BYTES {
         return (
@@ -1680,6 +1780,67 @@ mod tests {
         )
         .expect("a dashboard without the group must not be removed");
         assert!(refused.contains("analytics"), "{refused}");
+    }
+
+    #[test]
+    fn a_quote_in_a_stamp_field_is_refused() {
+        let refused = stamp_field_refusal("shop\"", "prod", "", "demo")
+            .expect("a quote in the bundle must be refused");
+        assert!(refused.contains("bundle name"), "{refused}");
+        assert!(
+            stamp_field_refusal("shop", "pro\nd", "", "demo").is_some(),
+            "a newline in the target must be refused"
+        );
+        assert!(
+            stamp_field_refusal("shop", "prod", "abcXYZ", "demo").is_some(),
+            "an upper-case commit must be refused"
+        );
+        assert!(
+            stamp_field_refusal("shop", "prod", "", "A by B").is_some(),
+            "a group with a space must be refused"
+        );
+    }
+
+    #[test]
+    fn a_group_name_with_a_space_is_refused() {
+        // The spoof: a group named `A by B` writes `… by A by B`, and `rsplit_once(" by ")`
+        // would read the deleting group as `B`.
+        assert!(stamp_field_refusal("shop", "prod", "", "A by B").is_some());
+        assert_eq!(stamp_field_refusal("shop", "prod", "", "A.B_c-1"), None);
+    }
+
+    #[test]
+    fn the_cli_shapes_pass() {
+        for (bundle, target, commit, owner_group) in [
+            ("shop", "prod", "abc1234", "demo"),
+            ("analytics-shop", "staging", "", "visitors"),
+        ] {
+            assert_eq!(
+                stamp_field_refusal(bundle, target, commit, owner_group),
+                None,
+                "{bundle} / {target} / {commit} / {owner_group} must pass"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unstamped_dashboard_is_exported_for_its_author() {
+        assert_eq!(export_stamp_refusal("", "", "shop", "demo"), None);
+    }
+
+    #[test]
+    fn another_bundles_dashboard_is_not_exported() {
+        let refused = export_stamp_refusal(
+            "stardelt bundle analytics-shop",
+            "prod @ abc1234 by analytics",
+            "shop",
+            "visitors",
+        )
+        .expect("another bundle's dashboard must not be exported");
+        assert!(
+            refused.contains("stardelt bundle analytics-shop"),
+            "the sentence does not name the dashboard's own stamp: {refused}"
+        );
     }
 
     #[test]

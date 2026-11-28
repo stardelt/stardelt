@@ -9858,7 +9858,7 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description The body is not a dashboard archive, or a name is empty or too long */
+            /** @description The body is not a dashboard archive, or a field has the wrong shape: `bundle` 3–40 lower-case letters, digits and dashes; `target` and `ownerGroup` 1–64 letters, digits, dots, underscores or dashes; `commit` lower-case hex */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -10047,7 +10047,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The caller is not a member of the bundle's owner group, or a deploy principal names another stage */
+            /** @description The caller is not a member of the bundle's owner group, a deploy principal names another stage, or the dashboard carries another bundle's or group's stamp */
             403: {
                 headers: {
                     [name: string]: unknown;

@@ -154,8 +154,15 @@ fn value(text: &str, key: &str) -> Option<String> {
 }
 
 /// Replaces the first `key:` line with `key: "<value>"`, or appends it as a new last line.
+/// The value is escaped, so no field can close the quote or add a line (defence in depth:
+/// the import route's `stamp_field_refusal` already keeps every field to a safe shape).
 fn set_value(text: &str, key: &str, value: &str) -> String {
-    let replacement = format!("{key}: \"{value}\"");
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    let replacement = format!("{key}: \"{escaped}\"");
     let mut lines: Vec<String> = Vec::new();
     let mut replaced = false;
     for line in text.lines() {
@@ -559,6 +566,42 @@ mod tests {
         assert!(dashboard[0].contains("certified_by: \"stardelt bundle shop\""));
         assert!(dashboard[0].contains("certification_details: \"test @ abc1234 by analytics\""));
         assert!(!dashboard[0].contains("certification_details: null"));
+    }
+
+    #[test]
+    fn a_quote_or_newline_in_a_value_stays_on_one_line() {
+        let mut databases = BTreeMap::new();
+        databases.insert(
+            "Trino_Gold".to_string(),
+            target_database("00000000-0000-4000-8000-000000000001"),
+        );
+        let stamp = Stamp {
+            bundle: "shop\"\ninjected: yes",
+            target: "prod",
+            commit: "",
+            owner_group: "demo",
+        };
+        let rewritten = rewrite(&fixture(), &databases, &stamp).expect("rewrite");
+        let members = members(&rewritten).expect("rewritten members");
+        let dashboard = text_of(&members, "dashboards/Shop.yaml");
+        assert_eq!(dashboard.len(), 1);
+        assert!(
+            dashboard[0].contains("\\\""),
+            "the quote is not escaped: {}",
+            dashboard[0]
+        );
+        assert!(
+            dashboard[0].contains("\\n"),
+            "the newline is not escaped: {}",
+            dashboard[0]
+        );
+        assert!(
+            !dashboard[0]
+                .lines()
+                .any(|line| line.starts_with("injected:")),
+            "the value added a line: {}",
+            dashboard[0]
+        );
     }
 
     #[test]
