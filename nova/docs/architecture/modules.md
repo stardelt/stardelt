@@ -10,9 +10,9 @@
 | `superset.rs` ⚠ | Pipelines & delivery | 1579 | 1372 | 5 | Superset |
 | `main.rs` ⚠ | Core & identity | 1532 | 1620 | 3 | - |
 | `mcp.rs` ⚠ | AI (Ask, MCP, models) | 1515 | 1409 | 4 | Airflow REST, Trino |
+| `ask.rs` | AI (Ask, MCP, models) | 1357 | 881 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `compute.rs` | Notebooks & compute | 1352 | 1255 | 6 | Kubernetes API (CRDs) |
 | `catalog.rs` | Catalog | 1351 | 1056 | 8 | Kubernetes API (CRDs), Lakekeeper (Iceberg REST), Trino |
-| `ask.rs` | AI (Ask, MCP, models) | 1337 | 872 | 3 | Kubernetes API (CRDs), Model endpoints (external), PostgreSQL state store |
 | `deployments.rs` | Pipelines & delivery | 1179 | 829 | 5 | Airflow REST, Kubernetes API (CRDs), PostgreSQL state store |
 | `lineage_api.rs` | Lineage | 1175 | 443 | 4 | PostgreSQL state store |
 | `evals.rs` | Catalog | 1048 | 325 | 6 | PostgreSQL state store |
@@ -58,9 +58,9 @@
 | `query_hints.rs` | SQL & query log | 176 | 118 | 0 | - |
 | `user_settings.rs` | Core & identity | 173 | 14 | 3 | PostgreSQL state store |
 | `lineage_event.rs` | Lineage | 170 | 0 | 0 | - |
+| `model_chat.rs` | AI (Ask, MCP, models) | 158 | 178 | 0 | Model endpoints (external) |
 | `embed.rs` | Core & identity | 153 | 181 | 0 | - |
 | `previews.rs` | Pipelines & delivery | 150 | 74 | 0 | Kubernetes API (CRDs) |
-| `model_chat.rs` | AI (Ask, MCP, models) | 148 | 170 | 0 | Model endpoints (external) |
 | `db.rs` | Core & identity | 134 | 72 | 0 | PostgreSQL state store |
 | `people.rs` | Core & identity | 124 | 129 | 0 | PostgreSQL state store |
 | `shared_accounts.rs` | Core & identity | 123 | 137 | 0 | PostgreSQL state store |
@@ -75,4 +75,4 @@
 | `bundle_owner.rs` | Pipelines & delivery | 50 | 102 | 0 | PostgreSQL state store |
 | `error.rs` | Core & identity | 47 | 19 | 0 | - |
 | `rfc3339.rs` | Core & identity | 26 | 27 | 0 | - |
-| **total (74 files)** | | **54474** | **47355** | **177** | |
+| **total (74 files)** | | **54504** | **47372** | **177** | |
