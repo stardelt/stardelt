@@ -241,6 +241,7 @@ pub struct ErrorResponse {
         crate::model_endpoints::ModelEndpointRow,
         crate::ask::AskRequest,
         crate::ask::AskPrevious,
+        crate::ask::AskTurn,
         crate::ask::AskAnswer,
         crate::ask::AskTable,
         crate::ask_agent::AskStep,

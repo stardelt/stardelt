@@ -55,6 +55,10 @@ const VERIFIED_QUERIES_IN_CONTEXT: usize = 5;
 const MAX_VERIFIED_SQL_CHARS: usize = 4000;
 /// The longest previous statement a follow-up may send back.
 const MAX_PREVIOUS_SQL_CHARS: usize = 8_000;
+/// How many earlier turns of the conversation one question may carry.
+const MAX_THREAD_TURNS: usize = 10;
+/// The longest answer in words one earlier turn may carry.
+const MAX_TURN_ANSWER_CHARS: usize = 8_000;
 /// How many endpoints one auto-mode question may ask: the ranked one, and one fallback (D3).
 const FALLBACK_ENDPOINTS: usize = 2;
 
@@ -66,6 +70,11 @@ pub(crate) struct AskRequest {
     /// The turn this question refines (the panel's last answered turn), or absent.
     #[serde(default)]
     pub previous: Option<AskPrevious>,
+    /// The conversation so far since **New question**, oldest first, without the question
+    /// being asked now, at most 10 turns. In agent mode the model reads it as earlier
+    /// messages, and `previous` is then not used.
+    #[serde(default)]
+    pub thread: Vec<AskTurn>,
     /// The `ModelEndpoint` that answers. Absent or `auto` uses auto mode: the ready
     /// endpoints ranked by this catalog's eval results, falling back once. A name asks
     /// that endpoint only, and is a `400` when it cannot answer Ask now.
@@ -88,6 +97,16 @@ pub(crate) struct AskPrevious {
     pub sql: String,
     /// The tables the earlier answer named, at most five.
     pub tables: Vec<AskTable>,
+}
+
+/// One earlier turn of the conversation: the question and the answer in words the person saw.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AskTurn {
+    /// The earlier question, 1 to 2000 characters.
+    pub question: String,
+    /// The earlier answer in words, 1 to 8000 characters.
+    pub answer: String,
 }
 
 /// `POST /api/ask` query: the catalog to search, or the default one.
@@ -733,6 +752,8 @@ struct AgentAsk<'a> {
     pool: &'a sqlx::PgPool,
     question: &'a str,
     previous: Option<&'a AskPrevious>,
+    /// The conversation so far; when it is not empty, `previous` is not used (D2).
+    thread: &'a [AskTurn],
     /// The endpoints the question may ask, in order: the named one, or the auto ranking.
     endpoints: &'a [(String, Value)],
     /// The MCP tool list (`mcp::tools()`): only its read-only entries are offered.
@@ -894,23 +915,37 @@ impl AgentCall<'_> {
     }
 }
 
+/// The messages one agent question sends (D2): the system prompt, then the conversation so
+/// far when there is one (each turn's question and answer), else the `previous` pair, then
+/// the question.
+fn agent_messages(thread: &[AskTurn], previous: Option<&AskPrevious>, question: &str) -> Value {
+    let mut messages: Vec<Value> = vec![json!({
+        "role": "system",
+        "content": AGENT_SYSTEM_PROMPT,
+    })];
+    if thread.is_empty() {
+        // D2: older clients and the CLI keep the single `previous` pair.
+        if let Some(previous) = previous {
+            messages.push(json!({"role": "user", "content": previous.question}));
+            messages.push(json!({"role": "assistant", "content": previous.sql}));
+        }
+    } else {
+        for turn in thread {
+            messages.push(json!({"role": "user", "content": turn.question}));
+            messages.push(json!({"role": "assistant", "content": turn.answer}));
+        }
+    }
+    messages.push(json!({"role": "user", "content": question}));
+    Value::Array(messages)
+}
+
 /// The agent path: the model works with the read-only tools and answers in words (D1–D6).
 async fn agent_ask(plan: AgentAsk<'_>) -> Response {
     let Some(client) = crate::model_probe::http_client() else {
         return fail(StatusCode::SERVICE_UNAVAILABLE, NO_ENDPOINT);
     };
     let offered = crate::ask_agent::openai_tools(plan.mcp_tools);
-    let mut messages: Vec<Value> = vec![json!({
-        "role": "system",
-        "content": AGENT_SYSTEM_PROMPT,
-    })];
-    // D6: a follow-up is an earlier question/answer pair, as in stardelt/stardelt#2341.
-    if let Some(previous) = plan.previous {
-        messages.push(json!({"role": "user", "content": previous.question}));
-        messages.push(json!({"role": "assistant", "content": previous.sql}));
-    }
-    messages.push(json!({"role": "user", "content": plan.question}));
-    let messages = Value::Array(messages);
+    let messages = agent_messages(plan.thread, plan.previous, plan.question);
     // A fallback endpoint that cannot use tools cannot do what this question asks for.
     let endpoints: Vec<(String, Value)> = plan
         .endpoints
@@ -1162,6 +1197,28 @@ fn previous_refusal(previous: &AskPrevious) -> Option<String> {
     None
 }
 
+/// Why a conversation thread may not be sent, or `None` when it may.
+fn thread_refusal(thread: &[AskTurn]) -> Option<String> {
+    if thread.len() > MAX_THREAD_TURNS {
+        return Some(format!(
+            "the thread must be at most {MAX_THREAD_TURNS} turns"
+        ));
+    }
+    for turn in thread {
+        if turn.question.trim().is_empty() || turn.question.chars().count() > MAX_QUESTION_CHARS {
+            return Some(format!(
+                "each thread question must be 1 to {MAX_QUESTION_CHARS} characters"
+            ));
+        }
+        if turn.answer.trim().is_empty() || turn.answer.chars().count() > MAX_TURN_ANSWER_CHARS {
+            return Some(format!(
+                "each thread answer must be 1 to {MAX_TURN_ANSWER_CHARS} characters"
+            ));
+        }
+    }
+    None
+}
+
 /// Two table names are the same table when all three parts are equal.
 fn same_table(a: &AskTable, b: &AskTable) -> bool {
     a.catalog == b.catalog && a.namespace == b.namespace && a.table == b.table
@@ -1374,7 +1431,7 @@ fn no_table_answer(endpoint: String, model: String, tried: Vec<String>) -> AskAn
     operation_id = "ask_answer",
     path = "/api/ask",
     tag = "public",
-    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. `mode` is `agent` or `sql`; absent is `agent` when the endpoint that answers can use tools (its probe found tool calling, and Nova's MCP endpoint is on) and `sql` otherwise. In agent mode the model works with the platform's **read-only** MCP tools as the caller, holding the `stardelt:read` scope only: at most 8 model calls and 6 tool calls per question, every tool result cut at 8 000 characters, and the endpoint's `sendRows` decides whether a `sql_read` result reaches the model whole or as its columns and row count. The answer then carries `text` (the answer in words) and `steps` (the tool calls, with at most 50 rows of a `sql_read` for the panel); `sql` is the last statement it ran, and nothing is `EXPLAIN`-checked because the tools themselves are read-only. An explicit `agent` on a model that cannot use tools is a `400`. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
+    description = "A question in words, one Trino statement out. A follow-up may name the answered turn it refines in `previous` — that turn's question, statement and tables — so a second message like \"only org domains\" changes the first statement instead of starting over: the previous turn's tables are tried first and each is re-read as the caller, which drops the ones the caller may not read. In agent mode, `thread` (at most 10 turns, each its question and the answer in words) is the conversation so far and is sent to the model as earlier messages; with a `thread`, `previous` is not used in agent mode. Nova searches as the caller for at most five tables — a table the question names in full (`catalog.namespace.table`) first, then, in every catalog the caller may browse (bronze, silver, gold, then the rest alphabetically, at most ten; the one `catalog` names, when given), the tables whose name contains every word of the question, or, when none does, the tables sharing the most words with it — sends the question and **the documentation of those tables** — description, tags, owner, domain, column names and their descriptions, and the tables' metric definitions (name, description, expression, time column, dimensions) — **and up to five of their verified queries** (question and statement only, never the expected rows) to one `ModelEndpoint` whose purpose list contains `ask` and whose probe found it reachable with JSON output, and answers the statement the model writes. `endpoint` names the one that answers; absent or `auto` is auto mode, which asks the ready endpoint whose eval runs on this catalog passed most often in the last 30 days (three runs at least; ties and endpoints with fewer runs in name order) and, when it fails with no answer, an upstream 5xx or 429, or an answer that is not the JSON shape, once more to the next one — at most two endpoints per question, and a named endpoint never falls back. `tried` names the endpoints asked, in order. `mode` is `agent` or `sql`; absent is `agent` when the endpoint that answers can use tools (its probe found tool calling, and Nova's MCP endpoint is on) and `sql` otherwise. In agent mode the model works with the platform's **read-only** MCP tools as the caller, holding the `stardelt:read` scope only: at most 8 model calls and 6 tool calls per question, every tool result cut at 8 000 characters, and the endpoint's `sendRows` decides whether a `sql_read` result reaches the model whole or as its columns and row count. The answer then carries `text` (the answer in words) and `steps` (the tool calls, with at most 50 rows of a `sql_read` for the panel); `sql` is the last statement it ran, and nothing is `EXPLAIN`-checked because the tools themselves are read-only. An explicit `agent` on a model that cannot use tools is a `400`. No row, no query result and no table data ever leaves the platform, whatever the endpoint's `sendRows` says; never the endpoint's URL or its key either. The statement is **checked with `EXPLAIN` as the caller and is not run**: `explain` is `passed` or `failed`, and a failed check keeps the SQL in the answer with the engine's sentence in `error` (one correction is asked of the model first). No matching table is a `200` with `sql: null` and a sentence saying so; a model endpoint that is refused, unreachable or does not answer in the JSON shape is a `502`. A spent budget is the `429` the model budget answers (see `/api/admin/model-usage`). Every answer carries `Cache-Control: no-store`.",
     params(("catalog" = Option<String>, Query, description = "The catalog to search for tables; omitted, every catalog the caller may browse")),
     request_body = AskRequest,
     responses(
@@ -1400,6 +1457,9 @@ pub(crate) async fn ask(
         );
     }
     if let Some(refusal) = request.previous.as_ref().and_then(previous_refusal) {
+        return fail(StatusCode::BAD_REQUEST, refusal);
+    }
+    if let Some(refusal) = thread_refusal(&request.thread) {
         return fail(StatusCode::BAD_REQUEST, refusal);
     }
     let Some(pool) = state.db.as_ref() else {
@@ -1485,6 +1545,7 @@ pub(crate) async fn ask(
             pool,
             question: &question,
             previous: request.previous.as_ref(),
+            thread: &request.thread,
             endpoints: &endpoints,
             mcp_tools: &tools,
             sub: &sub,
@@ -2408,6 +2469,131 @@ mod tests {
             sql: "SELECT id, display_name FROM bronze.public_db.rnacentral_databases".into(),
             tables: vec![table("public_db", "rnacentral_databases")],
         }
+    }
+
+    #[test]
+    fn agent_messages_puts_the_thread_between_system_and_question() {
+        let thread = vec![
+            AskTurn {
+                question: "where is my shop data?".into(),
+                answer: "It is in silver.shop and gold.shop_dbt.".into(),
+            },
+            AskTurn {
+                question: "and how many customers?".into(),
+                answer: "12 in silver.shop.customers.".into(),
+            },
+        ];
+        let messages = agent_messages(
+            &thread,
+            Some(&previous_turn()),
+            "and last month?",
+        );
+        let messages = messages.as_array().expect("an array of messages");
+        assert_eq!(messages.len(), 6, "system, two pairs, the question");
+        assert_eq!(messages[0].pointer("/role"), Some(&json!("system")));
+        assert_eq!(
+            messages[0].pointer("/content"),
+            Some(&json!(AGENT_SYSTEM_PROMPT))
+        );
+        assert_eq!(messages[1].pointer("/role"), Some(&json!("user")));
+        assert_eq!(
+            messages[1].pointer("/content"),
+            Some(&json!("where is my shop data?"))
+        );
+        assert_eq!(messages[2].pointer("/role"), Some(&json!("assistant")));
+        assert_eq!(
+            messages[2].pointer("/content"),
+            Some(&json!("It is in silver.shop and gold.shop_dbt."))
+        );
+        assert_eq!(
+            messages[3].pointer("/content"),
+            Some(&json!("and how many customers?"))
+        );
+        assert_eq!(
+            messages[4].pointer("/content"),
+            Some(&json!("12 in silver.shop.customers."))
+        );
+        assert_eq!(messages[5].pointer("/role"), Some(&json!("user")));
+        assert_eq!(messages[5].pointer("/content"), Some(&json!("and last month?")));
+    }
+
+    #[test]
+    fn agent_messages_without_a_thread_keeps_the_previous_pair() {
+        let messages = agent_messages(&[], Some(&previous_turn()), "and only org domains?");
+        let messages = messages.as_array().expect("an array of messages");
+        assert_eq!(messages.len(), 4, "system, the previous pair, the question");
+        assert_eq!(messages[0].pointer("/role"), Some(&json!("system")));
+        assert_eq!(
+            messages[1].pointer("/content"),
+            Some(&json!("can you tell me what I can do here?"))
+        );
+        assert_eq!(messages[2].pointer("/role"), Some(&json!("assistant")));
+        assert_eq!(
+            messages[2].pointer("/content"),
+            Some(&json!(
+                "SELECT id, display_name FROM bronze.public_db.rnacentral_databases"
+            ))
+        );
+        assert_eq!(
+            messages[3].pointer("/content"),
+            Some(&json!("and only org domains?"))
+        );
+        // Neither a thread nor a previous turn: just the system prompt and the question.
+        let bare = agent_messages(&[], None, "hello?");
+        assert_eq!(bare.as_array().expect("an array of messages").len(), 2);
+    }
+
+    #[test]
+    fn agent_messages_prefers_the_thread_over_previous() {
+        let thread = vec![AskTurn {
+            question: "where is my shop data?".into(),
+            answer: "It is in silver.shop.".into(),
+        }];
+        let messages = agent_messages(&thread, Some(&previous_turn()), "and per month?");
+        let messages = messages.as_array().expect("an array of messages");
+        assert_eq!(messages.len(), 4, "system, the thread's pair, the question");
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.pointer("/content")
+                    == Some(&json!(
+                        "SELECT id, display_name FROM bronze.public_db.rnacentral_databases"
+                    ))),
+            "the previous statement is not sent when a thread is there: {messages:?}"
+        );
+        assert_eq!(
+            messages[2].pointer("/content"),
+            Some(&json!("It is in silver.shop."))
+        );
+    }
+
+    #[test]
+    fn thread_refusal_refuses_eleven_turns_and_an_empty_answer() {
+        let turn = || AskTurn {
+            question: "where is my shop data?".into(),
+            answer: "It is in silver.shop.".into(),
+        };
+        assert_eq!(thread_refusal(&[]), None, "no thread is fine");
+        assert_eq!(thread_refusal(&vec![turn(); MAX_THREAD_TURNS]), None);
+        let refusal = thread_refusal(&vec![turn(); MAX_THREAD_TURNS + 1])
+            .expect("eleven turns are refused");
+        assert!(refusal.contains("10"), "{refusal}");
+        let empty_answer = AskTurn {
+            question: "and then?".into(),
+            answer: "   ".into(),
+        };
+        let refusal = thread_refusal(&[empty_answer]).expect("an empty answer is refused");
+        assert!(refusal.contains("answer"), "{refusal}");
+        let empty_question = AskTurn {
+            question: String::new(),
+            answer: "It is in silver.shop.".into(),
+        };
+        assert!(thread_refusal(&[empty_question]).is_some(), "an empty question is refused");
+        let long_answer = AskTurn {
+            question: "and then?".into(),
+            answer: "x".repeat(MAX_TURN_ANSWER_CHARS + 1),
+        };
+        assert!(thread_refusal(&[long_answer]).is_some(), "an 8001-character answer is refused");
     }
 
     #[test]

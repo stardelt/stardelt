@@ -435,6 +435,16 @@ export type AskPrevious = {
   tables: AskTable[]
 }
 
+/**
+ * One earlier turn of the conversation (`POST /api/ask` body `thread`, stardelt/stardelt#2434):
+ * the question and the answer in words the person saw. The panel sends the last 10 turns
+ * since **New question**; in agent mode the model reads them as earlier messages.
+ */
+export type AskTurn = {
+  question: string
+  answer: string
+}
+
 /** One conversation from the person's Ask History (`GET /api/ask/history`, design #891 slice c). */
 export type AskConversation = {
   id: number
@@ -1716,19 +1726,22 @@ export const api = {
    * A question in, checked SQL out (design nova#891). Metadata only ever leaves the platform.
    * `previous` is the answered turn this question refines (nova#2341): Nova then keeps that
    * turn's tables and sends its statement to the model. `endpoint` names the `ModelEndpoint`;
-   * omitted, auto mode ranks the ready ones (#2342).
+   * omitted, auto mode ranks the ready ones (#2342). `thread` is the conversation so far
+   * (#2434): in agent mode the model reads it as earlier messages, and `previous` is then
+   * not used.
    */
   /**
    * `mode` is left out by default: Nova answers in agent mode when the endpoint can use
    * tools and in `sql` mode otherwise, and the answer says which (stardelt/stardelt#2365).
    */
-  ask:          (question: string, catalog?: string, previous?: AskPrevious, endpoint?: string, mode?: 'agent' | 'sql') => {
+  ask:          (question: string, catalog?: string, previous?: AskPrevious, endpoint?: string, mode?: 'agent' | 'sql', thread?: AskTurn[]) => {
     const qs = catalog ? `?catalog=${encodeURIComponent(catalog)}` : ''
     return jpost<AskAnswer>(`/api/ask${qs}`, {
       question,
       ...(previous ? { previous } : {}),
       ...(endpoint ? { endpoint } : {}),
       ...(mode ? { mode } : {}),
+      ...(thread && thread.length ? { thread } : {}),
     })
   },
   /** The caller's own last 20 Ask conversations, newest first. The body is a bare array. */

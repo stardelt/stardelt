@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type AskPrevious, type ModelEndpoint } from '../api'
+import { ApiError, api, errorMessage, type AskAnswer, type AskConversation, type AskPrevious, type AskTurn, type ModelEndpoint } from '../api'
 import { formatTime } from '../format'
 import { tokenizeSql } from '../sqlHighlight'
 import { TOKEN_CLASS } from '../sqlTokens'
@@ -30,6 +30,27 @@ type Turn = {
   vote?: 'up' | 'down'
   /** The sentence of a vote that did not reach its row. */
   voteError?: string
+}
+
+/** How many turns of the conversation one question carries (the API's limit). */
+const MAX_THREAD_TURNS = 10
+
+/**
+ * The conversation as the Agent reads it (#2434, D4): each answered turn's question and the
+ * words the person saw — an agent answer's `text` (and its SQL), a SQL answer's sentence and
+ * statement. A turn that ended in an error or a budget notice is left out; the last 10 stay.
+ */
+export function turnsToThread(turns: Turn[]): AskTurn[] {
+  const thread: AskTurn[] = []
+  for (const turn of turns) {
+    const answer = turn.answer
+    if (!answer || turn.error) continue
+    const text = answer.mode === 'agent' ? answer.text ?? answer.sentence : answer.sentence
+    const parts = [text, answer.mode === 'agent' ? (answer.sql ? `SQL: ${answer.sql}` : '') : answer.sql ?? '']
+      .filter(part => part !== '')
+    thread.push({ question: turn.question, answer: parts.join('\n\n') })
+  }
+  return thread.slice(-MAX_THREAD_TURNS)
 }
 
 /** The three stages one question goes through; the panel says which one it is in. */
@@ -65,11 +86,18 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
   const [turns, setTurns] = useState<Turn[]>([])
   // The answered turn the next question refines (nova#2341); `null` after "New question".
   const [followUp, setFollowUp] = useState<AskPrevious | null>(null)
+  // Where the conversation the Agent reads begins in `turns`: 0, or after "New question".
+  const [threadStart, setThreadStart] = useState(0)
   const [busy, setBusy] = useState(false)
   const [step, setStep] = useState(0)
   const [showHistory, setShowHistory] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  // Each turn's wrapper and its answer card, so the list can follow the conversation (#2434).
+  const turnRefs = useRef(new Map<number, HTMLElement>())
+  const answerRefs = useRef(new Map<number, HTMLElement>())
+  // True while the person has scrolled up more than 120 px from the bottom.
+  const scrolledUp = useRef(false)
   // `busy` is state, so two fast Enters would both pass its check; the ref is the guard.
   const inFlight = useRef(false)
   // React runs an effect twice in development; the question from outside is asked once.
@@ -180,7 +208,10 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
     const ticker = setInterval(() => setStep(s => Math.min(s + 1, STEPS.length - 1)), STEP_MS)
     try {
       const endpoint = selected === 'auto' ? undefined : selected
-      const answer = await api.ask(q, undefined, followUp ?? undefined, endpoint)
+      // The conversation since "New question" (#2434): the Agent sees its own earlier
+      // answers in words, not only a statement.
+      const thread = turnsToThread(turns.slice(threadStart))
+      const answer = await api.ask(q, undefined, followUp ?? undefined, endpoint, undefined, thread)
       patchTurn(index, { answer })
       // The next question refines this answer, unless "New question" is pressed first.
       if (answer.sql !== null) {
@@ -195,10 +226,6 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
       inFlight.current = false
       setBusy(false)
       setStep(0)
-      requestAnimationFrame(() => {
-        const el = bodyRef.current
-        if (el) el.scrollTop = el.scrollHeight
-      })
       inputRef.current?.focus()
     }
   }
@@ -292,12 +319,37 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
         callId: c.callId ?? undefined,
       },
     }])
+    // A stored conversation is a new conversation: its first turn is where the thread starts.
+    setThreadStart(0)
+    setFollowUp(null)
+    scrolledUp.current = false
     setShowHistory(false)
-    requestAnimationFrame(() => {
-      const el = bodyRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    })
   }
+
+  // D5 (#2434): the list follows the conversation. A new question and the busy line stay at
+  // the bottom; an answer opens at its first line — or at its end when it fits — unless the
+  // person scrolled up while waiting.
+  const lastAnswered = turns.reduce(
+    (last, turn, i) => (turn.answer || turn.error ? i : last),
+    -1,
+  )
+  useEffect(() => {
+    if (showHistory || turns.length === 0) return
+    const list = bodyRef.current
+    if (!list) return
+    const newest = lastAnswered === turns.length - 1
+    const frame = requestAnimationFrame(() => {
+      if (!newest) {
+        list.scrollTop = list.scrollHeight
+        return
+      }
+      if (scrolledUp.current) return
+      const answer = answerRefs.current.get(lastAnswered) ?? turnRefs.current.get(lastAnswered)
+      if (!answer) return
+      answer.scrollIntoView({ block: answer.offsetHeight > list.clientHeight ? 'start' : 'end' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [turns.length, busy, lastAnswered, showHistory])
 
   return (
     <aside
@@ -317,7 +369,14 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
         <button type="button" className="btn-ghost px-2.5 py-2" aria-label="Close Agent" onClick={onClose}>✕</button>
       </div>
 
-      <div ref={bodyRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+      <div
+        ref={bodyRef}
+        className="flex-1 overflow-y-auto px-4 py-3 space-y-4"
+        onScroll={e => {
+          const el = e.currentTarget
+          scrolledUp.current = el.scrollHeight - el.scrollTop - el.clientHeight > 120
+        }}
+      >
         {showHistory ? (
           <div id="ask-history" className="space-y-1">
             {conversations.length === 0 && history.error == null && (
@@ -338,7 +397,22 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
         ) : (
           <>
             {turns.map((turn, i) => (
-              <TurnView key={i} turn={turn} onVote={vote.bind(null, i)} />
+              <div
+                key={i}
+                ref={el => {
+                  if (el) turnRefs.current.set(i, el)
+                  else turnRefs.current.delete(i)
+                }}
+              >
+                <TurnView
+                  turn={turn}
+                  onVote={vote.bind(null, i)}
+                  answerRef={el => {
+                    if (el) answerRefs.current.set(i, el)
+                    else answerRefs.current.delete(i)
+                  }}
+                />
+              </div>
             ))}
 
             {busy && (
@@ -388,7 +462,11 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
           <button
             type="button"
             className="btn-ghost px-2 py-1 text-xs"
-            onClick={() => setFollowUp(null)}
+            onClick={() => {
+              setFollowUp(null)
+              // A new conversation: the turns so far are not the Agent's context any more.
+              setThreadStart(turns.length)
+            }}
           >New question</button>
         </div>
       )}
@@ -415,7 +493,12 @@ export default function AskPanel({ endpoints, onClose, initialQuestion, onInitia
 }
 
 /** One question and its answer: the sentence, the statement, the check, the sources, the vote. */
-function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') => void }) {
+function TurnView({ turn, onVote, answerRef }: {
+  turn: Turn
+  onVote: (vote: 'up' | 'down') => void
+  /** The answer card, so the list can open an answer at its first line (#2434). */
+  answerRef?: (el: HTMLDivElement | null) => void
+}) {
   const navigate = useNavigate()
   const [copied, setCopied] = useState(false)
   const [verifying, setVerifying] = useState(false)
@@ -474,7 +557,7 @@ function TurnView({ turn, onVote }: { turn: Turn; onVote: (vote: 'up' | 'down') 
       )}
 
       {answer && (
-        <div className="card p-3 space-y-2 text-sm">
+        <div ref={answerRef} className="card p-3 space-y-2 text-sm">
           {answer.mode === 'agent'
             ? <p className="whitespace-pre-wrap">{answer.text ?? answer.sentence}</p>
             : <p>{answer.sentence}</p>}

@@ -411,3 +411,52 @@ test('an answer is marked as verified on one of its sources', async ({ page }) =
   await expect(page.getByText('Verified on gold.shop.customer_ltv')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Mark as verified' })).toHaveCount(0)
 })
+
+test('a follow-up sends the earlier agent answer as thread', async ({ page }) => {
+  // The lab's report (stardelt/stardelt#2434): an agent answer in words has `sql: null`, so
+  // `previous` never carried it; the thread is the conversation the model reads.
+  const bodies: Array<Record<string, unknown>> = []
+  const WORDS = 'Your shop data is in silver.shop.'
+  const WORDS_ANSWER = {
+    endpoint: 'lab', model: 'llama-3.3-70b', tried: ['lab'], callId: 45, sql: null,
+    sentence: WORDS, tables: [], explain: 'not_run', error: null, mode: 'agent',
+    text: WORDS, steps: [],
+  }
+  await stub(page, {
+    ask: (route) => {
+      bodies.push(route.request().postDataJSON())
+      return json(route, WORDS_ANSWER)
+    },
+  })
+  await page.keyboard.press('Control+J')
+  await ask(page, 'where is my shop data?')
+  const panel = page.locator('#ask-panel')
+  await expect(panel.getByText(WORDS)).toBeVisible()
+
+  await ask(page, 'and how many customers are in it?')
+  await expect.poll(() => bodies.length).toBe(2)
+  expect(bodies[0].thread).toBeUndefined()
+  expect(bodies[1].thread).toEqual([
+    { question: 'where is my shop data?', answer: WORDS },
+  ])
+})
+
+test('New question empties the thread', async ({ page }) => {
+  const bodies: Array<Record<string, unknown>> = []
+  await stub(page, {
+    ask: (route) => {
+      bodies.push(route.request().postDataJSON())
+      return json(route, PASSED)
+    },
+  })
+  await page.keyboard.press('Control+J')
+  await ask(page, 'How many customer rows did the shop read yesterday?')
+  const panel = page.locator('#ask-panel')
+  await expect(panel.getByRole('button', { name: 'New question' })).toBeVisible()
+  await panel.getByRole('button', { name: 'New question' }).click()
+
+  await ask(page, 'Which tables may I read?')
+  await expect.poll(() => bodies.length).toBe(2)
+  expect(bodies[1].thread).toBeUndefined()
+  expect(bodies[1].previous).toBeUndefined()
+})
