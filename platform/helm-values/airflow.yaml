@@ -481,6 +481,7 @@ volumeMounts:
 # installing with `--wait` (what `make install` and a GitOps toolkit do) deadlocks
 # against these two Jobs as hooks. Upstream requires them off for waiters, and
 # Job specs are immutable anyway, which makes the release un-reinstallable.
+# `step-airflow` deletes both Jobs before the upgrade so `useHelmHooks: false` stays safe.
 #   https://airflow.apache.org/docs/helm-chart/1.22.0/index.html
 migrateDatabaseJob:
   useHelmHooks: false
