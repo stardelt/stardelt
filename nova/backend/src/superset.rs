@@ -1023,7 +1023,7 @@ pub async fn delete_dashboard(
     path = "/api/dashboards/{id}/export",
     tag = "public",
     operation_id = "dashboards_export",
-    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export for its own stage. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI.",
+    description = "The ZIP archive of one dashboard for a bundle's author: the caller must be a member of the bundle's owner group, and a deploy principal may only export for its own stage. A dashboard whose stamp names another bundle or another group is refused; an unstamped one is the author's to export. The archive's `databases/` folder is dropped server-side, so a bundle never receives the target's connection URI.",
     params(
         ("id" = i64, Path, description = "Superset's numeric dashboard id"),
         ("bundle" = String, Query, description = "The bundle that owns the dashboard"),
