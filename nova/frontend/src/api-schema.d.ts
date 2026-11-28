@@ -166,6 +166,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/query-log/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/admin/query-log/export?from=&cursor=&limit=` — the whole log, ascending.
+         * @description Administrator only. Every stored column of the query log, oldest first, a page at a time — the read a job copies into the platform's own tables so usage outlives the 90-day window. The order is ascending (createdAt, then id), so a writer keeps the nextCursor of one page and continues from it after a restart; nextCursor is null on the last page. limit is 1 to 1000, 500 by default; from is an epoch-millisecond lower bound. With NOVA_QUERY_LOG_REDACT_LITERALS=1 every statement shows '?' in place of each string literal.
+         */
+        get: operations["query_log_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/teams": {
         parameters: {
             query?: never;
@@ -4914,6 +4934,38 @@ export interface components {
             userName?: string | null;
             warehouse: string;
         };
+        /** @description One ascending page of the export; `nextCursor` is null on the last page. */
+        QueryLogExportPage: {
+            nextCursor?: string | null;
+            rows: components["schemas"]["QueryLogExportRow"][];
+        };
+        /** @description One row of the export: every stored column, so a writer can copy the table whole. */
+        QueryLogExportRow: {
+            catalog?: string | null;
+            clientTags: string[];
+            /** Format: int64 */
+            createdAt: number;
+            data: components["schemas"]["QueryData"];
+            /** Format: int64 */
+            endedAt?: number | null;
+            error?: components["schemas"]["QueryFailure"] | null;
+            id: string;
+            queryType?: string | null;
+            schema?: string | null;
+            source?: string | null;
+            sql: string;
+            sqlHash: string;
+            /** Format: int64 */
+            startedAt?: number | null;
+            state: string;
+            tablesRead: string[];
+            tablesWritten: string[];
+            timing: components["schemas"]["QueryTiming"];
+            /** Format: int64 */
+            updatedAt: number;
+            user: string;
+            warehouse: string;
+        };
         /** @description One row of the query log list; the statement is cut to a preview. */
         QueryLogItem: {
             /** Format: int64 */
@@ -6591,6 +6643,60 @@ export interface operations {
                 };
             };
             /** @description Nova has no state store */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    query_log_export: {
+        parameters: {
+            query?: {
+                /** @description Created at or after this time, epoch milliseconds */
+                from?: number;
+                /** @description The nextCursor of the previous page; rows after it, ascending */
+                cursor?: string;
+                /** @description Page size from 1 to 1000; 500 by default */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One ascending page of the whole log */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryLogExportPage"];
+                };
+            };
+            /** @description A parameter is not valid; the message names it */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The state store is not configured */
             503: {
                 headers: {
                     [name: string]: unknown;

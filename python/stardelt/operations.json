@@ -898,6 +898,17 @@
       "query_params": [],
       "body": false
     },
+    "query_log_export": {
+      "method": "GET",
+      "path": "/api/admin/query-log/export",
+      "path_params": [],
+      "query_params": [
+        "from",
+        "cursor",
+        "limit"
+      ],
+      "body": false
+    },
     "query_log_history": {
       "method": "GET",
       "path": "/api/query-log/{id}/history",

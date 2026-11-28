@@ -25,6 +25,7 @@ GET	/api/admin/catalogs	admin_catalogs	main	admin
 GET	/api/admin/dashboards/{id}/export	superset	main	admin
 GET	/api/admin/mcp-audit	mcp_audit	main	admin
 GET	/api/admin/model-usage	model_usage	main	admin
+GET	/api/admin/query-log/export	query_log_api	main	admin
 GET	/api/apps	apps	main	admin
 GET	/api/apps/links	apps	main	signed-in
 GET	/api/apps/{id}	apps	main	admin

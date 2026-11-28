@@ -1,10 +1,11 @@
-B1 file-size budget (1500 production lines): 7 backend files over
+B1 file-size budget (1500 production lines): 8 backend files over
   pipelines.rs 9033
   catalog_docs.rs 2702
   auth.rs 2544
   notebooks.rs 2277
   connection_routes.rs 1949
-  main.rs 1516
+  query_log_api.rs 1729
+  main.rs 1519
   mcp.rs 1515
 F-size frontend files over 800 lines: 7
   api-schema.d.ts 16363
