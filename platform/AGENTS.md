@@ -32,7 +32,7 @@ The running development environment is the Hetzner k3s cluster
 ```bash
 make deps               # verify docker, kubectl, helm
 make lint               # bash -n every script under scripts/ + dev/ (+ shellcheck if installed)
-make install            # full stack
+make install            # full stack — on a new cluster after install-core and install-identity
 make install-core       # storage+catalog+query+Nova; SLIM=1 for 8 GB nodes (cx33)
 make install-notebooks  # JupyterHub
 make install-identity   # optional platform IdP (Keycloak); BASE_DOMAIN=…, secrets generated
