@@ -685,12 +685,14 @@ impl SupersetClient {
 // The route
 // ---------------------------------------------------------------------------
 
-/// Why the import refused: the archive itself (a 400 for the caller) or Superset (its own
-/// status and sentence).
+/// Why the import refused: the archive itself (a 400 for the caller), Superset (its own
+/// status and sentence), or a dashboard the archive would overwrite with another bundle's.
 #[derive(Debug)]
 pub(crate) enum ImportError {
     Archive(ArchiveError),
     Superset(SupersetError),
+    /// A dashboard in the archive is certified by another bundle or group.
+    ForeignDashboard(String),
 }
 
 impl From<ArchiveError> for ImportError {
@@ -710,6 +712,7 @@ impl std::fmt::Display for ImportError {
         match self {
             ImportError::Archive(error) => error.fmt(f),
             ImportError::Superset(error) => error.fmt(f),
+            ImportError::ForeignDashboard(sentence) => sentence.fmt(f),
         }
     }
 }
@@ -732,6 +735,9 @@ impl ImportError {
             )
                 .into_response(),
             ImportError::Superset(error) => error.into_response(),
+            ImportError::ForeignDashboard(sentence) => {
+                (StatusCode::FORBIDDEN, Json(json!({ "error": sentence }))).into_response()
+            }
         }
     }
 }
@@ -751,6 +757,12 @@ pub(crate) struct ImportedDashboard {
 /// The target database for a dataset's `catalog: gold` is the database whose name maps to the
 /// stem `Trino_Gold` (a space becomes `_`, the export's naming). Its uuid is read from the
 /// database's own export — never written by us — so the target keeps its connection URI.
+///
+/// Before the write, every dashboard the archive carries is matched by title against the
+/// target's own list and refused when its stamp names another bundle or owner group (#115
+/// decision 6), so an import can never take over another group's certified dashboard. The
+/// list is Superset's first page (100 dashboards), so a target with more than 100 dashboards
+/// is only checked against that first page.
 pub(crate) async fn import_archive(
     client: &SupersetClient,
     archive: &[u8],
@@ -758,6 +770,20 @@ pub(crate) async fn import_archive(
     overwrite: bool,
 ) -> Result<ImportedDashboard, ImportError> {
     let catalogs = superset_archive::dataset_catalogs(archive)?;
+    let titles = superset_archive::dashboard_titles(archive)?;
+    if !titles.is_empty() {
+        for listed in client.dashboards().await? {
+            if listed.title.is_empty() || !titles.iter().any(|title| title == &listed.title) {
+                continue;
+            }
+            let (certified, details) = client.provenance(listed.id).await?;
+            if let Some(sentence) =
+                export_stamp_refusal(&certified, &details, stamp.bundle, stamp.owner_group)
+            {
+                return Err(ImportError::ForeignDashboard(sentence));
+            }
+        }
+    }
     let mut ids = BTreeMap::new();
     for database in client.databases().await? {
         ids.insert(database.name.replace(' ', "_"), database.id);
@@ -1319,7 +1345,7 @@ pub struct DashboardImportQuery {
     operation_id = "dashboards_import",
     path = "/api/dashboards/import",
     tag = "public",
-    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. The answer is Superset's own import result plus the database stems that were mapped.",
+    description = "Import one Superset dashboard archive for a bundle's target: every dataset is remapped onto the target's own `Trino <catalog>` database, the target's `databases/` file is added, every dashboard is stamped `certified_by: stardelt bundle <bundle>` / `certification_details: <target> @ <commit>`, and Superset imports the result. The caller must be a member of the bundle's owner group; a deploy principal may only import to its own stage. An archive is refused when one of its dashboards already exists certified by another bundle or group. The answer is Superset's own import result plus the database stems that were mapped.",
     params(
         ("bundle" = String, Query, description = "The bundle whose dashboards these are"),
         ("ownerGroup" = String, Query, description = "The bundle's owner group"),
@@ -1332,7 +1358,7 @@ pub struct DashboardImportQuery {
         (status = 200, description = "Superset's import result and the mapped database stems", body = serde_json::Value),
         (status = 400, description = "The body is not a dashboard archive, or a field has the wrong shape: `bundle` 3–40 lower-case letters, digits and dashes; `target` and `ownerGroup` 1–64 letters, digits, dots, underscores or dashes; `commit` lower-case hex", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller is not a member of the bundle's owner group, or a deploy principal names another stage", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the bundle's owner group, a deploy principal names another stage, or a dashboard in the archive is certified by another bundle or owner group", body = crate::openapi::ErrorResponse),
         (status = 413, description = "The archive is larger than 16 MiB", body = crate::openapi::ErrorResponse),
         (status = 422, description = "The target has no database for one of the archive's catalogs", body = crate::openapi::ErrorResponse),
         (status = 502, description = "Superset answered an error, or could not be reached", body = crate::openapi::ErrorResponse),
@@ -1934,6 +1960,29 @@ mod tests {
         b"dashboard_title: Shop\ncertified_by: null\ncertification_details: null\n".to_vec()
     }
 
+    /// The `platform/superset/bundles/public-demo-shop/dashboards/Shop.yaml` title: the
+    /// dashboard import tests must match it.
+    const SHOP_TITLE: &str = "Shop: revenue, customers and products";
+
+    /// One dashboard member carrying the demo bundle's own title.
+    fn shop_dashboard() -> Vec<u8> {
+        format!(
+            "dashboard_title: \"{SHOP_TITLE}\"\ncertified_by: null\ncertification_details: null\n"
+        )
+        .into_bytes()
+    }
+
+    /// The demo bundle's archive: one dataset on `gold` and its own dashboard.
+    fn shop_archive() -> Vec<u8> {
+        zipped(&[
+            (
+                "shop-export/datasets/Trino_Gold/orders.yaml",
+                &dataset("gold"),
+            ),
+            ("shop-export/dashboards/Shop.yaml", &shop_dashboard()),
+        ])
+    }
+
     /// Serialises the tests that set/remove `NOVA_SUPERSET_*`: the environment is
     /// process-global. Tokio's mutex, because the guard is held across an await.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -2273,6 +2322,118 @@ mod tests {
             database.contains("uuid: target-gold"),
             "the target's own database file was added: {database}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_dashboard_of_another_bundle_is_refused() {
+        let (client, fake) = fake::start().await;
+        {
+            let mut state = fake.lock().unwrap();
+            state.listed = vec![(11, SHOP_TITLE.to_string())];
+            state.stamps.insert(
+                11,
+                ("stardelt bundle other".into(), "prod @ abc by sales".into()),
+            );
+        }
+        match import_archive(
+            &client,
+            &shop_archive(),
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc",
+                owner_group: "sales",
+            },
+            true,
+        )
+        .await
+        {
+            Err(ImportError::ForeignDashboard(sentence)) => assert!(
+                sentence.contains("this dashboard belongs to stardelt bundle other"),
+                "the refusal names the owning bundle: {sentence}"
+            ),
+            other => panic!("expected ForeignDashboard, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dashboard_of_another_group_is_refused() {
+        let (client, fake) = fake::start().await;
+        {
+            let mut state = fake.lock().unwrap();
+            state.listed = vec![(11, SHOP_TITLE.to_string())];
+            state.stamps.insert(
+                11,
+                (
+                    "stardelt bundle shop".into(),
+                    "prod @ abc by other-group".into(),
+                ),
+            );
+        }
+        match import_archive(
+            &client,
+            &shop_archive(),
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc",
+                owner_group: "sales",
+            },
+            true,
+        )
+        .await
+        {
+            Err(ImportError::ForeignDashboard(sentence)) => assert!(
+                sentence.contains("another group"),
+                "the refusal names the other group: {sentence}"
+            ),
+            other => panic!("expected ForeignDashboard, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dashboard_of_this_bundle_is_imported() {
+        let (client, fake) = fake::start().await;
+        {
+            let mut state = fake.lock().unwrap();
+            state.listed = vec![(11, SHOP_TITLE.to_string())];
+            state.stamps.insert(
+                11,
+                ("stardelt bundle shop".into(), "prod @ abc by sales".into()),
+            );
+        }
+        import_archive(
+            &client,
+            &shop_archive(),
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc",
+                owner_group: "sales",
+            },
+            true,
+        )
+        .await
+        .expect("a re-import of this bundle's own dashboard");
+    }
+
+    #[tokio::test]
+    async fn an_unstamped_dashboard_with_the_same_title_is_imported() {
+        let (client, fake) = fake::start().await;
+        fake.lock().unwrap().listed = vec![(11, SHOP_TITLE.to_string())];
+        import_archive(
+            &client,
+            &shop_archive(),
+            &Stamp {
+                bundle: "shop",
+                target: "prod",
+                commit: "abc",
+                owner_group: "sales",
+            },
+            true,
+        )
+        .await
+        .expect("an unstamped dashboard is the author's to overwrite");
     }
 
     #[tokio::test]
