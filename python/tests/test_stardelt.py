@@ -7,7 +7,9 @@ round-trip dtypes — the dev-cluster check in the ticket covers.
 """
 
 import base64
+import hashlib
 import json
+import re
 import os
 import pathlib
 import socket
@@ -19,6 +21,7 @@ import warnings
 import certifi
 import pandas as pd
 import pytest
+import yaml
 
 import stardelt
 
@@ -462,6 +465,86 @@ def test_the_cheat_sheet_names_the_live_loader_ticket():
     assert any(
         "20_000 rows" in line and "stardelt/stardelt#52" in line for line in readme.splitlines()
     )
+
+
+def _rules_file():
+    return json.loads(
+        pathlib.Path(stardelt.__file__).with_name("performance_rules.json").read_text(encoding="utf-8")
+    )
+
+
+def test_spark_tips_is_generated_from_the_rules_file():
+    rules = _rules_file()["rules"]
+    assert [rule["id"] for rule in rules] == [
+        "result-to-driver",
+        "local-data-to-cluster",
+        "loop-of-jobs",
+        "repeated-broadcast",
+        "cache-not-released",
+        "csv-chunk-append",
+        "repeated-count",
+    ]
+    assert stardelt.SPARK_TIPS == tuple(
+        f"instead of {rule['bad']}: {rule['good']} ({rule['why']})" for rule in rules
+    )
+
+
+def test_spark_tips_output_is_the_measured_text(capsys):
+    # The printed lines must not move: verify-* rows and notebook cells quote them.
+    stardelt.spark_tips()
+    out = capsys.readouterr().out
+    assert hashlib.sha256(out.encode("utf-8")).hexdigest() == (
+        "ab4d709aaf9dc88dfe3aed1bc2fb2956c0718c336b9d7517846e8e67a1743b22"
+    )
+
+
+def test_performance_rules_quote_the_manifests():
+    root = pathlib.Path(__file__).resolve().parents[2]
+    limits = _rules_file()["limits"]
+    documents = list(
+        yaml.safe_load_all((root / "platform" / "manifests" / "spark.yaml").read_text(encoding="utf-8"))
+    )
+    config = next(
+        doc
+        for doc in documents
+        if doc and doc.get("kind") == "ConfigMap" and "spark-defaults.conf" in (doc.get("data") or {})
+    )
+    values = {}
+    for line in config["data"]["spark-defaults.conf"].splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition(" ")
+        values[key] = value.strip()
+    deployment = next(
+        doc
+        for doc in documents
+        if doc and doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "spark-connect"
+    )
+    assert int(values["spark.driver.memory"].rstrip("g")) == limits["driver_heap_gib"]
+    assert int(values["spark.driver.maxResultSize"].rstrip("m")) == limits["max_result_mib"]
+    assert int(values["spark.executor.cores"]) == limits["executor_cores"]
+    assert int(values["spark.executor.memory"].rstrip("g")) == limits["executor_gib"]
+    assert int(values["spark.dynamicAllocation.maxExecutors"]) == limits["max_executors"]
+    pod = deployment["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["memory"]
+    assert int(pod.rstrip("Gi")) == limits["driver_pod_gib"]
+    preset = re.compile(
+        r'SparkClusterSize::(Small|Medium|Large) => \((\d+), "(\d+)Gi", (\d+), "(\d+)Gi", (\d+)\)'
+    )
+    operator = (
+        root / "operator" / "crates" / "stardelt-operator" / "src" / "spark_cluster.rs"
+    ).read_text(encoding="utf-8")
+    rows = {
+        match.group(1).lower(): {
+            "driver_cores": int(match.group(2)),
+            "driver_memory": f"{match.group(3)}Gi",
+            "executor_cores": int(match.group(4)),
+            "executor_memory": f"{match.group(5)}Gi",
+            "max_executors": int(match.group(6)),
+        }
+        for match in preset.finditer(operator)
+    }
+    assert rows == limits["size_classes"]
 
 
 # Token source and renewal --------------------------------------------------------

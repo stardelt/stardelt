@@ -10,19 +10,16 @@ MANIFEST = PLATFORM / "manifests" / "spark.yaml"
 README = PLATFORM.parent / "python" / "stardelt" / "README.md"
 GUIDE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "spark.md"
 PERFORMANCE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "performance.md"
-HELPER = PLATFORM.parent / "python" / "stardelt" / "__init__.py"
+RULES = PLATFORM.parent / "python" / "stardelt" / "performance_rules.json"
 CONNECT_GUIDE = PLATFORM.parent.parent / "stardelt-docs" / "docs" / "guides" / "connect-your-tools.md"
 OPERATOR = PLATFORM.parent / "operator" / "crates" / "stardelt-operator" / "src" / "spark_cluster.rs"
 
 
 def spark_tips():
-    """`SPARK_TIPS` from the helper, parsed — the seven strings `spark_tips()` prints."""
-    import ast
-    tree = ast.parse(HELPER.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SPARK_TIPS":
-            return [ast.literal_eval(element) for element in node.value.elts]
-    raise AssertionError("python/stardelt/__init__.py no longer defines SPARK_TIPS")
+    """The seven strings `spark_tips()` prints, built from the one rules file (stardelt-docs#108)."""
+    import json
+    rules = json.loads(RULES.read_text(encoding="utf-8"))["rules"]
+    return [f"instead of {rule['bad']}: {rule['good']} ({rule['why']})" for rule in rules]
 
 
 def readme_table_rows():

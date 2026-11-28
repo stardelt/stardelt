@@ -32,6 +32,7 @@ import datetime
 import json
 import math
 import os
+import pathlib
 import re
 import sys
 import time
@@ -690,25 +691,16 @@ def _cached_spark_session(token, remote):
 
 
 # The seven rows of the cheat sheet in README.md ("Keeping the shared driver
-# healthy"), one line each. `spark_tips()` prints them into a notebook; the
-# README table and the quickstart's markdown cell carry the same rows, so keep
-# the three in step when a row changes.
-SPARK_TIPS = (
-    "instead of df.toPandas()/df.collect() on a big table: df.limit(10_000).toPandas(), aggregate first, or df.writeTo(\"<catalog>.<schema>.<table>\").createOrReplace() and read it with SQL "
-    "(the whole result lands in the 1 GiB driver heap; above 512 MiB the call fails)",
-    "instead of spark.createDataFrame(big_pandas_or_list): write the data to a table once (writeTo), then spark.table(...) "
-    "(local data is shipped inside every task of every job)",
-    "instead of a Python loop that runs one job per item: one query with a join or groupBy, or df.repartition(n) plus mapInPandas "
-    "(every job adds a broadcast and a plan to the driver)",
-    "instead of df.join(small_df, ...) repeated in a loop: from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), ...) once, outside the loop "
-    "(one broadcast instead of one per iteration)",
-    "instead of df.cache() never released: df.unpersist() when done; cache only what several actions reuse "
-    "(cached blocks occupy executor memory, 1 GiB each, and are not freed by themselves)",
-    "instead of pd.read_csv(chunksize=250_000) then spark.createDataFrame(chunk) + saveAsTable(append) per chunk: chunks of at most 20_000 rows (about 1 MiB per task), "
-    "finished chunk numbers in a small table so a restart can resume, and see stardelt/stardelt#52 for the planned loader "
-    "(measured 2026-10-21: 250_000 rows = tasks of 11 MiB, 305 warnings in 3 h, driver OOMKilled)",
-    "instead of df.count() repeated to \"check\": run it once, keep the number "
-    "(each action is a job)",
+# healthy") come from ``performance_rules.json`` next to this file, the single
+# source the notebook guide, the README table and the VS Code hints are rendered
+# from (stardelt-docs#108). `spark_tips()` prints one line per rule; the line is
+# built from the rule's three cells, so an edit goes into the JSON only.
+_PERFORMANCE_RULES = json.loads(
+    pathlib.Path(__file__).with_name("performance_rules.json").read_text(encoding="utf-8")
+)["rules"]
+SPARK_TIPS = tuple(
+    f"instead of {rule['bad']}: {rule['good']} ({rule['why']})"
+    for rule in _PERFORMANCE_RULES
 )
 
 

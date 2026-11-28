@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "limits": {
+    "driver_heap_gib": 1,
+    "driver_pod_gib": 3,
+    "max_result_mib": 512,
+    "executor_cores": 1,
+    "executor_gib": 1,
+    "max_executors": 2,
+    "size_classes": {
+      "small": {
+        "driver_cores": 1,
+        "driver_memory": "2Gi",
+        "executor_cores": 1,
+        "executor_memory": "2Gi",
+        "max_executors": 2
+      },
+      "medium": {
+        "driver_cores": 2,
+        "driver_memory": "4Gi",
+        "executor_cores": 2,
+        "executor_memory": "4Gi",
+        "max_executors": 4
+      },
+      "large": {
+        "driver_cores": 4,
+        "driver_memory": "8Gi",
+        "executor_cores": 4,
+        "executor_memory": "8Gi",
+        "max_executors": 8
+      }
+    }
+  },
+  "rules": [
+    {
+      "id": "result-to-driver",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "df.toPandas()/df.collect() on a big table",
+      "good": "df.limit(10_000).toPandas(), aggregate first, or df.writeTo(\"<catalog>.<schema>.<table>\").createOrReplace() and read it with SQL",
+      "why": "the whole result lands in the 1 GiB driver heap; above 512 MiB the call fails"
+    },
+    {
+      "id": "local-data-to-cluster",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "spark.createDataFrame(big_pandas_or_list)",
+      "good": "write the data to a table once (writeTo), then spark.table(...)",
+      "why": "local data is shipped inside every task of every job"
+    },
+    {
+      "id": "loop-of-jobs",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "a Python loop that runs one job per item",
+      "good": "one query with a join or groupBy, or df.repartition(n) plus mapInPandas",
+      "why": "every job adds a broadcast and a plan to the driver"
+    },
+    {
+      "id": "repeated-broadcast",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "df.join(small_df, ...) repeated in a loop",
+      "good": "from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), ...) once, outside the loop",
+      "why": "one broadcast instead of one per iteration"
+    },
+    {
+      "id": "cache-not-released",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "df.cache() never released",
+      "good": "df.unpersist() when done; cache only what several actions reuse",
+      "why": "cached blocks occupy executor memory, 1 GiB each, and are not freed by themselves"
+    },
+    {
+      "id": "csv-chunk-append",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "pd.read_csv(chunksize=250_000) then spark.createDataFrame(chunk) + saveAsTable(append) per chunk",
+      "good": "chunks of at most 20_000 rows (about 1 MiB per task), finished chunk numbers in a small table so a restart can resume, and see stardelt/stardelt#52 for the planned loader",
+      "why": "measured 2026-10-21: 250_000 rows = tasks of 11 MiB, 305 warnings in 3 h, driver OOMKilled"
+    },
+    {
+      "id": "repeated-count",
+      "applies_to": ["shared-spark-driver"],
+      "bad": "df.count() repeated to \"check\"",
+      "good": "run it once, keep the number",
+      "why": "each action is a job"
+    }
+  ]
+}
