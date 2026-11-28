@@ -11,6 +11,7 @@ The caller's own Nova sign-in is the authority for the download; no token is sto
 files.
 """
 
+import hashlib
 import io
 import pathlib
 import shutil
@@ -72,6 +73,50 @@ def _target(out, name):
     if target != root and root not in target.parents:
         raise ExportError(f"the archive has an unsafe path: {name}")
     return out / name
+
+
+def normalized_hash(folder):
+    """The sha256 of an export folder as Nova stamps it (#2306): the wrapper, the export minute
+    and the certification stamp do not change it.
+
+    The rule matches `nova/backend/src/superset_archive.rs::normalized_hash`: sorted relative
+    paths, `databases/` dropped, one shared top folder stripped, `metadata.yaml`'s `timestamp:`
+    line dropped, and the two stamp lines of every `dashboards/*.yaml` dropped.
+    """
+    folder = pathlib.Path(folder)
+    files = sorted(path for path in folder.rglob("*") if path.is_file())
+    names = [path.relative_to(folder).as_posix() for path in files]
+    top = _shared_top(names)
+    digest = hashlib.sha256()
+    for path, name in zip(files, names):
+        relative = name[len(top) + 1:] if top else name
+        if "databases" in pathlib.PurePosixPath(relative).parts:
+            continue
+        data = path.read_bytes()
+        if relative == "metadata.yaml":
+            data = _without_lines(data, (b"timestamp:",))
+        elif relative.startswith("dashboards/") and relative.endswith(".yaml"):
+            data = _without_lines(data, (b"certified_by:", b"certification_details:"))
+        digest.update(relative.encode() + b"\0" + data + b"\0")
+    return digest.hexdigest()
+
+
+def _shared_top(names):
+    """The one top folder Superset wraps an export in, or "" (the Rust `top` rule)."""
+    if not names or any("/" not in name for name in names):
+        return ""
+    shared = {name.split("/", 1)[0] for name in names}
+    if len(shared) != 1:
+        return ""
+    top = shared.pop()
+    return top if f"{top}/metadata.yaml" in names else ""
+
+
+def _without_lines(data, prefixes):
+    """`data` without every line that starts with one of `prefixes`, byte for byte."""
+    return b"".join(
+        line for line in data.splitlines(keepends=True) if not line.startswith(prefixes)
+    )
 
 
 def bundle_identity(directory="."):

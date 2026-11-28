@@ -5,7 +5,7 @@ import zipfile
 
 import yaml
 
-from stardelt import api, bundle, cli
+from stardelt import api, bundle, cli, dashboards
 
 MANIFEST = """
 bundle: {name: sales-etl, ownerGroup: sales}
@@ -215,6 +215,42 @@ def test_a_plan_says_it_would_import_each_folder(tmp_path):
         {"action": "would-import-dashboards", "name": "dashboards/shop", "dashboards": 1, "kind": "Dashboard"},
     ]
     assert nova.uploads == [], "a plan writes nothing"
+
+
+def test_a_plan_names_a_dashboard_changed_in_the_target(tmp_path):
+    directory = make(tmp_path)
+    nova = Nova()
+    nova.listed = [
+        {"id": 7, "title": "shop", "target": "prod", "commit": "abc1234", "sha256": "0" * 64}
+    ]
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", STAMP, dry_run=True)
+
+    assert problems == []
+    assert {"action": "would-update-dashboards", "name": "shop", "kind": "Dashboard"} in rows
+    assert nova.uploads == []
+
+
+def test_a_plan_says_nothing_when_the_target_matches_the_folder(tmp_path):
+    directory = make(tmp_path)
+    nova = Nova()
+    nova.listed = [
+        {
+            "id": 7,
+            "title": "shop",
+            "target": "prod",
+            "commit": "abc1234",
+            "sha256": dashboards.normalized_hash(directory / "dashboards/shop"),
+        }
+    ]
+
+    problems, rows = bundle.apply_dashboards(nova, directory, "prod", STAMP, dry_run=True)
+
+    assert problems == []
+    assert "would-update-dashboards" not in [row["action"] for row in rows]
+    assert rows == [
+        {"action": "would-import-dashboards", "name": "dashboards/shop", "dashboards": 1, "kind": "Dashboard"},
+    ]
 
 
 def test_a_deploy_imports_each_folder_with_the_target_and_commit(tmp_path):

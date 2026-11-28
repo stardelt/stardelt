@@ -1265,11 +1265,13 @@ def apply_dashboards(nova, directory, target, stamp, prune=False, dry_run=False)
     """Import the bundle's ``dashboards:`` folders and prune the ones it dropped; ``(problems, rows)``.
 
     A bundle without a ``dashboards:`` block is unchanged (``([], [])``). ``dry_run`` writes
-    nothing and answers ``would-import-dashboards`` per folder and, with ``prune``, one
-    ``would-delete-dashboards`` per dashboard of this bundle, group and target that no folder
-    names any more. A real run imports every folder (``imported-dashboards``) and, after them, with
-    ``prune`` deletes those stale dashboards (``deleted-dashboards``). A dashboard that belongs to
-    another target is never deleted.
+    nothing and answers ``would-import-dashboards`` per folder, one ``would-update-dashboards``
+    per dashboard whose stored ``sha256`` differs from the folder's
+    ``stardelt.dashboards.normalized_hash``, and, with ``prune``, one ``would-delete-dashboards``
+    per dashboard of this bundle, group and target that no folder names any more. A real run
+    imports every folder (``imported-dashboards``) and, after them, with ``prune`` deletes those
+    stale dashboards (``deleted-dashboards``). A dashboard that belongs to another target is never
+    deleted.
     """
     root = Path(directory)
     try:
@@ -1298,43 +1300,61 @@ def apply_dashboards(nova, directory, target, stamp, prune=False, dry_run=False)
             )
         ], []
     bundle_name = stamp["bundle"]
-    titles, counts = set(), {}
+    from stardelt import dashboards as dashboard_files
+
+    titles, counts, folder_titles = set(), {}, {}
     for folder in folders:
         files = sorted((root / folder / "dashboards").glob("*.yaml"))
         counts[folder] = len(files)
+        folder_titles[folder] = []
         for path in files:
             try:
                 document = yaml.safe_load(path.read_text(encoding="utf-8"))
             except (OSError, yaml.YAMLError):
                 document = None
             title = document.get("dashboard_title") if isinstance(document, dict) else None
-            titles.add(title if isinstance(title, str) and title else path.stem)
+            name = title if isinstance(title, str) and title else path.stem
+            titles.add(name)
+            folder_titles[folder].append(name)
 
-    def stale():
-        """The dashboards of this bundle, group and target no folder names; ``(problems, rows)``."""
+    known = []
+    if dry_run or prune:
         try:
             listed = nova.call(
                 "dashboards_list", query={"bundle": bundle_name, "ownerGroup": group}
             ) or []
+            known = [row for row in listed if row.get("target") == target]
         except api.StardeltApiError as err:
-            return [("dashboards", str(err))], []
-        rows = []
-        for row in listed:
-            if row.get("target") != target or row.get("title") in titles:
-                continue
-            rows.append(row)
-        return [], rows
+            if prune:
+                return [("dashboards", str(err))], []
+
+    def stale():
+        """The dashboards of this bundle, group and target no folder names."""
+        return [row for row in known if row.get("title") not in titles]
 
     if dry_run:
         rows = []
         if prune:
-            problems, dropped = stale()
-            if problems:
-                return problems, []
             rows += [
                 {"action": "would-delete-dashboards", "name": row["title"], "id": row["id"], "kind": "Dashboard"}
-                for row in dropped
+                for row in stale()
             ]
+        stored = {
+            row.get("title"): row.get("sha256")
+            for row in known
+            if isinstance(row.get("title"), str)
+        }
+        for folder in folders:
+            local = dashboard_files.normalized_hash(root / folder)
+            for title in folder_titles[folder]:
+                if stored.get(title) and stored[title] != local:
+                    rows.append(
+                        {
+                            "action": "would-update-dashboards",
+                            "name": title,
+                            "kind": "Dashboard",
+                        }
+                    )
         rows += [
             {
                 "action": "would-import-dashboards",
@@ -1345,7 +1365,6 @@ def apply_dashboards(nova, directory, target, stamp, prune=False, dry_run=False)
             for folder in folders
         ]
         return [], rows
-    from stardelt import dashboards as dashboard_files
 
     rows = []
     for folder in folders:
@@ -1369,8 +1388,7 @@ def apply_dashboards(nova, directory, target, stamp, prune=False, dry_run=False)
             "kind": "Dashboard",
         })
     if prune:
-        problems, dropped = stale()
-        for row in dropped:
+        for row in stale():
             try:
                 nova.call(
                     "dashboards_delete",
